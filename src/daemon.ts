@@ -100,8 +100,9 @@ function parseArgs(argv: string[]): {
     portFlagIndex !== -1
       ? Number.parseInt(argv[portFlagIndex + 1] || "8008", 10)
       : 8008;
-  const provider =
-    providerFlagIndex !== -1 ? argv[providerFlagIndex + 1]?.trim() : null;
+  const providerValue =
+    providerFlagIndex !== -1 ? argv[providerFlagIndex + 1] : undefined;
+  const provider = providerValue ? providerValue.trim() : null;
 
   return { port, provider };
 }
@@ -190,12 +191,14 @@ function parseBalances(output: string): Record<string, number> {
   trimmed
     .split("\n")
     .map((line) => line.trim())
-    .forEach((line) => {
-      const match = line.match(/^(\S+):\s+(\d+)\s+s$/);
-      if (match) {
-        balances[match[1]] = Number.parseInt(match[2], 10);
-      }
-    });
+      .forEach((line) => {
+        const match = line.match(/^(\S+):\s+(\d+)\s+s$/);
+        const mintUrl = match?.[1];
+        const amount = match?.[2];
+        if (mintUrl && amount) {
+          balances[mintUrl] = Number.parseInt(amount, 10);
+        }
+      });
   return balances;
 }
 
@@ -207,10 +210,11 @@ function parseMints(output: string): Array<{ url: string; trusted: boolean }> {
       const urlMatch = line.match(/https?:\/\/\S+/i);
       if (!urlMatch) return null;
       const trustedMatch = line.match(/trusted:\s*(true|false)/i);
+      const trustedValue = trustedMatch?.[1];
       return {
         url: urlMatch[0],
         trusted: trustedMatch
-          ? trustedMatch[1].toLowerCase() === "true"
+          ? trustedValue?.toLowerCase() === "true"
           : false,
       };
     })
@@ -331,6 +335,76 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/ping") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: "pong" }));
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/status") {
+        try {
+          const balancesOutput = await runWalletCommand(["balance"]);
+          const balances = parseBalances(balancesOutput);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              output: {
+                daemon: "running",
+                wallet: "connected",
+                balances,
+              },
+            })
+          );
+        } catch (error) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              output: {
+                daemon: "running",
+                wallet: "error",
+                error: String(error),
+              },
+            })
+          );
+        }
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/stop") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ output: "stopping" }));
+        setTimeout(() => {
+          server.close(() => {
+            process.exit(0);
+          });
+        }, 50);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/balance") {
+        try {
+          const output = await runWalletCommand(["balance"]);
+          const balances = parseBalances(output);
+          if (!activeMintUrl && Object.keys(balances).length > 0) {
+            activeMintUrl = Object.keys(balances)[0] || null;
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              output: {
+                balances,
+                unit: "sat",
+                activeMint: activeMintUrl,
+              },
+            })
+          );
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/keys/balance") {
         try {
           const keys: Array<{ id: string; name: string; balance: number }> = [];
@@ -419,15 +493,21 @@ async function main(): Promise<void> {
         logger.error(`[daemon] Error: ${message}`);
 
         if (error instanceof InsufficientBalanceError) {
+          const balanceError = error as {
+            required?: number;
+            available?: number;
+            maxMintBalance?: number;
+            maxMintUrl?: string;
+          };
           res.writeHead(402, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
               error: message,
               error_type: "insufficient_balance",
-              required: error.required,
-              available: error.available,
-              maxMintBalance: error.maxMintBalance,
-              maxMintUrl: error.maxMintUrl,
+              required: balanceError.required,
+              available: balanceError.available,
+              maxMintBalance: balanceError.maxMintBalance,
+              maxMintUrl: balanceError.maxMintUrl,
             })
           );
           return;
@@ -456,25 +536,47 @@ async function main(): Promise<void> {
   });
 }
 
-main().catch((error) => {
-  logger.error("Failed to start Routstr daemon:", error);
-  process.exit(1);
-});
-
 export async function startDaemon(options: { port?: string; provider?: string } = {}): Promise<void> {
-  const port = options.port ? parseInt(options.port, 10) : 8008;
-  const args = [...process.argv.slice(0, 2), "daemon"];
+  const args: string[] = [];
   if (options.port) {
     args.push("--port", options.port);
   }
   if (options.provider) {
     args.push("--provider", options.provider);
   }
-  
+
+  // Spawn daemon.ts directly as a detached background process
   const proc = Bun.spawn({
-    cmd: ["bun", "run", `${import.meta.dir}/daemon.ts`, ...args.slice(2)],
+    cmd: ["bun", "run", `${import.meta.dir}/daemon.ts`, ...args],
     stdout: "inherit",
     stderr: "inherit",
+    stdin: "ignore",
   });
-  await proc.exited;
+  proc.unref();
+
+  const port = options.port || "8008";
+
+  // Poll until the daemon is healthy
+  for (let i = 0; i < 100; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    try {
+      const res = await fetch(`http://localhost:${port}/health`);
+      if (res.ok) {
+        logger.log("Daemon started successfully.");
+        return;
+      }
+    } catch {
+      // Not ready yet
+    }
+  }
+
+  throw new Error("Daemon failed to start within 20 seconds");
+}
+
+// Only auto-run main() when this file is executed directly (not imported)
+if (import.meta.main) {
+  main().catch((error) => {
+    logger.error("Failed to start Routstr daemon:", error);
+    process.exit(1);
+  });
 }

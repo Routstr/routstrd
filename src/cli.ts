@@ -1,5 +1,11 @@
 import { startDaemon } from "./daemon";
-import { program, handleDaemonCommand, callDaemon, ensureDaemonRunning } from "./cli-shared";
+import {
+  program,
+  handleDaemonCommand,
+  callDaemon,
+  ensureDaemonRunning,
+  isDaemonRunning,
+} from "./cli-shared";
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
@@ -97,7 +103,30 @@ program
   .command("status")
   .description("Check daemon and wallet status")
   .action(async () => {
-    await handleDaemonCommand("/status");
+    const running = await isDaemonRunning();
+    if (!running) {
+      console.log("Daemon is not running");
+      process.exit(1);
+    }
+
+    const result = await callDaemon("/status");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    if (result.output !== undefined) {
+      if (typeof result.output === "string") {
+        console.log(result.output);
+      } else {
+        try {
+          const formatted = JSON.stringify(result.output, null, 2);
+          console.log(formatted ?? String(result.output));
+        } catch {
+          console.log(String(result.output));
+        }
+      }
+    }
   });
 
 // Balance - get wallet and API key balances
