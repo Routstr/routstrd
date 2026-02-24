@@ -1,0 +1,123 @@
+import { program } from "commander";
+import { existsSync } from "fs";
+import {
+  CONFIG_FILE,
+  DEFAULT_CONFIG,
+  type RoutstrdConfig,
+} from "./utils/config";
+
+export interface CommandResponse {
+  output?: unknown;
+  error?: string;
+}
+
+async function loadConfig(): Promise<RoutstrdConfig> {
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const content = await Bun.file(CONFIG_FILE).text();
+      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+    }
+  } catch (error) {
+    console.error("Failed to load config:", error);
+  }
+  return DEFAULT_CONFIG;
+}
+
+async function callDaemon(
+  path: string,
+  options: { method?: "GET" | "POST"; body?: object } = {},
+): Promise<CommandResponse> {
+  const { method = "GET", body } = options;
+  const config = await loadConfig();
+
+  const response = await fetch(`http://localhost:${config.port}${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!response.ok) {
+    const errorData = (await response.json()) as { error?: string };
+    throw new Error(errorData.error || `HTTP ${response.status}`);
+  }
+
+  return response.json() as Promise<CommandResponse>;
+}
+
+export async function isDaemonRunning(): Promise<boolean> {
+  try {
+    const config = await loadConfig();
+    const response = await fetch(`http://localhost:${config.port}/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function startDaemonProcess(): Promise<void> {
+  const proc = Bun.spawn({
+    cmd: ["bun", "run", `${import.meta.dir}/index.ts`, "daemon"],
+    stdout: "ignore",
+    stderr: "ignore",
+    stdin: "ignore",
+  });
+  proc.unref();
+
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    if (await isDaemonRunning()) {
+      return;
+    }
+  }
+
+  throw new Error("Daemon failed to start within 5 seconds");
+}
+
+export async function ensureDaemonRunning(): Promise<void> {
+  if (await isDaemonRunning()) {
+    return;
+  }
+
+  console.log("Starting daemon...");
+  await startDaemonProcess();
+}
+
+export async function handleDaemonCommand(
+  path: string,
+  options: { method?: "GET" | "POST"; body?: object } = {},
+): Promise<CommandResponse> {
+  try {
+    await ensureDaemonRunning();
+    const result = await callDaemon(path, options);
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    if (result.output !== undefined) {
+      if (typeof result.output === "string") {
+        console.log(result.output);
+      } else {
+        try {
+          const formatted = JSON.stringify(result.output, null, 2);
+          console.log(formatted ?? String(result.output));
+        } catch {
+          console.log(String(result.output));
+        }
+      }
+    }
+
+    return result;
+  } catch (error) {
+    const message = (error as Error).message;
+    if (message?.includes("fetch failed") || message?.includes("Connection refused")) {
+      console.error("Daemon is not running and failed to auto-start");
+      process.exit(1);
+    }
+    console.error(message);
+    process.exit(1);
+  }
+}
+
+export { program, callDaemon };
