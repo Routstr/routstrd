@@ -407,9 +407,54 @@ async function main(): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/keys/balance") {
         try {
-          const keys: Array<{ id: string; name: string; balance: number }> = [];
+          const walletBalances = await walletAdapter.getBalances();
+          const totalWallet = Object.values(walletBalances).reduce(
+            (sum, balance) => sum + balance,
+            0
+          );
+
+          const state = store.getState();
+          console.log("LALL SSTAT", state);
+          const cachedTokens = state.cachedTokens || [];
+          const totalCached = cachedTokens.reduce(
+            (sum: number, t: { balance?: number }) => sum + (t.balance || 0),
+            0
+          );
+
+          const apiKeys = state.apiKeys || [];
+          const totalApiKeys = apiKeys.reduce(
+            (sum: number, k: { balance?: number }) => sum + (k.balance || 0),
+            0
+          );
+
+          const keys: Array<{ id: string; name: string; balance: number }> = [
+            { id: "wallet", name: "Wallet", balance: totalWallet },
+            ...cachedTokens.map(
+              (t: { baseUrl: string; balance?: number }) => ({
+                id: `cached:${t.baseUrl}`,
+                name: `Cached: ${t.baseUrl}`,
+                balance: t.balance || 0,
+              })
+            ),
+            ...apiKeys.map(
+              (k: { baseUrl: string; balance?: number }) => ({
+                id: `apikey:${k.baseUrl}`,
+                name: `API Key: ${k.baseUrl}`,
+                balance: k.balance || 0,
+              })
+            ),
+          ];
+
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ output: { keys } }));
+          res.end(
+            JSON.stringify({
+              output: {
+                keys,
+                total: totalWallet + totalCached + totalApiKeys,
+                unit: "sat",
+              },
+            })
+          );
         } catch (error) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: String(error) }));
