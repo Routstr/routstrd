@@ -3,7 +3,7 @@ import { Readable } from "stream";
 import { ReadableStream as WebReadableStream } from "stream/web";
 import { spawn } from "child_process";
 import { getDecodedToken } from "@cashu/cashu-ts";
-import { mkdir } from "fs/promises";
+import { mkdir, appendFile } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
 import SQLite from "bun:sqlite";
@@ -13,6 +13,7 @@ import {
   SOCKET_PATH,
   PID_FILE,
   CONFIG_FILE,
+  LOG_FILE,
   DEFAULT_CONFIG,
   type RoutstrdConfig,
 } from "./utils/config";
@@ -32,7 +33,7 @@ async function loadSdk() {
 function createBunSqliteDriver(dbPath: string) {
   const db = new SQLite(dbPath);
   
-  db.exec(`
+  db.run(`
     CREATE TABLE IF NOT EXISTS sdk_storage (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -245,11 +246,10 @@ async function main(): Promise<void> {
   saveConfig(updatedConfig);
 
   const sdkModule = await loadSdk();
-  const { ModelManager, getDefaultDiscoveryAdapter, getDefaultProviderRegistry, getDefaultStorageAdapter, createMemoryDriver, createSdkStore } = sdkModule;
+  const { ModelManager, getDefaultDiscoveryAdapter, getDefaultProviderRegistry, getDefaultStorageAdapter, createSdkStore } = sdkModule;
 
-  // For now, use memory driver (can be upgraded to sqlite later)
-  const memoryDriver = createMemoryDriver();
-  const store = createSdkStore({ driver: memoryDriver });
+  const sqliteDriver = createBunSqliteDriver(DB_PATH);
+  const store = createSdkStore({ driver: sqliteDriver });
   
   // Get adapters (these use the default store, but we'll work with what we have)
   const discoveryAdapter = getDefaultDiscoveryAdapter();
@@ -590,13 +590,44 @@ export async function startDaemon(options: { port?: string; provider?: string } 
     args.push("--provider", options.provider);
   }
 
+  async function writeToLog(line: string): Promise<void> {
+    try {
+      await appendFile(LOG_FILE, line + "\n");
+    } catch {
+      // Ignore log errors
+    }
+  }
+
+  const logWriter = {
+    write(data: string) {
+      process.stdout.write(data);
+      writeToLog(data.trimEnd());
+    },
+    writeError(data: string) {
+      process.stderr.write(data);
+      writeToLog(data.trimEnd());
+    },
+  };
+
   // Spawn daemon.ts directly as a detached background process
-  const proc = Bun.spawn({
-    cmd: ["bun", "run", `${import.meta.dir}/daemon.ts`, ...args],
-    stdout: "inherit",
-    stderr: "inherit",
+  const proc = Bun.spawn(["bun", "run", `${import.meta.dir}/daemon.ts`, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
     stdin: "ignore",
   });
+
+  proc.stdout?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.write(data.toString());
+    }
+  }));
+
+  proc.stderr?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.writeError(data.toString());
+    }
+  }));
+
   proc.unref();
 
   const port = options.port || "8008";

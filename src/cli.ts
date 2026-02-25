@@ -6,12 +6,14 @@ import {
   ensureDaemonRunning,
   isDaemonRunning,
 } from "./cli-shared";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, createWriteStream } from "fs";
+import { appendFile } from "fs/promises";
 import { join } from "path";
 import {
   CONFIG_DIR,
   DB_PATH,
   CONFIG_FILE,
+  LOG_FILE,
   DEFAULT_CONFIG,
   type RoutstrdConfig,
 } from "./utils/config";
@@ -40,12 +42,43 @@ async function initDaemon(): Promise<void> {
   console.log(`Database will be stored at: ${DB_PATH}`);
   console.log("\nInitializing cocod...");
 
+  async function writeToLog(line: string): Promise<void> {
+    try {
+      await appendFile(LOG_FILE, line + "\n");
+    } catch {
+      // Ignore log errors
+    }
+  }
+
+  const logWriter = {
+    write(data: string) {
+      process.stdout.write(data);
+      writeToLog(data.trimEnd());
+    },
+    writeError(data: string) {
+      process.stderr.write(data);
+      writeToLog(data.trimEnd());
+    },
+  };
+
   // Initialize cocod
-  const initProc = Bun.spawn({
-    cmd: ["cocod", "init"],
-    stdout: "inherit",
-    stderr: "inherit",
+  const initProc = Bun.spawn(["cocod", "init"], {
+    stdout: "pipe",
+    stderr: "pipe",
   });
+  
+  initProc.stdout?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.write(data.toString());
+    }
+  }));
+  
+  initProc.stderr?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.writeError(data.toString());
+    }
+  }));
+  
   const initCode = await initProc.exited;
 
   if (initCode !== 0) {

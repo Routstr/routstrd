@@ -5,6 +5,7 @@ export const SOCKET_PATH = process.env.ROUTSTRD_SOCKET || `${CONFIG_DIR}/routstr
 export const PID_FILE = process.env.ROUTSTRD_PID || `${CONFIG_DIR}/routstrd.pid`;
 export const DB_PATH = `${CONFIG_DIR}/routstr.db`;
 export const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
+export const LOG_FILE = `${CONFIG_DIR}/routstrd.log`;
 
 export interface RoutstrdConfig {
   port: number;

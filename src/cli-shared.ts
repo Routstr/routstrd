@@ -1,8 +1,10 @@
 import { program } from "commander";
-import { existsSync } from "fs";
+import { existsSync, createWriteStream } from "fs";
+import { appendFile } from "fs/promises";
 import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
+  LOG_FILE,
   type RoutstrdConfig,
 } from "./utils/config";
 
@@ -55,12 +57,27 @@ export async function isDaemonRunning(): Promise<boolean> {
 }
 
 export async function startDaemonProcess(): Promise<void> {
-  const proc = Bun.spawn({
-    cmd: ["bun", "run", `${import.meta.dir}/index.ts`, "daemon"],
-    stdout: "ignore",
-    stderr: "ignore",
+  const logWriter = createLogWriter();
+  const proc = Bun.spawn([
+    "bun", "run", `${import.meta.dir}/index.ts`, "daemon"
+  ], {
+    stdout: "pipe",
+    stderr: "pipe",
     stdin: "ignore",
   });
+  
+  proc.stdout?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.write(data.toString());
+    }
+  }));
+  
+  proc.stderr?.pipeTo(new WritableStream({
+    write(data) {
+      logWriter.writeError(data.toString());
+    }
+  }));
+  
   proc.unref();
 
   for (let i = 0; i < 50; i++) {
@@ -121,3 +138,25 @@ export async function handleDaemonCommand(
 }
 
 export { program, callDaemon };
+
+async function writeToLog(line: string): Promise<void> {
+  try {
+    await appendFile(LOG_FILE, line + "\n");
+  } catch {
+    // Ignore log errors
+  }
+}
+
+function createLogWriter() {
+  let logStream: ReturnType<typeof createWriteStream> | null = null;
+  return {
+    write(data: string) {
+      process.stdout.write(data);
+      writeToLog(data.trimEnd());
+    },
+    writeError(data: string) {
+      process.stderr.write(data);
+      writeToLog(data.trimEnd());
+    },
+  };
+}
