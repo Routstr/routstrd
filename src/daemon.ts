@@ -18,17 +18,15 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
-
-const SDK_PATH = "/home/debian/knightclaw/projects/routstr-chat/sdk/dist/index.mjs";
-
-let sdk: any = null;
-
-async function loadSdk() {
-  if (!sdk) {
-    sdk = await import(SDK_PATH);
-  }
-  return sdk;
-}
+import {
+  ModelManager,
+  createDiscoveryAdapterFromStore,
+  createProviderRegistryFromStore,
+  createStorageAdapterFromStore,
+  createSdkStore,
+  routeRequests,
+  InsufficientBalanceError,
+} from "@routstr/sdk";
 
 function createBunSqliteDriver(dbPath: string) {
   const db = new SQLite(dbPath);
@@ -41,7 +39,7 @@ function createBunSqliteDriver(dbPath: string) {
   `);
 
   return {
-    getItem<T>(key: string, defaultValue: T): T {
+    async getItem<T>(key: string, defaultValue: T): Promise<T> {
       try {
         const row = db.query("SELECT value FROM sdk_storage WHERE key = ?").get(key) as { value: string } | undefined;
         if (!row || typeof row.value !== "string") return defaultValue;
@@ -58,7 +56,7 @@ function createBunSqliteDriver(dbPath: string) {
         return defaultValue;
       }
     },
-    setItem<T>(key: string, value: T): void {
+    async setItem<T>(key: string, value: T): Promise<void> {
       try {
         db.query(
           "INSERT INTO sdk_storage (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -67,7 +65,7 @@ function createBunSqliteDriver(dbPath: string) {
         logger.error(`SQLite setItem failed for key "${key}":`, error);
       }
     },
-    removeItem(key: string): void {
+    async removeItem(key: string): Promise<void> {
       try {
         db.query("DELETE FROM sdk_storage WHERE key = ?").run(key);
       } catch (error) {
@@ -245,11 +243,8 @@ async function main(): Promise<void> {
   const updatedConfig = { ...config, port, provider };
   saveConfig(updatedConfig);
 
-  const sdkModule = await loadSdk();
-  const { ModelManager, createDiscoveryAdapterFromStore, createProviderRegistryFromStore, createStorageAdapterFromStore, createSdkStore } = sdkModule;
-
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
-  const store = createSdkStore({ driver: sqliteDriver });
+  const store = await createSdkStore({ driver: sqliteDriver });
   
   // Create adapters from our SQLite-backed store
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
@@ -508,7 +503,6 @@ async function main(): Promise<void> {
         undefined;
 
       try {
-        const { routeRequests, InsufficientBalanceError } = sdkModule;
         const response = await routeRequests({
           modelId,
           requestBody,
@@ -543,8 +537,6 @@ async function main(): Promise<void> {
         });
         res.end(JSON.stringify(responseBody));
       } catch (error) {
-        const sdkModuleError = await loadSdk();
-        const { InsufficientBalanceError } = sdkModuleError;
         const message = error instanceof Error ? error.message : String(error);
         logger.error(`[daemon] Error: ${message}`);
 
