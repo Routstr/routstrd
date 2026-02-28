@@ -3,7 +3,7 @@ import { Readable } from "stream";
 import { ReadableStream as WebReadableStream } from "stream/web";
 import { spawn } from "child_process";
 import { getDecodedToken } from "@cashu/cashu-ts";
-import { mkdir, appendFile } from "fs/promises";
+import { mkdir } from "fs/promises";
 import { join } from "path";
 import { existsSync } from "fs";
 import SQLite from "bun:sqlite";
@@ -246,15 +246,15 @@ async function main(): Promise<void> {
   saveConfig(updatedConfig);
 
   const sdkModule = await loadSdk();
-  const { ModelManager, getDefaultDiscoveryAdapter, getDefaultProviderRegistry, getDefaultStorageAdapter, createSdkStore } = sdkModule;
+  const { ModelManager, createDiscoveryAdapterFromStore, createProviderRegistryFromStore, createStorageAdapterFromStore, createSdkStore } = sdkModule;
 
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
   const store = createSdkStore({ driver: sqliteDriver });
   
-  // Get adapters (these use the default store, but we'll work with what we have)
-  const discoveryAdapter = getDefaultDiscoveryAdapter();
-  const providerRegistry = getDefaultProviderRegistry();
-  const storageAdapter = getDefaultStorageAdapter();
+  // Create adapters from our SQLite-backed store
+  const discoveryAdapter = createDiscoveryAdapterFromStore(store);
+  const providerRegistry = createProviderRegistryFromStore(store);
+  const storageAdapter = createStorageAdapterFromStore(store);
 
   logger.log("Bootstrapping providers...");
   const modelManager = new ModelManager(discoveryAdapter);
@@ -285,30 +285,40 @@ async function main(): Promise<void> {
       return activeMintUrl;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
-      const output = await runWalletCommand([
-        "send",
-        "cashu",
-        String(amount),
-        "--mint-url",
-        mintUrl,
-      ]);
-      const token = pickTokenLine(output);
-      if (!token) {
-        throw new Error("Wallet CLI did not return a token.");
+      try {
+        const output = await runWalletCommand([
+          "send",
+          "cashu",
+          String(amount),
+          "--mint-url",
+          mintUrl,
+        ]);
+        const token = pickTokenLine(output);
+        if (!token) {
+          throw new Error("Wallet CLI did not return a token.");
+        }
+        return token;
+      } catch (error) {
+        logger.error("Error in walletAdapter sendToken:", error);
+        throw error;
       }
-      return token;
     },
     async receiveToken(
       token: string
     ): Promise<{ success: boolean; amount: number; unit: "sat" | "msat" }> {
-      await runWalletCommand(["receive", "cashu", token]);
-      const decoded = getDecodedToken(token);
-      const amount = decoded?.proofs?.reduce(
-        (sum, proof) => sum + proof.amount,
-        0
-      );
-      const unit = decoded?.unit === "msat" ? "msat" : "sat";
-      return { success: true, amount: amount ?? 0, unit };
+      try {
+        await runWalletCommand(["receive", "cashu", token]);
+        const decoded = getDecodedToken(token);
+        const amount = decoded?.proofs?.reduce(
+          (sum, proof) => sum + proof.amount,
+          0
+        );
+        const unit = decoded?.unit === "msat" ? "msat" : "sat";
+        return { success: true, amount: amount ?? 0, unit };
+      } catch (error) {
+        logger.error("Error in walletAdapter receiveToken:", error);
+        return { success: false, amount: 0, unit: "sat" };
+      }
     },
     isUsingNip60(): boolean {
       return false;
@@ -414,7 +424,6 @@ async function main(): Promise<void> {
           );
 
           const state = store.getState();
-          console.log("LALL SSTAT", state);
           const cachedTokens = state.cachedTokens || [];
           const totalCached = cachedTokens.reduce(
             (sum: number, t: { balance?: number }) => sum + (t.balance || 0),
@@ -510,6 +519,8 @@ async function main(): Promise<void> {
           discoveryAdapter,
           modelManager,
         });
+        const requestId = response.headers.get("x-routstr-request-id") || undefined;
+        logger.log("Request ID, ", requestId, " with path: ", url.pathname); 
 
         const isStream = bodyObj.stream === true;
 
@@ -590,43 +601,17 @@ export async function startDaemon(options: { port?: string; provider?: string } 
     args.push("--provider", options.provider);
   }
 
-  async function writeToLog(line: string): Promise<void> {
-    try {
-      await appendFile(LOG_FILE, line + "\n");
-    } catch {
-      // Ignore log errors
-    }
-  }
+  // Spawn daemon.ts as a truly detached background process
+  // stdio is set to "ignore" so the parent holds no pipe handles,
+  // allowing it to exit cleanly. The child daemon logs to LOG_FILE via its own logger.
+  const logFile = Bun.file(LOG_FILE);
 
-  const logWriter = {
-    write(data: string) {
-      process.stdout.write(data);
-      writeToLog(data.trimEnd());
-    },
-    writeError(data: string) {
-      process.stderr.write(data);
-      writeToLog(data.trimEnd());
-    },
-  };
-
-  // Spawn daemon.ts directly as a detached background process
   const proc = Bun.spawn(["bun", "run", `${import.meta.dir}/daemon.ts`, ...args], {
-    stdout: "pipe",
-    stderr: "pipe",
+    stdout: logFile,
+    stderr: logFile,
     stdin: "ignore",
+    detached: true,
   });
-
-  proc.stdout?.pipeTo(new WritableStream({
-    write(data) {
-      logWriter.write(data.toString());
-    }
-  }));
-
-  proc.stderr?.pipeTo(new WritableStream({
-    write(data) {
-      logWriter.writeError(data.toString());
-    }
-  }));
 
   proc.unref();
 
@@ -638,8 +623,8 @@ export async function startDaemon(options: { port?: string; provider?: string } 
     try {
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) {
-        logger.log("Daemon started successfully.");
-        return;
+        logger.log(`Routstr daemon started (PID: ${proc.pid}).`);
+        process.exit(0);
       }
     } catch {
       // Not ready yet
