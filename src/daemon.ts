@@ -386,6 +386,71 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (req.method === "POST" && url.pathname === "/refund") {
+        try {
+          const bodyText = await readBody(req);
+          const body = bodyText ? JSON.parse(bodyText) : {};
+          const mintUrl = body.mintUrl as string | undefined;
+
+          if (!mintUrl) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing required 'mintUrl' field." }));
+            return;
+          }
+
+          const state = store.getState();
+          const pendingDistribution = (state.cachedTokens || []).map((t: { baseUrl: string; balance?: number }) => ({
+            baseUrl: t.baseUrl,
+            amount: t.balance || 0,
+          }));
+          const apiKeysStored = (state.apiKeys || []).map((k: { baseUrl: string; balance?: number }) => ({
+            baseUrl: k.baseUrl,
+            amount: k.balance || 0,
+          }));
+
+          if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ output: { message: "No pending tokens to refund", results: [] } }));
+            return;
+          }
+
+          const { RoutstrClient } = sdkModule;
+          const refundBaseUrls = pendingDistribution
+            .map((p: { baseUrl: string }) => p.baseUrl)
+            .concat(apiKeysStored.map((p: { baseUrl: string }) => p.baseUrl));
+
+          const client = new RoutstrClient(
+            walletAdapter,
+            storageAdapter,
+            providerRegistry,
+            "min",
+            "lazyrefund"
+          );
+
+          const spender = client.getCashuSpender();
+          const results = await spender.refundProviders(refundBaseUrls, mintUrl, true);
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            output: {
+              message: `Refunded to ${mintUrl}`,
+              pendingTokens: pendingDistribution.length,
+              apiKeys: apiKeysStored.length,
+              results: results.map((r: { baseUrl: string; success: boolean }) => ({
+                baseUrl: r.baseUrl,
+                success: r.success,
+              })),
+            },
+          }));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.error(`Refund error: ${message}`);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: message }));
+        }
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/balance") {
         try {
           const output = await runWalletCommand(["balance"]);
