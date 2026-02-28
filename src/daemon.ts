@@ -26,6 +26,7 @@ import {
   createSdkStore,
   routeRequests,
   InsufficientBalanceError,
+  RoutstrClient,
 } from "@routstr/sdk";
 
 function createBunSqliteDriver(dbPath: string) {
@@ -414,7 +415,6 @@ async function main(): Promise<void> {
             return;
           }
 
-          const { RoutstrClient } = sdkModule;
           const refundBaseUrls = pendingDistribution
             .map((p: { baseUrl: string }) => p.baseUrl)
             .concat(apiKeysStored.map((p: { baseUrl: string }) => p.baseUrl));
