@@ -127,3 +127,58 @@ export async function handleDaemonCommand(
 }
 
 export { program, callDaemon };
+
+program
+  .command("refund")
+  .description("Refund pending tokens and API keys to a specified mint")
+  .requiredOption("-m, --mint-url <mintUrl>", "Mint URL to refund to")
+  .option("-y, --yes", "Skip confirmation prompt", false)
+  .action(async (options: { mintUrl: string; yes: boolean }) => {
+    const config = await loadConfig();
+
+    try {
+      const response = await fetch(`http://localhost:${config.port}/refund`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mintUrl: options.mintUrl }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error?: string };
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+      }
+
+      const result = (await response.json()) as {
+        output?: {
+          message: string;
+          pendingTokens: number;
+          apiKeys: number;
+          results: Array<{ baseUrl: string; success: boolean }>;
+        };
+        error?: string;
+      };
+
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      if (result.output) {
+        console.log(result.output.message);
+        console.log(`\nPending tokens: ${result.output.pendingTokens}`);
+        console.log(`API keys: ${result.output.apiKeys}`);
+        console.log("\nResults:");
+        for (const r of result.output.results) {
+          console.log(`  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`);
+        }
+      }
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message?.includes("fetch failed") || message?.includes("Connection refused")) {
+        console.error("Daemon is not running");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
