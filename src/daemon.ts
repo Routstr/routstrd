@@ -376,6 +376,19 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/models") {
+        try {
+          await modelManager.fetchRoutstr21Models();
+          const models = discoveryAdapter.getRoutstr21Models();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ output: { models } }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return;
+      }
+
       if (req.method === "POST" && url.pathname === "/stop") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output: "stopping" }));

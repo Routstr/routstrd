@@ -12,7 +12,7 @@ export interface CommandResponse {
   error?: string;
 }
 
-async function loadConfig(): Promise<RoutstrdConfig> {
+export async function loadConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {
       const content = await Bun.file(CONFIG_FILE).text();
