@@ -7,29 +7,29 @@ import {
   isDaemonRunning,
   loadConfig,
 } from "./cli-shared";
-import { existsSync, mkdirSync, createWriteStream } from "fs";
-import { appendFile, readFile, writeFile } from "fs/promises";
+import { existsSync, mkdirSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import {
   CONFIG_DIR,
   DB_PATH,
   CONFIG_FILE,
-  LOG_FILE,
   DEFAULT_CONFIG,
   type RoutstrdConfig,
 } from "./utils/config";
+import { logger } from "./utils/logger";
 
 const OPENCODE_CONFIG_PATH = join(process.env.HOME || "", ".config/opencode/opencode.json");
 
 const cliVersion = "0.1.0";
 
 async function initDaemon(): Promise<void> {
-  console.log("Initializing routstrd...");
+  logger.log("Initializing routstrd... XYS`");
 
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
-    console.log(`Created config directory: ${CONFIG_DIR}`);
+    logger.log(`Created config directory: ${CONFIG_DIR}`);
   }
 
   // Create initial config
@@ -38,64 +38,66 @@ async function initDaemon(): Promise<void> {
       ...DEFAULT_CONFIG,
       cocodPath: null,
     };
-    Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
-    console.log(`Created config file: ${CONFIG_FILE}`);
+    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+    logger.log(`Created config file: ${CONFIG_FILE}`);
   }
 
   console.log(`Database will be stored at: ${DB_PATH}`);
   console.log("\nInitializing cocod...");
 
-  async function writeToLog(line: string): Promise<void> {
-    try {
-      await appendFile(LOG_FILE, line + "\n");
-    } catch {
-      // Ignore log errors
-    }
-  }
-
-  const logWriter = {
-    write(data: string) {
-      process.stdout.write(data);
-      writeToLog(data.trimEnd());
-    },
-    writeError(data: string) {
-      process.stderr.write(data);
-      writeToLog(data.trimEnd());
-    },
-  };
-
-  // Initialize cocod
   const initProc = Bun.spawn(["cocod", "init"], {
     stdout: "pipe",
     stderr: "pipe",
   });
-  
-  initProc.stdout?.pipeTo(new WritableStream({
-    write(data) {
-      logWriter.write(data.toString());
-    }
-  }));
-  
-  initProc.stderr?.pipeTo(new WritableStream({
-    write(data) {
-      logWriter.writeError(data.toString());
-    }
-  }));
-  
-  const initCode = await initProc.exited;
 
-  if (initCode !== 0) {
-    console.error("Failed to initialize cocod. Please run 'cocod init' manually.");
+  let initStdout = "";
+  let initStderr = "";
+
+  const stdoutDone = initProc.stdout
+    ? initProc.stdout.pipeTo(
+        new WritableStream<Uint8Array>({
+          write(chunk) {
+            const text = new TextDecoder().decode(chunk);
+            initStdout += text;
+            process.stdout.write(text);
+          },
+        }),
+      )
+    : Promise.resolve();
+
+  const stderrDone = initProc.stderr
+    ? initProc.stderr.pipeTo(
+        new WritableStream<Uint8Array>({
+          write(chunk) {
+            const text = new TextDecoder().decode(chunk);
+            initStderr += text;
+            process.stderr.write(text);
+          },
+        }),
+      )
+    : Promise.resolve();
+
+  const [initCode] = await Promise.all([initProc.exited, stdoutDone, stderrDone]);
+  const combinedOutput = `${initStdout}\n${initStderr}`.toLowerCase();
+  const alreadyInitialized = combinedOutput.includes("already initialized");
+
+  if (initCode !== 0 && !alreadyInitialized) {
+    logger.error("Failed to initialize cocod. Please run 'cocod init' manually.");
+    return;
+  }
+
+  if (alreadyInitialized) {
+    logger.log("cocod is already initialized.");
   } else {
-    console.log("cocod initialized successfully.");
+    logger.log("cocod initialized successfully.");
   }
 
   const config = await loadConfig();
   await startDaemon({ port: String(config.port || 8008) });
   await installRoutstrModelsInOpencode(config);
 
-  console.log("\nInitialization complete!");
-  console.log(`Run 'routstrd daemon' to start the daemon.`);
+  logger.log("\nInitialization complete!");
+  logger.log(`Run 'routstrd daemon' to start the daemon.`);
 }
 
 async function checkCocodInstalled(): Promise<boolean> {
@@ -112,7 +114,7 @@ async function checkCocodInstalled(): Promise<boolean> {
 }
 
 async function installRoutstrModelsInOpencode(config: RoutstrdConfig): Promise<void> {
-  console.log("\nInstalling routstr models in opencode.json...");
+  logger.log("\nInstalling routstr models in opencode.json...");
 
   const port = config.port || 8008;
 
@@ -151,7 +153,7 @@ async function installRoutstrModelsInOpencode(config: RoutstrdConfig): Promise<v
     const models = data.output?.models || [];
 
     if (models.length === 0) {
-      console.log("No models found from routstr daemon.");
+      logger.log("No models found from routstr daemon.");
       return;
     }
 
@@ -172,9 +174,9 @@ async function installRoutstrModelsInOpencode(config: RoutstrdConfig): Promise<v
     };
 
     await writeFile(OPENCODE_CONFIG_PATH, JSON.stringify(opencodeConfig, null, 2));
-    console.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
+    logger.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
   } catch (error) {
-    console.error("Failed to install models in opencode.json:", error);
+    logger.error("Failed to install models in opencode.json:", error);
   }
 }
 
@@ -187,8 +189,8 @@ program
 program
   .command("init")
   .description("Initialize routstrd (creates config directory and initializes cocod)")
-  .action(() => {
-    initDaemon();
+  .action(async () => {
+    await initDaemon();
   });
 
 // Daemon - start the background daemon
@@ -198,8 +200,8 @@ program
   .option("--port <port>", "Port to listen on", "8008")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
-    if (!checkCocodInstalled()) {
-      console.error("cocod is not installed. Run 'routstrd init' first to install cocod.");
+    if (!(await checkCocodInstalled())) {
+      logger.error("cocod is not installed. Run 'routstrd init' first to install cocod.");
       process.exit(1);
     }
     await startDaemon(options);
