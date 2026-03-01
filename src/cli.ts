@@ -9,7 +9,7 @@ import {
 } from "./cli-shared";
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join } from "path";
 import {
   CONFIG_DIR,
   DB_PATH,
@@ -24,7 +24,7 @@ const OPENCODE_CONFIG_PATH = join(process.env.HOME || "", ".config/opencode/open
 const cliVersion = "0.1.0";
 
 async function initDaemon(): Promise<void> {
-  logger.log("Initializing routstrd... XYS`");
+  logger.log("Initializing routstrd...");
 
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
@@ -148,6 +148,8 @@ async function installRoutstrModelsInOpencode(config: RoutstrdConfig): Promise<v
   }
 
   try {
+    mkdirSync(dirname(OPENCODE_CONFIG_PATH), { recursive: true });
+
     const response = await fetch(`http://localhost:${port}/models`);
     const data = await response.json() as { output?: { models: string[] } };
     const models = data.output?.models || [];

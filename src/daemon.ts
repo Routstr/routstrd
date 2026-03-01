@@ -664,6 +664,18 @@ async function main(): Promise<void> {
 
 export async function startDaemon(options: { port?: string; provider?: string } = {}): Promise<void> {
   const args: string[] = [];
+  const port = options.port || "8008";
+
+  try {
+    const existing = await fetch(`http://localhost:${port}/health`);
+    if (existing.ok) {
+      logger.log(`Routstr daemon already running on http://localhost:${port}`);
+      return;
+    }
+  } catch {
+    // Daemon is not running yet; continue with startup.
+  }
+
   if (options.port) {
     args.push("--port", options.port);
   }
@@ -685,8 +697,6 @@ export async function startDaemon(options: { port?: string; provider?: string } 
 
   proc.unref();
 
-  const port = options.port || "8008";
-
   // Poll until the daemon is healthy
   for (let i = 0; i < 100; i++) {
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -694,7 +704,7 @@ export async function startDaemon(options: { port?: string; provider?: string } 
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) {
         logger.log(`Routstr daemon started (PID: ${proc.pid}).`);
-        process.exit(0);
+        return;
       }
     } catch {
       // Not ready yet
