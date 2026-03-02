@@ -26,6 +26,23 @@ const cliVersion = "0.1.0";
 async function initDaemon(): Promise<void> {
   logger.log("Initializing routstrd...");
 
+  if (!(await checkCocodInstalled())) {
+    logger.log("cocod not found. Installing globally with bun...");
+
+    const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+
+    const installCode = await installProc.exited;
+    if (installCode !== 0 || !(await checkCocodInstalled())) {
+      logger.error("Failed to install cocod. Please run 'bun install --global cocod' manually.");
+      return;
+    }
+
+    logger.log("cocod installed successfully.");
+  }
+
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
