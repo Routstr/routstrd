@@ -16,7 +16,19 @@ async function writeLog(level: string, ...args: unknown[]) {
   await ensureLogDir();
   const timestamp = new Date().toISOString();
   const message = args
-    .map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a)))
+    .map((a) => {
+      if (a instanceof Error) {
+        return `${a.message}${a.stack ? `\n${a.stack}` : ""}`;
+      }
+      if (typeof a === "object") {
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      }
+      return String(a);
+    })
     .join(" ");
   const line = `[${timestamp}] [${level}] ${message}\n`;
   try {

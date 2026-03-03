@@ -251,13 +251,29 @@ async function main(): Promise<void> {
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);
   const storageAdapter = createStorageAdapterFromStore(store);
-
-  logger.log("Bootstrapping providers...");
   const modelManager = new ModelManager(discoveryAdapter);
-  const providers = await modelManager.bootstrapProviders(false);
-  logger.log(`Bootstrapped ${providers.length} providers`);
-  await modelManager.fetchModels(providers);
-  logger.log("Provider bootstrap complete.");
+
+  let providerBootstrapPromise: Promise<void> | null = null;
+  const ensureProvidersBootstrapped = (): Promise<void> => {
+    if (!providerBootstrapPromise) {
+      providerBootstrapPromise = (async () => {
+        logger.log("Bootstrapping providers...");
+        const providers = await modelManager.bootstrapProviders(false);
+        logger.log(`Bootstrapped ${providers.length} providers`);
+        await modelManager.fetchModels(providers);
+        logger.log("Provider bootstrap complete.");
+      })().catch((error) => {
+        logger.error("Provider bootstrap failed:", error);
+        throw error;
+      });
+    }
+    return providerBootstrapPromise;
+  };
+
+  // Start bootstrap in background so daemon can become healthy quickly.
+  void ensureProvidersBootstrapped().catch(() => {
+    // Error is already logged; keep daemon alive for troubleshooting/retries.
+  });
 
   let activeMintUrl: string | null = null;
   let mintUnits: Record<string, "sat" | "msat"> = {};
@@ -378,6 +394,7 @@ async function main(): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/models") {
         try {
+          await ensureProvidersBootstrapped();
           await modelManager.fetchRoutstr21Models();
           const models = discoveryAdapter.getRoutstr21Models();
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -581,6 +598,7 @@ async function main(): Promise<void> {
         undefined;
 
       try {
+        await ensureProvidersBootstrapped();
         const response = await routeRequests({
           modelId,
           requestBody,
@@ -665,6 +683,8 @@ async function main(): Promise<void> {
 export async function startDaemon(options: { port?: string; provider?: string } = {}): Promise<void> {
   const args: string[] = [];
   const port = options.port || "8008";
+  const pollIntervalMs = 250;
+  const startupTimeoutMs = 10 * 60 * 1000;
 
   try {
     const existing = await fetch(`http://localhost:${port}/health`);
@@ -697,9 +717,22 @@ export async function startDaemon(options: { port?: string; provider?: string } 
 
   proc.unref();
 
+  let exitCode: number | null = null;
+  proc.exited.then((code) => {
+    exitCode = code;
+  });
+
   // Poll until the daemon is healthy
-  for (let i = 0; i < 100; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
+  const maxPolls = Math.ceil(startupTimeoutMs / pollIntervalMs);
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+
+    if (exitCode !== null) {
+      throw new Error(
+        `Daemon process exited early with code ${exitCode}. Check logs at ${LOG_FILE}`
+      );
+    }
+
     try {
       const res = await fetch(`http://localhost:${port}/health`);
       if (res.ok) {
@@ -711,7 +744,9 @@ export async function startDaemon(options: { port?: string; provider?: string } 
     }
   }
 
-  throw new Error("Daemon failed to start within 20 seconds");
+  throw new Error(
+    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs at ${LOG_FILE}`
+  );
 }
 
 // Only auto-run main() when this file is executed directly (not imported)
