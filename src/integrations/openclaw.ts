@@ -103,15 +103,15 @@ export async function installOpenClawIntegration(config: RoutstrdConfig): Promis
 
     openclawConfig.models.providers[OPENCLAW_PROVIDER_ID] = {
       baseUrl: OPENCLAW_API_BASE,
-      apiKey: openclawConfig.models.providers[OPENCLAW_PROVIDER_ID]?.apiKey || "",
+      apiKey: openclawConfig.models.providers[OPENCLAW_PROVIDER_ID]?.apiKey || "placehodler",
       api: "openai-completions",
       models: providerModels,
     };
 
     const availableModelIds = new Set(providerModels.map((model) => model.id));
-    const primaryId = availableModelIds.has("glm-4.7") ? "glm-4.7" : providerModels[0]?.id;
-    const fallbackId = availableModelIds.has("qwen3-coder-next")
-      ? "qwen3-coder-next"
+    const primaryId = availableModelIds.has("gpt-5.3-codex") ? "gpt-5.3-codex" : providerModels[0]?.id;
+    const fallbackId = availableModelIds.has("minimax-m2.5")
+      ? "minimax-m2.5"
       : providerModels.find((model) => model.id !== primaryId)?.id;
 
     if (primaryId) {
@@ -126,11 +126,11 @@ export async function installOpenClawIntegration(config: RoutstrdConfig): Promis
       };
     }
 
-    const aliasMap: Record<string, { alias?: string }> = {};
-    for (const model of providerModels) {
-      aliasMap[`${OPENCLAW_PROVIDER_ID}/${model.id}`] = { alias: toAlias(model.id) };
-    }
-    openclawConfig.agents.defaults.models = aliasMap;
+    // const aliasMap: Record<string, { alias?: string }> = {};
+    // for (const model of providerModels) {
+    //   aliasMap[`${OPENCLAW_PROVIDER_ID}/${model.id}`] = { alias: toAlias(model.id) };
+    // }
+    // openclawConfig.agents.defaults.models = aliasMap;
 
     await writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify(openclawConfig, null, 2));
     logger.log(`Added "${OPENCLAW_PROVIDER_ID}" provider with ${models.length} models to openclaw.json`);
