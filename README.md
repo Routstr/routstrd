@@ -16,7 +16,10 @@ routstrd is a Bun-based CLI tool that provides a background daemon for the Routs
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
-- [cocod](https://github.com/cocodash/cocod) (Cashu wallet daemon)
+
+```sh
+curl -fsSL https://bun.com/install | bash
+```
 
 ## Installation
 
@@ -25,21 +28,8 @@ routstrd is a Bun-based CLI tool that provides a background daemon for the Routs
 ```sh
 cd routstrd
 bun install
-```
-
-### Global Installation
-
-Link the package for global CLI access:
-
-```sh
-cd routstrd
 bun link
-```
-
-Or install globally from the local path:
-
-```sh
-bun install -g /path/to/routstrd
+routstrd init
 ```
 
 ## Usage
