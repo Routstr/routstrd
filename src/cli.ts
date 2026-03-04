@@ -18,6 +18,13 @@ import {
 import { logger } from "./utils/logger";
 import { setupIntegration } from "./integrations";
 
+type RoutstrModel = {
+  id: string;
+  name?: string;
+  description?: string;
+  context_length?: number;
+};
+
 const cliVersion = "0.1.0";
 
 async function initDaemon(): Promise<void> {
@@ -249,13 +256,17 @@ program
     }
 
     if (result.output && typeof result.output === "object" && "models" in result.output) {
-      const models = (result.output as { models: string[] }).models;
+      const models = (result.output as { models: RoutstrModel[] }).models;
       if (models.length === 0) {
         console.log("No routstr21 models found");
       } else {
         console.log(`\nFound ${models.length} routstr21 models:`);
         models.forEach((model, i) => {
-          console.log(`${i + 1}. ${model}`);
+          const details = [
+            model.name && model.name !== model.id ? model.name : null,
+            model.context_length ? `${model.context_length} ctx` : null,
+          ].filter(Boolean).join(" - ");
+          console.log(`${i + 1}. ${model.id}${details ? ` (${details})` : ""}`);
         });
       }
     }

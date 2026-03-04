@@ -7,6 +7,11 @@ import { logger } from "../utils/logger";
 const OPENCODE_CONFIG_PATH = join(process.env.HOME || "", ".config/opencode/opencode.json");
 const OPENCODE_SMALL_MODEL = "routstr/minimax-m2.5";
 
+type RoutstrModel = {
+  id: string;
+  name?: string;
+};
+
 export async function installOpencodeIntegration(config: RoutstrdConfig): Promise<void> {
   logger.log("\nInstalling routstr models in opencode.json...");
 
@@ -45,7 +50,7 @@ export async function installOpencodeIntegration(config: RoutstrdConfig): Promis
     mkdirSync(dirname(OPENCODE_CONFIG_PATH), { recursive: true });
 
     const response = await fetch(`http://localhost:${port}/models`);
-    const data = await response.json() as { output?: { models: string[] } };
+    const data = await response.json() as { output?: { models: RoutstrModel[] } };
     const models = data.output?.models || [];
 
     if (models.length === 0) {
@@ -55,7 +60,7 @@ export async function installOpencodeIntegration(config: RoutstrdConfig): Promis
 
     const modelsObj: Record<string, { name: string }> = {};
     for (const model of models) {
-      modelsObj[model] = { name: model };
+      modelsObj[model.id] = { name: model.name || model.id };
     }
 
     opencodeConfig.provider["routstr"] = {

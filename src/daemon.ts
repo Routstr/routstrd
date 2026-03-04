@@ -20,6 +20,7 @@ import {
 import { logger } from "./utils/logger";
 import {
   ModelManager,
+  type Model,
   createDiscoveryAdapterFromStore,
   createProviderRegistryFromStore,
   createStorageAdapterFromStore,
@@ -28,6 +29,8 @@ import {
   InsufficientBalanceError,
   RoutstrClient,
 } from "@routstr/sdk";
+
+type ExposedModel = Pick<Model, "id"> & Partial<Omit<Model, "id">>;
 
 function createBunSqliteDriver(dbPath: string) {
   const db = new SQLite(dbPath);
@@ -270,6 +273,20 @@ async function main(): Promise<void> {
     return providerBootstrapPromise;
   };
 
+  const getRoutstr21Models = async (): Promise<ExposedModel[]> => {
+    await ensureProvidersBootstrapped();
+
+    const routstr21ModelIds = Array.from(new Set(await modelManager.fetchRoutstr21Models())).slice(0, 21);
+    const baseUrls = modelManager.getBaseUrls();
+    const discoveredModels = await modelManager.fetchModels(baseUrls);
+    const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
+
+    return routstr21ModelIds.map((modelId) => {
+      const model = modelsById.get(modelId);
+      return model || { id: modelId, name: modelId };
+    });
+  };
+
   // Start bootstrap in background so daemon can become healthy quickly.
   void ensureProvidersBootstrapped().catch(() => {
     // Error is already logged; keep daemon alive for troubleshooting/retries.
@@ -404,11 +421,26 @@ async function main(): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/models") {
         try {
-          await ensureProvidersBootstrapped();
-          await modelManager.fetchRoutstr21Models();
-          const models = discoveryAdapter.getRoutstr21Models();
+          const models = await getRoutstr21Models();
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ output: { models } }));
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/v1/models") {
+        try {
+          const models = await getRoutstr21Models();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              object: "list",
+              data: models.map((model) => ({ ...model, object: "model" })),
+            })
+          );
         } catch (error) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: String(error) }));
