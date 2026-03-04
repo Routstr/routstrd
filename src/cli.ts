@@ -118,6 +118,7 @@ async function initDaemon(): Promise<void> {
   await setupIntegration(config);
 
   logger.log("\nInitialization complete!");
+  logger.log("\n use 'cocod receive cashu' or 'cocod receive bolt11 2100' to top up your local wallet!");
 }
 
 async function checkCocodInstalled(): Promise<boolean> {
