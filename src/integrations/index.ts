@@ -14,6 +14,7 @@ function ask(question: string): Promise<string> {
     process.stdin.resume();
     process.stdin.setEncoding("utf8");
     process.stdin.once("data", (data) => {
+      process.stdin.pause();
       resolve(data.toString().trim());
     });
   });
