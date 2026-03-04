@@ -6,6 +6,10 @@ import { installOpenClawIntegration } from "./openclaw";
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
 
+  if (!process.stdin.isTTY) {
+    return Promise.resolve("1");
+  }
+
   return new Promise((resolve) => {
     process.stdin.resume();
     process.stdin.setEncoding("utf8");

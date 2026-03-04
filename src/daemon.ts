@@ -731,7 +731,12 @@ export async function startDaemon(options: { port?: string; provider?: string } 
   const startupTimeoutMs = 10 * 60 * 1000;
 
   try {
-    const existing = await fetch(`http://localhost:${port}/health`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const existing = await fetch(`http://localhost:${port}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
     if (existing.ok) {
       logger.log(`Routstr daemon already running on http://localhost:${port}`);
       return;

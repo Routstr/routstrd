@@ -118,7 +118,6 @@ async function initDaemon(): Promise<void> {
   await setupIntegration(config);
 
   logger.log("\nInitialization complete!");
-  logger.log(`Run 'routstrd daemon' to start the daemon.`);
 }
 
 async function checkCocodInstalled(): Promise<boolean> {
