@@ -218,6 +218,10 @@ program
           console.log(`${key.name}: ${key.balance} sats`);
         }
       }
+      const apikeysCalled = (keysResult.output as { apikeysCalled?: number }).apikeysCalled;
+      if (apikeysCalled !== undefined) {
+        console.log(`\nAPI Keys Called: ${apikeysCalled}`);
+      }
     } else if (keysResult.error) {
       console.error("Keys error:", keysResult.error);
     }

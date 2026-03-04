@@ -317,7 +317,12 @@ async function main(): Promise<void> {
     },
     async receiveToken(
       token: string
-    ): Promise<{ success: boolean; amount: number; unit: "sat" | "msat" }> {
+    ): Promise<{
+      success: boolean;
+      amount: number;
+      unit: "sat" | "msat";
+      message?: string;
+    }> {
       try {
         await runWalletCommand(["receive", "cashu", token]);
         const decoded = getDecodedToken(token);
@@ -328,8 +333,13 @@ async function main(): Promise<void> {
         const unit = decoded?.unit === "msat" ? "msat" : "sat";
         return { success: true, amount: amount ?? 0, unit };
       } catch (error) {
-        logger.error("Error in walletAdapter receiveToken:", error);
-        return { success: false, amount: 0, unit: "sat" };
+        console.log("Eerro in receive", error);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        const message = errorMessage.includes("Failed to fetch mint")
+          ? errorMessage
+          : undefined;
+        return { success: false, amount: 0, unit: "sat", message };
       }
     },
     isUsingNip60(): boolean {
@@ -551,6 +561,7 @@ async function main(): Promise<void> {
                 keys,
                 total: totalWallet + totalCached + totalApiKeys,
                 unit: "sat",
+                apikeysCalled: apiKeys.length,
               },
             })
           );
@@ -608,6 +619,7 @@ async function main(): Promise<void> {
           providerRegistry,
           discoveryAdapter,
           modelManager,
+          debugLevel: "DEBUG"
         });
         const requestId = response.headers.get("x-routstr-request-id") || undefined;
         logger.log("Request ID, ", requestId, " with path: ", url.pathname); 
