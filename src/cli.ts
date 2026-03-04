@@ -151,14 +151,18 @@ program
 program
   .command("daemon")
   .description("Start the background daemon")
-  .option("--port <port>", "Port to listen on", "8008")
+  .option("--port <port>", "Port to listen on")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
     if (!(await checkCocodInstalled())) {
       logger.error("cocod is not installed. Run 'routstrd init' first to install cocod.");
       process.exit(1);
     }
-    await startDaemon(options);
+    const config = await loadConfig();
+    await startDaemon({
+      port: options.port || String(config.port || 8008),
+      provider: options.provider,
+    });
   });
 
 // Status - check daemon status

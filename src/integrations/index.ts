@@ -1,6 +1,7 @@
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import { installOpencodeIntegration } from "./opencode";
+import { installOpenClawIntegration } from "./openclaw";
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -30,7 +31,7 @@ function parseChoice(input: string): number {
 export async function setupIntegration(config: RoutstrdConfig): Promise<void> {
   logger.log("\nChoose an integration to set up:");
   logger.log("1. OpenCode (default)");
-  logger.log("2. Skip for now");
+  logger.log("2. OpenClaw");
   logger.log("3. Skip for now");
 
   const answer = await ask("Select integration [1]: ");
@@ -38,6 +39,11 @@ export async function setupIntegration(config: RoutstrdConfig): Promise<void> {
 
   if (choice === 1) {
     await installOpencodeIntegration(config);
+    return;
+  }
+
+  if (choice === 2) {
+    await installOpenClawIntegration(config);
     return;
   }
 
