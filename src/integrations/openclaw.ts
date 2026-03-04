@@ -6,7 +6,7 @@ import { logger } from "../utils/logger";
 
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "", ".openclaw/openclaw.json");
 const OPENCLAW_PROVIDER_ID = "routstr";
-const OPENCLAW_API_BASE = "https://api.nonkycai.com/v1";
+const OPENCLAW_API_BASE = "http://localhost:8008/v1";
 const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/glm-4.7";
 const OPENCLAW_DEFAULT_FALLBACK_MODEL = "routstr/qwen3-coder-next";
 
