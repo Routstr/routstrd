@@ -208,34 +208,43 @@ program
       callDaemon("/keys/balance"),
     ]);
 
+    console.log("Checking full system balance...\n");
+
     console.log("=== Wallet Balance ===");
-    if (walletResult.output) {
-      if (typeof walletResult.output === "string") {
-        console.log(walletResult.output);
-      } else {
-        console.log(JSON.stringify(walletResult.output, null, 2));
+    let totalWallet = 0;
+    if (walletResult.output && typeof walletResult.output === "object" && "balances" in walletResult.output) {
+      const balances = (walletResult.output as { balances: Record<string, number> }).balances;
+      for (const [mintUrl, balance] of Object.entries(balances)) {
+        console.log(`  ${mintUrl}: ${balance} sats`);
+        totalWallet += balance;
       }
+      console.log(`  Total: ${totalWallet} sats`);
     } else if (walletResult.error) {
       console.error("Wallet error:", walletResult.error);
     }
 
-    console.log("\n=== API Key Balances ===");
+    console.log("\n=== API Keys ===");
+    let totalApiKeys = 0;
     if (keysResult.output && typeof keysResult.output === "object" && "keys" in keysResult.output) {
       const keys = (keysResult.output as { keys: Array<{ id: string; name: string; balance: number }> }).keys;
-      if (keys.length === 0) {
-        console.log("No API keys found");
-      } else {
-        for (const key of keys) {
-          console.log(`${key.name}: ${key.balance} sats`);
-        }
+      const apiKeyEntries = keys.filter(k => k.id.startsWith("apikey:"));
+      for (const key of apiKeyEntries) {
+        const name = key.name.replace("API Key: ", "");
+        console.log(`  ${name}: ${key.balance} sats`);
+        totalApiKeys += key.balance;
       }
-      const apikeysCalled = (keysResult.output as { apikeysCalled?: number }).apikeysCalled;
-      if (apikeysCalled !== undefined) {
-        console.log(`\nAPI Keys Called: ${apikeysCalled}`);
+      if (apiKeyEntries.length === 0) {
+        console.log("  No API keys found");
+      } else {
+        console.log(`  Total: ${totalApiKeys} sats`);
       }
     } else if (keysResult.error) {
       console.error("Keys error:", keysResult.error);
     }
+
+    console.log("\n=== Summary ===");
+    console.log(`  Wallet: ${totalWallet} sats | API Keys: ${totalApiKeys} sats`);
+    console.log(`  Grand Total: ${totalWallet + totalApiKeys} sats`);
   });
 
 // Ping
