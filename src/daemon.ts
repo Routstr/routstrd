@@ -687,6 +687,11 @@ async function main(): Promise<void> {
         );
 
         if (isStream) {
+          res.statusCode = response.status;
+          response.headers.forEach((value, key) => {
+            res.setHeader(key, value);
+          });
+
           const body = response.body;
           if (body) {
             const nodeReadable = Readable.fromWeb(

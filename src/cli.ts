@@ -140,23 +140,23 @@ program
   .description("Routstr daemon - Manage routstr processes")
   .version(cliVersion, "--version", "output the version number");
 
-// Init - initialize the daemon
+// Onboard - initialize the daemon
 program
-  .command("init")
+  .command("onboard")
   .description("Initialize routstrd (creates config directory and initializes cocod)")
   .action(async () => {
     await initDaemon();
   });
 
-// Daemon - start the background daemon
+// Start - start the background daemon
 program
-  .command("daemon")
+  .command("start")
   .description("Start the background daemon")
   .option("--port <port>", "Port to listen on")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
     if (!(await checkCocodInstalled())) {
-      logger.error("cocod is not installed. Run 'routstrd init' first to install cocod.");
+      logger.error("cocod is not installed. Run 'routstrd onboard' first to install cocod.");
       process.exit(1);
     }
     const config = await loadConfig();

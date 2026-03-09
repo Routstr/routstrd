@@ -29,7 +29,7 @@ curl -fsSL https://bun.com/install | bash
 cd routstrd
 bun install
 bun link
-routstrd init
+routstrd onboard
 ```
 
 ## Usage
@@ -39,7 +39,7 @@ routstrd init
 Initialize routstrd (creates config directory and sets up cocod):
 
 ```sh
-routstrd init
+routstrd onboard
 ```
 
 This will:
@@ -52,17 +52,17 @@ This will:
 Start the background daemon:
 
 ```sh
-routstrd daemon
+routstrd start
 ```
 
 With custom port:
 ```sh
-routstrd daemon --port 9000
+routstrd start --port 9000
 ```
 
 With specific provider:
 ```sh
-routstrd daemon --provider https://your-provider.com
+routstrd start --provider https://your-provider.com
 ```
 
 ### CLI Commands
@@ -150,7 +150,7 @@ bun run start
 
 Run daemon:
 ```sh
-bun run daemon
+bun run start
 ```
 
 Typecheck:
