@@ -34,7 +34,7 @@ type ExposedModel = Pick<Model, "id"> & Partial<Omit<Model, "id">>;
 
 function createBunSqliteDriver(dbPath: string) {
   const db = new SQLite(dbPath);
-  
+
   db.run(`
     CREATE TABLE IF NOT EXISTS sdk_storage (
       key TEXT PRIMARY KEY,
@@ -45,7 +45,9 @@ function createBunSqliteDriver(dbPath: string) {
   return {
     async getItem<T>(key: string, defaultValue: T): Promise<T> {
       try {
-        const row = db.query("SELECT value FROM sdk_storage WHERE key = ?").get(key) as { value: string } | undefined;
+        const row = db
+          .query("SELECT value FROM sdk_storage WHERE key = ?")
+          .get(key) as { value: string } | undefined;
         if (!row || typeof row.value !== "string") return defaultValue;
         try {
           return JSON.parse(row.value) as T;
@@ -63,7 +65,7 @@ function createBunSqliteDriver(dbPath: string) {
     async setItem<T>(key: string, value: T): Promise<void> {
       try {
         db.query(
-          "INSERT INTO sdk_storage (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+          "INSERT INTO sdk_storage (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         ).run(key, JSON.stringify(value));
       } catch (error) {
         logger.error(`SQLite setItem failed for key "${key}":`, error);
@@ -96,7 +98,7 @@ function parseArgs(argv: string[]): {
 } {
   const portFlagIndex = argv.findIndex((arg) => arg === "--port");
   const providerFlagIndex = argv.findIndex(
-    (arg) => arg === "--provider" || arg === "-p"
+    (arg) => arg === "--provider" || arg === "-p",
   );
 
   const port =
@@ -155,7 +157,7 @@ async function runWalletCommand(args: string[]): Promise<string> {
     child.on("close", (code) => {
       if (code && code !== 0) {
         reject(
-          new Error(stderr.trim() || stdout.trim() || "Wallet CLI failed")
+          new Error(stderr.trim() || stdout.trim() || "Wallet CLI failed"),
         );
         return;
       }
@@ -183,7 +185,7 @@ function parseBalances(output: string): Record<string, number> {
             return [mintUrl, Number(value.sats ?? 0)];
           }
           return [mintUrl, 0];
-        })
+        }),
       );
     }
   } catch {
@@ -194,14 +196,14 @@ function parseBalances(output: string): Record<string, number> {
   trimmed
     .split("\n")
     .map((line) => line.trim())
-      .forEach((line) => {
-        const match = line.match(/^(\S+):\s+(\d+)\s+s$/);
-        const mintUrl = match?.[1];
-        const amount = match?.[2];
-        if (mintUrl && amount) {
-          balances[mintUrl] = Number.parseInt(amount, 10);
-        }
-      });
+    .forEach((line) => {
+      const match = line.match(/^(\S+):\s+(\d+)\s+s$/);
+      const mintUrl = match?.[1];
+      const amount = match?.[2];
+      if (mintUrl && amount) {
+        balances[mintUrl] = Number.parseInt(amount, 10);
+      }
+    });
   return balances;
 }
 
@@ -216,13 +218,11 @@ function parseMints(output: string): Array<{ url: string; trusted: boolean }> {
       const trustedValue = trustedMatch?.[1];
       return {
         url: urlMatch[0],
-        trusted: trustedMatch
-          ? trustedValue?.toLowerCase() === "true"
-          : false,
+        trusted: trustedMatch ? trustedValue?.toLowerCase() === "true" : false,
       };
     })
     .filter((entry): entry is { url: string; trusted: boolean } =>
-      Boolean(entry)
+      Boolean(entry),
     );
 }
 
@@ -249,7 +249,7 @@ async function main(): Promise<void> {
 
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
   const store = await createSdkStore({ driver: sqliteDriver });
-  
+
   // Create adapters from our SQLite-backed store
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);
@@ -276,10 +276,14 @@ async function main(): Promise<void> {
   const getRoutstr21Models = async (): Promise<ExposedModel[]> => {
     await ensureProvidersBootstrapped();
 
-    const routstr21ModelIds = Array.from(new Set(await modelManager.fetchRoutstr21Models())).slice(0, 21);
+    const routstr21ModelIds = Array.from(
+      new Set(await modelManager.fetchRoutstr21Models()),
+    ).slice(0, 21);
     const baseUrls = modelManager.getBaseUrls();
     const discoveredModels = await modelManager.fetchModels(baseUrls);
-    const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
+    const modelsById = new Map(
+      discoveredModels.map((model) => [model.id, model]),
+    );
 
     return routstr21ModelIds.map((modelId) => {
       const model = modelsById.get(modelId);
@@ -300,7 +304,7 @@ async function main(): Promise<void> {
       const output = await runWalletCommand(["balance"]);
       const balances = parseBalances(output);
       mintUnits = Object.fromEntries(
-        Object.keys(balances).map((mintUrl) => [mintUrl, "sat"])
+        Object.keys(balances).map((mintUrl) => [mintUrl, "sat"]),
       );
       if (!activeMintUrl) {
         activeMintUrl = Object.keys(balances)[0] || null;
@@ -332,9 +336,7 @@ async function main(): Promise<void> {
         throw error;
       }
     },
-    async receiveToken(
-      token: string
-    ): Promise<{
+    async receiveToken(token: string): Promise<{
       success: boolean;
       amount: number;
       unit: "sat" | "msat";
@@ -345,7 +347,7 @@ async function main(): Promise<void> {
         const decoded = getDecodedToken(token);
         const amount = decoded?.proofs?.reduce(
           (sum, proof) => sum + proof.amount,
-          0
+          0,
         );
         const unit = decoded?.unit === "msat" ? "msat" : "sat";
         return { success: true, amount: amount ?? 0, unit };
@@ -402,7 +404,7 @@ async function main(): Promise<void> {
                 wallet: "connected",
                 balances,
               },
-            })
+            }),
           );
         } catch (error) {
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -413,7 +415,7 @@ async function main(): Promise<void> {
                 wallet: "error",
                 error: String(error),
               },
-            })
+            }),
           );
         }
         return;
@@ -439,7 +441,7 @@ async function main(): Promise<void> {
             JSON.stringify({
               object: "list",
               data: models.map((model) => ({ ...model, object: "model" })),
-            })
+            }),
           );
         } catch (error) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -467,23 +469,33 @@ async function main(): Promise<void> {
 
           if (!mintUrl) {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Missing required 'mintUrl' field." }));
+            res.end(
+              JSON.stringify({ error: "Missing required 'mintUrl' field." }),
+            );
             return;
           }
 
           const state = store.getState();
-          const pendingDistribution = (state.cachedTokens || []).map((t: { baseUrl: string; balance?: number }) => ({
-            baseUrl: t.baseUrl,
-            amount: t.balance || 0,
-          }));
-          const apiKeysStored = (state.apiKeys || []).map((k: { baseUrl: string; balance?: number }) => ({
-            baseUrl: k.baseUrl,
-            amount: k.balance || 0,
-          }));
+          const pendingDistribution = (state.cachedTokens || []).map(
+            (t: { baseUrl: string; balance?: number }) => ({
+              baseUrl: t.baseUrl,
+              amount: t.balance || 0,
+            }),
+          );
+          const apiKeysStored = (state.apiKeys || []).map(
+            (k: { baseUrl: string; balance?: number }) => ({
+              baseUrl: k.baseUrl,
+              amount: k.balance || 0,
+            }),
+          );
 
           if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ output: { message: "No pending tokens to refund", results: [] } }));
+            res.end(
+              JSON.stringify({
+                output: { message: "No pending tokens to refund", results: [] },
+              }),
+            );
             return;
           }
 
@@ -496,26 +508,35 @@ async function main(): Promise<void> {
             storageAdapter,
             providerRegistry,
             "min",
-            "lazyrefund"
+            "lazyrefund",
           );
 
           const spender = client.getCashuSpender();
-          const results = await spender.refundProviders(refundBaseUrls, mintUrl, true);
+          const results = await spender.refundProviders(
+            refundBaseUrls,
+            mintUrl,
+            true,
+          );
 
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            output: {
-              message: `Refunded to ${mintUrl}`,
-              pendingTokens: pendingDistribution.length,
-              apiKeys: apiKeysStored.length,
-              results: results.map((r: { baseUrl: string; success: boolean }) => ({
-                baseUrl: r.baseUrl,
-                success: r.success,
-              })),
-            },
-          }));
+          res.end(
+            JSON.stringify({
+              output: {
+                message: `Refunded to ${mintUrl}`,
+                pendingTokens: pendingDistribution.length,
+                apiKeys: apiKeysStored.length,
+                results: results.map(
+                  (r: { baseUrl: string; success: boolean }) => ({
+                    baseUrl: r.baseUrl,
+                    success: r.success,
+                  }),
+                ),
+              },
+            }),
+          );
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           logger.error(`Refund error: ${message}`);
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: message }));
@@ -538,7 +559,7 @@ async function main(): Promise<void> {
                 unit: "sat",
                 activeMint: activeMintUrl,
               },
-            })
+            }),
           );
         } catch (error) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -552,38 +573,34 @@ async function main(): Promise<void> {
           const walletBalances = await walletAdapter.getBalances();
           const totalWallet = Object.values(walletBalances).reduce(
             (sum, balance) => sum + balance,
-            0
+            0,
           );
 
           const state = store.getState();
           const cachedTokens = state.cachedTokens || [];
           const totalCached = cachedTokens.reduce(
             (sum: number, t: { balance?: number }) => sum + (t.balance || 0),
-            0
+            0,
           );
 
           const apiKeys = state.apiKeys || [];
           const totalApiKeys = apiKeys.reduce(
             (sum: number, k: { balance?: number }) => sum + (k.balance || 0),
-            0
+            0,
           );
 
           const keys: Array<{ id: string; name: string; balance: number }> = [
             { id: "wallet", name: "Wallet", balance: totalWallet },
-            ...cachedTokens.map(
-              (t: { baseUrl: string; balance?: number }) => ({
-                id: `cached:${t.baseUrl}`,
-                name: `Cached: ${t.baseUrl}`,
-                balance: t.balance || 0,
-              })
-            ),
-            ...apiKeys.map(
-              (k: { baseUrl: string; balance?: number }) => ({
-                id: `apikey:${k.baseUrl}`,
-                name: `API Key: ${k.baseUrl}`,
-                balance: k.balance || 0,
-              })
-            ),
+            ...cachedTokens.map((t: { baseUrl: string; balance?: number }) => ({
+              id: `cached:${t.baseUrl}`,
+              name: `Cached: ${t.baseUrl}`,
+              balance: t.balance || 0,
+            })),
+            ...apiKeys.map((k: { baseUrl: string; balance?: number }) => ({
+              id: `apikey:${k.baseUrl}`,
+              name: `API Key: ${k.baseUrl}`,
+              balance: k.balance || 0,
+            })),
           ];
 
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -595,7 +612,7 @@ async function main(): Promise<void> {
                 unit: "sat",
                 apikeysCalled: apiKeys.length,
               },
-            })
+            }),
           );
         } catch (error) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -620,7 +637,7 @@ async function main(): Promise<void> {
           JSON.stringify({
             error: "Invalid JSON body.",
             details: error instanceof Error ? error.message : String(error),
-          })
+          }),
         );
         return;
       }
@@ -641,6 +658,7 @@ async function main(): Promise<void> {
         undefined;
 
       try {
+        logger.log("smh", req);
         await ensureProvidersBootstrapped();
         const response = await routeRequests({
           modelId,
@@ -651,18 +669,28 @@ async function main(): Promise<void> {
           providerRegistry,
           discoveryAdapter,
           modelManager,
-          debugLevel: "DEBUG"
+          debugLevel: "DEBUG",
         });
-        const requestId = response.headers.get("x-routstr-request-id") || undefined;
-        logger.log("Request ID, ", requestId, " with path: ", url.pathname); 
 
         const isStream = bodyObj.stream === true;
+        // response.headers.get("content-type") === "text/event-stream";
+        const requestId =
+          response.headers.get("x-routstr-request-id") || undefined;
+        logger.log("Request ID, ", requestId, " with path: ", url.pathname);
+        logger.log(
+          "Request ID, ",
+          response.headers,
+          response.body,
+          " with path: ",
+          url.pathname,
+          isStream,
+        );
 
         if (isStream) {
           const body = response.body;
           if (body) {
             const nodeReadable = Readable.fromWeb(
-              body as unknown as WebReadableStream
+              body as unknown as WebReadableStream,
             );
             nodeReadable.pipe(res);
           } else {
@@ -696,7 +724,7 @@ async function main(): Promise<void> {
               available: balanceError.available,
               maxMintBalance: balanceError.maxMintBalance,
               maxMintUrl: balanceError.maxMintUrl,
-            })
+            }),
           );
           return;
         }
@@ -704,7 +732,7 @@ async function main(): Promise<void> {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: message }));
       }
-    }
+    },
   );
 
   // Write PID file
@@ -724,7 +752,9 @@ async function main(): Promise<void> {
   });
 }
 
-export async function startDaemon(options: { port?: string; provider?: string } = {}): Promise<void> {
+export async function startDaemon(
+  options: { port?: string; provider?: string } = {},
+): Promise<void> {
   const args: string[] = [];
   const port = options.port || "8008";
   const pollIntervalMs = 250;
@@ -757,12 +787,15 @@ export async function startDaemon(options: { port?: string; provider?: string } 
   // allowing it to exit cleanly. The child daemon logs to LOG_FILE via its own logger.
   const logFile = Bun.file(LOG_FILE);
 
-  const proc = Bun.spawn(["bun", "run", `${import.meta.dir}/daemon.ts`, ...args], {
-    stdout: logFile,
-    stderr: logFile,
-    stdin: "ignore",
-    detached: true,
-  });
+  const proc = Bun.spawn(
+    ["bun", "run", `${import.meta.dir}/daemon.ts`, ...args],
+    {
+      stdout: logFile,
+      stderr: logFile,
+      stdin: "ignore",
+      detached: true,
+    },
+  );
 
   proc.unref();
 
@@ -778,7 +811,7 @@ export async function startDaemon(options: { port?: string; provider?: string } 
 
     if (exitCode !== null) {
       throw new Error(
-        `Daemon process exited early with code ${exitCode}. Check logs at ${LOG_FILE}`
+        `Daemon process exited early with code ${exitCode}. Check logs at ${LOG_FILE}`,
       );
     }
 
@@ -794,7 +827,7 @@ export async function startDaemon(options: { port?: string; provider?: string } 
   }
 
   throw new Error(
-    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs at ${LOG_FILE}`
+    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs at ${LOG_FILE}`,
   );
 }
 

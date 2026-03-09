@@ -13,6 +13,7 @@ import {
   DB_PATH,
   CONFIG_FILE,
   DEFAULT_CONFIG,
+  LOG_FILE,
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
@@ -291,6 +292,62 @@ program
   .description("Stop the background daemon")
   .action(async () => {
     await handleDaemonCommand("/stop", { method: "POST" });
+  });
+
+// Logs
+program
+  .command("logs")
+  .description("View daemon logs")
+  .option("-f, --follow", "Follow log output", false)
+  .option("-n, --lines <number>", "Number of lines to show", "50")
+  .action(async (options: { follow: boolean; lines: string }) => {
+    if (!existsSync(LOG_FILE)) {
+      console.log("No log file found. Daemon may not have started yet.");
+      process.exit(1);
+    }
+
+    const lines = parseInt(options.lines, 10);
+
+    const readLastLines = async (): Promise<string[]> => {
+      const content = await Bun.file(LOG_FILE).text();
+      const allLines = content.split("\n").filter(Boolean);
+      return allLines.slice(-lines);
+    };
+
+    const printLines = async (): Promise<void> => {
+      const lastLines = await readLastLines();
+      for (const line of lastLines) {
+        console.log(line);
+      }
+    };
+
+    if (options.follow) {
+      const logFile = Bun.file(LOG_FILE);
+      const initialContent = await logFile.text();
+      let lastSize = initialContent.length;
+      
+      await printLines();
+
+      const interval = setInterval(async () => {
+        const content = await Bun.file(LOG_FILE).text();
+        const currentSize = content.length;
+        if (currentSize > lastSize) {
+          const allLines = content.split("\n").filter(Boolean);
+          const newLines = allLines.slice(Math.floor(lastSize === 0 ? 0 : -1), -1);
+          for (const line of newLines) {
+            console.log(line);
+          }
+          lastSize = currentSize;
+        }
+      }, 1000);
+
+      process.on("SIGINT", () => {
+        clearInterval(interval);
+        process.exit(0);
+      });
+    } else {
+      await printLines();
+    }
   });
 
 export function cli(args: string[]) {
