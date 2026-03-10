@@ -59,7 +59,8 @@ cocod receive bolt11 <amount>
 
 ### That's it! You can start using it on http://localhost:8008
 
-### Start Daemon
+## More Commands
+###Start Daemon
 
 Start the background daemon:
 
