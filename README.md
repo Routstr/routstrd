@@ -42,6 +42,15 @@ Initialize routstrd (creates config directory and sets up cocod):
 routstrd onboard
 ```
 
+Then fund with Cashu/Lightning:
+```sh
+cocod receive cashu <token>
+```
+or 
+```sh
+cocod receive bolt11 <amount>
+```
+
 This will:
 - Create `~/.routstrd/` directory
 - Create config file at `~/.routstrd/config.json`
