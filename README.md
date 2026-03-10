@@ -42,6 +42,12 @@ Initialize routstrd (creates config directory and sets up cocod):
 routstrd onboard
 ```
 
+This will:
+- Create `~/.routstrd/` directory
+- Create config file at `~/.routstrd/config.json`
+- Run `cocod init` to set up the wallet
+
+
 Then fund with Cashu/Lightning:
 ```sh
 cocod receive cashu <token>
@@ -51,10 +57,7 @@ or
 cocod receive bolt11 <amount>
 ```
 
-This will:
-- Create `~/.routstrd/` directory
-- Create config file at `~/.routstrd/config.json`
-- Run `cocod init` to set up the wallet
+### That's it! You can start using it on http://localhost:8008
 
 ### Start Daemon
 
