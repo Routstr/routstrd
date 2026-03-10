@@ -47,7 +47,20 @@ This will:
 - Create config file at `~/.routstrd/config.json`
 - Run `cocod init` to set up the wallet
 
-### Start Daemon
+
+Then fund with Cashu/Lightning:
+```sh
+cocod receive cashu <token>
+```
+or 
+```sh
+cocod receive bolt11 <amount>
+```
+
+### That's it! You can start using it on http://localhost:8008
+
+## More Commands
+###Start Daemon
 
 Start the background daemon:
 
