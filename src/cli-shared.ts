@@ -131,16 +131,36 @@ export { program, callDaemon };
 program
   .command("refund")
   .description("Refund pending tokens and API keys to a specified mint")
-  .requiredOption("-m, --mint-url <mintUrl>", "Mint URL to refund to")
+  .option("-m, --mint-url <mintUrl>", "Mint URL to refund to (defaults to first mint in wallet)")
   .option("-y, --yes", "Skip confirmation prompt", false)
-  .action(async (options: { mintUrl: string; yes: boolean }) => {
+  .action(async (options: { mintUrl?: string; yes: boolean }) => {
     const config = await loadConfig();
+
+    let mintUrl = options.mintUrl;
+    if (!mintUrl) {
+      const balanceResponse = await fetch(`http://localhost:${config.port}/balance`);
+      const balanceResult = (await balanceResponse.json()) as {
+        output?: { balances?: Record<string, number> };
+        error?: string;
+      };
+      if (balanceResult.error) {
+        console.log(balanceResult.error);
+        process.exit(1);
+      }
+      const balances = balanceResult.output?.balances;
+      if (!balances || Object.keys(balances).length === 0) {
+        console.log("No mint URLs found in wallet balance");
+        process.exit(1);
+      }
+      mintUrl = Object.keys(balances)[0];
+      console.log(`Using mint URL: ${mintUrl}`);
+    }
 
     try {
       const response = await fetch(`http://localhost:${config.port}/refund`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mintUrl: options.mintUrl }),
+        body: JSON.stringify({ mintUrl }),
       });
 
       if (!response.ok) {

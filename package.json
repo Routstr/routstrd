@@ -8,7 +8,6 @@
     "routstrd": "./src/index.ts"
   },
   "scripts": {
-    "start": "bun src/index.ts",
     "start": "bun src/index.ts start",
     "lint": "tsc --noEmit",
     "test": "bun test"
