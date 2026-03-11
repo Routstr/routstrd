@@ -318,23 +318,47 @@ async function main(): Promise<void> {
       return activeMintUrl;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
-      try {
-        const output = await runWalletCommand([
-          "send",
-          "cashu",
-          String(amount),
-          "--mint-url",
-          mintUrl,
-        ]);
-        const token = pickTokenLine(output);
-        if (!token) {
-          throw new Error("Wallet CLI did not return a token.");
+      const maxRetries = 3;
+      const retryDelayMs = 5000;
+      const retryErrorPattern = "Proof already reserved by operation";
+
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          const output = await runWalletCommand([
+            "send",
+            "cashu",
+            String(amount),
+            "--mint-url",
+            mintUrl,
+          ]);
+          const token = pickTokenLine(output);
+          if (!token) {
+            throw new Error("Wallet CLI did not return a token.");
+          }
+          return token;
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          const shouldRetry =
+            attempt < maxRetries &&
+            errorMessage.includes(retryErrorPattern);
+
+          if (shouldRetry) {
+            logger.log(
+              `sendToken attempt ${attempt + 1} failed with reserved proof error, retrying in ${retryDelayMs / 1000}s...`,
+            );
+            await new Promise((resolve) =>
+              setTimeout(resolve, retryDelayMs),
+            );
+            continue;
+          }
+
+          logger.error("Error in walletAdapter sendToken:", error);
+          throw error;
         }
-        return token;
-      } catch (error) {
-        logger.error("Error in walletAdapter sendToken:", error);
-        throw error;
       }
+      throw new Error("sendToken failed after max retries");
     },
     async receiveToken(token: string): Promise<{
       success: boolean;
