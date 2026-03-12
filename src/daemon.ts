@@ -1,5 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from "http";
-import { Readable } from "stream";
+import { Transform, Readable } from "stream";
 import { ReadableStream as WebReadableStream } from "stream/web";
 import { spawn } from "child_process";
 import { getDecodedToken } from "@cashu/cashu-ts";
@@ -232,6 +232,69 @@ function pickTokenLine(output: string): string {
     .map((line) => line.trim())
     .filter(Boolean);
   return lines[lines.length - 1] || "";
+}
+
+type UsageData = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cost: number;
+  satsCost: number;
+};
+
+function createSSEParserTransform(
+  onUsage: (usage: UsageData) => void,
+): Transform {
+  let buffer = "";
+
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      buffer += chunk.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          const dataStr = trimmed.slice(6);
+          if (dataStr === "[DONE]") {
+            continue;
+          }
+          try {
+            const data = JSON.parse(dataStr);
+            this.push(line + "\n");
+
+            if (data.usage && !data.choices?.length) {
+              const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
+              const msats =
+                data.usage.cost?.total_msats ??
+                data.metadata?.routstr?.cost?.total_msats ??
+                0;
+              onUsage({
+                promptTokens: data.usage.prompt_tokens ?? 0,
+                completionTokens: data.usage.completion_tokens ?? 0,
+                totalTokens: data.usage.total_tokens ?? 0,
+                cost,
+                satsCost: msats / 1000,
+              });
+            }
+          } catch {
+            this.push(line + "\n");
+          }
+        } else {
+          this.push(line + "\n");
+        }
+      }
+
+      callback();
+    },
+    flush(callback) {
+      if (buffer.trim()) {
+        this.push(buffer);
+      }
+      callback();
+    },
+  });
 }
 
 async function main(): Promise<void> {
@@ -718,10 +781,23 @@ async function main(): Promise<void> {
 
           const body = response.body;
           if (body) {
+            let capturedUsage: UsageData | null = null;
             const nodeReadable = Readable.fromWeb(
               body as unknown as WebReadableStream,
             );
-            nodeReadable.pipe(res);
+            const sseParser = createSSEParserTransform((usage) => {
+              capturedUsage = usage;
+            });
+            nodeReadable.pipe(sseParser).pipe(res);
+
+            res.on("finish", () => {
+              if (capturedUsage) {
+                logger.log(
+                  `Streaming request usage:`,
+                  JSON.stringify(capturedUsage),
+                );
+              }
+            });
           } else {
             res.end();
           }
