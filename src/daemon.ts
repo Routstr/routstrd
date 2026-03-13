@@ -247,59 +247,79 @@ function createSSEParserTransform(
 ): Transform {
   let buffer = "";
 
+  const maybeCaptureUsageFromJson = (jsonText: string): void => {
+    try {
+      const data = JSON.parse(jsonText);
+      if (data.usage && !data.choices?.length) {
+        const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
+        const msats =
+          data.usage.cost?.total_msats ??
+          data.metadata?.routstr?.cost?.total_msats ??
+          0;
+        onUsage({
+          promptTokens: data.usage.prompt_tokens ?? 0,
+          completionTokens: data.usage.completion_tokens ?? 0,
+          totalTokens: data.usage.total_tokens ?? 0,
+          cost,
+          satsCost: msats / 1000,
+        });
+      }
+    } catch {
+      // Ignore non-JSON lines/events.
+    }
+  };
+
   return new Transform({
     transform(chunk, encoding, callback) {
+      this.push(chunk);
+
       buffer += chunk.toString();
-      while (true) {
-        const eventBoundary = /\r?\n\r?\n/.exec(buffer);
-        if (!eventBoundary) {
-          break;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === "[DONE]") {
+          continue;
         }
 
-        const boundaryIndex = eventBoundary.index;
-        const delimiter = eventBoundary[0];
-        const rawEvent = buffer.slice(0, boundaryIndex);
-        const fullEvent = rawEvent + delimiter;
-        buffer = buffer.slice(boundaryIndex + delimiter.length);
-
-        const dataLines: string[] = [];
-        for (const line of rawEvent.split(/\r?\n/)) {
-          if (line.startsWith("data:")) {
-            dataLines.push(line.startsWith("data: ") ? line.slice(6) : line.slice(5));
+        if (trimmed.startsWith("data: ")) {
+          const dataStr = trimmed.slice(6);
+          if (dataStr !== "[DONE]") {
+            maybeCaptureUsageFromJson(dataStr);
           }
+          continue;
         }
 
-        const dataStr = dataLines.join("\n");
-        if (dataStr && dataStr !== "[DONE]") {
-          try {
-            const data = JSON.parse(dataStr);
-            if (data.usage && !data.choices?.length) {
-              const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
-              const msats =
-                data.usage.cost?.total_msats ??
-                data.metadata?.routstr?.cost?.total_msats ??
-                0;
-              onUsage({
-                promptTokens: data.usage.prompt_tokens ?? 0,
-                completionTokens: data.usage.completion_tokens ?? 0,
-                totalTokens: data.usage.total_tokens ?? 0,
-                cost,
-                satsCost: msats / 1000,
-              });
-            }
-          } catch {
-            // Not JSON or incomplete payload at this event boundary; pass through unchanged.
+        if (trimmed.startsWith("data:")) {
+          const dataStr = trimmed.slice(5).trimStart();
+          if (dataStr !== "[DONE]") {
+            maybeCaptureUsageFromJson(dataStr);
           }
+          continue;
         }
 
-        this.push(fullEvent);
+        if (trimmed.startsWith("{")) {
+          maybeCaptureUsageFromJson(trimmed);
+        }
       }
 
       callback();
     },
     flush(callback) {
-      if (buffer) {
-        this.push(buffer);
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith("data: ")) {
+        const dataStr = trimmed.slice(6);
+        if (dataStr !== "[DONE]") {
+          maybeCaptureUsageFromJson(dataStr);
+        }
+      } else if (trimmed.startsWith("data:")) {
+        const dataStr = trimmed.slice(5).trimStart();
+        if (dataStr !== "[DONE]") {
+          maybeCaptureUsageFromJson(dataStr);
+        }
+      } else if (trimmed.startsWith("{")) {
+        maybeCaptureUsageFromJson(trimmed);
       }
       callback();
     },
