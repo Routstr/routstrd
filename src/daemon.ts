@@ -331,6 +331,7 @@ function createSSEParserTransform(
   const maybeCaptureUsageFromJson = (jsonText: string): void => {
     try {
       const data = JSON.parse(jsonText) as any;
+      logger.log(data);
       const responseId = data.id;
       if (typeof responseId === "string" && responseId.trim().length > 0) {
         onResponseId?.(responseId.trim());
@@ -863,6 +864,65 @@ async function main(): Promise<void> {
                 totalSatsCost,
                 recentSatsCost,
                 limit,
+              },
+            }),
+          );
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/usagePi") {
+        try {
+          const timestamp = (url.searchParams.get("timestamp") || "").trim();
+          if (!timestamp) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "Missing required 'timestamp' query parameter.",
+              }),
+            );
+            return;
+          }
+
+          const requestedLimit = Number.parseInt(
+            url.searchParams.get("limit") || "10",
+            10,
+          );
+          const limit =
+            Number.isFinite(requestedLimit) && requestedLimit > 0
+              ? Math.min(requestedLimit, 1000)
+              : 10;
+
+          const usageTracking =
+            ((store.getState().usageTracking || []) as UsageTrackingEntry[]) ||
+            [];
+          const requestIdPrefix = `gen-${timestamp}-`;
+          const filteredUsage = usageTracking.filter((entry) =>
+            entry.requestId.startsWith(requestIdPrefix),
+          );
+          const recent = filteredUsage.slice(-limit).reverse();
+          const totalSatsCost = filteredUsage.reduce(
+            (sum, entry) => sum + (entry.satsCost || 0),
+            0,
+          );
+          const recentSatsCost = recent.reduce(
+            (sum, entry) => sum + (entry.satsCost || 0),
+            0,
+          );
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              output: {
+                entries: recent,
+                totalEntries: filteredUsage.length,
+                totalSatsCost,
+                recentSatsCost,
+                limit,
+                timestamp,
               },
             }),
           );
