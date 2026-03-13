@@ -816,6 +816,49 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (req.method === "GET" && url.pathname === "/usage") {
+        try {
+          const requestedLimit = Number.parseInt(
+            url.searchParams.get("limit") || "10",
+            10,
+          );
+          const limit =
+            Number.isFinite(requestedLimit) && requestedLimit > 0
+              ? Math.min(requestedLimit, 1000)
+              : 10;
+
+          const usageTracking =
+            ((store.getState().usageTracking || []) as UsageTrackingEntry[]) ||
+            [];
+          const recent = usageTracking.slice(-limit).reverse();
+          const totalSatsCost = usageTracking.reduce(
+            (sum, entry) => sum + (entry.satsCost || 0),
+            0,
+          );
+          const recentSatsCost = recent.reduce(
+            (sum, entry) => sum + (entry.satsCost || 0),
+            0,
+          );
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              output: {
+                entries: recent,
+                totalEntries: usageTracking.length,
+                totalSatsCost,
+                recentSatsCost,
+                limit,
+              },
+            }),
+          );
+        } catch (error) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(error) }));
+        }
+        return;
+      }
+
       if (req.method !== "POST") {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Only POST is supported." }));

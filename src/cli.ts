@@ -26,6 +26,19 @@ type RoutstrModel = {
   context_length?: number;
 };
 
+type UsageEntry = {
+  id: string;
+  timestamp: number;
+  modelId: string;
+  baseUrl: string;
+  requestId: string;
+  cost: number;
+  satsCost: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 const cliVersion = "0.1.0";
 
 async function initDaemon(): Promise<void> {
@@ -284,6 +297,61 @@ program
         });
       }
     }
+  });
+
+program
+  .command("usage")
+  .description("Show recent usage logs and total sats cost")
+  .option("-n, --limit <number>", "Number of recent usage entries", "10")
+  .action(async (options: { limit: string }) => {
+    await ensureDaemonRunning();
+
+    const requested = Number.parseInt(options.limit, 10);
+    const limit =
+      Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 10;
+
+    const result = await callDaemon(`/usage?limit=${limit}`);
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          entries?: UsageEntry[];
+          totalEntries?: number;
+          totalSatsCost?: number;
+          recentSatsCost?: number;
+          limit?: number;
+        }
+      | undefined;
+
+    const entries = output?.entries || [];
+    const totalEntries = output?.totalEntries || 0;
+    const totalSatsCost = output?.totalSatsCost || 0;
+    const recentSatsCost = output?.recentSatsCost || 0;
+
+    console.log(`Usage entries: showing ${entries.length} of ${totalEntries}`);
+    console.log(`Total sats cost (all time): ${totalSatsCost.toFixed(3)} sats`);
+    console.log(`Sats cost (shown entries): ${recentSatsCost.toFixed(3)} sats`);
+
+    if (entries.length === 0) {
+      console.log("No usage entries yet.");
+      return;
+    }
+
+    console.log("");
+    entries.forEach((entry, index) => {
+      const time = new Date(entry.timestamp).toISOString();
+      const provider = entry.baseUrl || "unknown";
+      const reqId = entry.requestId || "unknown";
+      console.log(
+        `${index + 1}. ${time} | ${entry.modelId} | ${provider} | ${entry.satsCost.toFixed(3)} sats`,
+      );
+      console.log(
+        `   tokens p/c/t: ${entry.promptTokens}/${entry.completionTokens}/${entry.totalTokens} | request: ${reqId}`,
+      );
+    });
   });
 
 // Stop
