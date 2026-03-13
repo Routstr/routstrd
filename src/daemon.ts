@@ -745,7 +745,6 @@ async function main(): Promise<void> {
         undefined;
 
       try {
-        logger.log("smh", req);
         await ensureProvidersBootstrapped();
         const response = await routeRequests({
           modelId,
@@ -764,14 +763,6 @@ async function main(): Promise<void> {
         const requestId =
           response.headers.get("x-routstr-request-id") || undefined;
         logger.log("Request ID, ", requestId, " with path: ", url.pathname);
-        logger.log(
-          "Request ID, ",
-          response.headers,
-          response.body,
-          " with path: ",
-          url.pathname,
-          isStream,
-        );
 
         if (isStream) {
           res.statusCode = response.status;
