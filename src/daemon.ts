@@ -314,14 +314,28 @@ function resolveUsageBaseUrl(response: Response, fallback?: string): string {
   return fallback || "unknown";
 }
 
+function extractResponseId(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const id = (body as { id?: unknown }).id;
+  if (typeof id !== "string") return undefined;
+  const trimmed = id.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function createSSEParserTransform(
   onUsage: (usage: UsageData) => void,
+  onResponseId?: (responseId: string) => void,
 ): Transform {
   let buffer = "";
 
   const maybeCaptureUsageFromJson = (jsonText: string): void => {
     try {
-      const data = JSON.parse(jsonText);
+      const data = JSON.parse(jsonText) as any;
+      const responseId = data.id;
+      if (typeof responseId === "string" && responseId.trim().length > 0) {
+        onResponseId?.(responseId.trim());
+      }
+
       if (data.usage && !data.choices?.length) {
         const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
         const msats =
@@ -925,22 +939,33 @@ async function main(): Promise<void> {
           const body = response.body;
           if (body) {
             let capturedUsage: UsageData | null = null;
+            let capturedResponseId: string | undefined;
             const nodeReadable = Readable.fromWeb(
               body as unknown as WebReadableStream,
             );
-            const sseParser = createSSEParserTransform((usage) => {
-              capturedUsage = usage;
-            });
+            const sseParser = createSSEParserTransform(
+              (usage) => {
+                capturedUsage = usage;
+              },
+              (responseId) => {
+                capturedResponseId = responseId;
+              },
+            );
             nodeReadable.pipe(sseParser).pipe(res);
 
             res.on("finish", () => {
               if (capturedUsage) {
+                const usageRequestId =
+                  capturedResponseId || requestId || "unknown";
                 appendUsageTracking({
-                  id: `${requestId || `req-${Date.now()}`}-${modelId}`,
+                  id:
+                    usageRequestId === "unknown"
+                      ? `req-${Date.now()}-${modelId}`
+                      : usageRequestId,
                   timestamp: Date.now(),
                   modelId,
                   baseUrl: usageBaseUrl,
-                  requestId: requestId || "unknown",
+                  requestId: usageRequestId,
                   ...capturedUsage,
                 });
                 logger.log(
@@ -958,12 +983,17 @@ async function main(): Promise<void> {
         const responseBody = await response.json();
         const nonStreamUsage = extractUsageFromResponseBody(responseBody);
         if (nonStreamUsage) {
+          const responseRequestId =
+            extractResponseId(responseBody) || requestId || "unknown";
           appendUsageTracking({
-            id: `${requestId || `req-${Date.now()}`}-${modelId}`,
+            id:
+              responseRequestId === "unknown"
+                ? `req-${Date.now()}-${modelId}`
+                : responseRequestId,
             timestamp: Date.now(),
             modelId,
             baseUrl: usageBaseUrl,
-            requestId: requestId || "unknown",
+            requestId: responseRequestId,
             ...nonStreamUsage,
           });
         }
