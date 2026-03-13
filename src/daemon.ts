@@ -250,20 +250,29 @@ function createSSEParserTransform(
   return new Transform({
     transform(chunk, encoding, callback) {
       buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+      while (true) {
+        const eventBoundary = /\r?\n\r?\n/.exec(buffer);
+        if (!eventBoundary) {
+          break;
+        }
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("data: ")) {
-          const dataStr = trimmed.slice(6);
-          if (dataStr === "[DONE]") {
-            continue;
+        const boundaryIndex = eventBoundary.index;
+        const delimiter = eventBoundary[0];
+        const rawEvent = buffer.slice(0, boundaryIndex);
+        const fullEvent = rawEvent + delimiter;
+        buffer = buffer.slice(boundaryIndex + delimiter.length);
+
+        const dataLines: string[] = [];
+        for (const line of rawEvent.split(/\r?\n/)) {
+          if (line.startsWith("data:")) {
+            dataLines.push(line.startsWith("data: ") ? line.slice(6) : line.slice(5));
           }
+        }
+
+        const dataStr = dataLines.join("\n");
+        if (dataStr && dataStr !== "[DONE]") {
           try {
             const data = JSON.parse(dataStr);
-            this.push(line + "\n");
-
             if (data.usage && !data.choices?.length) {
               const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
               const msats =
@@ -279,17 +288,17 @@ function createSSEParserTransform(
               });
             }
           } catch {
-            this.push(line + "\n");
+            // Not JSON or incomplete payload at this event boundary; pass through unchanged.
           }
-        } else {
-          this.push(line + "\n");
         }
+
+        this.push(fullEvent);
       }
 
       callback();
     },
     flush(callback) {
-      if (buffer.trim()) {
+      if (buffer) {
         this.push(buffer);
       }
       callback();
