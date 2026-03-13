@@ -6,7 +6,7 @@
       "name": "routstrd",
       "dependencies": {
         "@cashu/cashu-ts": "^3.1.1",
-        "@routstr/sdk": "^0.1.7",
+        "@routstr/sdk": "^0.1.8",
         "applesauce-core": "^5.1.0",
         "applesauce-relay": "^5.1.0",
         "better-sqlite3": "^11.7.2",
@@ -31,7 +31,7 @@
 
     "@noble/hashes": ["@noble/hashes@2.0.1", "", {}, "sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw=="],
 
-    "@routstr/sdk": ["@routstr/sdk@0.1.7", "", { "dependencies": { "@cashu/cashu-ts": "^3.1.1", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "rxjs": "^7.8.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^11.7.2" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-2BnlbibYZ19Tf/fGVTt9MXZyPIu7csMIPaUlQXrI5zKcEFlOm5d0ar439euNdaE/i4dld0KOiUaH5ye7+sCYqw=="],
+    "@routstr/sdk": ["@routstr/sdk@0.1.8", "", { "dependencies": { "@cashu/cashu-ts": "^3.1.1", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "rxjs": "^7.8.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^11.7.2" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-O1PG1tf2H8ITPUV7Eakichh3H6sFJH4aSAbIn1LXesXJ4YMYoBcWD8QsUhwW0ABHEZ0zKnn4oES6RXUZhcYnqQ=="],
 
     "@scure/base": ["@scure/base@2.0.0", "", {}, "sha512-3E1kpuZginKkek01ovG8krQ0Z44E3DHPjc5S2rjJw9lZn3KSQOs8S7wqikF/AH7iRanHypj85uGyxk0XAyC37w=="],
 
