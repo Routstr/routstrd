@@ -331,7 +331,6 @@ function createSSEParserTransform(
   const maybeCaptureUsageFromJson = (jsonText: string): void => {
     try {
       const data = JSON.parse(jsonText) as any;
-      logger.log(data);
       const responseId = data.id;
       if (typeof responseId === "string" && responseId.trim().length > 0) {
         onResponseId?.(responseId.trim());
@@ -363,58 +362,63 @@ function createSSEParserTransform(
     }
   };
 
+  const processLine = (self: Transform, line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    if (trimmed === "data: [DONE]" || trimmed === "[DONE]") {
+      self.push("data: [DONE]\n\n");
+      return;
+    }
+
+    if (trimmed.startsWith("data:")) {
+      // Normalize: strip "data:" or "data: " prefix to get JSON
+      const dataStr = trimmed.startsWith("data: ")
+        ? trimmed.slice(6)
+        : trimmed.slice(5).trimStart();
+      if (dataStr === "[DONE]") {
+        self.push("data: [DONE]\n\n");
+        return;
+      }
+      maybeCaptureUsageFromJson(dataStr);
+      // Re-emit as a properly framed SSE event (one per push)
+      self.push(`data: ${dataStr}\n\n`);
+      return;
+    }
+
+    // NDJSON (bare JSON objects without "data:" prefix)
+    if (trimmed.startsWith("{")) {
+      maybeCaptureUsageFromJson(trimmed);
+      self.push(`data: ${trimmed}\n\n`);
+      return;
+    }
+
+    // Pass through other SSE fields (e.g., "event:", "id:", "retry:", comments)
+    self.push(line + "\n");
+  };
+
   return new Transform({
     transform(chunk, encoding, callback) {
-      this.push(chunk);
-
       buffer += chunk.toString();
+
+      // Split on newlines; last element is incomplete (keep in buffer)
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
 
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === "[DONE]") {
-          continue;
-        }
-
-        if (trimmed.startsWith("data: ")) {
-          const dataStr = trimmed.slice(6);
-          if (dataStr !== "[DONE]") {
-            maybeCaptureUsageFromJson(dataStr);
-          }
-          continue;
-        }
-
-        if (trimmed.startsWith("data:")) {
-          const dataStr = trimmed.slice(5).trimStart();
-          if (dataStr !== "[DONE]") {
-            maybeCaptureUsageFromJson(dataStr);
-          }
-          continue;
-        }
-
-        if (trimmed.startsWith("{")) {
-          maybeCaptureUsageFromJson(trimmed);
-        }
+        processLine(this, line);
       }
 
       callback();
     },
     flush(callback) {
-      const trimmed = buffer.trim();
-      if (trimmed.startsWith("data: ")) {
-        const dataStr = trimmed.slice(6);
-        if (dataStr !== "[DONE]") {
-          maybeCaptureUsageFromJson(dataStr);
-        }
-      } else if (trimmed.startsWith("data:")) {
-        const dataStr = trimmed.slice(5).trimStart();
-        if (dataStr !== "[DONE]") {
-          maybeCaptureUsageFromJson(dataStr);
-        }
-      } else if (trimmed.startsWith("{")) {
-        maybeCaptureUsageFromJson(trimmed);
+      // Process any remaining data in the buffer
+      if (buffer.trim()) {
+        processLine(this, buffer);
       }
+      buffer = "";
       callback();
     },
   });
