@@ -337,12 +337,19 @@ function createSSEParserTransform(
         onResponseId?.(responseId.trim());
       }
 
-      if (data.usage && !data.choices?.length) {
-        const cost = data.usage.cost?.total_usd ?? data.usage.cost ?? 0;
+      if (data.usage) {
+        const usageCost = data.usage.cost;
+        const cost =
+          typeof usageCost === "number"
+            ? usageCost
+            : usageCost?.total_usd ??
+              data.metadata?.routstr?.cost?.total_usd ??
+              0;
         const msats =
-          data.usage.cost?.total_msats ??
           data.metadata?.routstr?.cost?.total_msats ??
-          0;
+          (typeof data.usage.cost_sats === "number"
+            ? data.usage.cost_sats * 1000
+            : 0);
         onUsage({
           promptTokens: data.usage.prompt_tokens ?? 0,
           completionTokens: data.usage.completion_tokens ?? 0,
