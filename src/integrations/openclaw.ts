@@ -7,8 +7,8 @@ import { logger } from "../utils/logger";
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "", ".openclaw/openclaw.json");
 const OPENCLAW_PROVIDER_ID = "routstr";
 const OPENCLAW_API_BASE = "http://localhost:8008/v1";
-const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/glm-4.7";
-const OPENCLAW_DEFAULT_FALLBACK_MODEL = "routstr/qwen3-coder-next";
+const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/minimax-m2.5";
+const OPENCLAW_DEFAULT_FALLBACK_MODEL = "routstr/kimi-k2.5";
 
 type RoutstrModel = {
   id: string;
