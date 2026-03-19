@@ -61,7 +61,12 @@ export async function startDaemon(
     }
 
     try {
-      const res = await fetch(`http://localhost:${port}/health`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`http://localhost:${port}/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
       if (res.ok) {
         logger.log(`Routstr daemon started (PID: ${proc.pid}).`);
         return;
