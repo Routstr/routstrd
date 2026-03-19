@@ -331,6 +331,7 @@ function createSSEParserTransform(
   const maybeCaptureUsageFromJson = (jsonText: string): void => {
     try {
       const data = JSON.parse(jsonText) as any;
+      logger.log(data);
       const responseId = data.id;
       if (typeof responseId === "string" && responseId.trim().length > 0) {
         onResponseId?.(responseId.trim());
@@ -425,6 +426,22 @@ function createSSEParserTransform(
 }
 
 async function main(): Promise<void> {
+  // Ignore SIGHUP to survive terminal closure
+  process.on("SIGHUP", () => {
+    logger.log("Received SIGHUP, ignoring (terminal closed)");
+  });
+
+  // Handle graceful shutdown signals
+  process.on("SIGTERM", () => {
+    logger.log("Received SIGTERM, shutting down gracefully");
+    process.exit(0);
+  });
+
+  process.on("SIGINT", () => {
+    logger.log("Received SIGINT, shutting down gracefully");
+    process.exit(0);
+  });
+
   const args = parseArgs(process.argv);
   const config = await loadConfig();
 
@@ -470,14 +487,19 @@ async function main(): Promise<void> {
     return providerBootstrapPromise;
   };
 
-  const getRoutstr21Models = async (): Promise<ExposedModel[]> => {
+  const getRoutstr21Models = async (
+    forceRefresh = false,
+  ): Promise<ExposedModel[]> => {
     await ensureProvidersBootstrapped();
 
     const routstr21ModelIds = Array.from(
-      new Set(await modelManager.fetchRoutstr21Models()),
+      new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
     ).slice(0, 21);
     const baseUrls = modelManager.getBaseUrls();
-    const discoveredModels = await modelManager.fetchModels(baseUrls);
+    const discoveredModels = await modelManager.fetchModels(
+      baseUrls,
+      forceRefresh,
+    );
     const modelsById = new Map(
       discoveredModels.map((model) => [model.id, model]),
     );
@@ -644,7 +666,9 @@ async function main(): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/models") {
         try {
-          const models = await getRoutstr21Models();
+          const forceRefresh =
+            url.searchParams.get("refresh")?.toLowerCase() === "true";
+          const models = await getRoutstr21Models(forceRefresh);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ output: { models } }));
         } catch (error) {
@@ -656,7 +680,9 @@ async function main(): Promise<void> {
 
       if (req.method === "GET" && url.pathname === "/v1/models") {
         try {
-          const models = await getRoutstr21Models();
+          const forceRefresh =
+            url.searchParams.get("refresh")?.toLowerCase() === "true";
+          const models = await getRoutstr21Models(forceRefresh);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -1151,12 +1177,12 @@ export async function startDaemon(
   }
 
   // Spawn daemon.ts as a truly detached background process
-  // stdio is set to "ignore" so the parent holds no pipe handles,
-  // allowing it to exit cleanly. The child daemon logs to LOG_FILE via its own logger.
+  // Use nohup to ensure the process survives terminal closure (SIGHUP)
+  // stdio is redirected to log file so the parent holds no pipe handles
   const logFile = Bun.file(LOG_FILE);
 
   const proc = Bun.spawn(
-    ["bun", "run", `${import.meta.dir}/daemon.ts`, ...args],
+    ["nohup", "bun", "run", `${import.meta.dir}/daemon.ts`, ...args],
     {
       stdout: logFile,
       stderr: logFile,

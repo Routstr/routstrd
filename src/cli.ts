@@ -273,10 +273,13 @@ program
 program
   .command("models")
   .description("List available routstr21 models")
-  .action(async () => {
+  .option("-r, --refresh", "Force refresh routstr21 models from Nostr", false)
+  .action(async (options: { refresh: boolean }) => {
     await ensureDaemonRunning();
     
-    const result = await callDaemon("/models");
+    const result = await callDaemon(
+      options.refresh ? "/models?refresh=true" : "/models",
+    );
     if (result.error) {
       console.log(result.error);
       process.exit(1);
