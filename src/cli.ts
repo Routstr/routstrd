@@ -1,4 +1,4 @@
-import { startDaemon } from "./daemon";
+import { startDaemon } from "./start-daemon";
 import {
   program,
   handleDaemonCommand,
