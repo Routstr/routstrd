@@ -40,7 +40,7 @@ export function createDaemonRequestHandler(deps: {
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
-  getRoutstr21Models: () => Promise<any[]>;
+  getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   runWalletCommand: (args: string[]) => Promise<string>;
   parseBalances: (output: string) => Record<string, number>;
 }) {
@@ -93,7 +93,9 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/models") {
       try {
-        const models = await deps.getRoutstr21Models();
+        const forceRefresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+        const models = await deps.getRoutstr21Models(forceRefresh);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output: { models } }));
       } catch (error) {
@@ -105,7 +107,9 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/v1/models") {
       try {
-        const models = await deps.getRoutstr21Models();
+        const forceRefresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+        const models = await deps.getRoutstr21Models(forceRefresh);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({

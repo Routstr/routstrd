@@ -21,14 +21,19 @@ export function createModelService(modelManager: ModelManager) {
     return providerBootstrapPromise;
   };
 
-  const getRoutstr21Models = async (): Promise<ExposedModel[]> => {
+  const getRoutstr21Models = async (
+    forceRefresh = false,
+  ): Promise<ExposedModel[]> => {
     await ensureProvidersBootstrapped();
 
     const routstr21ModelIds = Array.from(
-      new Set(await modelManager.fetchRoutstr21Models()),
+      new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
     ).slice(0, 21);
     const baseUrls = modelManager.getBaseUrls();
-    const discoveredModels = await modelManager.fetchModels(baseUrls);
+    const discoveredModels = await modelManager.fetchModels(
+      baseUrls,
+      forceRefresh,
+    );
     const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
 
     return routstr21ModelIds.map((modelId) => {
