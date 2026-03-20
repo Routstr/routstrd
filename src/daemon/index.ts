@@ -46,10 +46,6 @@ async function main(): Promise<void> {
   const { ensureProvidersBootstrapped, getRoutstr21Models } =
     createModelService(modelManager);
 
-  void ensureProvidersBootstrapped().catch(() => {
-    // Error is already logged; keep daemon alive for troubleshooting/retries.
-  });
-
   const walletAdapter = await createWalletAdapter();
 
   const server = createServer();
@@ -81,8 +77,58 @@ async function main(): Promise<void> {
     // Ignore
   }
 
+  const REFRESH_INTERVAL_MS = 3.5 * 60 * 60 * 1000; // 3.5 hours
+
+  // Recurring job to refresh routstr21 models
+  let refreshInterval: ReturnType<typeof setInterval> | null = null;
+
+  const startModelRefreshJob = () => {
+    logger.log(
+      `Starting recurring model refresh job (every ${REFRESH_INTERVAL_MS / 1000 / 60 / 60} hours)`,
+    );
+
+    refreshInterval = setInterval(async () => {
+      logger.log("Running scheduled model refresh...");
+      try {
+        await getRoutstr21Models(true);
+        logger.log("Scheduled model refresh completed successfully.");
+      } catch (error) {
+        logger.error("Scheduled model refresh failed:", error);
+      }
+    }, REFRESH_INTERVAL_MS);
+  };
+
+  const stopModelRefreshJob = () => {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      refreshInterval = null;
+      logger.log("Stopped recurring model refresh job.");
+    }
+  };
+
+  server.on("close", () => {
+    stopModelRefreshJob();
+  });
+
   server.listen(port, async () => {
     logger.log(`Routstr daemon listening on http://localhost:${port}`);
+
+    // Start the recurring model refresh job after initial bootstrap
+    void ensureProvidersBootstrapped()
+      .then(() => {
+        startModelRefreshJob();
+        // Run an immediate refresh to populate models right away
+        logger.log("Running initial model refresh...");
+        return getRoutstr21Models(true);
+      })
+      .then(() => {
+        logger.log("Initial model refresh completed.");
+      })
+      .catch((error) => {
+        logger.error("Initial model refresh failed:", error);
+        // Still start the job even if initial refresh fails
+        startModelRefreshJob();
+      });
   });
 }
 
