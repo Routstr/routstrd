@@ -8,7 +8,7 @@
  */
 
 import type { UsageTrackingEntry } from "../daemon/types.ts";
-import { callDaemon, ensureDaemonRunning, isDaemonRunning } from "../cli-shared.ts";
+import { callDaemon, isDaemonRunning } from "../cli-shared.ts";
 
 // ═══════════════════════════════════════════════════════════════
 // Types
@@ -101,6 +101,14 @@ function clearScreen(): string {
   return "\x1b[2J\x1b[H";
 }
 
+function enterAlternateScreen(): string {
+  return "\x1b[?1049h";
+}
+
+function leaveAlternateScreen(): string {
+  return "\x1b[?1049l";
+}
+
 function hideCursor(): string {
   return "\x1b[?25l";
 }
@@ -113,28 +121,12 @@ function moveCursor(row: number, col: number): string {
   return `\x1b[${row};${col}H`;
 }
 
-function saveCursor(): string {
-  return "\x1b[s";
-}
-
-function restoreCursor(): string {
-  return "\x1b[u";
-}
-
-function eraseLine(): string {
-  return "\x1b[2K";
-}
-
 function eraseDown(): string {
   return "\x1b[J";
 }
 
 function getWidth(): number {
   return process.stdout.columns || 80;
-}
-
-function getHeight(): number {
-  return process.stdout.rows || 24;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -183,11 +175,11 @@ function getTodayStart(): number {
 }
 
 function formatDate(timestamp: number): string {
-  return new Date(timestamp).toISOString().split("T")[0];
+  return new Date(timestamp).toISOString().split("T")[0] ?? "";
 }
 
 function formatTime(timestamp: number): string {
-  return new Date(timestamp).toISOString().split("T")[1].slice(0, 8);
+  return new Date(timestamp).toISOString().split("T")[1]?.slice(0, 8) ?? "";
 }
 
 function formatNumber(n: number): string {
@@ -408,9 +400,9 @@ function renderOverview(stats: UsageStats, width: number): string {
   // Quick model breakdown
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length > 0) {
-    const maxCost = modelStats[0].satsCost;
+    const maxCost = modelStats[0]!.satsCost;
     const modelLines = modelStats.slice(0, 5).map((m) => {
-      const color = MODEL_COLORS[m.modelId] || MODEL_COLORS.default;
+      const color = MODEL_COLORS[m.modelId] || MODEL_COLORS.default || COLORS.white;
       return renderBarChart(m.modelId, m.satsCost, maxCost, width - 4, color);
     });
     output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
@@ -499,13 +491,12 @@ function renderModels(stats: UsageStats, width: number): string {
   }
   
   const totalCost = stats.totalSatsCost;
-  const maxCost = modelStats[0].satsCost;
-  const maxTokens = Math.max(...modelStats.map((m) => m.totalTokens));
+  const maxCost = modelStats[0]!.satsCost;
   
   const lines: string[] = [];
   
   for (const model of modelStats) {
-    const color = MODEL_COLORS[model.modelId] || MODEL_COLORS.default;
+    const color = MODEL_COLORS[model.modelId] || MODEL_COLORS.default || COLORS.white;
     const pct = totalCost > 0 ? ((model.satsCost / totalCost) * 100).toFixed(1) : "0.0";
     
     lines.push(`${color}${COLORS.bold}${model.modelId}${COLORS.reset}`);
@@ -557,7 +548,6 @@ function renderTokens(stats: UsageStats, width: number): string {
   
   // Token by model
   if (modelStats.length > 0) {
-    const maxTokens = Math.max(...modelStats.map((m) => m.totalTokens));
     const tokenLines = modelStats.slice(0, 6).map((m) => {
       const color = MODEL_COLORS[m.modelId] || MODEL_COLORS.default;
       const promptPct = m.totalTokens > 0 
@@ -633,8 +623,6 @@ function renderRecent(stats: UsageStats, width: number): string {
 // ═══════════════════════════════════════════════════════════════
 
 async function main(): Promise<void> {
-  const width = getWidth();
-  
   // Check if daemon is running
   const running = await isDaemonRunning();
   if (!running) {
@@ -642,142 +630,157 @@ async function main(): Promise<void> {
     console.log(`Run ${COLORS.green}routstrd start${COLORS.reset} first.`);
     process.exit(1);
   }
-  
+
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+  const isInteractive = Boolean(stdout.isTTY && stdin.isTTY);
+
   let currentTab: TabId = "overview";
   let stats: UsageStats | null = null;
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let shouldUpdate = true;
   let autoRefresh = true;
-  
-  // Setup signal handlers
-  process.stdin.setRawMode?.(true);
-  process.stdin.resume();
-  process.stdin.setEncoding("utf-8");
-  
-  function cleanup() {
+  let cleanedUp = false;
+  let rendering = false;
+
+  if (isInteractive) {
+    stdout.write(enterAlternateScreen() + hideCursor());
+    stdin.setRawMode?.(true);
+    stdin.resume();
+    stdin.setEncoding("utf-8");
+  }
+
+  function cleanup(exitCode = 0) {
+    if (cleanedUp) return;
+    cleanedUp = true;
+
     if (refreshInterval) {
       clearInterval(refreshInterval);
     }
-    process.stdout.write(clearScreen() + showCursor());
-    process.exit(0);
+
+    if (isInteractive) {
+      stdin.setRawMode?.(false);
+      stdin.pause();
+      stdout.write(showCursor() + leaveAlternateScreen());
+    } else {
+      stdout.write(showCursor());
+    }
+
+    process.exit(exitCode);
   }
-  
-  process.on("SIGINT", cleanup);
-  process.on("SIGTERM", cleanup);
-  
-  // Key handler
-  process.stdin.on("data", (key: string) => {
+
+  process.on("SIGINT", () => cleanup(0));
+  process.on("SIGTERM", () => cleanup(0));
+
+  async function render(forceFetch = false) {
+    if (rendering) return;
+    rendering = true;
+
+    try {
+      const width = getWidth();
+
+      if (forceFetch || shouldUpdate) {
+        stats = await fetchUsage(1000);
+        shouldUpdate = false;
+      }
+
+      if (!stats) {
+        stdout.write(
+          moveCursor(1, 1) +
+          eraseDown() +
+          `${COLORS.red}Error: Could not fetch usage data.${COLORS.reset}\n` +
+          `Make sure routstrd is running.\n` +
+          `\nPress Q to quit.`
+        );
+        return;
+      }
+
+      let content: string;
+
+      switch (currentTab) {
+        case "overview":
+          content = renderOverview(stats, width);
+          break;
+        case "today":
+          content = renderToday(stats, width);
+          break;
+        case "models":
+          content = renderModels(stats, width);
+          break;
+        case "providers":
+          content = renderProviders(stats, width);
+          break;
+        case "tokens":
+          content = renderTokens(stats, width);
+          break;
+        case "recent":
+          content = renderRecent(stats, width);
+          break;
+        default:
+          content = "Unknown tab";
+      }
+
+      const output =
+        moveCursor(1, 1) +
+        eraseDown() +
+        renderHeader(currentTab, width) +
+        renderTabs(currentTab, width) +
+        renderSeparator(width) +
+        content +
+        "\n" +
+        renderSeparator(width) +
+        `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${COLORS.reset}`;
+
+      stdout.write(output);
+    } finally {
+      rendering = false;
+    }
+  }
+
+  const handleKey = (key: string) => {
     if (key === "q" || key === "Q" || key === "\u0003") {
-      cleanup();
+      cleanup(0);
       return;
     }
-    
+
     if (key === "r" || key === "R") {
       shouldUpdate = true;
+      void render(true);
       return;
     }
-    
+
     if (key === "a" || key === "A") {
       autoRefresh = !autoRefresh;
       shouldUpdate = true;
+      void render(false);
       return;
     }
-    
-    // Tab switching with number keys
+
     const tab = TABS.find((t) => t.key === key);
     if (tab) {
       currentTab = tab.id;
-      shouldUpdate = true;
+      void render(false);
     }
-    
-    // Arrow keys for future expansion
-    if (key === "\x1b[A") {
-      // Up arrow
-    } else if (key === "\x1b[B") {
-      // Down arrow
-    }
-  });
-  
-  // Render loop
-  async function render() {
-    if (shouldUpdate || autoRefresh) {
-      stats = await fetchUsage(1000);
-      shouldUpdate = false;
-    }
-    
-    if (!stats) {
-      process.stdout.write(
-        clearScreen() + hideCursor() + moveCursor(1, 1) +
-        `${COLORS.red}Error: Could not fetch usage data.${COLORS.reset}\n` +
-        `Make sure routstrd is running.\n` +
-        `\nPress Q to quit.`
-      );
-      return;
-    }
-    
-    let content: string;
-    
-    switch (currentTab) {
-      case "overview":
-        content = renderOverview(stats, width);
-        break;
-      case "today":
-        content = renderToday(stats, width);
-        break;
-      case "models":
-        content = renderModels(stats, width);
-        break;
-      case "providers":
-        content = renderProviders(stats, width);
-        break;
-      case "tokens":
-        content = renderTokens(stats, width);
-        break;
-      case "recent":
-        content = renderRecent(stats, width);
-        break;
-      default:
-        content = "Unknown tab";
-    }
-    
-    const output =
-      clearScreen() +
-      hideCursor() +
-      moveCursor(1, 1) +
-      renderHeader(currentTab, width) +
-      renderTabs(currentTab, width) +
-      renderSeparator(width) +
-      content +
-      "\n" +
-      renderSeparator(width) +
-      `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${COLORS.reset}`;
-    
-    process.stdout.write(output);
+  };
+
+  if (isInteractive) {
+    stdin.on("data", handleKey);
   }
-  
-  // Initial render
-  await render();
-  
-  // Auto-refresh every 2 seconds
-  refreshInterval = setInterval(async () => {
+
+  await render(true);
+
+  refreshInterval = setInterval(() => {
     if (autoRefresh) {
       shouldUpdate = true;
-      await render();
+      void render(true);
     }
   }, 2000);
-  
-  // Render on demand
-  process.stdin.on("data", () => {
-    if (!autoRefresh) {
-      render();
-    }
-  });
 }
 
 export async function runUsageTui(): Promise<void> {
   await main().catch((err) => {
+    process.stdout.write(showCursor() + leaveAlternateScreen());
     console.error("Error:", err);
-    process.stdout.write(showCursor());
     process.exit(1);
   });
 }
