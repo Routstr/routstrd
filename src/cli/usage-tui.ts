@@ -94,7 +94,7 @@ const vimState: VimState = {
   lastKeyTime: 0,
 };
 
-const MAX_SCROLL_LINES = 50;
+let maxScrollLines = 0;
 
 // ═══════════════════════════════════════════════════════════════
 // Constants
@@ -188,6 +188,7 @@ function clampScrollPos(contentHeight: number, viewportHeight: number): void {
 
 function applyScrollToContent(content: string, viewportHeight: number): string {
   const lines = content.split("\n");
+  maxScrollLines = Math.max(0, lines.length - Math.max(0, viewportHeight));
   clampScrollPos(lines.length, viewportHeight);
 
   if (viewportHeight <= 0) {
@@ -199,7 +200,7 @@ function applyScrollToContent(content: string, viewportHeight: number): string {
 
 // Vim mode helpers
 function scrollDown(lines = 1): void {
-  vimState.scrollPos = Math.min(vimState.scrollPos + lines, MAX_SCROLL_LINES);
+  vimState.scrollPos = Math.min(vimState.scrollPos + lines, maxScrollLines);
 }
 
 function scrollUp(lines = 1): void {
@@ -211,7 +212,7 @@ function scrollToTop(): void {
 }
 
 function scrollToBottom(): void {
-  vimState.scrollPos = MAX_SCROLL_LINES;
+  vimState.scrollPos = maxScrollLines;
 }
 
 function pageUp(): void {
@@ -257,13 +258,13 @@ function nextSearchResult(totalEntries: number): void {
   if (vimState.searchResults.length === 0) return;
   vimState.currentSearchIdx = (vimState.currentSearchIdx + 1) % vimState.searchResults.length;
   // Map search result index to scroll position (approximate)
-  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * MAX_SCROLL_LINES);
+  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * maxScrollLines);
 }
 
 function prevSearchResult(totalEntries: number): void {
   if (vimState.searchResults.length === 0) return;
   vimState.currentSearchIdx = (vimState.currentSearchIdx - 1 + vimState.searchResults.length) % vimState.searchResults.length;
-  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * MAX_SCROLL_LINES);
+  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * maxScrollLines);
 }
 
 function exitSearchMode(): void {
@@ -1007,10 +1008,11 @@ async function main(): Promise<void> {
         renderSeparator(width) +
         renderSearchBar(width);
       const chromeLines = chrome.split("\n").length - 1;
-      const footerBlock = "\n" + renderSeparator(width) + footer;
-      const footerLines = footerBlock.split("\n").length - 1;
-      const contentViewportHeight = Math.max(1, height - chromeLines - footerLines);
+      const footerSeparator = renderSeparator(width);
+      const footerLines = footerSeparator.split("\n").length - 1;
+      const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
       const visibleContent = applyScrollToContent(content, contentViewportHeight);
+      const footerBlock = (visibleContent ? "\n" : "") + footerSeparator + footer;
 
       const output =
         moveCursor(1, 1) +
