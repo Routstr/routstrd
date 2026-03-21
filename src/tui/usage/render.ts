@@ -298,7 +298,7 @@ export function renderModels(stats: UsageStats, width: number): string {
     lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${formatReqs(model.requests)}`);
     lines.push(`  ${COLORS.dim}Tokens:${COLORS.reset} ${formatNumber(model.totalTokens)}`);
     lines.push(`  ${COLORS.dim}Avg:${COLORS.reset} ${formatCost(model.satsCost / model.requests)} sats/req`);
-    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 4, color, Number(pct), "model-detail")}`);
+    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 6, color, Number(pct), "model-detail")}`);
     lines.push("");
   }
   endBarSection("model-detail");
@@ -373,23 +373,39 @@ export function renderClients(stats: UsageStats, width: number): string {
 
   const totalCost = getTotals(stats.entries).satsCost;
   const maxCost = clientStats[0]!.satsCost;
-  const maxClientLabel = Math.max(...clientStats.map((c) => c.client.length));
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}Client${"".padEnd(20)} Requests${"".padEnd(10)} Cost${"".padEnd(12)} Tokens${"".padEnd(10)} Avg Cost${COLORS.reset}`);
-  lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
-  startBarSection("client-detail", maxClientLabel);
+  const col1 = 20; // Client
+  const col2 = 12; // Requests
+  const col3 = 24; // Cost
+  const col4 = 12; // Tokens
+
+  const hClient = "Client".padEnd(col1);
+  const hReqs = "Requests".padEnd(col2);
+  const hCost = "Cost".padEnd(col3);
+  const hTok = "Tokens".padEnd(col4);
+  lines.push(`${COLORS.bold}${hClient}${hReqs}${hCost}${hTok}Avg Cost${COLORS.reset}`);
+  lines.push(COLORS.dim + "─".repeat(Math.max(0, width - 4)) + COLORS.reset);
+
+  startBarSection("client-detail", 20); // match col1
   for (const client of clientStats) {
     const color = CLIENT_COLORS[client.client] || CLIENT_COLORS.default || COLORS.white;
     const pct = totalCost > 0 ? ((client.satsCost / totalCost) * 100).toFixed(1) : "0.0";
     const avgCostFormatted = formatCost(client.requests > 0 ? client.satsCost / client.requests : 0);
+    
+    const dClient = client.client.slice(0, col1 - 1).padEnd(col1);
+    const dReqs = formatReqs(client.requests).padEnd(col2);
+    const dCost = `${formatCost(client.satsCost)} sats (${pct}%)`.padEnd(col3);
+    const dTok = formatNumber(client.totalTokens).padEnd(col4);
+    const dAvg = `${avgCostFormatted} sats/req`;
+
     lines.push(
-      `${color}${COLORS.bold}${client.client.padEnd(20)}${COLORS.reset}` +
-      `${formatReqs(client.requests).padEnd(12)}` +
-      `${COLORS.green}${formatCost(client.satsCost).padEnd(12)} sats${COLORS.reset} (${pct}%)` +
-      `${COLORS.dim} ${formatNumber(client.totalTokens).padEnd(10)} ${avgCostFormatted.padEnd(10)} sats/req${COLORS.reset}`
+      `${color}${COLORS.bold}${dClient}${COLORS.reset}` +
+      `${dReqs}` +
+      `${COLORS.green}${dCost}${COLORS.reset}` +
+      `${COLORS.dim}${dTok}${dAvg}${COLORS.reset}`
     );
-    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color, Number(pct), "client-detail")}`);
+    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 6, color, Number(pct), "client-detail")}`);
     lines.push("");
   }
   endBarSection("client-detail");
