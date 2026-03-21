@@ -431,9 +431,9 @@ program
     const currentMode = config.mode || "apikeys";
     
     console.log("Select client mode:");
-    console.log("  1) apikeys    - Use API keys for payments");
-    console.log("  2) xcashu     - Use xcashu");
-    console.log("  3) lazyrefund - Lazy refund mode");
+    console.log("  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.");
+    console.log("  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.");
+    console.log("  3) lazyrefund - Refunds are performed periodically which also means identities are reset periodically.");
     console.log(`\nCurrent mode: ${currentMode}`);
 
     const modes: Array<"apikeys" | "xcashu" | "lazyrefund"> = ["apikeys", "xcashu", "lazyrefund"];
