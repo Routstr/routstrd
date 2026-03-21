@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   saveDaemonConfig(updatedConfig);
 
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
-  const store = await createSdkStore({ driver: sqliteDriver });
+  const { store } = await createSdkStore({ driver: sqliteDriver });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);

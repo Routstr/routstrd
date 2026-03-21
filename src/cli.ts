@@ -18,6 +18,8 @@ import {
 } from "./utils/config";
 import { logger } from "./utils/logger";
 import { setupIntegration } from "./integrations";
+import { createSdkStore } from "@routstr/sdk";
+import { createBunSqliteDriver } from "./daemon/sqlite-driver";
 
 type RoutstrModel = {
   id: string;
@@ -129,7 +131,12 @@ async function initDaemon(): Promise<void> {
 
   const config = await loadConfig();
   await startDaemon({ port: String(config.port || 8008) });
-  await setupIntegration(config);
+
+  // Create SDK store for integrations
+  const sqliteDriver = createBunSqliteDriver(DB_PATH);
+  const { store } = await createSdkStore({ driver: sqliteDriver });
+
+  await setupIntegration(config, store);
 
   logger.log("\nInitialization complete!");
   logger.log("\n use 'cocod receive cashu' or 'cocod receive bolt11 2100' to top up your local wallet!");

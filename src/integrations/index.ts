@@ -3,6 +3,7 @@ import { logger } from "../utils/logger";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
+import type { SdkStore } from "@routstr/sdk";
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -34,7 +35,10 @@ function parseChoice(input: string): number {
   return 1;
 }
 
-export async function setupIntegration(config: RoutstrdConfig): Promise<void> {
+export async function setupIntegration(
+  config: RoutstrdConfig,
+  store: SdkStore,
+): Promise<void> {
   logger.log("\nChoose an integration to set up:");
   logger.log("1. OpenCode (default)");
   logger.log("2. OpenClaw");
@@ -45,17 +49,17 @@ export async function setupIntegration(config: RoutstrdConfig): Promise<void> {
   const choice = parseChoice(answer);
 
   if (choice === 1) {
-    await installOpencodeIntegration(config);
+    await installOpencodeIntegration(config, store);
     return;
   }
 
   if (choice === 2) {
-    await installOpenClawIntegration(config);
+    await installOpenClawIntegration(config, store);
     return;
   }
 
   if (choice === 3) {
-    await installPiIntegration(config);
+    await installPiIntegration(config, store);
     return;
   }
 
