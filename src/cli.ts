@@ -357,6 +357,15 @@ program
     });
   });
 
+// Monitor - interactive TUI
+program
+  .command("monitor")
+  .description("Open interactive TUI for usage monitoring (htop-like)")
+  .action(async () => {
+    const { runUsageTui } = await import("./cli/usage-tui");
+    await runUsageTui();
+  });
+
 // Stop
 program
   .command("stop")

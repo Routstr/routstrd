@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts start",
+    "monitor": "bun src/index.ts monitor",
     "lint": "tsc --noEmit",
     "test": "bun test"
   },
