@@ -64,6 +64,7 @@ async function main(): Promise<void> {
       getRoutstr21Models,
       runWalletCommand,
       parseBalances,
+      mode: config.mode || "apikeys",
     }),
   );
 

@@ -11,10 +11,12 @@ export interface RoutstrdConfig {
   port: number;
   provider: string | null;
   cocodPath: string | null;
+  mode?: "xcashu" | "lazyrefund" | "apikeys";
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
   port: 8008,
   provider: null,
   cocodPath: null,
+  mode: "apikeys",
 };

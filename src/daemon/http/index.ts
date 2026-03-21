@@ -84,6 +84,7 @@ export function createDaemonRequestHandler(deps: {
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   runWalletCommand: (args: string[]) => Promise<string>;
   parseBalances: (output: string) => Record<string, number>;
+  mode?: "xcashu" | "lazyrefund" | "apikeys";
 }) {
   const usageTracker = createUsageTracker(deps.store);
 
@@ -418,6 +419,7 @@ export function createDaemonRequestHandler(deps: {
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
+        mode: deps.mode,
       });
 
       const isStream = bodyObj.stream === true;

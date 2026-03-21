@@ -422,6 +422,77 @@ program
     console.log("Daemon restarted.");
   });
 
+// Mode
+program
+  .command("mode")
+  .description("Set the client mode (xcashu, lazyrefund, or apikeys)")
+  .action(async () => {
+    const config = await loadConfig();
+    const currentMode = config.mode || "apikeys";
+    
+    console.log("Select client mode:");
+    console.log("  1) apikeys    - Use API keys for payments");
+    console.log("  2) xcashu     - Use xcashu");
+    console.log("  3) lazyrefund - Lazy refund mode");
+    console.log(`\nCurrent mode: ${currentMode}`);
+
+    const modes: Array<"apikeys" | "xcashu" | "lazyrefund"> = ["apikeys", "xcashu", "lazyrefund"];
+    
+    const selectedIndex = await new Promise<number>((resolve) => {
+      const rl = require("readline").createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rl.question("\nEnter choice (1-3): ", (answer: string) => {
+        rl.close();
+        const num = parseInt(answer, 10);
+        resolve(Number.isFinite(num) && num >= 1 && num <= 3 ? num - 1 : 0);
+      });
+    });
+
+    const selectedMode = modes[selectedIndex];
+    
+    if (selectedMode === currentMode) {
+      console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
+      return;
+    }
+
+    // Update config
+    const updatedConfig: RoutstrdConfig = {
+      ...config,
+      mode: selectedMode,
+    };
+    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+    console.log(`Mode set to '${selectedMode}'. Restarting daemon...`);
+
+    // Restart daemon
+    const wasRunning = await isDaemonRunning();
+    if (wasRunning) {
+      console.log("Stopping daemon...");
+      await callDaemon("/stop", { method: "POST" });
+      
+      for (let i = 0; i < 50; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (!(await isDaemonRunning())) {
+          break;
+        }
+      }
+
+      if (await isDaemonRunning()) {
+        logger.error("Daemon failed to stop within 5 seconds");
+        process.exit(1);
+      }
+      console.log("Daemon stopped.");
+    }
+
+    console.log("Starting daemon...");
+    await startDaemon({
+      port: String(config.port || 8008),
+      provider: config.provider || undefined,
+    });
+    console.log(`Daemon restarted with mode '${selectedMode}'.`);
+  });
+
 // Logs
 program
   .command("logs")
