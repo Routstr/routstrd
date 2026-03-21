@@ -39,6 +39,7 @@ type UsageEntry = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  client?: string;
 };
 
 const cliVersion = "0.1.0";
@@ -355,8 +356,9 @@ program
       const time = new Date(entry.timestamp).toISOString();
       const provider = entry.baseUrl || "unknown";
       const reqId = entry.requestId || "unknown";
+      const client = entry.client ? ` | client: ${entry.client}` : "";
       console.log(
-        `${index + 1}. ${time} | ${entry.modelId} | ${provider} | ${entry.satsCost.toFixed(3)} sats`,
+        `${index + 1}. ${time} | ${entry.modelId} | ${provider} | ${entry.satsCost.toFixed(3)} sats${client}`,
       );
       console.log(
         `   tokens p/c/t: ${entry.promptTokens}/${entry.completionTokens}/${entry.totalTokens} | request: ${reqId}`,
