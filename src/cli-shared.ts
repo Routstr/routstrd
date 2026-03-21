@@ -59,7 +59,7 @@ export async function startDaemonProcess(): Promise<void> {
   const logFile = Bun.file(LOG_FILE);
 
   const proc = Bun.spawn([
-    "bun", "run", `${import.meta.dir}/index.ts`, "daemon"
+    "bun", "run", `${import.meta.dir}/daemon/index.ts`
   ], {
     stdout: logFile,
     stderr: logFile,
