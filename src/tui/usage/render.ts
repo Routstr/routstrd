@@ -13,6 +13,7 @@ import {
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
+import type { BalanceInfo } from "./data.ts";
 import type { TabId, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
@@ -106,7 +107,7 @@ export function renderBarChart(
 }
 
 
-export function renderOverview(stats: UsageStats, width: number): string {
+export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, width: number): string {
   const totals = getTotals(stats.entries);
   const entryCount = stats.entries.length;
   const totalVisibleCost = totals.satsCost;
@@ -128,6 +129,43 @@ export function renderOverview(stats: UsageStats, width: number): string {
 
   let output = renderBox(leftBox, width, "Summary Stats");
   output += "\n" + renderBox(rightBox, width, "Token Stats");
+
+  // Display all balances (wallet, cached tokens, API keys) if available
+  if (balance && balance.keys.length > 0) {
+    const balanceLines: string[] = [];
+    const totalBalance = balance.total;
+
+    if (totalBalance > 0) {
+      balanceLines.push(`${COLORS.bold}Total Balance:${COLORS.reset} ${COLORS.green}${totalBalance.toLocaleString()} sat${COLORS.reset}`);
+    } else {
+      balanceLines.push(`${COLORS.bold}Total Balance:${COLORS.reset} ${COLORS.red}0 sat${COLORS.reset}`);
+    }
+
+    for (const key of balance.keys) {
+      const color = key.id === "wallet" ? COLORS.green : COLORS.cyan;
+      if (key.id === "wallet") {
+        balanceLines.push(`${color}Wallet:${COLORS.reset} ${key.balance.toLocaleString()} sat`);
+      } else {
+        // Extract provider URL from name (e.g., "API Key: https://..." or "Cached: https://...")
+        const providerUrl = key.name.replace(/^(API Key|Cached):\s*/, "");
+        const shortProvider = providerUrl.replace("https://", "").replace("http://", "");
+        const label = key.id.startsWith("cached:") ? "Cached" : "API Key";
+        balanceLines.push(`${color}${label}:${COLORS.reset} ${shortProvider} (${key.balance.toLocaleString()} sat)`);
+      }
+    }
+
+    if (totalBalance === 0) {
+      balanceLines.push(`${COLORS.dim}No funds available${COLORS.reset}`);
+    }
+
+    output = renderBox(balanceLines, width, "Balance") + "\n" + output;
+  } else if (balance && balance.keys.length === 0) {
+    const balanceLines: string[] = [
+      `${COLORS.bold}Total Balance:${COLORS.reset} ${COLORS.red}0 sat${COLORS.reset}`,
+      `${COLORS.dim}No funds available${COLORS.reset}`,
+    ];
+    output = renderBox(balanceLines, width, "Balance") + "\n" + output;
+  }
 
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length > 0) {
@@ -404,9 +442,9 @@ export function renderRecent(stats: UsageStats, width: number): string {
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, width: number): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, width: number): string {
   switch (activeTab) {
-    case "overview": return renderOverview(stats, width);
+    case "overview": return renderOverview(stats, balance, width);
     case "today": return renderToday(stats, width);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);

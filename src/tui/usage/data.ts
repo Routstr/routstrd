@@ -2,6 +2,45 @@ import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import { callDaemon, isDaemonRunning } from "../../cli-shared.ts";
 import type { ClientStats, DayStats, ModelStats, ProviderStats, UsageStats } from "./types.ts";
 
+export interface BalanceKey {
+  id: string;
+  name: string;
+  balance: number;
+}
+
+export interface BalanceInfo {
+  keys: BalanceKey[];
+  total: number;
+  unit: "sat";
+  apikeysCalled: number;
+}
+
+export async function fetchBalance(): Promise<BalanceInfo | null> {
+  try {
+    const running = await isDaemonRunning();
+    if (!running) return null;
+
+    const result = await callDaemon("/keys/balance");
+    if (result.error) return null;
+
+    const output = result.output as {
+      keys?: BalanceKey[];
+      total?: number;
+      unit?: string;
+      apikeysCalled?: number;
+    };
+
+    return {
+      keys: output?.keys || [],
+      total: output?.total || 0,
+      unit: (output?.unit as "sat") || "sat",
+      apikeysCalled: output?.apikeysCalled || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchUsage(limit = 1000): Promise<UsageStats | null> {
   try {
     const running = await isDaemonRunning();
