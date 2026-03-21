@@ -67,6 +67,36 @@ interface Tab {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Vim Mode State
+// ═══════════════════════════════════════════════════════════════
+
+interface VimState {
+  scrollPos: number;
+  searchQuery: string;
+  searchResults: number[];
+  currentSearchIdx: number;
+  isSearching: boolean;
+  searchReverse: boolean;
+  mode: "normal" | "search";
+  lastKey: string;
+  lastKeyTime: number;
+}
+
+const vimState: VimState = {
+  scrollPos: 0,
+  searchQuery: "",
+  searchResults: [],
+  currentSearchIdx: 0,
+  isSearching: false,
+  searchReverse: false,
+  mode: "normal",
+  lastKey: "",
+  lastKeyTime: 0,
+};
+
+const MAX_SCROLL_LINES = 50;
+
+// ═══════════════════════════════════════════════════════════════
 // Constants
 // ═══════════════════════════════════════════════════════════════
 
@@ -145,6 +175,80 @@ function eraseDown(): string {
 
 function getWidth(): number {
   return process.stdout.columns || 80;
+}
+
+// Vim mode helpers
+function scrollDown(lines = 1): void {
+  vimState.scrollPos = Math.min(vimState.scrollPos + lines, MAX_SCROLL_LINES);
+}
+
+function scrollUp(lines = 1): void {
+  vimState.scrollPos = Math.max(vimState.scrollPos - lines, 0);
+}
+
+function scrollToTop(): void {
+  vimState.scrollPos = 0;
+}
+
+function scrollToBottom(): void {
+  vimState.scrollPos = MAX_SCROLL_LINES;
+}
+
+function pageUp(): void {
+  scrollUp(15);
+}
+
+function pageDown(): void {
+  scrollDown(15);
+}
+
+function startSearch(reverse = false): void {
+  vimState.isSearching = true;
+  vimState.searchReverse = reverse;
+  vimState.searchQuery = "";
+  vimState.mode = "search";
+}
+
+function performSearch(query: string, entries: UsageTrackingEntry[]): void {
+  vimState.searchQuery = query;
+  vimState.searchResults = [];
+  vimState.currentSearchIdx = 0;
+  
+  if (!query) {
+    vimState.searchResults = [];
+    return;
+  }
+  
+  const lowerQuery = query.toLowerCase();
+  entries.forEach((entry, idx) => {
+    const searchable = [
+      entry.modelId,
+      entry.baseUrl || "",
+      entry.client || "",
+    ].join(" ").toLowerCase();
+    
+    if (searchable.includes(lowerQuery)) {
+      vimState.searchResults.push(idx);
+    }
+  });
+}
+
+function nextSearchResult(totalEntries: number): void {
+  if (vimState.searchResults.length === 0) return;
+  vimState.currentSearchIdx = (vimState.currentSearchIdx + 1) % vimState.searchResults.length;
+  // Map search result index to scroll position (approximate)
+  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * MAX_SCROLL_LINES);
+}
+
+function prevSearchResult(totalEntries: number): void {
+  if (vimState.searchResults.length === 0) return;
+  vimState.currentSearchIdx = (vimState.currentSearchIdx - 1 + vimState.searchResults.length) % vimState.searchResults.length;
+  vimState.scrollPos = Math.floor((vimState.searchResults[vimState.currentSearchIdx]! / Math.max(1, totalEntries)) * MAX_SCROLL_LINES);
+}
+
+function exitSearchMode(): void {
+  vimState.isSearching = false;
+  vimState.mode = "normal";
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -361,10 +465,26 @@ function getTotals(entries: UsageTrackingEntry[]) {
 
 function renderHeader(activeTab: TabId, width: number): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
+  const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
   const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [1-7] Tabs  [R] Refresh${COLORS.reset}`;
-  const fill = width - title.length - help.length - 4;
+  const fill = width - title.length - help.length - vimIndicator.length - 6;
   
-  return `${title}${" ".repeat(Math.max(1, fill))}${help}\n`;
+  return `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}\n`;
+}
+
+function renderSearchBar(width: number): string {
+  if (!vimState.isSearching) return "";
+  
+  const prompt = vimState.searchReverse ? "?" : "/";
+  const query = vimState.searchQuery;
+  const matches = vimState.searchResults.length > 0 
+    ? ` (${vimState.currentSearchIdx + 1}/${vimState.searchResults.length})`
+    : "";
+  
+  const searchLine = `${COLORS.yellow}${prompt}${COLORS.reset}${query}${COLORS.dim}_${COLORS.reset}${matches} `;
+  const placeholder = `${COLORS.dim}type to search, Enter to confirm, Esc to cancel${COLORS.reset}`;
+  
+  return `\n${searchLine}${placeholder}\n`;
 }
 
 function renderTabs(activeTab: TabId, width: number): string {
@@ -865,10 +985,11 @@ async function main(): Promise<void> {
         renderHeader(currentTab, width) +
         renderTabs(currentTab, width) +
         renderSeparator(width) +
+        renderSearchBar(width) +
         content +
         "\n" +
         renderSeparator(width) +
-        `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${COLORS.reset}`;
+        `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: j/k scroll, / search, g top, G bottom${COLORS.reset}` : ""}`;
 
       stdout.write(output);
     } finally {
@@ -877,6 +998,46 @@ async function main(): Promise<void> {
   }
 
   const handleKey = (key: string) => {
+    // Handle search mode separately
+    if (vimState.isSearching) {
+      if (key === "\x1b" || key === "\x1b[3~") { // Escape
+        exitSearchMode();
+        void render(false);
+        return;
+      }
+      if (key === "\r" || key === "\n") { // Enter - confirm search
+        if (stats?.entries) {
+          performSearch(vimState.searchQuery, stats.entries);
+        }
+        exitSearchMode();
+        void render(false);
+        return;
+      }
+      if (key === "\x7f" || key === "\x08") { // Backspace
+        vimState.searchQuery = vimState.searchQuery.slice(0, -1);
+        if (stats?.entries) {
+          performSearch(vimState.searchQuery, stats.entries);
+        }
+        void render(false);
+        return;
+      }
+      if (key === "\x03") { // Ctrl+C
+        exitSearchMode();
+        void render(false);
+        return;
+      }
+      // Any printable character
+      if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) < 127) {
+        vimState.searchQuery += key;
+        if (stats?.entries) {
+          performSearch(vimState.searchQuery, stats.entries);
+        }
+        void render(false);
+        return;
+      }
+      return;
+    }
+
     if (key === "q" || key === "Q" || key === "\u0003") {
       cleanup(0);
       return;
@@ -895,9 +1056,129 @@ async function main(): Promise<void> {
       return;
     }
 
+    // Vim mode navigation
+    // Navigation: j, k, l, h
+    if (key === "j") { // down
+      scrollDown();
+      void render(false);
+      return;
+    }
+    if (key === "k") { // up
+      scrollUp();
+      void render(false);
+      return;
+    }
+    if (key === "l") { // right - next tab
+      const currentIdx = TABS.findIndex((t) => t.id === currentTab);
+      const nextIdx = (currentIdx + 1) % TABS.length;
+      currentTab = TABS[nextIdx]!.id;
+      vimState.scrollPos = 0;
+      void render(false);
+      return;
+    }
+    if (key === "h") { // left - prev tab
+      const currentIdx = TABS.findIndex((t) => t.id === currentTab);
+      const prevIdx = (currentIdx - 1 + TABS.length) % TABS.length;
+      currentTab = TABS[prevIdx]!.id;
+      vimState.scrollPos = 0;
+      void render(false);
+      return;
+    }
+    
+    // Vim: g - go to top (gg in vim means go to top, but we just use g for simplicity)
+    // For G (bottom), we use a double-tap timeout: press g twice quickly
+    if (key === "g") {
+      if (vimState.lastKey === "g" && Date.now() - vimState.lastKeyTime < 300) {
+        // Double-tap g = G (go to bottom)
+        scrollToBottom();
+        vimState.lastKey = "";
+        void render(false);
+        return;
+      }
+      vimState.lastKey = "g";
+      vimState.lastKeyTime = Date.now();
+      scrollToTop();
+      void render(false);
+      return;
+    }
+    
+    // Page up/down: Ctrl+b, Ctrl+f, Ctrl+u, Ctrl+d
+    if (key === "\x02") { // Ctrl+b (back)
+      pageUp();
+      void render(false);
+      return;
+    }
+    if (key === "\x06") { // Ctrl+f (forward)
+      pageDown();
+      void render(false);
+      return;
+    }
+    if (key === "\x15") { // Ctrl+u (up half page)
+      scrollUp(10);
+      void render(false);
+      return;
+    }
+    if (key === "\x04") { // Ctrl+d (down half page)
+      scrollDown(10);
+      void render(false);
+      return;
+    }
+    
+    // Home/End keys (common TUI shortcuts)
+    if (key === "\x1b[H" || key === "\x1b[1~" || key === "\x1bOH") { // Home
+      scrollToTop();
+      void render(false);
+      return;
+    }
+    if (key === "\x1b[F" || key === "\x1b[4~" || key === "\x1bOF") { // End
+      scrollToBottom();
+      void render(false);
+      return;
+    }
+    
+    // Search: / forward, ? reverse
+    if (key === "/") {
+      startSearch(false);
+      void render(false);
+      return;
+    }
+    if (key === "?") {
+      startSearch(true);
+      void render(false);
+      return;
+    }
+    
+    // Next/prev search match
+    if (key === "n") {
+      if (vimState.searchReverse) {
+        prevSearchResult(stats?.entries.length || 0);
+      } else {
+        nextSearchResult(stats?.entries.length || 0);
+      }
+      void render(false);
+      return;
+    }
+    if (key === "N") {
+      if (vimState.searchReverse) {
+        nextSearchResult(stats?.entries.length || 0);
+      } else {
+        prevSearchResult(stats?.entries.length || 0);
+      }
+      void render(false);
+      return;
+    }
+    
+    // Escape - clear scroll or exit vim mode
+    if (key === "\x1b") {
+      scrollToTop();
+      void render(false);
+      return;
+    }
+
     const tab = TABS.find((t) => t.key === key);
     if (tab) {
       currentTab = tab.id;
+      vimState.scrollPos = 0;
       void render(false);
     }
   };
