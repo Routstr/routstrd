@@ -81,13 +81,15 @@ export function renderBarChart(
 
 export function renderOverview(stats: UsageStats, width: number): string {
   const totals = getTotals(stats.entries);
-  const avgCost = stats.totalEntries > 0 ? stats.totalSatsCost / stats.totalEntries : 0;
-  const avgTokens = stats.totalEntries > 0 ? totals.totalTokens / stats.totalEntries : 0;
+  const entryCount = stats.entries.length;
+  const totalVisibleCost = totals.satsCost;
+  const avgCost = entryCount > 0 ? totalVisibleCost / entryCount : 0;
+  const avgTokens = entryCount > 0 ? totals.totalTokens / entryCount : 0;
   const halfWidth = Math.floor((width - 6) / 2);
 
   const leftBox = [
-    `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${stats.totalSatsCost.toFixed(3)} sats${COLORS.reset}`,
-    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatNumber(stats.totalEntries)}`,
+    `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${totalVisibleCost.toFixed(3)} sats${COLORS.reset}`,
+    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatNumber(entryCount)}`,
     `${COLORS.bold}Avg Cost/Req:${COLORS.reset} ${avgCost.toFixed(3)} sats`,
   ].map((l) => l.padEnd(halfWidth));
 
@@ -103,7 +105,7 @@ export function renderOverview(stats: UsageStats, width: number): string {
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length > 0) {
     const maxCost = modelStats[0]!.satsCost;
-    const totalCost = Math.max(stats.totalSatsCost, 1);
+    const totalCost = Math.max(totalVisibleCost, 1);
     const modelLines = modelStats.slice(0, 5).map((m) => renderBarChart(
       `${m.modelId} `,
       m.satsCost,
@@ -118,7 +120,7 @@ export function renderOverview(stats: UsageStats, width: number): string {
   const clientStats = getClientStats(stats.entries);
   if (clientStats.length > 0) {
     const maxCost = clientStats[0]!.satsCost;
-    const totalCost = Math.max(stats.totalSatsCost, 1);
+    const totalCost = Math.max(totalVisibleCost, 1);
     const clientLines = clientStats.slice(0, 5).map((c) => renderBarChart(
       `${c.client} `,
       c.satsCost,
@@ -193,7 +195,7 @@ export function renderModels(stats: UsageStats, width: number): string {
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length === 0) return renderBox(["No model data available"], width, "Models");
 
-  const totalCost = stats.totalSatsCost;
+  const totalCost = getTotals(stats.entries).satsCost;
   const maxCost = modelStats[0]!.satsCost;
   const lines: string[] = [];
 
@@ -277,7 +279,7 @@ export function renderClients(stats: UsageStats, width: number): string {
   const clientStats = getClientStats(stats.entries);
   if (clientStats.length === 0) return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
 
-  const totalCost = stats.totalSatsCost;
+  const totalCost = getTotals(stats.entries).satsCost;
   const maxCost = clientStats[0]!.satsCost;
   const lines: string[] = [];
   lines.push(`${COLORS.bold}Client${"".padEnd(20)} Requests${"".padEnd(10)} Cost${"".padEnd(12)} Tokens${"".padEnd(10)} Avg Cost${COLORS.reset}`);
