@@ -15,6 +15,20 @@ import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
 import type { TabId, UsageStats } from "./types.ts";
 
+/** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
+function formatCost(value: number): string {
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(2) + "m";
+  if (value >= 1_000) return (value / 1_000).toFixed(2) + "k";
+  return value.toFixed(2);
+}
+
+/** Format request count: 1, 12, 123, 1.2k, 1.2m */
+function formatReqs(value: number): string {
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "m";
+  if (value >= 1_000) return (value / 1_000).toFixed(1) + "k";
+  return value.toString();
+}
+
 export function renderHeader(activeTab: TabId, width: number): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
   const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
@@ -57,6 +71,16 @@ export function renderBox(lines: string[], width: number, title?: string): strin
   return result.join("\n");
 }
 
+const _sectionMaxLabelLen = new Map<string, number>();
+
+export function startBarSection(sectionKey: string, maxLabelLen: number): void {
+  _sectionMaxLabelLen.set(sectionKey, maxLabelLen);
+}
+
+export function endBarSection(_sectionKey: string): void {
+  // kept for API compat; no-op since we compute max per call now
+}
+
 export function renderBarChart(
   label: string,
   value: number,
@@ -64,20 +88,23 @@ export function renderBarChart(
   width: number,
   color: string,
   percentageValue?: number,
+  sectionKey?: string,
 ): string {
   const safeMaxValue = Math.max(maxValue, 1);
-  const pctSource = percentageValue ?? value;
-  const pctDenominator = percentageValue !== undefined ? 100 : safeMaxValue;
   const pct = percentageValue !== undefined
     ? percentageValue.toFixed(1)
-    : ((pctSource / pctDenominator) * 100).toFixed(1);
+    : ((value / safeMaxValue) * 100).toFixed(1);
   const suffix = ` ${pct}%`;
+
+  const maxLen = sectionKey ? (_sectionMaxLabelLen.get(sectionKey) ?? label.length) : label.length;
+  const paddedLabel = label.padEnd(maxLen);
   const reserved = suffix.length + 1;
-  const maxBarWidth = Math.max(0, width - label.length - reserved);
+  const maxBarWidth = Math.max(0, width - paddedLabel.length - reserved);
   const barLen = Math.max(0, Math.round((value / safeMaxValue) * maxBarWidth));
   const bar = color + "█".repeat(barLen) + COLORS.reset;
-  return `${label}${bar}${suffix}`;
+  return `${paddedLabel} ${bar}${suffix}`;
 }
+
 
 export function renderOverview(stats: UsageStats, width: number): string {
   const totals = getTotals(stats.entries);
@@ -88,9 +115,9 @@ export function renderOverview(stats: UsageStats, width: number): string {
   const halfWidth = Math.floor((width - 6) / 2);
 
   const leftBox = [
-    `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${totalVisibleCost.toFixed(3)} sats${COLORS.reset}`,
-    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatNumber(entryCount)}`,
-    `${COLORS.bold}Avg Cost/Req:${COLORS.reset} ${avgCost.toFixed(3)} sats`,
+    `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${formatCost(totalVisibleCost)} sats${COLORS.reset}`,
+    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatReqs(entryCount)}`,
+    `${COLORS.bold}Avg Cost/Req:${COLORS.reset} ${formatCost(avgCost)} sats`,
   ].map((l) => l.padEnd(halfWidth));
 
   const rightBox = [
@@ -106,14 +133,18 @@ export function renderOverview(stats: UsageStats, width: number): string {
   if (modelStats.length > 0) {
     const maxCost = modelStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
+    const maxModelLabel = Math.max(...modelStats.slice(0, 5).map((m) => m.modelId.length)) + 1;
+    startBarSection("models", maxModelLabel);
     const modelLines = modelStats.slice(0, 5).map((m) => renderBarChart(
-      `${m.modelId} `,
+      m.modelId + " ",
       m.satsCost,
       maxCost,
       width - 4,
       MODEL_COLORS[m.modelId] || MODEL_COLORS.default || COLORS.white,
       (m.satsCost / totalCost) * 100,
+      "models",
     ));
+    endBarSection("models");
     output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
   }
 
@@ -121,14 +152,18 @@ export function renderOverview(stats: UsageStats, width: number): string {
   if (clientStats.length > 0) {
     const maxCost = clientStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
+    const maxClientLabel = Math.max(...clientStats.slice(0, 5).map((c) => c.client.length)) + 1;
+    startBarSection("clients", maxClientLabel);
     const clientLines = clientStats.slice(0, 5).map((c) => renderBarChart(
-      `${c.client} `,
+      c.client + " ",
       c.satsCost,
       maxCost,
       width - 4,
       CLIENT_COLORS[c.client] || CLIENT_COLORS.default || COLORS.white,
       (c.satsCost / totalCost) * 100,
+      "clients",
     ));
+    endBarSection("clients");
     output += "\n" + renderBox(clientLines, width, "Usage by Client");
   }
 
@@ -153,8 +188,8 @@ export function renderToday(stats: UsageStats, width: number): string {
 
   const summaryLines = [
     `${COLORS.bold}Date:${COLORS.reset} ${todayStats.date}`,
-    `${COLORS.bold}Requests:${COLORS.reset} ${todayStats.requests}`,
-    `${COLORS.bold}Cost:${COLORS.reset} ${COLORS.green}${todayStats.satsCost.toFixed(3)} sats${COLORS.reset}`,
+    `${COLORS.bold}Requests:${COLORS.reset} ${formatReqs(todayStats.requests)}`,
+    `${COLORS.bold}Cost:${COLORS.reset} ${COLORS.green}${formatCost(todayStats.satsCost)} sats${COLORS.reset}`,
     `${COLORS.bold}Tokens:${COLORS.reset} ${formatNumber(todayStats.totalTokens)} (p: ${formatNumber(todayStats.promptTokens)} + c: ${formatNumber(todayStats.completionTokens)})`,
   ];
 
@@ -164,27 +199,36 @@ export function renderToday(stats: UsageStats, width: number): string {
   const hourLines: string[] = [];
   const maxHourCost = Math.max(...Array.from(hourly.values()).map((h) => h.satsCost), 1);
   const totalTodayCost = Math.max(todayStats.satsCost, 1);
+  const hourLabels: string[] = [];
   for (let h = 0; h <= currentHour; h++) {
     const hStat = hourly.get(h);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
-    const time = `${h.toString().padStart(2, "0")}:00`;
-    const label = `${time} (${reqs} req, ${cost.toFixed(2)} sats) `;
+    hourLabels.push(`${h.toString().padStart(2, "0")}:00 (${formatReqs(reqs)} req, ${formatCost(cost)} sats) `);
+  }
+  const maxHourLabel = Math.max(...hourLabels.map((l) => l.length));
+  startBarSection("hourly", maxHourLabel);
+  for (let i = 0; i <= currentHour; i++) {
+    const hStat = hourly.get(i);
+    const reqs = hStat?.requests || 0;
+    const cost = hStat?.satsCost || 0;
     hourLines.push(renderBarChart(
-      label,
+      hourLabels[i]!,
       cost,
       maxHourCost,
       width - 4,
-      h === currentHour ? COLORS.green : COLORS.cyan,
+      i === currentHour ? COLORS.green : COLORS.cyan,
       (cost / totalTodayCost) * 100,
+      "hourly",
     ));
   }
+  endBarSection("hourly");
 
   output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width);
 
   const days = Array.from(getDayStats(stats.entries).values()).slice(0, 7);
   if (days.length > 1) {
-    const dayLines = days.slice(1).map((d) => `${d.date}: ${d.requests} req, ${d.satsCost.toFixed(2)} sats, ${formatNumber(d.totalTokens)} tokens`);
+    const dayLines = days.slice(1).map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
     output += "\n" + renderBox(dayLines, width, "Recent Days");
   }
 
@@ -197,19 +241,22 @@ export function renderModels(stats: UsageStats, width: number): string {
 
   const totalCost = getTotals(stats.entries).satsCost;
   const maxCost = modelStats[0]!.satsCost;
+  const maxModelLabel = Math.max(...modelStats.map((m) => m.modelId.length));
   const lines: string[] = [];
 
+  startBarSection("model-detail", maxModelLabel);
   for (const model of modelStats) {
     const color = MODEL_COLORS[model.modelId] || MODEL_COLORS.default || COLORS.white;
     const pct = totalCost > 0 ? ((model.satsCost / totalCost) * 100).toFixed(1) : "0.0";
     lines.push(`${color}${COLORS.bold}${model.modelId}${COLORS.reset}`);
-    lines.push(`  ${COLORS.dim}Cost:${COLORS.reset} ${model.satsCost.toFixed(3)} sats (${pct}%)`);
-    lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${model.requests}`);
+    lines.push(`  ${COLORS.dim}Cost:${COLORS.reset} ${formatCost(model.satsCost)} sats (${pct}%)`);
+    lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${formatReqs(model.requests)}`);
     lines.push(`  ${COLORS.dim}Tokens:${COLORS.reset} ${formatNumber(model.totalTokens)}`);
-    lines.push(`  ${COLORS.dim}Avg:${COLORS.reset} ${(model.satsCost / model.requests).toFixed(4)} sats/req`);
-    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 4, color, Number(pct))}`);
+    lines.push(`  ${COLORS.dim}Avg:${COLORS.reset} ${formatCost(model.satsCost / model.requests)} sats/req`);
+    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 4, color, Number(pct), "model-detail")}`);
     lines.push("");
   }
+  endBarSection("model-detail");
 
   return renderBox(lines, width, "Model Breakdown");
 }
@@ -222,8 +269,8 @@ export function renderProviders(stats: UsageStats, width: number): string {
   for (const provider of providerStats) {
     const shortUrl = provider.baseUrl.replace("https://", "").replace("http://", "");
     lines.push(`${COLORS.cyan}${COLORS.bold}${shortUrl}${COLORS.reset}`);
-    lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${provider.requests}`);
-    lines.push(`  ${COLORS.dim}Cost:${COLORS.reset} ${provider.satsCost.toFixed(3)} sats`);
+    lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${formatReqs(provider.requests)}`);
+    lines.push(`  ${COLORS.dim}Cost:${COLORS.reset} ${formatCost(provider.satsCost)} sats`);
     lines.push(`  ${COLORS.dim}Tokens:${COLORS.reset} ${formatNumber(provider.totalTokens)}`);
     lines.push("");
   }
@@ -270,7 +317,7 @@ export function renderTokens(stats: UsageStats, width: number): string {
     }
   }
 
-  const sizeLines = Object.entries(sizeBuckets).map(([name, bucket]) => `${name.padEnd(6)}: ${bucket.count.toString().padStart(4)} reqs, ${bucket.cost.toFixed(2)} sats`);
+  const sizeLines = Object.entries(sizeBuckets).map(([name, bucket]) => `${name.padEnd(6)}: ${formatReqs(bucket.count).padStart(5)} reqs, ${formatCost(bucket.cost)} sats`);
   output += "\n" + renderBox(sizeLines, width, "Request Size Distribution");
   return output;
 }
@@ -281,23 +328,26 @@ export function renderClients(stats: UsageStats, width: number): string {
 
   const totalCost = getTotals(stats.entries).satsCost;
   const maxCost = clientStats[0]!.satsCost;
+  const maxClientLabel = Math.max(...clientStats.map((c) => c.client.length));
   const lines: string[] = [];
   lines.push(`${COLORS.bold}Client${"".padEnd(20)} Requests${"".padEnd(10)} Cost${"".padEnd(12)} Tokens${"".padEnd(10)} Avg Cost${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
+  startBarSection("client-detail", maxClientLabel);
   for (const client of clientStats) {
     const color = CLIENT_COLORS[client.client] || CLIENT_COLORS.default || COLORS.white;
     const pct = totalCost > 0 ? ((client.satsCost / totalCost) * 100).toFixed(1) : "0.0";
-    const avgCost = client.requests > 0 ? (client.satsCost / client.requests).toFixed(4) : "0.0000";
+    const avgCostFormatted = formatCost(client.requests > 0 ? client.satsCost / client.requests : 0);
     lines.push(
       `${color}${COLORS.bold}${client.client.padEnd(20)}${COLORS.reset}` +
-      `${client.requests.toString().padEnd(12)}` +
-      `${COLORS.green}${client.satsCost.toFixed(3).padEnd(12)} sats${COLORS.reset} (${pct}%)` +
-      `${COLORS.dim} ${formatNumber(client.totalTokens).padEnd(10)} ${avgCost.padEnd(10)} sats/req${COLORS.reset}`
+      `${formatReqs(client.requests).padEnd(12)}` +
+      `${COLORS.green}${formatCost(client.satsCost).padEnd(12)} sats${COLORS.reset} (${pct}%)` +
+      `${COLORS.dim} ${formatNumber(client.totalTokens).padEnd(10)} ${avgCostFormatted.padEnd(10)} sats/req${COLORS.reset}`
     );
-    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color, Number(pct))}`);
+    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color, Number(pct), "client-detail")}`);
     lines.push("");
   }
+  endBarSection("client-detail");
 
   let output = renderBox(lines, width, "Client Breakdown");
   const clientModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
@@ -320,9 +370,9 @@ export function renderClients(stats: UsageStats, width: number): string {
     const modelMap = clientModelMap.get(topClient.client);
     if (!modelMap) continue;
     const models = Array.from(modelMap.entries()).sort((a, b) => b[1].satsCost - a[1].satsCost).slice(0, 5);
-    clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${topClient.requests} reqs, ${topClient.satsCost.toFixed(2)} sats)`);
+    clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${formatReqs(topClient.requests)} reqs, ${formatCost(topClient.satsCost)} sats)`);
     for (const [model, data] of models) {
-      clientModelLines.push(`  ${(MODEL_COLORS[model] || MODEL_COLORS.default)}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${data.satsCost.toFixed(3)} sats`);
+      clientModelLines.push(`  ${(MODEL_COLORS[model] || MODEL_COLORS.default)}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${formatCost(data.satsCost)} sats`);
     }
     clientModelLines.push("");
   }
@@ -345,7 +395,7 @@ export function renderRecent(stats: UsageStats, width: number): string {
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, 18).padEnd(18);
     const tokens = `${formatNumber(entry.totalTokens).padEnd(6)} (${formatNumber(entry.promptTokens)}+${formatNumber(entry.completionTokens)})`;
-    const cost = `${entry.satsCost.toFixed(3).padEnd(10)} sats`;
+    const cost = `${formatCost(entry.satsCost).padEnd(8)} sats`;
     const provider = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "").slice(0, Math.max(0, width - 60));
     const color = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
     lines.push(`${COLORS.dim}${time}${COLORS.reset} ${color}${model}${COLORS.reset} ${tokens.padEnd(10)} ${COLORS.green}${cost}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset}`);
