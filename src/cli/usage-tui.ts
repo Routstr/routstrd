@@ -177,6 +177,26 @@ function getWidth(): number {
   return process.stdout.columns || 80;
 }
 
+function getHeight(): number {
+  return process.stdout.rows || 24;
+}
+
+function clampScrollPos(contentHeight: number, viewportHeight: number): void {
+  const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  vimState.scrollPos = Math.max(0, Math.min(vimState.scrollPos, maxScroll));
+}
+
+function applyScrollToContent(content: string, viewportHeight: number): string {
+  const lines = content.split("\n");
+  clampScrollPos(lines.length, viewportHeight);
+
+  if (viewportHeight <= 0) {
+    return "";
+  }
+
+  return lines.slice(vimState.scrollPos, vimState.scrollPos + viewportHeight).join("\n");
+}
+
 // Vim mode helpers
 function scrollDown(lines = 1): void {
   vimState.scrollPos = Math.min(vimState.scrollPos + lines, MAX_SCROLL_LINES);
@@ -934,6 +954,7 @@ async function main(): Promise<void> {
 
     try {
       const width = getWidth();
+      const height = getHeight();
 
       if (forceFetch || shouldUpdate) {
         stats = await fetchUsage(1000);
@@ -979,17 +1000,24 @@ async function main(): Promise<void> {
           content = "Unknown tab";
       }
 
-      const output =
-        moveCursor(1, 1) +
-        eraseDown() +
+      const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: j/k scroll, / search, g top, G bottom${COLORS.reset}` : ""}`;
+      const chrome =
         renderHeader(currentTab, width) +
         renderTabs(currentTab, width) +
         renderSeparator(width) +
-        renderSearchBar(width) +
-        content +
-        "\n" +
-        renderSeparator(width) +
-        `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: j/k scroll, / search, g top, G bottom${COLORS.reset}` : ""}`;
+        renderSearchBar(width);
+      const chromeLines = chrome.split("\n").length - 1;
+      const footerBlock = "\n" + renderSeparator(width) + footer;
+      const footerLines = footerBlock.split("\n").length - 1;
+      const contentViewportHeight = Math.max(1, height - chromeLines - footerLines);
+      const visibleContent = applyScrollToContent(content, contentViewportHeight);
+
+      const output =
+        moveCursor(1, 1) +
+        eraseDown() +
+        chrome +
+        visibleContent +
+        footerBlock;
 
       stdout.write(output);
     } finally {
