@@ -57,12 +57,26 @@ export function renderBox(lines: string[], width: number, title?: string): strin
   return result.join("\n");
 }
 
-export function renderBarChart(label: string, value: number, maxValue: number, width: number, color: string): string {
-  const maxBarWidth = width - label.length - 20;
-  const barLen = Math.round((value / maxValue) * maxBarWidth);
+export function renderBarChart(
+  label: string,
+  value: number,
+  maxValue: number,
+  width: number,
+  color: string,
+  percentageValue?: number,
+): string {
+  const safeMaxValue = Math.max(maxValue, 1);
+  const pctSource = percentageValue ?? value;
+  const pctDenominator = percentageValue !== undefined ? 100 : safeMaxValue;
+  const pct = percentageValue !== undefined
+    ? percentageValue.toFixed(1)
+    : ((pctSource / pctDenominator) * 100).toFixed(1);
+  const suffix = ` ${pct}%`;
+  const reserved = suffix.length + 1;
+  const maxBarWidth = Math.max(0, width - label.length - reserved);
+  const barLen = Math.max(0, Math.round((value / safeMaxValue) * maxBarWidth));
   const bar = color + "█".repeat(barLen) + COLORS.reset;
-  const pct = maxValue > 0 ? ((value / maxValue) * 100).toFixed(1) : "0.0";
-  return `${label.padEnd(width - maxBarWidth - 15)}${bar} ${pct}%`;
+  return `${label}${bar}${suffix}`;
 }
 
 export function renderOverview(stats: UsageStats, width: number): string {
@@ -89,14 +103,30 @@ export function renderOverview(stats: UsageStats, width: number): string {
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length > 0) {
     const maxCost = modelStats[0]!.satsCost;
-    const modelLines = modelStats.slice(0, 5).map((m) => renderBarChart(m.modelId, m.satsCost, maxCost, width - 4, MODEL_COLORS[m.modelId] || MODEL_COLORS.default || COLORS.white));
+    const totalCost = Math.max(stats.totalSatsCost, 1);
+    const modelLines = modelStats.slice(0, 5).map((m) => renderBarChart(
+      `${m.modelId} `,
+      m.satsCost,
+      maxCost,
+      width - 4,
+      MODEL_COLORS[m.modelId] || MODEL_COLORS.default || COLORS.white,
+      (m.satsCost / totalCost) * 100,
+    ));
     output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
   }
 
   const clientStats = getClientStats(stats.entries);
   if (clientStats.length > 0) {
     const maxCost = clientStats[0]!.satsCost;
-    const clientLines = clientStats.slice(0, 5).map((c) => renderBarChart(c.client, c.satsCost, maxCost, width - 4, CLIENT_COLORS[c.client] || CLIENT_COLORS.default || COLORS.white));
+    const totalCost = Math.max(stats.totalSatsCost, 1);
+    const clientLines = clientStats.slice(0, 5).map((c) => renderBarChart(
+      `${c.client} `,
+      c.satsCost,
+      maxCost,
+      width - 4,
+      CLIENT_COLORS[c.client] || CLIENT_COLORS.default || COLORS.white,
+      (c.satsCost / totalCost) * 100,
+    ));
     output += "\n" + renderBox(clientLines, width, "Usage by Client");
   }
 
@@ -131,13 +161,21 @@ export function renderToday(stats: UsageStats, width: number): string {
 
   const hourLines: string[] = [];
   const maxHourCost = Math.max(...Array.from(hourly.values()).map((h) => h.satsCost), 1);
+  const totalTodayCost = Math.max(todayStats.satsCost, 1);
   for (let h = 0; h <= currentHour; h++) {
     const hStat = hourly.get(h);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
     const time = `${h.toString().padStart(2, "0")}:00`;
-    const label = `${time} (${reqs} req, ${cost.toFixed(2)} sats)`;
-    hourLines.push(renderBarChart(label, cost, maxHourCost, width - 4, h === currentHour ? COLORS.green : COLORS.cyan));
+    const label = `${time} (${reqs} req, ${cost.toFixed(2)} sats) `;
+    hourLines.push(renderBarChart(
+      label,
+      cost,
+      maxHourCost,
+      width - 4,
+      h === currentHour ? COLORS.green : COLORS.cyan,
+      (cost / totalTodayCost) * 100,
+    ));
   }
 
   output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width);
@@ -167,7 +205,7 @@ export function renderModels(stats: UsageStats, width: number): string {
     lines.push(`  ${COLORS.dim}Requests:${COLORS.reset} ${model.requests}`);
     lines.push(`  ${COLORS.dim}Tokens:${COLORS.reset} ${formatNumber(model.totalTokens)}`);
     lines.push(`  ${COLORS.dim}Avg:${COLORS.reset} ${(model.satsCost / model.requests).toFixed(4)} sats/req`);
-    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 4, color)}`);
+    lines.push(`  ${renderBarChart("  ", model.satsCost, maxCost, width - 4, color, Number(pct))}`);
     lines.push("");
   }
 
@@ -255,7 +293,7 @@ export function renderClients(stats: UsageStats, width: number): string {
       `${COLORS.green}${client.satsCost.toFixed(3).padEnd(12)} sats${COLORS.reset} (${pct}%)` +
       `${COLORS.dim} ${formatNumber(client.totalTokens).padEnd(10)} ${avgCost.padEnd(10)} sats/req${COLORS.reset}`
     );
-    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color)}`);
+    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color, Number(pct))}`);
     lines.push("");
   }
 
