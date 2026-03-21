@@ -49,7 +49,16 @@ interface ProviderStats {
   totalTokens: number;
 }
 
-type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "recent";
+interface ClientStats {
+  client: string;
+  requests: number;
+  satsCost: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "recent";
 
 interface Tab {
   id: TabId;
@@ -67,7 +76,8 @@ const TABS: Tab[] = [
   { id: "models", name: "Models", key: "3" },
   { id: "providers", name: "Providers", key: "4" },
   { id: "tokens", name: "Tokens", key: "5" },
-  { id: "recent", name: "Recent", key: "6" },
+  { id: "clients", name: "Clients", key: "6" },
+  { id: "recent", name: "Recent", key: "7" },
 ];
 
 const COLORS = {
@@ -90,6 +100,14 @@ const COLORS = {
 const MODEL_COLORS: Record<string, string> = {
   "gpt-5.4": COLORS.magenta,
   "minimax-m2.7": COLORS.cyan,
+  "default": COLORS.white,
+};
+
+const CLIENT_COLORS: Record<string, string> = {
+  "opencode": COLORS.blue,
+  "openclaw": COLORS.green,
+  "pi-agent": COLORS.yellow,
+  "unknown": COLORS.dim,
   "default": COLORS.white,
 };
 
@@ -298,6 +316,33 @@ function getProviderStats(entries: UsageTrackingEntry[]): ProviderStats[] {
   return Array.from(providers.values()).sort((a, b) => b.satsCost - a.satsCost);
 }
 
+function getClientStats(entries: UsageTrackingEntry[]): ClientStats[] {
+  const clients = new Map<string, ClientStats>();
+  
+  for (const entry of entries) {
+    const client = entry.client || "unknown";
+    const existing = clients.get(client) || {
+      client,
+      requests: 0,
+      satsCost: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    
+    clients.set(client, {
+      ...existing,
+      requests: existing.requests + 1,
+      satsCost: existing.satsCost + entry.satsCost,
+      promptTokens: existing.promptTokens + entry.promptTokens,
+      completionTokens: existing.completionTokens + entry.completionTokens,
+      totalTokens: existing.totalTokens + entry.totalTokens,
+    });
+  }
+  
+  return Array.from(clients.values()).sort((a, b) => b.satsCost - a.satsCost);
+}
+
 function getTotals(entries: UsageTrackingEntry[]) {
   return entries.reduce(
     (acc, entry) => ({
@@ -316,7 +361,7 @@ function getTotals(entries: UsageTrackingEntry[]) {
 
 function renderHeader(activeTab: TabId, width: number): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
-  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [1-6] Tabs  [R] Refresh${COLORS.reset}`;
+  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [1-7] Tabs  [R] Refresh${COLORS.reset}`;
   const fill = width - title.length - help.length - 4;
   
   return `${title}${" ".repeat(Math.max(1, fill))}${help}\n`;
@@ -406,6 +451,17 @@ function renderOverview(stats: UsageStats, width: number): string {
       return renderBarChart(m.modelId, m.satsCost, maxCost, width - 4, color);
     });
     output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
+  }
+  
+  // Client distribution
+  const clientStats = getClientStats(stats.entries);
+  if (clientStats.length > 0) {
+    const maxCost = clientStats[0]!.satsCost;
+    const clientLines = clientStats.slice(0, 5).map((c) => {
+      const color = CLIENT_COLORS[c.client] || CLIENT_COLORS.default || COLORS.white;
+      return renderBarChart(c.client, c.satsCost, maxCost, width - 4, color);
+    });
+    output += "\n" + renderBox(clientLines, width, "Usage by Client");
   }
   
   return output;
@@ -587,6 +643,86 @@ function renderTokens(stats: UsageStats, width: number): string {
   return output;
 }
 
+function renderClients(stats: UsageStats, width: number): string {
+  const clientStats = getClientStats(stats.entries);
+  
+  if (clientStats.length === 0) {
+    return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
+  }
+  
+  const totalCost = stats.totalSatsCost;
+  const maxCost = clientStats[0]!.satsCost;
+  
+  const lines: string[] = [];
+  
+  // Summary by client
+  lines.push(`${COLORS.bold}Client${"".padEnd(20)} Requests${"".padEnd(10)} Cost${"".padEnd(12)} Tokens${"".padEnd(10)} Avg Cost${COLORS.reset}`);
+  lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
+  
+  for (const client of clientStats) {
+    const color = CLIENT_COLORS[client.client] || CLIENT_COLORS.default || COLORS.white;
+    const pct = totalCost > 0 ? ((client.satsCost / totalCost) * 100).toFixed(1) : "0.0";
+    const avgCost = client.requests > 0 ? (client.satsCost / client.requests).toFixed(4) : "0.0000";
+    
+    lines.push(
+      `${color}${COLORS.bold}${client.client.padEnd(20)}${COLORS.reset}` +
+      `${client.requests.toString().padEnd(12)}` +
+      `${COLORS.green}${client.satsCost.toFixed(3).padEnd(12)} sats${COLORS.reset} (${pct}%)` +
+      `${COLORS.dim} ${formatNumber(client.totalTokens).padEnd(10)} ${avgCost.padEnd(10)} sats/req${COLORS.reset}`
+    );
+    lines.push(`  ${renderBarChart("", client.satsCost, maxCost, width - 4, color)}`);
+    lines.push("");
+  }
+  
+  let output = renderBox(lines, width, "Client Breakdown");
+  
+  // Model breakdown per client
+  const clientModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
+  
+  for (const entry of stats.entries) {
+    const client = entry.client || "unknown";
+    const model = entry.modelId;
+    
+    if (!clientModelMap.has(client)) {
+      clientModelMap.set(client, new Map());
+    }
+    const modelMap = clientModelMap.get(client)!;
+    const existing = modelMap.get(model) || { requests: 0, satsCost: 0, tokens: 0 };
+    modelMap.set(model, {
+      requests: existing.requests + 1,
+      satsCost: existing.satsCost + entry.satsCost,
+      tokens: existing.tokens + entry.totalTokens,
+    });
+  }
+  
+  // Show top models for top clients
+  const topClients = clientStats.slice(0, 3);
+  const innerWidth = Math.floor((width - 6) / 2);
+  
+  const clientModelLines: string[] = [];
+  for (const topClient of topClients) {
+    const modelMap = clientModelMap.get(topClient.client);
+    if (!modelMap) continue;
+    
+    const models = Array.from(modelMap.entries())
+      .sort((a, b) => b[1].satsCost - a[1].satsCost)
+      .slice(0, 5);
+    
+    clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${topClient.requests} reqs, ${topClient.satsCost.toFixed(2)} sats)`);
+    for (const [model, data] of models) {
+      const color = MODEL_COLORS[model] || MODEL_COLORS.default;
+      clientModelLines.push(`  ${color}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${data.satsCost.toFixed(3)} sats`);
+    }
+    clientModelLines.push("");
+  }
+  
+  if (clientModelLines.length > 0) {
+    output += "\n" + renderBox(clientModelLines, width, "Top Models per Client");
+  }
+  
+  return output;
+}
+
 function renderRecent(stats: UsageStats, width: number): string {
   const recentEntries = stats.entries.slice(0, 50);
   
@@ -712,6 +848,9 @@ async function main(): Promise<void> {
           break;
         case "tokens":
           content = renderTokens(stats, width);
+          break;
+        case "clients":
+          content = renderClients(stats, width);
           break;
         case "recent":
           content = renderRecent(stats, width);
