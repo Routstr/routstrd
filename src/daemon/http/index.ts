@@ -12,6 +12,33 @@ import {
 import type { UsageData } from "../types";
 import { logger } from "../../utils/logger";
 
+/**
+ * Extracts the client ID from an incoming request by looking up the API key
+ * in the store's clientIds list.
+ */
+function getClientIdFromRequest(
+  req: IncomingMessage,
+  store: { getState(): any },
+): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return undefined;
+  }
+
+  const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
+  if (!apiKey.startsWith("sk-")) {
+    return undefined;
+  }
+
+  const state = store.getState();
+  const clientIds = state.clientIds || [];
+  const matchingClient = (clientIds as { clientId: string; apiKey: string }[]).find(
+    (c) => c.apiKey === apiKey,
+  );
+
+  return matchingClient?.clientId;
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -419,6 +446,7 @@ export function createDaemonRequestHandler(deps: {
                 modelId,
                 baseUrl: usageBaseUrl,
                 requestId: usageRequestId,
+                client: getClientIdFromRequest(req, deps.store),
                 ...capturedUsage,
               });
               logger.log(
@@ -447,6 +475,7 @@ export function createDaemonRequestHandler(deps: {
           modelId,
           baseUrl: usageBaseUrl,
           requestId: responseRequestId,
+          client: getClientIdFromRequest(req, deps.store),
           ...nonStreamUsage,
         });
       }
