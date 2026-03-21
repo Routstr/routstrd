@@ -383,6 +383,45 @@ program
     await handleDaemonCommand("/stop", { method: "POST" });
   });
 
+// Restart
+program
+  .command("restart")
+  .description("Restart the background daemon")
+  .option("--port <port>", "Port to listen on")
+  .option("-p, --provider <provider>", "Default provider to use")
+  .action(async (options: { port?: string; provider?: string }) => {
+    const config = await loadConfig();
+    const wasRunning = await isDaemonRunning();
+
+    if (wasRunning) {
+      console.log("Stopping daemon...");
+      await callDaemon("/stop", { method: "POST" });
+      
+      // Wait for daemon to fully stop
+      for (let i = 0; i < 50; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (!(await isDaemonRunning())) {
+          break;
+        }
+      }
+
+      if (await isDaemonRunning()) {
+        logger.error("Daemon failed to stop within 5 seconds");
+        process.exit(1);
+      }
+      console.log("Daemon stopped.");
+    } else {
+      console.log("Daemon was not running.");
+    }
+
+    console.log("Starting daemon...");
+    await startDaemon({
+      port: options.port || String(config.port || 8008),
+      provider: options.provider,
+    });
+    console.log("Daemon restarted.");
+  });
+
 // Logs
 program
   .command("logs")
