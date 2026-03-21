@@ -13,7 +13,8 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/qrcode": "^1.5.6"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -25,6 +26,7 @@
     "applesauce-relay": "^5.1.0",
     "better-sqlite3": "^11.7.2",
     "commander": "^14.0.2",
+    "qrcode": "^1.5.4",
     "rxjs": "^7.8.1",
     "zustand": "^5.0.5"
   }

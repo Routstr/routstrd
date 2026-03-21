@@ -18,6 +18,11 @@ import {
 } from "./utils/config";
 import { logger } from "./utils/logger";
 import { setupIntegration } from "./integrations";
+import * as QRCode from "qrcode";
+import {
+  isCocodInstalled,
+  resolveCocodExecutable,
+} from "./daemon/wallet/cocod-client";
 
 type RoutstrModel = {
   id: string;
@@ -41,25 +46,27 @@ type UsageEntry = {
 
 const cliVersion = "0.1.0";
 
+function parsePositiveIntOrExit(value: string, fieldName: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(`Invalid ${fieldName}: ${value}`);
+    process.exit(1);
+  }
+  return parsed;
+}
+
+async function printLightningInvoice(invoice: string): Promise<void> {
+  const paymentUri = `lightning:${invoice}`;
+  const qr = await QRCode.toString(paymentUri, {
+    type: "terminal",
+    small: true,
+  });
+
+  console.log(`${qr}\nInvoice:\n${invoice}`);
+}
+
 async function initDaemon(): Promise<void> {
   logger.log("Initializing routstrd...");
-
-  if (!(await checkCocodInstalled())) {
-    logger.log("cocod not found. Installing globally with bun...");
-
-    const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-
-    const installCode = await installProc.exited;
-    if (installCode !== 0 || !(await checkCocodInstalled())) {
-      logger.error("Failed to install cocod. Please run 'bun install --global cocod' manually.");
-      return;
-    }
-
-    logger.log("cocod installed successfully.");
-  }
 
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
@@ -77,10 +84,39 @@ async function initDaemon(): Promise<void> {
     logger.log(`Created config file: ${CONFIG_FILE}`);
   }
 
+  const config = await loadConfig();
+  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
+
+  if (!(await isCocodInstalled(config.cocodPath))) {
+    if (config.cocodPath) {
+      logger.error(
+        `Configured cocod executable was not found: ${config.cocodPath}`,
+      );
+      return;
+    }
+
+    logger.log("cocod not found. Installing globally with bun...");
+
+    const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+
+    const installCode = await installProc.exited;
+    if (installCode !== 0 || !(await isCocodInstalled(config.cocodPath))) {
+      logger.error(
+        "Failed to install cocod. Please run 'bun install --global cocod' manually.",
+      );
+      return;
+    }
+
+    logger.log("cocod installed successfully.");
+  }
+
   console.log(`Database will be stored at: ${DB_PATH}`);
   console.log("\nInitializing cocod...");
 
-  const initProc = Bun.spawn(["cocod", "init"], {
+  const initProc = Bun.spawn([cocodExecutable, "init"], {
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -127,25 +163,13 @@ async function initDaemon(): Promise<void> {
     logger.log("cocod initialized successfully.");
   }
 
-  const config = await loadConfig();
   await startDaemon({ port: String(config.port || 8008) });
   await setupIntegration(config);
 
   logger.log("\nInitialization complete!");
-  logger.log("\n use 'cocod receive cashu' or 'cocod receive bolt11 2100' to top up your local wallet!");
-}
-
-async function checkCocodInstalled(): Promise<boolean> {
-  try {
-    const proc = Bun.spawn({
-      cmd: ["which", "cocod"],
-      stdout: "pipe",
-    });
-    const code = await proc.exited;
-    return code === 0;
-  } catch {
-    return false;
-  }
+  logger.log(
+    "\n use 'routstrd wallet receive cashu <token>' or 'routstrd wallet receive bolt11 2100' to top up your local wallet!",
+  );
 }
 
 program
@@ -168,11 +192,14 @@ program
   .option("--port <port>", "Port to listen on")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
-    if (!(await checkCocodInstalled())) {
-      logger.error("cocod is not installed. Run 'routstrd onboard' first to install cocod.");
+    const config = await loadConfig();
+    if (!(await isCocodInstalled(config.cocodPath))) {
+      const installHint = config.cocodPath
+        ? `Configured cocod executable was not found: ${config.cocodPath}`
+        : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
+      logger.error(installHint);
       process.exit(1);
     }
-    const config = await loadConfig();
     await startDaemon({
       port: options.port || String(config.port || 8008),
       provider: options.provider,
@@ -354,6 +381,139 @@ program
       console.log(
         `   tokens p/c/t: ${entry.promptTokens}/${entry.completionTokens}/${entry.totalTokens} | request: ${reqId}`,
       );
+    });
+  });
+
+const walletCmd = program.command("wallet").description("Wallet operations");
+
+walletCmd
+  .command("status")
+  .description("Check wallet status")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/status");
+  });
+
+walletCmd
+  .command("unlock <passphrase>")
+  .description("Unlock the wallet")
+  .action(async (passphrase: string) => {
+    await handleDaemonCommand("/wallet/unlock", {
+      method: "POST",
+      body: { passphrase },
+    });
+  });
+
+walletCmd
+  .command("balance")
+  .description("Get wallet balance")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/balance");
+  });
+
+const walletReceiveCmd = walletCmd
+  .command("receive")
+  .description("Wallet receive operations");
+
+walletReceiveCmd
+  .command("cashu <token>")
+  .description("Receive a Cashu token")
+  .action(async (token: string) => {
+    await handleDaemonCommand("/wallet/receive/cashu", {
+      method: "POST",
+      body: { token },
+    });
+  });
+
+walletReceiveCmd
+  .command("bolt11 <amount>")
+  .description("Create a Lightning invoice")
+  .option("--mint-url <url>", "Mint URL to use")
+  .action(async (amount: string, options: { mintUrl?: string }) => {
+    try {
+      await ensureDaemonRunning();
+
+      const result = await callDaemon("/wallet/receive/bolt11", {
+        method: "POST",
+        body: {
+          amount: parsePositiveIntOrExit(amount, "amount"),
+          mintUrl: options.mintUrl,
+        },
+      });
+
+      const output = result.output as
+        | { invoice?: string; amount?: number; mintUrl?: string }
+        | undefined;
+
+      if (typeof output?.invoice === "string" && output.invoice) {
+        await printLightningInvoice(output.invoice);
+        return;
+      }
+
+      if (result.output !== undefined) {
+        console.log(JSON.stringify(result.output, null, 2));
+      }
+    } catch (error) {
+      console.error((error as Error).message);
+      process.exit(1);
+    }
+  });
+
+const walletSendCmd = walletCmd.command("send").description("Wallet send operations");
+
+walletSendCmd
+  .command("cashu <amount>")
+  .description("Create a Cashu token to send")
+  .option("--mint-url <url>", "Mint URL to use")
+  .action(async (amount: string, options: { mintUrl?: string }) => {
+    await handleDaemonCommand("/wallet/send/cashu", {
+      method: "POST",
+      body: {
+        amount: parsePositiveIntOrExit(amount, "amount"),
+        mintUrl: options.mintUrl,
+      },
+    });
+  });
+
+walletSendCmd
+  .command("bolt11 <invoice>")
+  .description("Pay a Lightning invoice")
+  .option("--mint-url <url>", "Mint URL to use")
+  .action(async (invoice: string, options: { mintUrl?: string }) => {
+    await handleDaemonCommand("/wallet/send/bolt11", {
+      method: "POST",
+      body: {
+        invoice,
+        mintUrl: options.mintUrl,
+      },
+    });
+  });
+
+const walletMintsCmd = walletCmd.command("mints").description("Wallet mint operations");
+
+walletMintsCmd
+  .command("list")
+  .description("List configured wallet mints")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/mints");
+  });
+
+walletMintsCmd
+  .command("add <url>")
+  .description("Add a wallet mint")
+  .action(async (url: string) => {
+    await handleDaemonCommand("/wallet/mints", {
+      method: "POST",
+      body: { url },
+    });
+  });
+
+walletMintsCmd
+  .command("info <url>")
+  .description("Get wallet mint info")
+  .action(async (url: string) => {
+    await handleDaemonCommand("/wallet/mints/info", {
+      method: "POST",
+      body: { url },
     });
   });
 

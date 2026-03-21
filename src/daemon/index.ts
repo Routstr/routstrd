@@ -16,11 +16,8 @@ import {
   saveDaemonConfig,
 } from "./config-store";
 import { createBunSqliteDriver } from "./sqlite-driver";
-import {
-  createWalletAdapter,
-  parseBalances,
-  runWalletCommand,
-} from "./wallet";
+import { createWalletAdapter } from "./wallet";
+import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 
@@ -37,7 +34,9 @@ async function main(): Promise<void> {
   saveDaemonConfig(updatedConfig);
 
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
-  const store = await createSdkStore({ driver: sqliteDriver });
+  const sdkStore = createSdkStore({ driver: sqliteDriver });
+  await sdkStore.hydrate;
+  const store = sdkStore.store;
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);
@@ -46,7 +45,11 @@ async function main(): Promise<void> {
   const { ensureProvidersBootstrapped, getRoutstr21Models } =
     createModelService(modelManager);
 
-  const walletAdapter = await createWalletAdapter();
+  const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+  const walletAdapter = await createWalletAdapter({
+    cocodPath: config.cocodPath,
+    walletClient,
+  });
 
   const server = createServer();
   server.on(
@@ -55,6 +58,7 @@ async function main(): Promise<void> {
       provider,
       server,
       store,
+      walletClient,
       walletAdapter,
       storageAdapter,
       providerRegistry,
@@ -62,8 +66,6 @@ async function main(): Promise<void> {
       modelManager,
       ensureProvidersBootstrapped,
       getRoutstr21Models,
-      runWalletCommand,
-      parseBalances,
     }),
   );
 
