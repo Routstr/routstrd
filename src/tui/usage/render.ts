@@ -121,22 +121,37 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, w
   const totalVisibleCost = totals.satsCost;
   const avgCost = entryCount > 0 ? totalVisibleCost / entryCount : 0;
   const avgTokens = entryCount > 0 ? totals.totalTokens / entryCount : 0;
-  const halfWidth = Math.floor((width - 6) / 2);
 
   const leftBox = [
     `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${formatCost(totalVisibleCost)} sats${COLORS.reset}`,
     `${COLORS.bold}Total Requests:${COLORS.reset} ${formatReqs(entryCount)}`,
     `${COLORS.bold}Avg Cost/Req:${COLORS.reset} ${formatCost(avgCost)} sats`,
-  ].map((l) => l.padEnd(halfWidth));
+  ];
 
   const rightBox = [
     `${COLORS.bold}Total Tokens:${COLORS.reset} ${formatNumber(totals.totalTokens)}`,
     `${COLORS.bold}Avg Tokens/Req:${COLORS.reset} ${formatNumber(Math.round(avgTokens))}`,
     `${COLORS.bold}Prompt/Comp:${COLORS.reset} ${(totals.promptTokens / Math.max(1, totals.completionTokens)).toFixed(2)}x`,
-  ].map((l) => l.padEnd(halfWidth));
+  ];
 
-  let output = renderBox(leftBox, width, "Summary Stats");
-  output += "\n" + renderBox(rightBox, width, "Token Stats");
+  const halfWidth1 = Math.floor(width / 2);
+  const halfWidth2 = width - halfWidth1;
+
+  const leftBoxStr = renderBox(leftBox, halfWidth1, "Stats of Sats");
+  const rightBoxStr = renderBox(rightBox, halfWidth2, "Token Stats");
+
+  const leftLines = leftBoxStr.split("\n");
+  const rightLines = rightBoxStr.split("\n");
+  const maxLines = Math.max(leftLines.length, rightLines.length);
+
+  const combinedLines: string[] = [];
+  for (let i = 0; i < maxLines; i++) {
+    const l = leftLines[i] || " ".repeat(halfWidth1);
+    const r = rightLines[i] || " ".repeat(halfWidth2);
+    combinedLines.push(l + r);
+  }
+
+  let output = combinedLines.join("\n");
 
   // Display all balances (wallet, cached tokens, API keys) if available
   if (balance && balance.keys.length > 0) {
