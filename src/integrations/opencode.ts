@@ -41,18 +41,16 @@ export async function installOpencodeIntegration(
     logger.log(`Using existing API key for ${OPENCODE_NAME}`);
   } else {
     apiKey = generateApiKey();
-    // Add new clientId entry
-    store.setState((prev: { clientIds: any[] }) => ({
-      clientIds: [
-        ...(prev.clientIds || []),
-        {
-          clientId: OPENCODE_CLIENT_ID,
-          name: OPENCODE_NAME,
-          apiKey,
-          createdAt: Date.now(),
-        },
-      ],
-    }));
+    // Add new clientId entry using proper store action
+    store.getState().setClientIds((prev) => [
+      ...(prev || []),
+      {
+        clientId: OPENCODE_CLIENT_ID,
+        name: OPENCODE_NAME,
+        apiKey,
+        createdAt: Date.now(),
+      },
+    ]);
     logger.log(`Created new API key for ${OPENCODE_NAME}`);
   }
 

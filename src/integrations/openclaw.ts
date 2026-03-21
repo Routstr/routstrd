@@ -83,18 +83,16 @@ export async function installOpenClawIntegration(
     logger.log(`Using existing API key for ${OPENCLAW_NAME}`);
   } else {
     apiKey = generateApiKey();
-    // Add new clientId entry
-    store.setState((prev: { clientIds: any[] }) => ({
-      clientIds: [
-        ...(prev.clientIds || []),
-        {
-          clientId: OPENCLAW_CLIENT_ID,
-          name: OPENCLAW_NAME,
-          apiKey,
-          createdAt: Date.now(),
-        },
-      ],
-    }));
+    // Add new clientId entry using proper store action
+    store.getState().setClientIds((prev) => [
+      ...(prev || []),
+      {
+        clientId: OPENCLAW_CLIENT_ID,
+        name: OPENCLAW_NAME,
+        apiKey,
+        createdAt: Date.now(),
+      },
+    ]);
     logger.log(`Created new API key for ${OPENCLAW_NAME}`);
   }
 

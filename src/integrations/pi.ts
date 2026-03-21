@@ -56,18 +56,16 @@ export async function installPiIntegration(
     logger.log(`Using existing API key for ${PI_NAME}`);
   } else {
     apiKey = generateApiKey();
-    // Add new clientId entry
-    store.setState((prev: { clientIds: any[] }) => ({
-      clientIds: [
-        ...(prev.clientIds || []),
-        {
-          clientId: PI_CLIENT_ID,
-          name: PI_NAME,
-          apiKey,
-          createdAt: Date.now(),
-        },
-      ],
-    }));
+    // Add new clientId entry using proper store action
+    store.getState().setClientIds((prev) => [
+      ...(prev || []),
+      {
+        clientId: PI_CLIENT_ID,
+        name: PI_NAME,
+        apiKey,
+        createdAt: Date.now(),
+      },
+    ]);
     logger.log(`Created new API key for ${PI_NAME}`);
   }
 
