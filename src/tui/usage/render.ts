@@ -62,13 +62,21 @@ export function renderSeparator(width: number): string {
 
 export function renderBox(lines: string[], width: number, title?: string): string {
   const result: string[] = [];
-  const innerWidth = width - 4;
-  result.push(`┌─${title ? ` ${title} ` : " "}${("─".repeat(innerWidth - (title?.length || 0) - 2))}─┐`);
-  for (const line of lines) {
-    const padding = innerWidth - stripAnsi(line).length;
-    result.push(`│ ${line}${" ".repeat(Math.max(0, padding))} │`);
+  const innerWidth = Math.max(0, width - 4);
+  
+  if (title) {
+    const titleStr = ` ${title} `;
+    const dashCount = Math.max(0, width - 2 - titleStr.length - 1);
+    result.push(`┌─${titleStr}${"─".repeat(dashCount)}┐`);
+  } else {
+    result.push(`┌${"─".repeat(Math.max(0, width - 2))}┐`);
   }
-  result.push(`└${"─".repeat(width - 2)}─┘`);
+  
+  for (const line of lines) {
+    const padding = Math.max(0, innerWidth - stripAnsi(line).length);
+    result.push(`│ ${line}${" ".repeat(padding)} │`);
+  }
+  result.push(`└${"─".repeat(Math.max(0, width - 2))}┘`);
   return result.join("\n");
 }
 
@@ -232,7 +240,6 @@ export function renderToday(stats: UsageStats, width: number): string {
   ];
 
   let output = renderBox(summaryLines, width, "Today");
-  output += "\n" + renderBox([], width, "Hourly Activity");
 
   const hourLines: string[] = [];
   const maxHourCost = Math.max(...Array.from(hourly.values()).map((h) => h.satsCost), 1);
@@ -262,7 +269,7 @@ export function renderToday(stats: UsageStats, width: number): string {
   }
   endBarSection("hourly");
 
-  output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width);
+  output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width, "Hourly Activity");
 
   const days = Array.from(getDayStats(stats.entries).values()).slice(0, 7);
   if (days.length > 1) {
