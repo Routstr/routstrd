@@ -13,7 +13,7 @@ import {
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
-import type { BalanceInfo } from "./data.ts";
+import type { BalanceInfo, StatusInfo } from "./data.ts";
 import type { TabId, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
@@ -115,7 +115,7 @@ export function renderBarChart(
 }
 
 
-export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, width: number): string {
+export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
   const totals = getTotals(stats.entries);
   const entryCount = stats.entries.length;
   const totalVisibleCost = totals.satsCost;
@@ -153,6 +153,22 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, w
 
   let output = combinedLines.join("\n");
 
+  // Status and Balance boxes side by side
+  const statusLines: string[] = [];
+  if (status) {
+    const daemonColor = status.daemon === "running" ? COLORS.green : COLORS.red;
+    const walletColor = status.wallet === "connected" ? COLORS.green : COLORS.red;
+    const modeColor = COLORS.cyan;
+    statusLines.push(`${COLORS.bold}Daemon:${COLORS.reset} ${daemonColor}${status.daemon}${COLORS.reset}`);
+    statusLines.push(`${COLORS.bold}Wallet:${COLORS.reset} ${walletColor}${status.wallet}${COLORS.reset}`);
+    statusLines.push(`${COLORS.bold}Mode:${COLORS.reset} ${modeColor}${status.mode}${COLORS.reset}`);
+    if (status.error) {
+      statusLines.push(`${COLORS.bold}Error:${COLORS.reset} ${COLORS.red}${status.error}${COLORS.reset}`);
+    }
+  } else {
+    statusLines.push(`${COLORS.dim}Status unavailable${COLORS.reset}`);
+  }
+
   // Display all balances (wallet, cached tokens, API keys) if available
   if (balance && balance.keys.length > 0) {
     const balanceLines: string[] = [];
@@ -181,13 +197,42 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, w
       balanceLines.push(`${COLORS.dim}No funds available${COLORS.reset}`);
     }
 
-    output = renderBox(balanceLines, width, "Balance") + "\n" + output;
+    // Render status and balance boxes side by side
+    const balanceBoxStr = renderBox(balanceLines, halfWidth1, "Balance");
+    const statusBoxStr = renderBox(statusLines, halfWidth2, "System Status");
+    const balanceBoxLines = balanceBoxStr.split("\n");
+    const statusBoxLines = statusBoxStr.split("\n");
+    const statusBalanceMaxLines = Math.max(balanceBoxLines.length, statusBoxLines.length);
+
+    const statusBalanceLines: string[] = [];
+    for (let i = 0; i < statusBalanceMaxLines; i++) {
+      const b = balanceBoxLines[i] || " ".repeat(halfWidth1);
+      const s = statusBoxLines[i] || " ".repeat(halfWidth2);
+      statusBalanceLines.push(b + s);
+    }
+    output = statusBalanceLines.join("\n") + "\n" + output;
   } else if (balance && balance.keys.length === 0) {
+    // Only balance is empty, show status next to empty balance box
     const balanceLines: string[] = [
       `${COLORS.bold}Total Balance:${COLORS.reset} ${COLORS.red}0 sat${COLORS.reset}`,
       `${COLORS.dim}No funds available${COLORS.reset}`,
     ];
-    output = renderBox(balanceLines, width, "Balance") + "\n" + output;
+    const balanceBoxStr = renderBox(balanceLines, halfWidth1, "Balance");
+    const statusBoxStr = renderBox(statusLines, halfWidth2, "System Status");
+    const balanceBoxLines = balanceBoxStr.split("\n");
+    const statusBoxLines = statusBoxStr.split("\n");
+    const statusBalanceMaxLines = Math.max(balanceBoxLines.length, statusBoxLines.length);
+
+    const statusBalanceLines: string[] = [];
+    for (let i = 0; i < statusBalanceMaxLines; i++) {
+      const b = balanceBoxLines[i] || " ".repeat(halfWidth1);
+      const s = statusBoxLines[i] || " ".repeat(halfWidth2);
+      statusBalanceLines.push(b + s);
+    }
+    output = statusBalanceLines.join("\n") + "\n" + output;
+  } else {
+    // No balance data, just show status box full width
+    output = renderBox(statusLines, width, "System Status") + "\n" + output;
   }
 
   const modelStats = getModelStats(stats.entries);
@@ -480,9 +525,9 @@ export function renderRecent(stats: UsageStats, width: number): string {
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, width: number): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
   switch (activeTab) {
-    case "overview": return renderOverview(stats, balance, width);
+    case "overview": return renderOverview(stats, balance, status, width);
     case "today": return renderToday(stats, width);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);

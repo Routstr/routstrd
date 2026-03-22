@@ -108,12 +108,15 @@ export function createDaemonRequestHandler(deps: {
       try {
         const balancesOutput = await deps.runWalletCommand(["balance"]);
         const balances = deps.parseBalances(balancesOutput);
+        const state = deps.store.getState();
+        const mode = state.mode || deps.mode || "apikeys";
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
               daemon: "running",
               wallet: "connected",
+              mode,
               balances,
             },
           }),

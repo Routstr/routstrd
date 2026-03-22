@@ -15,6 +15,39 @@ export interface BalanceInfo {
   apikeysCalled: number;
 }
 
+export interface StatusInfo {
+  daemon: string;
+  wallet: string;
+  mode: "xcashu" | "lazyrefund" | "apikeys";
+  error?: string;
+}
+
+export async function fetchStatus(): Promise<StatusInfo | null> {
+  try {
+    const running = await isDaemonRunning();
+    if (!running) return null;
+
+    const result = await callDaemon("/status");
+    if (result.error) return null;
+
+    const output = result.output as {
+      daemon?: string;
+      wallet?: string;
+      mode?: "xcashu" | "lazyrefund" | "apikeys";
+      error?: string;
+    };
+
+    return {
+      daemon: output?.daemon || "unknown",
+      wallet: output?.wallet || "unknown",
+      mode: output?.mode || "apikeys",
+      error: output?.error,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchBalance(): Promise<BalanceInfo | null> {
   try {
     const running = await isDaemonRunning();

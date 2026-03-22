@@ -1,5 +1,5 @@
 import { TABS } from "./constants.ts";
-import { fetchBalance, fetchUsage, type BalanceInfo } from "./data.ts";
+import { fetchBalance, fetchStatus, fetchUsage, type BalanceInfo, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -45,6 +45,7 @@ export async function runUsageTui(): Promise<void> {
   let currentTab: TabId = "overview";
   let stats: UsageStats | null = null;
   let balance: BalanceInfo | null = null;
+  let status: StatusInfo | null = null;
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let shouldUpdate = true;
   let autoRefresh = true;
@@ -88,6 +89,7 @@ export async function runUsageTui(): Promise<void> {
       if (forceFetch || shouldUpdate) {
         stats = await fetchUsage(1000);
         balance = await fetchBalance();
+        status = await fetchStatus();
         shouldUpdate = false;
       }
 
@@ -102,7 +104,7 @@ export async function runUsageTui(): Promise<void> {
         return;
       }
 
-      const content = renderTabContent(currentTab, stats, balance, width);
+      const content = renderTabContent(currentTab, stats, balance, status, width);
       const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
       const chrome = renderHeader(currentTab, width) + renderTabs(currentTab) + renderSeparator(width) + renderSearchBar();
       const chromeLines = chrome.split("\n").length - 1;
