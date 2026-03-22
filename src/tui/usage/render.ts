@@ -301,11 +301,17 @@ export function renderToday(stats: UsageStats, width: number): string {
 
   let output = renderBox(summaryLines, width, "Today");
 
+  const days = Array.from(getDayStats(stats.entries).values()).slice(0, 7);
+  if (days.length > 1) {
+    const dayLines = days.slice(1).map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
+    output += "\n" + renderBox(dayLines, width, "Recent Days");
+  }
+
   const hourLines: string[] = [];
   const maxHourCost = Math.max(...Array.from(hourly.values()).map((h) => h.satsCost), 1);
   const totalTodayCost = Math.max(todayStats.satsCost, 1);
   const hourLabels: string[] = [];
-  for (let h = 0; h <= currentHour; h++) {
+  for (let h = currentHour; h >= 0; h--) {
     const hStat = hourly.get(h);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
@@ -313,12 +319,12 @@ export function renderToday(stats: UsageStats, width: number): string {
   }
   const maxHourLabel = Math.max(...hourLabels.map((l) => l.length));
   startBarSection("hourly", maxHourLabel);
-  for (let i = 0; i <= currentHour; i++) {
+  for (let i = currentHour; i >= 0; i--) {
     const hStat = hourly.get(i);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
     hourLines.push(renderBarChart(
-      hourLabels[i]!,
+      hourLabels[currentHour - i]!,
       cost,
       maxHourCost,
       width - 4,
@@ -330,12 +336,6 @@ export function renderToday(stats: UsageStats, width: number): string {
   endBarSection("hourly");
 
   output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width, "Hourly Activity");
-
-  const days = Array.from(getDayStats(stats.entries).values()).slice(0, 7);
-  if (days.length > 1) {
-    const dayLines = days.slice(1).map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
-    output += "\n" + renderBox(dayLines, width, "Recent Days");
-  }
 
   return output;
 }
