@@ -21,34 +21,23 @@ function getClientIdFromRequest(
   store: { getState(): any },
 ): string | undefined {
   const authHeader = req.headers.authorization;
-  logger.log("[getClientIdFromRequest] authHeader:", authHeader);
   
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    logger.log("[getClientIdFromRequest] No valid Bearer auth header found");
     return undefined;
   }
 
   const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
-  logger.log("[getClientIdFromRequest] apiKey:", apiKey);
   
   if (!apiKey.startsWith("sk-")) {
-    logger.log("[getClientIdFromRequest] API key does not start with 'sk-'");
     return undefined;
   }
 
   const state = store.getState();
   const clientIds = state.clientIds || [];
-  logger.log("[getClientIdFromRequest] clientIds in store:", JSON.stringify(clientIds));
   
   const matchingClient = (clientIds as { clientId: string; apiKey: string }[]).find(
     (c) => c.apiKey === apiKey,
   );
-
-  if (matchingClient) {
-    logger.log("[getClientIdFromRequest] Found matching clientId:", matchingClient.clientId);
-  } else {
-    logger.log("[getClientIdFromRequest] No matching client found for apiKey:", apiKey);
-  }
   
   return matchingClient?.clientId;
 }
