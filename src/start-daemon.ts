@@ -1,5 +1,7 @@
 import { LOG_FILE } from "./utils/config";
 import { logger } from "./utils/logger";
+import { existsSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 
 export async function startDaemon(
   options: { port?: string; provider?: string } = {},
@@ -31,17 +33,23 @@ export async function startDaemon(
     args.push("--provider", options.provider);
   }
 
-  const logFile = Bun.file(LOG_FILE);
+  // Ensure log directory exists
+  const logDir = dirname(LOG_FILE);
+  if (!existsSync(logDir)) {
+    mkdirSync(logDir, { recursive: true });
+  }
 
-  const proc = Bun.spawn(
-    ["bun", "run", `${import.meta.dir}/daemon/index.ts`, ...args],
-    {
-      stdout: logFile,
-      stderr: logFile,
-      stdin: "ignore",
-      detached: true,
-    },
-  );
+  // Use shell redirection to append stdout/stderr to log file
+  // Bun.file() overwrites, so we need shell >> for appending
+  const daemonScript = `${import.meta.dir}/daemon/index.ts`;
+  const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")} >> "${LOG_FILE}" 2>&1`;
+
+  const proc = Bun.spawn(["sh", "-c", shellCmd], {
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "ignore",
+    detached: true,
+  });
 
   proc.unref();
 

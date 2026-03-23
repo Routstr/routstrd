@@ -445,7 +445,6 @@ export function createDaemonRequestHandler(deps: {
           res.on("finish", () => {
             if (capturedUsage) {
               const usageRequestId = capturedResponseId || requestId || "unknown";
-              logger.log(req);
               usageTracker.append({
                 id:
                   usageRequestId === "unknown"
