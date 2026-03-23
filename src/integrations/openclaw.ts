@@ -1,14 +1,18 @@
+import { randomBytes } from "crypto";
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
+import type { SdkStore } from "@routstr/sdk";
 
 const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "", ".openclaw/openclaw.json");
 const OPENCLAW_PROVIDER_ID = "routstr";
 const OPENCLAW_API_BASE = "http://localhost:8008/v1";
 const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/minimax-m2.5";
 const OPENCLAW_DEFAULT_FALLBACK_MODEL = "routstr/kimi-k2.5";
+const OPENCLAW_CLIENT_ID = "openclaw";
+const OPENCLAW_NAME = "OpenClaw";
 
 type RoutstrModel = {
   id: string;
@@ -54,10 +58,43 @@ function toAlias(modelId: string): string {
   return modelId;
 }
 
-export async function installOpenClawIntegration(config: RoutstrdConfig): Promise<void> {
+function generateApiKey(): string {
+  const bytes = randomBytes(24);
+  return `sk-${bytes.toString("hex")}`;
+}
+
+export async function installOpenClawIntegration(
+  config: RoutstrdConfig,
+  store: SdkStore,
+): Promise<void> {
   logger.log("\nInstalling routstr models in openclaw.json...");
 
   const port = config.port || 8008;
+
+  // Get or create clientId entry for OpenClaw
+  const state = store.getState();
+  const existingClient = (state.clientIds || []).find(
+    (c: { clientId: string }) => c.clientId === OPENCLAW_CLIENT_ID,
+  );
+
+  let apiKey: string;
+  if (existingClient) {
+    apiKey = existingClient.apiKey;
+    logger.log(`Using existing API key for ${OPENCLAW_NAME}`);
+  } else {
+    apiKey = generateApiKey();
+    // Add new clientId entry using proper store action
+    store.getState().setClientIds((prev) => [
+      ...(prev || []),
+      {
+        clientId: OPENCLAW_CLIENT_ID,
+        name: OPENCLAW_NAME,
+        apiKey,
+        createdAt: Date.now(),
+      },
+    ]);
+    logger.log(`Created new API key for ${OPENCLAW_NAME}`);
+  }
 
   let openclawConfig: OpenClawConfig = {};
 
@@ -103,7 +140,7 @@ export async function installOpenClawIntegration(config: RoutstrdConfig): Promis
 
     openclawConfig.models.providers[OPENCLAW_PROVIDER_ID] = {
       baseUrl: OPENCLAW_API_BASE,
-      apiKey: openclawConfig.models.providers[OPENCLAW_PROVIDER_ID]?.apiKey || "placehodler",
+      apiKey,
       api: "openai-completions",
       models: providerModels,
     };

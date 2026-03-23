@@ -18,11 +18,14 @@ import {
 } from "../wallet/cocod-client";
 import { decodeCashuTokenAmount } from "../wallet";
 
+type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
+
 type WalletStatusOutput = {
   daemon: "running";
   wallet: "connected" | "error";
   walletState: CocodState;
   balances?: Record<string, number>;
+  mode: ClientMode;
   error?: string;
 };
 
@@ -38,7 +41,38 @@ type DaemonDeps = {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
+  mode?: ClientMode;
 };
+
+/**
+ * Extracts the client ID from an incoming request by looking up the API key
+ * in the store's clientIds list.
+ */
+function getClientIdFromRequest(
+  req: IncomingMessage,
+  store: { getState(): any },
+): string | undefined {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return undefined;
+  }
+
+  const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
+
+  if (!apiKey.startsWith("sk-")) {
+    return undefined;
+  }
+
+  const state = store.getState();
+  const clientIds = state.clientIds || [];
+
+  const matchingClient = (clientIds as { clientId: string; apiKey: string }[]).find(
+    (c) => c.apiKey === apiKey,
+  );
+
+  return matchingClient?.clientId;
+}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -157,7 +191,14 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function getCurrentMode(deps: DaemonDeps): ClientMode {
+  const stateMode = deps.store.getState()?.mode;
+  return stateMode || deps.mode || "apikeys";
+}
+
 async function buildStatusOutput(deps: DaemonDeps): Promise<WalletStatusOutput> {
+  const mode = getCurrentMode(deps);
+
   try {
     const walletState = await deps.walletClient.getStatus();
     if (walletState !== "UNLOCKED") {
@@ -165,6 +206,7 @@ async function buildStatusOutput(deps: DaemonDeps): Promise<WalletStatusOutput> 
         daemon: "running",
         wallet: "error",
         walletState,
+        mode,
         error: getWalletStateMessage(walletState),
       };
     }
@@ -175,12 +217,14 @@ async function buildStatusOutput(deps: DaemonDeps): Promise<WalletStatusOutput> 
       wallet: "connected",
       walletState,
       balances,
+      mode,
     };
   } catch (error) {
     return {
       daemon: "running",
       wallet: "error",
       walletState: "ERROR",
+      mode,
       error: toErrorMessage(error),
     };
   }
@@ -582,6 +626,7 @@ export function createDaemonRequestHandler(deps: DaemonDeps) {
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
+        mode: deps.mode,
       });
 
       const isStream = bodyObj.stream === true;
@@ -615,6 +660,7 @@ export function createDaemonRequestHandler(deps: DaemonDeps) {
           res.on("finish", () => {
             if (capturedUsage) {
               const usageRequestId = capturedResponseId || requestId || "unknown";
+              logger.log(req);
               usageTracker.append({
                 id:
                   usageRequestId === "unknown"
@@ -624,6 +670,7 @@ export function createDaemonRequestHandler(deps: DaemonDeps) {
                 modelId,
                 baseUrl: usageBaseUrl,
                 requestId: usageRequestId,
+                client: getClientIdFromRequest(req, deps.store),
                 ...capturedUsage,
               });
               logger.log(
@@ -652,6 +699,7 @@ export function createDaemonRequestHandler(deps: DaemonDeps) {
           modelId,
           baseUrl: usageBaseUrl,
           requestId: responseRequestId,
+          client: getClientIdFromRequest(req, deps.store),
           ...nonStreamUsage,
         });
       }

@@ -34,9 +34,7 @@ async function main(): Promise<void> {
   saveDaemonConfig(updatedConfig);
 
   const sqliteDriver = createBunSqliteDriver(DB_PATH);
-  const sdkStore = createSdkStore({ driver: sqliteDriver });
-  await sdkStore.hydrate;
-  const store = sdkStore.store;
+  const { store } = await createSdkStore({ driver: sqliteDriver });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);
@@ -66,6 +64,7 @@ async function main(): Promise<void> {
       modelManager,
       ensureProvidersBootstrapped,
       getRoutstr21Models,
+      mode: config.mode || "apikeys",
     }),
   );
 

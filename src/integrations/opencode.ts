@@ -1,21 +1,58 @@
+import { randomBytes } from "crypto";
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
+import type { SdkStore } from "@routstr/sdk";
 
 const OPENCODE_CONFIG_PATH = join(process.env.HOME || "", ".config/opencode/opencode.json");
 const OPENCODE_SMALL_MODEL = "routstr/minimax-m2.5";
+const OPENCODE_CLIENT_ID = "opencode";
+const OPENCODE_NAME = "OpenCode";
 
 type RoutstrModel = {
   id: string;
   name?: string;
 };
 
-export async function installOpencodeIntegration(config: RoutstrdConfig): Promise<void> {
+function generateApiKey(): string {
+  const bytes = randomBytes(24);
+  return `sk-${bytes.toString("hex")}`;
+}
+
+export async function installOpencodeIntegration(
+  config: RoutstrdConfig,
+  store: SdkStore,
+): Promise<void> {
   logger.log("\nInstalling routstr models in opencode.json...");
 
   const port = config.port || 8008;
+
+  // Get or create clientId entry for OpenCode
+  const state = store.getState();
+  const existingClient = (state.clientIds || []).find(
+    (c: { clientId: string }) => c.clientId === OPENCODE_CLIENT_ID,
+  );
+
+  let apiKey: string;
+  if (existingClient) {
+    apiKey = existingClient.apiKey;
+    logger.log(`Using existing API key for ${OPENCODE_NAME}`);
+  } else {
+    apiKey = generateApiKey();
+    // Add new clientId entry using proper store action
+    store.getState().setClientIds((prev) => [
+      ...(prev || []),
+      {
+        clientId: OPENCODE_CLIENT_ID,
+        name: OPENCODE_NAME,
+        apiKey,
+        createdAt: Date.now(),
+      },
+    ]);
+    logger.log(`Created new API key for ${OPENCODE_NAME}`);
+  }
 
   let opencodeConfig: {
     provider?: Record<string, {
@@ -68,7 +105,7 @@ export async function installOpencodeIntegration(config: RoutstrdConfig): Promis
       name: "routstr",
       options: {
         baseURL: `http://localhost:${port}/`,
-        apiKey: "",
+        apiKey,
         includeUsage: true,
       },
       models: modelsObj,

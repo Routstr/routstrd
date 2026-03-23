@@ -5,12 +5,15 @@
   "type": "module",
   "private": false,
   "bin": {
-    "routstrd": "./src/index.ts"
+    "routstrd": "./dist/index.js"
   },
   "scripts": {
     "start": "bun src/index.ts start",
+    "monitor": "bun src/index.ts monitor",
     "lint": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js",
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -21,10 +24,9 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "^0.2.0",
+    "@routstr/sdk": "^0.2.2",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
-    "better-sqlite3": "^11.7.2",
     "commander": "^14.0.2",
     "qrcode": "^1.5.4",
     "rxjs": "^7.8.1",

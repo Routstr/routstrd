@@ -18,6 +18,8 @@ import {
 } from "./utils/config";
 import { logger } from "./utils/logger";
 import { setupIntegration } from "./integrations";
+import { createSdkStore } from "@routstr/sdk";
+import { createBunSqliteDriver } from "./daemon/sqlite-driver";
 import * as QRCode from "qrcode";
 import {
   isCocodInstalled,
@@ -42,6 +44,7 @@ type UsageEntry = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  client?: string;
 };
 
 const cliVersion = "0.1.0";
@@ -164,7 +167,12 @@ async function initDaemon(): Promise<void> {
   }
 
   await startDaemon({ port: String(config.port || 8008) });
-  await setupIntegration(config);
+
+  // Create SDK store for integrations
+  const sqliteDriver = createBunSqliteDriver(DB_PATH);
+  const { store } = await createSdkStore({ driver: sqliteDriver });
+
+  await setupIntegration(config, store);
 
   logger.log("\nInitialization complete!");
   logger.log(
@@ -375,13 +383,23 @@ program
       const time = new Date(entry.timestamp).toISOString();
       const provider = entry.baseUrl || "unknown";
       const reqId = entry.requestId || "unknown";
+      const client = entry.client ? ` | client: ${entry.client}` : "";
       console.log(
-        `${index + 1}. ${time} | ${entry.modelId} | ${provider} | ${entry.satsCost.toFixed(3)} sats`,
+        `${index + 1}. ${time} | ${entry.modelId} | ${provider} | ${entry.satsCost.toFixed(3)} sats${client}`,
       );
       console.log(
         `   tokens p/c/t: ${entry.promptTokens}/${entry.completionTokens}/${entry.totalTokens} | request: ${reqId}`,
       );
     });
+  });
+
+// Monitor - interactive TUI
+program
+  .command("monitor")
+  .description("Open interactive TUI for usage monitoring (htop-like)")
+  .action(async () => {
+    const { runUsageTui } = await import("./cli/usage-tui");
+    await runUsageTui();
   });
 
 const walletCmd = program.command("wallet").description("Wallet operations");
@@ -523,6 +541,116 @@ program
   .description("Stop the background daemon")
   .action(async () => {
     await handleDaemonCommand("/stop", { method: "POST" });
+  });
+
+// Restart
+program
+  .command("restart")
+  .description("Restart the background daemon")
+  .option("--port <port>", "Port to listen on")
+  .option("-p, --provider <provider>", "Default provider to use")
+  .action(async (options: { port?: string; provider?: string }) => {
+    const config = await loadConfig();
+    const wasRunning = await isDaemonRunning();
+
+    if (wasRunning) {
+      console.log("Stopping daemon...");
+      await callDaemon("/stop", { method: "POST" });
+
+      // Wait for daemon to fully stop
+      for (let i = 0; i < 50; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (!(await isDaemonRunning())) {
+          break;
+        }
+      }
+
+      if (await isDaemonRunning()) {
+        logger.error("Daemon failed to stop within 5 seconds");
+        process.exit(1);
+      }
+      console.log("Daemon stopped.");
+    } else {
+      console.log("Daemon was not running.");
+    }
+
+    console.log("Starting daemon...");
+    await startDaemon({
+      port: options.port || String(config.port || 8008),
+      provider: options.provider,
+    });
+    console.log("Daemon restarted.");
+  });
+
+// Mode
+program
+  .command("mode")
+  .description("Set the client mode (xcashu, lazyrefund, or apikeys)")
+  .action(async () => {
+    const config = await loadConfig();
+    const currentMode = config.mode || "apikeys";
+
+    console.log("Select client mode:");
+    console.log("  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.");
+    console.log("  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.");
+    console.log("  3) lazyrefund - Refunds are performed periodically which also means identities are reset periodically.");
+    console.log(`\nCurrent mode: ${currentMode}`);
+
+    const modes: Array<"apikeys" | "xcashu" | "lazyrefund"> = ["apikeys", "xcashu", "lazyrefund"];
+
+    const selectedIndex = await new Promise<number>((resolve) => {
+      const rl = require("readline").createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rl.question("\nEnter choice (1-3): ", (answer: string) => {
+        rl.close();
+        const num = parseInt(answer, 10);
+        resolve(Number.isFinite(num) && num >= 1 && num <= 3 ? num - 1 : 0);
+      });
+    });
+
+    const selectedMode = modes[selectedIndex];
+
+    if (selectedMode === currentMode) {
+      console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
+      return;
+    }
+
+    // Update config
+    const updatedConfig: RoutstrdConfig = {
+      ...config,
+      mode: selectedMode,
+    };
+    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+    console.log(`Mode set to '${selectedMode}'. Restarting daemon...`);
+
+    // Restart daemon
+    const wasRunning = await isDaemonRunning();
+    if (wasRunning) {
+      console.log("Stopping daemon...");
+      await callDaemon("/stop", { method: "POST" });
+
+      for (let i = 0; i < 50; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (!(await isDaemonRunning())) {
+          break;
+        }
+      }
+
+      if (await isDaemonRunning()) {
+        logger.error("Daemon failed to stop within 5 seconds");
+        process.exit(1);
+      }
+      console.log("Daemon stopped.");
+    }
+
+    console.log("Starting daemon...");
+    await startDaemon({
+      port: String(config.port || 8008),
+      provider: config.provider || undefined,
+    });
+    console.log(`Daemon restarted with mode '${selectedMode}'.`);
   });
 
 // Logs
