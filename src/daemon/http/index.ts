@@ -87,7 +87,15 @@ async function readBody(req: IncomingMessage): Promise<string> {
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
   const bodyText = await readBody(req);
-  return bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {};
+  if (!bodyText) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(bodyText) as Record<string, unknown>;
+  } catch {
+    throw new CocodHttpError(400, "Invalid JSON body.");
+  }
 }
 
 function parseLimit(value: string | null, fallback = 10): number {
