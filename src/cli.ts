@@ -371,7 +371,7 @@ program
   .command("monitor")
   .description("Open interactive TUI for usage monitoring (htop-like)")
   .action(async () => {
-    const { runUsageTui } = await import("./cli/usage-tui");
+    const { runUsageTui } = await import("./tui/usage/index.ts");
     await runUsageTui();
   });
 
