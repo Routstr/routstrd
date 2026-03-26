@@ -1,46 +1,11 @@
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
-import { ReadableStream as WebReadableStream } from "stream/web";
-import { routeRequests, InsufficientBalanceError } from "@routstr/sdk";
-import { createSSEParserTransform } from "../sse";
 import {
-  createUsageTracker,
-  extractResponseId,
-  extractUsageFromResponseBody,
-  resolveUsageBaseUrl,
-} from "../usage";
-import type { UsageData } from "../types";
+  routeRequests,
+  InsufficientBalanceError,
+  getDefaultUsageTrackingDriver,
+} from "@routstr/sdk";
 import { logger } from "../../utils/logger";
-
-/**
- * Extracts the client ID from an incoming request by looking up the API key
- * in the store's clientIds list.
- */
-function getClientIdFromRequest(
-  req: IncomingMessage,
-  store: { getState(): any },
-): string | undefined {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return undefined;
-  }
-
-  const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
-  
-  if (!apiKey.startsWith("sk-")) {
-    return undefined;
-  }
-
-  const state = store.getState();
-  const clientIds = state.clientIds || [];
-  
-  const matchingClient = (clientIds as { clientId: string; apiKey: string }[]).find(
-    (c) => c.apiKey === apiKey,
-  );
-  
-  return matchingClient?.clientId;
-}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -75,8 +40,6 @@ export function createDaemonRequestHandler(deps: {
   parseBalances: (output: string) => Record<string, number>;
   mode?: "xcashu" | "lazyrefund" | "apikeys";
 }) {
-  const usageTracker = createUsageTracker(deps.store);
-
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
@@ -327,9 +290,30 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
-        const output = usageTracker.listRecent(parseLimit(url.searchParams.get("limit")));
+        const usageDriver = getDefaultUsageTrackingDriver();
+        const limit = parseLimit(url.searchParams.get("limit"));
+        const entries = await usageDriver.list({ limit });
+        const totalEntries = await usageDriver.count();
+        const totalSatsCost = (
+          await usageDriver.list()
+        ).reduce((sum, entry) => sum + (entry.satsCost || 0), 0);
+        const recentSatsCost = entries.reduce(
+          (sum, entry) => sum + (entry.satsCost || 0),
+          0,
+        );
+
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ output }));
+        res.end(
+          JSON.stringify({
+            output: {
+              entries,
+              totalEntries,
+              totalSatsCost,
+              recentSatsCost,
+              limit,
+            },
+          }),
+        );
       } catch (error) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
@@ -350,12 +334,37 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const output = usageTracker.listForTimestamp(
-          timestamp,
-          parseLimit(url.searchParams.get("limit")),
+        const usageDriver = getDefaultUsageTrackingDriver();
+        const limit = parseLimit(url.searchParams.get("limit"));
+        const allMatching = await usageDriver.list();
+        const requestIdPrefix = `gen-${timestamp}-`;
+        const filtered = allMatching.filter((entry) =>
+          entry.requestId.startsWith(requestIdPrefix),
         );
+        const entries = filtered.slice(0, limit);
+        const totalEntries = filtered.length;
+        const totalSatsCost = filtered.reduce(
+          (sum, entry) => sum + (entry.satsCost || 0),
+          0,
+        );
+        const recentSatsCost = entries.reduce(
+          (sum, entry) => sum + (entry.satsCost || 0),
+          0,
+        );
+
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ output }));
+        res.end(
+          JSON.stringify({
+            output: {
+              entries,
+              totalEntries,
+              totalSatsCost,
+              recentSatsCost,
+              limit,
+              timestamp,
+            },
+          }),
+        );
       } catch (error) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
@@ -415,9 +424,11 @@ export function createDaemonRequestHandler(deps: {
       });
 
       const isStream = bodyObj.stream === true;
-      const requestId = response.headers.get("x-routstr-request-id") || undefined;
+      const requestId =
+        (response as any).requestId ||
+        response.headers.get("x-routstr-request-id") ||
+        undefined;
       logger.log("Request ID, ", requestId, " with path: ", url.pathname);
-      const usageBaseUrl = resolveUsageBaseUrl(response, forcedProvider);
 
       if (isStream) {
         res.statusCode = response.status;
@@ -426,67 +437,36 @@ export function createDaemonRequestHandler(deps: {
         });
 
         const body = response.body;
-        if (body) {
-          let capturedUsage: UsageData | null = null;
-          let capturedResponseId: string | undefined;
-          const nodeReadable = Readable.fromWeb(
-            body as unknown as WebReadableStream,
-          );
-          const sseParser = createSSEParserTransform(
-            (usage) => {
-              capturedUsage = usage;
-            },
-            (responseId) => {
-              capturedResponseId = responseId;
-            },
-          );
-          nodeReadable.pipe(sseParser).pipe(res);
-
-          res.on("finish", () => {
-            if (capturedUsage) {
-              const usageRequestId = capturedResponseId || requestId || "unknown";
-              usageTracker.append({
-                id:
-                  usageRequestId === "unknown"
-                    ? `req-${Date.now()}-${modelId}`
-                    : usageRequestId,
-                timestamp: Date.now(),
-                modelId,
-                baseUrl: usageBaseUrl,
-                requestId: usageRequestId,
-                client: getClientIdFromRequest(req, deps.store),
-                ...capturedUsage,
-              });
-              logger.log(
-                "Streaming request usage:",
-                JSON.stringify(capturedUsage),
-              );
-            }
-          });
-        } else {
+        if (!body) {
           res.end();
+          return;
         }
+
+        const nodeReadable = Readable.fromWeb(body as any);
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          const fail = (err: unknown) => {
+            if (settled) return;
+            settled = true;
+            reject(err);
+          };
+
+          res.once("finish", finish);
+          res.once("close", finish);
+          res.once("error", fail);
+          nodeReadable.once("error", fail);
+
+          nodeReadable.pipe(res);
+        });
         return;
       }
 
       const responseBody = await response.json();
-      const nonStreamUsage = extractUsageFromResponseBody(responseBody);
-      if (nonStreamUsage) {
-        const responseRequestId =
-          extractResponseId(responseBody) || requestId || "unknown";
-        usageTracker.append({
-          id:
-            responseRequestId === "unknown"
-              ? `req-${Date.now()}-${modelId}`
-              : responseRequestId,
-          timestamp: Date.now(),
-          modelId,
-          baseUrl: usageBaseUrl,
-          requestId: responseRequestId,
-          client: getClientIdFromRequest(req, deps.store),
-          ...nonStreamUsage,
-        });
-      }
       res.writeHead(response.status, {
         "Content-Type": "application/json",
       });
