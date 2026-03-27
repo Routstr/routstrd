@@ -15,7 +15,7 @@ import {
   loadDaemonConfig,
   saveDaemonConfig,
 } from "./config-store";
-import { createBunSqliteDriver } from "./sqlite-driver";
+import { createBunSqliteDriver } from "@routstr/sdk/storage";
 import {
   createWalletAdapter,
   parseBalances,
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
   const updatedConfig = { ...config, port, provider };
   saveDaemonConfig(updatedConfig);
 
-  const sqliteDriver = createBunSqliteDriver(DB_PATH);
+  const sqliteDriver = await createBunSqliteDriver(DB_PATH);
   const { store } = await createSdkStore({ driver: sqliteDriver });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);

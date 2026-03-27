@@ -19,7 +19,7 @@ import {
 import { logger } from "./utils/logger";
 import { setupIntegration } from "./integrations";
 import { createSdkStore } from "@routstr/sdk";
-import { createBunSqliteDriver } from "./daemon/sqlite-driver";
+import { createBunSqliteDriver } from "@routstr/sdk/storage";
 
 type RoutstrModel = {
   id: string;
@@ -134,7 +134,7 @@ async function initDaemon(): Promise<void> {
   await startDaemon({ port: String(config.port || 8008) });
 
   // Create SDK store for integrations
-  const sqliteDriver = createBunSqliteDriver(DB_PATH);
+  const sqliteDriver = await createBunSqliteDriver(DB_PATH);
   const { store } = await createSdkStore({ driver: sqliteDriver });
 
   await setupIntegration(config, store);

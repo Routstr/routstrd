@@ -16,6 +16,7 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
+    "@routstr/sdk": "../routstr-chat/sdk",
     "@types/bun": "latest"
   },
   "peerDependencies": {
