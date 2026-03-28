@@ -15,7 +15,10 @@ import {
   loadDaemonConfig,
   saveDaemonConfig,
 } from "./config-store";
-import { createBunSqliteDriver } from "@routstr/sdk/storage";
+import {
+  createBunSqliteDriver,
+  createBunSqliteUsageTrackingDriver,
+} from "@routstr/sdk/storage";
 import {
   createWalletAdapter,
   parseBalances,
@@ -38,6 +41,11 @@ async function main(): Promise<void> {
 
   const sqliteDriver = await createBunSqliteDriver(DB_PATH);
   const { store } = await createSdkStore({ driver: sqliteDriver });
+  const { Database } = await import("bun:sqlite");
+  const usageTrackingDriver = createBunSqliteUsageTrackingDriver({
+    dbPath: DB_PATH,
+    sqlite: { Database },
+  });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
   const providerRegistry = createProviderRegistryFromStore(store);
@@ -65,6 +73,7 @@ async function main(): Promise<void> {
       runWalletCommand,
       parseBalances,
       mode: config.mode || "apikeys",
+      usageTrackingDriver,
     }),
   );
 

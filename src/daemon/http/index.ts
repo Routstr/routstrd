@@ -3,8 +3,8 @@ import { Readable } from "stream";
 import {
   routeRequests,
   InsufficientBalanceError,
-  getDefaultUsageTrackingDriver,
 } from "@routstr/sdk";
+import type { UsageTrackingDriver } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -39,6 +39,7 @@ export function createDaemonRequestHandler(deps: {
   runWalletCommand: (args: string[]) => Promise<string>;
   parseBalances: (output: string) => Record<string, number>;
   mode?: "xcashu" | "lazyrefund" | "apikeys";
+  usageTrackingDriver: UsageTrackingDriver;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -290,7 +291,7 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
-        const usageDriver = getDefaultUsageTrackingDriver();
+        const usageDriver = deps.usageTrackingDriver;
         const limit = parseLimit(url.searchParams.get("limit"));
         const entries = await usageDriver.list({ limit });
         const totalEntries = await usageDriver.count();
@@ -334,7 +335,7 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const usageDriver = getDefaultUsageTrackingDriver();
+        const usageDriver = deps.usageTrackingDriver;
         const limit = parseLimit(url.searchParams.get("limit"));
         const allMatching = await usageDriver.list();
         const requestIdPrefix = `gen-${timestamp}-`;
@@ -421,6 +422,7 @@ export function createDaemonRequestHandler(deps: {
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
         mode: deps.mode,
+        usageTrackingDriver: deps.usageTrackingDriver,
       });
 
       const isStream = bodyObj.stream === true;
