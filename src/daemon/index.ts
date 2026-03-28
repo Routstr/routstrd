@@ -45,6 +45,7 @@ async function main(): Promise<void> {
   const usageTrackingDriver = createBunSqliteUsageTrackingDriver({
     dbPath: DB_PATH,
     sqlite: { Database },
+    legacyStorageDriver: sqliteDriver,
   });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);

@@ -38,7 +38,7 @@ export function createDaemonRequestHandler(deps: {
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   runWalletCommand: (args: string[]) => Promise<string>;
   parseBalances: (output: string) => Record<string, number>;
-  mode?: "xcashu" | "lazyrefund" | "apikeys";
+  mode?: "xcashu" | "apikeys";
   usageTrackingDriver: UsageTrackingDriver;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
@@ -181,7 +181,7 @@ export function createDaemonRequestHandler(deps: {
           deps.storageAdapter,
           deps.providerRegistry,
           "min",
-          "lazyrefund",
+          "apikeys",
         );
 
         const spender = client.getCashuSpender();
@@ -423,6 +423,7 @@ export function createDaemonRequestHandler(deps: {
         debugLevel: "DEBUG",
         mode: deps.mode,
         usageTrackingDriver: deps.usageTrackingDriver,
+        sdkStore: deps.store,
       });
 
       const isStream = bodyObj.stream === true;

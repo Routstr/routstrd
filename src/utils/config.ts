@@ -11,7 +11,7 @@ export interface RoutstrdConfig {
   port: number;
   provider: string | null;
   cocodPath: string | null;
-  mode?: "xcashu" | "lazyrefund" | "apikeys";
+  mode?: "xcashu" | "apikeys";
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
