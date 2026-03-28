@@ -1,7 +1,7 @@
 import { LOG_FILE } from "./utils/config";
 import { logger } from "./utils/logger";
 import { existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { dirname } from "path";
 
 export async function startDaemon(
   options: { port?: string; provider?: string } = {},
@@ -41,7 +41,7 @@ export async function startDaemon(
 
   // Use shell redirection to append stdout/stderr to log file
   // Bun.file() overwrites, so we need shell >> for appending
-  const daemonScript = `${import.meta.dir}/daemon/index.ts`;
+  const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
   const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")} >> "${LOG_FILE}" 2>&1`;
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
