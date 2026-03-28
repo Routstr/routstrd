@@ -1,6 +1,8 @@
 import { type IncomingMessage, type ServerResponse } from "http";
-import { Readable } from "stream";
-import { routeRequests, InsufficientBalanceError } from "@routstr/sdk";
+import {
+  routeRequestsToNodeResponse,
+  InsufficientBalanceError,
+} from "@routstr/sdk";
 import type { UsageTrackingDriver } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 
@@ -555,9 +557,11 @@ export function createDaemonRequestHandler(deps: {
 
     try {
       await deps.ensureProvidersBootstrapped();
-      const response = await routeRequests({
+      logger.log("Routing request with path: ", url.pathname);
+      await routeRequestsToNodeResponse({
         modelId,
         requestBody,
+        path: url.pathname,
         forcedProvider,
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
@@ -569,56 +573,9 @@ export function createDaemonRequestHandler(deps: {
         mode: deps.mode,
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
+        res,
       });
-
-      const isStream = bodyObj.stream === true;
-      const requestId =
-        (response as any).requestId ||
-        response.headers.get("x-routstr-request-id") ||
-        undefined;
-      logger.log("Request ID, ", requestId, " with path: ", url.pathname);
-
-      if (isStream) {
-        res.statusCode = response.status;
-        response.headers.forEach((value, key) => {
-          res.setHeader(key, value);
-        });
-
-        const body = response.body;
-        if (!body) {
-          res.end();
-          return;
-        }
-
-        const nodeReadable = Readable.fromWeb(body as any);
-        await new Promise<void>((resolve, reject) => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            resolve();
-          };
-          const fail = (err: unknown) => {
-            if (settled) return;
-            settled = true;
-            reject(err);
-          };
-
-          res.once("finish", finish);
-          res.once("close", finish);
-          res.once("error", fail);
-          nodeReadable.once("error", fail);
-
-          nodeReadable.pipe(res);
-        });
-        return;
-      }
-
-      const responseBody = await response.json();
-      res.writeHead(response.status, {
-        "Content-Type": "application/json",
-      });
-      res.end(JSON.stringify(responseBody));
+      return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[daemon] Error: ${message}`);
