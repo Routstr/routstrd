@@ -425,7 +425,7 @@ program
 // Mode
 program
   .command("mode")
-  .description("Set the client mode (xcashu, lazyrefund, or apikeys)")
+  .description("Set the client mode (xcashu or apikeys)")
   .action(async () => {
     const config = await loadConfig();
     const currentMode = config.mode || "apikeys";
@@ -433,10 +433,9 @@ program
     console.log("Select client mode:");
     console.log("  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.");
     console.log("  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.");
-    console.log("  3) lazyrefund - Refunds are performed periodically which also means identities are reset periodically.");
     console.log(`\nCurrent mode: ${currentMode}`);
 
-    const modes: Array<"apikeys" | "xcashu" | "lazyrefund"> = ["apikeys", "xcashu", "lazyrefund"];
+    const modes: Array<"apikeys" | "xcashu"> = ["apikeys", "xcashu"];
     
     const selectedIndex = await new Promise<number>((resolve) => {
       const rl = require("readline").createInterface({

@@ -42,6 +42,8 @@ export function createDaemonRequestHandler(deps: {
   usageTrackingDriver: UsageTrackingDriver;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
+    // Log all incoming headers with PipeLineHeaders tag
+    
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
 
@@ -403,11 +405,22 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    const forcedProvider =
+    const forcedProvider: string | undefined =
       url.searchParams.get("provider") ||
       (req.headers["x-routstr-provider"] as string | undefined) ||
       deps.provider ||
       undefined;
+
+    // Convert req.headers to Record<string, string> and log with PipeLineHeaders tag
+    const incomingHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (typeof value === "string") {
+        incomingHeaders[key] = value;
+      } else if (Array.isArray(value) && value.length > 0) {
+        incomingHeaders[key] = value[0]!;
+      }
+    }
+    logger.log(`[PipeLineHeaders] Passing headers to routeRequests: ${JSON.stringify(incomingHeaders)}`);
 
     try {
       await deps.ensureProvidersBootstrapped();
@@ -415,6 +428,7 @@ export function createDaemonRequestHandler(deps: {
         modelId,
         requestBody,
         forcedProvider,
+        headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
         providerRegistry: deps.providerRegistry,

@@ -18,7 +18,7 @@ export interface BalanceInfo {
 export interface StatusInfo {
   daemon: string;
   wallet: string;
-  mode: "xcashu" | "lazyrefund" | "apikeys";
+  mode: "xcashu" | "apikeys";
   error?: string;
 }
 
@@ -33,7 +33,7 @@ export async function fetchStatus(): Promise<StatusInfo | null> {
     const output = result.output as {
       daemon?: string;
       wallet?: string;
-      mode?: "xcashu" | "lazyrefund" | "apikeys";
+      mode?: "xcashu" | "apikeys";
       error?: string;
     };
 
