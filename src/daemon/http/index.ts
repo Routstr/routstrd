@@ -1,9 +1,6 @@
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
-import {
-  routeRequests,
-  InsufficientBalanceError,
-} from "@routstr/sdk";
+import { routeRequests, InsufficientBalanceError } from "@routstr/sdk";
 import type { UsageTrackingDriver } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 
@@ -42,8 +39,6 @@ export function createDaemonRequestHandler(deps: {
   usageTrackingDriver: UsageTrackingDriver;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
-    // Log all incoming headers with PipeLineHeaders tag
-    
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
 
@@ -187,11 +182,7 @@ export function createDaemonRequestHandler(deps: {
         );
 
         const spender = client.getCashuSpender();
-        const results = await spender.refundProviders(
-          refundBaseUrls,
-          mintUrl,
-          true,
-        );
+        const results = await spender.refundProviders(mintUrl);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -291,15 +282,156 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/providers") {
+      try {
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+        const disabledProviders: string[] = state.disabledProviders || [];
+
+        const providers = baseUrlsList.map((baseUrl, index) => ({
+          index,
+          baseUrl,
+          disabled: disabledProviders.includes(baseUrl),
+        }));
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              providers,
+              disabledCount: disabledProviders.length,
+              totalCount: baseUrlsList.length,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/providers/disable") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const indices = body.indices as number[] | undefined;
+
+        if (!Array.isArray(indices)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Missing or invalid 'indices' field (expected number[]).",
+            }),
+          );
+          return;
+        }
+
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+        const disabledProviders: string[] = [
+          ...(state.disabledProviders || []),
+        ];
+
+        const toDisable: string[] = [];
+        for (const idx of indices) {
+          if (
+            typeof idx === "number" &&
+            idx >= 0 &&
+            idx < baseUrlsList.length
+          ) {
+            const baseUrl = baseUrlsList[idx]!;
+            if (!disabledProviders.includes(baseUrl)) {
+              disabledProviders.push(baseUrl);
+              toDisable.push(baseUrl);
+            }
+          }
+        }
+
+        deps.store.getState().setDisabledProviders(disabledProviders);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: `Disabled ${toDisable.length} provider(s)`,
+              disabled: toDisable,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/providers/enable") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const indices = body.indices as number[] | undefined;
+
+        if (!Array.isArray(indices)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Missing or invalid 'indices' field (expected number[]).",
+            }),
+          );
+          return;
+        }
+
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+        const disabledProviders: string[] = [
+          ...(state.disabledProviders || []),
+        ];
+
+        const toEnable: string[] = [];
+        for (const idx of indices) {
+          if (
+            typeof idx === "number" &&
+            idx >= 0 &&
+            idx < baseUrlsList.length
+          ) {
+            const baseUrl = baseUrlsList[idx]!;
+            const pos = disabledProviders.indexOf(baseUrl);
+            if (pos !== -1) {
+              disabledProviders.splice(pos, 1);
+              toEnable.push(baseUrl);
+            }
+          }
+        }
+
+        deps.store.getState().setDisabledProviders(disabledProviders);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: `Enabled ${toEnable.length} provider(s)`,
+              enabled: toEnable,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
         const usageDriver = deps.usageTrackingDriver;
         const limit = parseLimit(url.searchParams.get("limit"));
         const entries = await usageDriver.list({ limit });
         const totalEntries = await usageDriver.count();
-        const totalSatsCost = (
-          await usageDriver.list()
-        ).reduce((sum, entry) => sum + (entry.satsCost || 0), 0);
+        const totalSatsCost = (await usageDriver.list()).reduce(
+          (sum, entry) => sum + (entry.satsCost || 0),
+          0,
+        );
         const recentSatsCost = entries.reduce(
           (sum, entry) => sum + (entry.satsCost || 0),
           0,
@@ -411,7 +543,7 @@ export function createDaemonRequestHandler(deps: {
       deps.provider ||
       undefined;
 
-    // Convert req.headers to Record<string, string> and log with PipeLineHeaders tag
+    // Convert req.headers to Record<string, string>
     const incomingHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
       if (typeof value === "string") {
@@ -420,7 +552,6 @@ export function createDaemonRequestHandler(deps: {
         incomingHeaders[key] = value[0]!;
       }
     }
-    logger.log(`[PipeLineHeaders] Passing headers to routeRequests: ${JSON.stringify(incomingHeaders)}`);
 
     try {
       await deps.ensureProvidersBootstrapped();

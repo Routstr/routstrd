@@ -366,6 +366,103 @@ program
     });
   });
 
+// Providers - list and manage providers
+const providersCmd = program
+  .command("providers")
+  .description("List and manage providers");
+
+providersCmd
+  .command("list")
+  .description("List all providers with their enabled/disabled status")
+  .action(async () => {
+    await ensureDaemonRunning();
+
+    const result = await callDaemon("/providers");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as {
+      providers: Array<{ index: number; baseUrl: string; disabled: boolean }>;
+      disabledCount: number;
+      totalCount: number;
+    } | undefined;
+
+    if (!output?.providers) {
+      console.log("No providers found.");
+      return;
+    }
+
+    console.log(`Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`);
+    for (const provider of output.providers) {
+      const status = provider.disabled ? "DISABLED" : "enabled ";
+      console.log(`  [${provider.index}] ${status}  ${provider.baseUrl}`);
+    }
+  });
+
+providersCmd
+  .command("disable <indices...>")
+  .description("Disable providers by their indices (e.g., routstrd providers disable 0 2 5)")
+  .action(async (indices: string[]) => {
+    await ensureDaemonRunning();
+
+    const indexNums = indices.map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+    if (indexNums.length === 0) {
+      console.log("No valid indices provided.");
+      process.exit(1);
+    }
+
+    const result = await callDaemon("/providers/disable", {
+      method: "POST",
+      body: { indices: indexNums },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as { message: string; disabled: string[] } | undefined;
+    if (output) {
+      console.log(output.message);
+      for (const url of output.disabled) {
+        console.log(`  - ${url}`);
+      }
+    }
+  });
+
+providersCmd
+  .command("enable <indices...>")
+  .description("Enable providers by their indices (e.g., routstrd providers enable 0 2 5)")
+  .action(async (indices: string[]) => {
+    await ensureDaemonRunning();
+
+    const indexNums = indices.map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+    if (indexNums.length === 0) {
+      console.log("No valid indices provided.");
+      process.exit(1);
+    }
+
+    const result = await callDaemon("/providers/enable", {
+      method: "POST",
+      body: { indices: indexNums },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as { message: string; enabled: string[] } | undefined;
+    if (output) {
+      console.log(output.message);
+      for (const url of output.enabled) {
+        console.log(`  - ${url}`);
+      }
+    }
+  });
+
 // Monitor - interactive TUI
 program
   .command("monitor")
