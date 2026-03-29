@@ -42,7 +42,7 @@ type UsageEntry = {
   client?: string;
 };
 
-const cliVersion = "0.1.0";
+const cliVersion = "0.1.1";
 
 async function initDaemon(): Promise<void> {
   logger.log("Initializing routstrd...");
@@ -57,7 +57,9 @@ async function initDaemon(): Promise<void> {
 
     const installCode = await installProc.exited;
     if (installCode !== 0 || !(await checkCocodInstalled())) {
-      logger.error("Failed to install cocod. Please run 'bun install --global cocod' manually.");
+      logger.error(
+        "Failed to install cocod. Please run 'bun install --global cocod' manually.",
+      );
       return;
     }
 
@@ -115,12 +117,18 @@ async function initDaemon(): Promise<void> {
       )
     : Promise.resolve();
 
-  const [initCode] = await Promise.all([initProc.exited, stdoutDone, stderrDone]);
+  const [initCode] = await Promise.all([
+    initProc.exited,
+    stdoutDone,
+    stderrDone,
+  ]);
   const combinedOutput = `${initStdout}\n${initStderr}`.toLowerCase();
   const alreadyInitialized = combinedOutput.includes("already initialized");
 
   if (initCode !== 0 && !alreadyInitialized) {
-    logger.error("Failed to initialize cocod. Please run 'cocod init' manually.");
+    logger.error(
+      "Failed to initialize cocod. Please run 'cocod init' manually.",
+    );
     return;
   }
 
@@ -140,7 +148,9 @@ async function initDaemon(): Promise<void> {
   await setupIntegration(config, store);
 
   logger.log("\nInitialization complete!");
-  logger.log("\n use 'cocod receive cashu' or 'cocod receive bolt11 2100' to top up your local wallet!");
+  logger.log(
+    "\n use 'cocod receive cashu' or 'cocod receive bolt11 2100' to top up your local wallet!",
+  );
 }
 
 async function checkCocodInstalled(): Promise<boolean> {
@@ -164,7 +174,9 @@ program
 // Onboard - initialize the daemon
 program
   .command("onboard")
-  .description("Initialize routstrd (creates config directory and initializes cocod)")
+  .description(
+    "Initialize routstrd (creates config directory and initializes cocod)",
+  )
   .action(async () => {
     await initDaemon();
   });
@@ -177,7 +189,9 @@ program
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
     if (!(await checkCocodInstalled())) {
-      logger.error("cocod is not installed. Run 'routstrd onboard' first to install cocod.");
+      logger.error(
+        "cocod is not installed. Run 'routstrd onboard' first to install cocod.",
+      );
       process.exit(1);
     }
     const config = await loadConfig();
@@ -224,7 +238,7 @@ program
   .description("Get wallet and API key balances")
   .action(async () => {
     await ensureDaemonRunning();
-    
+
     const [walletResult, keysResult] = await Promise.all([
       callDaemon("/balance"),
       callDaemon("/keys/balance"),
@@ -234,8 +248,14 @@ program
 
     console.log("=== Wallet Balance ===");
     let totalWallet = 0;
-    if (walletResult.output && typeof walletResult.output === "object" && "balances" in walletResult.output) {
-      const balances = (walletResult.output as { balances: Record<string, number> }).balances;
+    if (
+      walletResult.output &&
+      typeof walletResult.output === "object" &&
+      "balances" in walletResult.output
+    ) {
+      const balances = (
+        walletResult.output as { balances: Record<string, number> }
+      ).balances;
       for (const [mintUrl, balance] of Object.entries(balances)) {
         console.log(`  ${mintUrl}: ${balance} sats`);
         totalWallet += balance;
@@ -247,9 +267,17 @@ program
 
     console.log("\n=== API Keys ===");
     let totalApiKeys = 0;
-    if (keysResult.output && typeof keysResult.output === "object" && "keys" in keysResult.output) {
-      const keys = (keysResult.output as { keys: Array<{ id: string; name: string; balance: number }> }).keys;
-      const apiKeyEntries = keys.filter(k => k.id.startsWith("apikey:"));
+    if (
+      keysResult.output &&
+      typeof keysResult.output === "object" &&
+      "keys" in keysResult.output
+    ) {
+      const keys = (
+        keysResult.output as {
+          keys: Array<{ id: string; name: string; balance: number }>;
+        }
+      ).keys;
+      const apiKeyEntries = keys.filter((k) => k.id.startsWith("apikey:"));
       for (const key of apiKeyEntries) {
         const name = key.name.replace("API Key: ", "");
         console.log(`  ${name}: ${key.balance} sats`);
@@ -265,7 +293,9 @@ program
     }
 
     console.log("\n=== Summary ===");
-    console.log(`  Wallet: ${totalWallet} sats | API Keys: ${totalApiKeys} sats`);
+    console.log(
+      `  Wallet: ${totalWallet} sats | API Keys: ${totalApiKeys} sats`,
+    );
     console.log(`  Grand Total: ${totalWallet + totalApiKeys} sats`);
   });
 
@@ -284,7 +314,7 @@ program
   .option("-r, --refresh", "Force refresh routstr21 models from Nostr", false)
   .action(async (options: { refresh: boolean }) => {
     await ensureDaemonRunning();
-    
+
     const result = await callDaemon(
       options.refresh ? "/models?refresh=true" : "/models",
     );
@@ -293,7 +323,11 @@ program
       process.exit(1);
     }
 
-    if (result.output && typeof result.output === "object" && "models" in result.output) {
+    if (
+      result.output &&
+      typeof result.output === "object" &&
+      "models" in result.output
+    ) {
       const models = (result.output as { models: RoutstrModel[] }).models;
       if (models.length === 0) {
         console.log("No routstr21 models found");
@@ -303,7 +337,9 @@ program
           const details = [
             model.name && model.name !== model.id ? model.name : null,
             model.context_length ? `${model.context_length} ctx` : null,
-          ].filter(Boolean).join(" - ");
+          ]
+            .filter(Boolean)
+            .join(" - ");
           console.log(`${i + 1}. ${model.id}${details ? ` (${details})` : ""}`);
         });
       }
@@ -319,7 +355,9 @@ program
 
     const requested = Number.parseInt(options.limit, 10);
     const limit =
-      Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 10;
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, 1000)
+        : 10;
 
     const result = await callDaemon(`/usage?limit=${limit}`);
     if (result.error) {
@@ -383,18 +421,26 @@ providersCmd
       process.exit(1);
     }
 
-    const output = result.output as {
-      providers: Array<{ index: number; baseUrl: string; disabled: boolean }>;
-      disabledCount: number;
-      totalCount: number;
-    } | undefined;
+    const output = result.output as
+      | {
+          providers: Array<{
+            index: number;
+            baseUrl: string;
+            disabled: boolean;
+          }>;
+          disabledCount: number;
+          totalCount: number;
+        }
+      | undefined;
 
     if (!output?.providers) {
       console.log("No providers found.");
       return;
     }
 
-    console.log(`Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`);
+    console.log(
+      `Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`,
+    );
     for (const provider of output.providers) {
       const status = provider.disabled ? "DISABLED" : "enabled ";
       console.log(`  [${provider.index}] ${status}  ${provider.baseUrl}`);
@@ -403,11 +449,15 @@ providersCmd
 
 providersCmd
   .command("disable <indices...>")
-  .description("Disable providers by their indices (e.g., routstrd providers disable 0 2 5)")
+  .description(
+    "Disable providers by their indices (e.g., routstrd providers disable 0 2 5)",
+  )
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices.map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+    const indexNums = indices
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n));
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -423,7 +473,9 @@ providersCmd
       process.exit(1);
     }
 
-    const output = result.output as { message: string; disabled: string[] } | undefined;
+    const output = result.output as
+      | { message: string; disabled: string[] }
+      | undefined;
     if (output) {
       console.log(output.message);
       for (const url of output.disabled) {
@@ -434,11 +486,15 @@ providersCmd
 
 providersCmd
   .command("enable <indices...>")
-  .description("Enable providers by their indices (e.g., routstrd providers enable 0 2 5)")
+  .description(
+    "Enable providers by their indices (e.g., routstrd providers enable 0 2 5)",
+  )
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices.map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+    const indexNums = indices
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n));
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -454,7 +510,9 @@ providersCmd
       process.exit(1);
     }
 
-    const output = result.output as { message: string; enabled: string[] } | undefined;
+    const output = result.output as
+      | { message: string; enabled: string[] }
+      | undefined;
     if (output) {
       console.log(output.message);
       for (const url of output.enabled) {
@@ -493,7 +551,7 @@ program
     if (wasRunning) {
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
-      
+
       // Wait for daemon to fully stop
       for (let i = 0; i < 50; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -526,14 +584,18 @@ program
   .action(async () => {
     const config = await loadConfig();
     const currentMode = config.mode || "apikeys";
-    
+
     console.log("Select client mode:");
-    console.log("  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.");
-    console.log("  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.");
+    console.log(
+      "  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.",
+    );
+    console.log(
+      "  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.",
+    );
     console.log(`\nCurrent mode: ${currentMode}`);
 
     const modes: Array<"apikeys" | "xcashu"> = ["apikeys", "xcashu"];
-    
+
     const selectedIndex = await new Promise<number>((resolve) => {
       const rl = require("readline").createInterface({
         input: process.stdin,
@@ -547,7 +609,7 @@ program
     });
 
     const selectedMode = modes[selectedIndex];
-    
+
     if (selectedMode === currentMode) {
       console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
       return;
@@ -566,7 +628,7 @@ program
     if (wasRunning) {
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
-      
+
       for (let i = 0; i < 50; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         if (!(await isDaemonRunning())) {
@@ -620,7 +682,7 @@ program
       const logFile = Bun.file(LOG_FILE);
       const initialContent = await logFile.text();
       let lastSize = initialContent.length;
-      
+
       await printLines();
 
       const interval = setInterval(async () => {
@@ -628,7 +690,10 @@ program
         const currentSize = content.length;
         if (currentSize > lastSize) {
           const allLines = content.split("\n").filter(Boolean);
-          const newLines = allLines.slice(Math.floor(lastSize === 0 ? 0 : -1), -1);
+          const newLines = allLines.slice(
+            Math.floor(lastSize === 0 ? 0 : -1),
+            -1,
+          );
           for (const line of newLines) {
             console.log(line);
           }
