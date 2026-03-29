@@ -116,9 +116,10 @@ export function renderBarChart(
 
 
 export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
+  // Use the server-calculated totalSatsCost (all entries) instead of summing limited entries
   const totals = getTotals(stats.entries);
   const entryCount = stats.entries.length;
-  const totalVisibleCost = totals.satsCost;
+  const totalVisibleCost = stats.totalSatsCost; // <-- Use server's total, not client-side sum of limited entries
   const avgCost = entryCount > 0 ? totalVisibleCost / entryCount : 0;
   const avgTokens = entryCount > 0 ? totals.totalTokens / entryCount : 0;
 
@@ -344,7 +345,8 @@ export function renderModels(stats: UsageStats, width: number): string {
   const modelStats = getModelStats(stats.entries);
   if (modelStats.length === 0) return renderBox(["No model data available"], width, "Models");
 
-  const totalCost = getTotals(stats.entries).satsCost;
+  // Use totalSatsCost (all-time) for percentage calculations to match header
+  const totalCost = stats.totalSatsCost;
   const maxCost = modelStats[0]!.satsCost;
   const maxModelLabel = Math.max(...modelStats.map((m) => m.modelId.length));
   const lines: string[] = [];
@@ -431,7 +433,8 @@ export function renderClients(stats: UsageStats, width: number): string {
   const clientStats = getClientStats(stats.entries);
   if (clientStats.length === 0) return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
 
-  const totalCost = getTotals(stats.entries).satsCost;
+  // Use totalSatsCost (all-time) for percentage calculations to match header
+  const totalCost = stats.totalSatsCost;
   const maxCost = clientStats[0]!.satsCost;
   const lines: string[] = [];
 
