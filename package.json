@@ -16,7 +16,6 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "@routstr/sdk": "../routstr-chat/sdk",
     "@types/bun": "latest"
   },
   "peerDependencies": {
@@ -24,7 +23,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "^0.2.5",
+    "@routstr/sdk": "^0.2.6",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "commander": "^14.0.2",
