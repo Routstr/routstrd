@@ -670,17 +670,17 @@ program
 // Mode
 program
   .command("mode")
-  .description("Set the client mode (xcashu or apikeys)")
+  .description("Set the client mode (lazyrefund/apikeys or xcashu)")
   .action(async () => {
     const config = await loadConfig();
     const currentMode = config.mode || "apikeys";
 
     console.log("Select client mode:");
     console.log(
-      "  1) apikeys    - Pseudonymous accounts are kept with the Routstr nodes for easy topup and refunds.",
+      "  1) lazyrefund/apikeys    - Pseudonymous accounts are kept with the Routstr nodes and are refunded after 5 mins if not used.",
     );
     console.log(
-      "  2) xcashu     - Balances are never kept with the nodes, all balances are refunded in response.",
+      "  2) xcashu (coming soon)   - Balances are never kept with the nodes, all balances are refunded in response.",
     );
     console.log(`\nCurrent mode: ${currentMode}`);
 
@@ -691,14 +691,21 @@ program
         input: process.stdin,
         output: process.stdout,
       });
-      rl.question("\nEnter choice (1-3): ", (answer: string) => {
+      rl.question("\nEnter choice (1-2): ", (answer: string) => {
         rl.close();
         const num = parseInt(answer, 10);
-        resolve(Number.isFinite(num) && num >= 1 && num <= 3 ? num - 1 : 0);
+        resolve(Number.isFinite(num) && num >= 1 && num <= 2 ? num - 1 : 0);
       });
     });
 
     const selectedMode = modes[selectedIndex];
+
+    if (selectedMode === "xcashu") {
+      console.log(
+        "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
+      );
+      return;
+    }
 
     if (selectedMode === currentMode) {
       console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
