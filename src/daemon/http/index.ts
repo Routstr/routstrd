@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import {
   routeRequestsToNodeResponse,
@@ -5,6 +6,11 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
+
+function generateApiKey(): string {
+  const bytes = randomBytes(24);
+  return `sk-${bytes.toString("hex")}`;
+}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -184,7 +190,7 @@ export function createDaemonRequestHandler(deps: {
         );
 
         const spender = client.getCashuSpender();
-        const results = await spender.refundProviders(mintUrl);
+        const results = await spender.refundProviders(mintUrl, true);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -424,6 +430,131 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Client management endpoints
+    if (req.method === "GET" && url.pathname === "/clients") {
+      try {
+        const state = deps.store.getState();
+        const clientIds = state.clientIds || [];
+
+        const clients = clientIds.map(
+          (c: {
+            clientId: string;
+            name: string;
+            apiKey: string;
+            createdAt: number;
+            lastUsed?: number | null;
+          }) => ({
+            id: c.clientId,
+            name: c.name,
+            apiKey: c.apiKey,
+            createdAt: c.createdAt,
+            lastUsed: c.lastUsed,
+          }),
+        );
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              clients,
+              totalCount: clients.length,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/clients/add") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const name = body.name as string | undefined;
+
+        if (!name || typeof name !== "string" || name.trim() === "") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error:
+                "Missing required 'name' field (must be a non-empty string).",
+            }),
+          );
+          return;
+        }
+
+        const clientId = name
+          .toLowerCase()
+          .replace(/\s+/g, "-")
+          .replace(/[^a-z0-9-]/g, "");
+
+        if (!clientId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error:
+                "Invalid client name. Must contain alphanumeric characters.",
+            }),
+          );
+          return;
+        }
+
+        const state = deps.store.getState();
+        const existingClients = state.clientIds || [];
+        const existingClient = existingClients.find(
+          (c: { clientId: string }) => c.clientId === clientId,
+        );
+
+        if (existingClient) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `Client with id '${clientId}' already exists.`,
+            }),
+          );
+          return;
+        }
+
+        const apiKey = generateApiKey();
+        const newClient = {
+          clientId,
+          name: name.trim(),
+          apiKey,
+          createdAt: Date.now(),
+        };
+
+        deps.store
+          .getState()
+          .setClientIds((prev: typeof existingClients) => [
+            ...(prev || []),
+            newClient,
+          ]);
+
+        logger.log(`Added client '${name}' with id '${clientId}'`);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: `Client '${name}' added successfully`,
+              client: {
+                id: clientId,
+                name: name.trim(),
+                apiKey,
+                createdAt: newClient.createdAt,
+              },
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
         const usageDriver = deps.usageTrackingDriver;
@@ -509,7 +640,8 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method !== "POST") {
+    // Allow client management endpoints through
+    if (req.method !== "POST" && !url.pathname.startsWith("/clients")) {
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Only POST is supported." }));
       return;

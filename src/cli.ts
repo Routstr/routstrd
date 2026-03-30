@@ -521,6 +521,96 @@ providersCmd
     }
   });
 
+// Clients - list and manage clients
+const clientsCmd = program
+  .command("clients")
+  .description("List and manage clients");
+
+clientsCmd
+  .command("list")
+  .description("List all clients")
+  .action(async () => {
+    await ensureDaemonRunning();
+
+    const result = await callDaemon("/clients");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          clients: Array<{
+            id: string;
+            name: string;
+            apiKey: string;
+            createdAt: number;
+            lastUsed?: number | null;
+          }>;
+          totalCount: number;
+        }
+      | undefined;
+
+    if (!output?.clients || output.clients.length === 0) {
+      console.log("No clients found.");
+      return;
+    }
+
+    console.log(`Clients (${output.totalCount} total):\n`);
+    for (const client of output.clients) {
+      const createdAt = new Date(client.createdAt).toISOString();
+      const lastUsed = client.lastUsed
+        ? new Date(client.lastUsed).toISOString()
+        : "never";
+      console.log(`  ${client.id}`);
+      console.log(`    Name:     ${client.name}`);
+      console.log(`    API Key:  ${client.apiKey}`);
+      console.log(`    Created:  ${createdAt}`);
+      console.log("");
+    }
+  });
+
+clientsCmd
+  .command("add")
+  .description("Add a new client")
+  .requiredOption("-n, --name <name>", "Client name")
+  .action(async (options: { name: string }) => {
+    await ensureDaemonRunning();
+    const config = await loadConfig();
+
+    const result = await callDaemon("/clients/add", {
+      method: "POST",
+      body: { name: options.name },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          message: string;
+          client: {
+            id: string;
+            name: string;
+            apiKey: string;
+            createdAt: number;
+          };
+        }
+      | undefined;
+
+    if (output) {
+      console.log(output.message);
+      console.log(`\n  ID:     ${output.client.id}`);
+      console.log(`  Name:   ${output.client.name}`);
+      console.log(`  API Key: ${output.client.apiKey}`);
+      console.log(
+        `\n  Access Routstr at: http://localhost:${config.port || 8008}`,
+      );
+    }
+  });
+
 // Monitor - interactive TUI
 program
   .command("monitor")
