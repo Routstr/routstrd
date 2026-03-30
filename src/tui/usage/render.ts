@@ -116,16 +116,16 @@ export function renderBarChart(
 
 
 export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
-  // Use the server-calculated totalSatsCost (all entries) instead of summing limited entries
+  // Use the server-calculated totals (all entries) instead of summing limited entries
   const totals = getTotals(stats.entries);
-  const entryCount = stats.entries.length;
+  const totalRequests = stats.totalEntries; // Use server's total count, not entries.length
   const totalVisibleCost = stats.totalSatsCost; // <-- Use server's total, not client-side sum of limited entries
-  const avgCost = entryCount > 0 ? totalVisibleCost / entryCount : 0;
-  const avgTokens = entryCount > 0 ? totals.totalTokens / entryCount : 0;
+  const avgCost = totalRequests > 0 ? totalVisibleCost / totalRequests : 0;
+  const avgTokens = totalRequests > 0 ? totals.totalTokens / totalRequests : 0;
 
   const leftBox = [
     `${COLORS.bold}Total Spent:${COLORS.reset} ${COLORS.green}${formatCost(totalVisibleCost)} sats${COLORS.reset}`,
-    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatReqs(entryCount)}`,
+    `${COLORS.bold}Total Requests:${COLORS.reset} ${formatReqs(totalRequests)}`,
     `${COLORS.bold}Avg Cost/Req:${COLORS.reset} ${formatCost(avgCost)} sats`,
   ];
 

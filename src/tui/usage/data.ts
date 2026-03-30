@@ -74,7 +74,7 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
   }
 }
 
-export async function fetchUsage(limit = 1000): Promise<UsageStats | null> {
+export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
   try {
     const running = await isDaemonRunning();
     if (!running) return null;

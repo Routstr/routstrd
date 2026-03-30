@@ -87,7 +87,7 @@ export async function runUsageTui(): Promise<void> {
       const height = getHeight();
 
       if (forceFetch || shouldUpdate) {
-        stats = await fetchUsage(1000);
+        stats = await fetchUsage(10000);
         balance = await fetchBalance();
         status = await fetchStatus();
         shouldUpdate = false;

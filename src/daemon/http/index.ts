@@ -26,7 +26,7 @@ async function readBody(req: IncomingMessage): Promise<string> {
 function parseLimit(value: string | null, fallback = 10): number {
   const requested = Number.parseInt(value || String(fallback), 10);
   return Number.isFinite(requested) && requested > 0
-    ? Math.min(requested, 1000)
+    ? Math.min(requested, 100000) // Cap at 100k entries
     : fallback;
 }
 
