@@ -13,10 +13,12 @@ export function decodeCashuTokenAmount(token: string): {
   return { amount, unit };
 }
 
-export async function createWalletAdapter(options: {
-  cocodPath?: string | null;
-  walletClient?: CocodClient;
-} = {}) {
+export async function createWalletAdapter(
+  options: {
+    cocodPath?: string | null;
+    walletClient?: CocodClient;
+  } = {},
+) {
   const client =
     options.walletClient || createCocodClient({ cocodPath: options.cocodPath });
   let activeMintUrl: string | null = null;
@@ -67,8 +69,7 @@ export async function createWalletAdapter(options: {
             error instanceof Error ? error.message : String(error);
 
           const shouldRetry =
-            attempt < maxRetries &&
-            errorMessage.includes(retryErrorPattern);
+            attempt < maxRetries && errorMessage.includes(retryErrorPattern);
 
           if (shouldRetry) {
             logger.log(
@@ -92,7 +93,8 @@ export async function createWalletAdapter(options: {
       message?: string;
     }> {
       try {
-        await client.receiveCashu(token);
+        const res = await client.receiveCashu(token);
+        logger.log("DEBUGSDF", res);
         const { amount, unit } = decodeCashuTokenAmount(token);
         return { success: true, amount, unit };
       } catch (error) {

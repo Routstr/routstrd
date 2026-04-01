@@ -22,7 +22,10 @@ type SpawnedProcess = {
   unref?: () => void;
 };
 
-type SpawnDaemon = (args: string[], env: Record<string, string>) => SpawnedProcess;
+type SpawnDaemon = (
+  args: string[],
+  env: Record<string, string>,
+) => SpawnedProcess;
 
 export type CocodState = "UNINITIALIZED" | "LOCKED" | "UNLOCKED" | "ERROR";
 
@@ -52,9 +55,7 @@ export interface CocodClient {
   getMintInfo(url: string): Promise<unknown>;
 }
 
-export function resolveCocodExecutable(
-  cocodPath?: string | null,
-): string {
+export function resolveCocodExecutable(cocodPath?: string | null): string {
   const trimmed = cocodPath?.trim();
   return trimmed || "cocod";
 }
@@ -106,14 +107,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function createCocodClient(options: {
-  cocodPath?: string | null;
-  socketPath?: string;
-  fetchImpl?: CocodFetch;
-  spawnDaemon?: SpawnDaemon;
-  pollIntervalMs?: number;
-  startupTimeoutMs?: number;
-} = {}): CocodClient {
+export function createCocodClient(
+  options: {
+    cocodPath?: string | null;
+    socketPath?: string;
+    fetchImpl?: CocodFetch;
+    spawnDaemon?: SpawnDaemon;
+    pollIntervalMs?: number;
+    startupTimeoutMs?: number;
+  } = {},
+): CocodClient {
   const executable = resolveCocodExecutable(options.cocodPath);
   const socketPath = options.socketPath || DEFAULT_SOCKET_PATH;
   const fetchImpl = options.fetchImpl || (fetch as CocodFetch);
@@ -146,7 +149,9 @@ export function createCocodClient(options: {
     };
 
     const response = await fetchImpl(`http://localhost${path}`, requestInit);
-    const data = (await response.json()) as CommandResponse<T>;
+    const rawText = await response.text();
+    logger.log(`[fetchJson] ${init.method || "GET"} ${path} status=${response.status} body=${rawText}`);
+    const data = JSON.parse(rawText) as CommandResponse<T>;
 
     if (!response.ok) {
       throw new CocodHttpError(
@@ -220,11 +225,13 @@ export function createCocodClient(options: {
   }
 
   function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    return callDaemon<T>(path, {
+    const res = callDaemon<T>(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    logger.log("DEBUG", res);
+    return res;
   }
 
   return {
@@ -242,7 +249,15 @@ export function createCocodClient(options: {
       return normalizeBalances(output);
     },
     async receiveCashu(token: string): Promise<string> {
-      return post<string>("/receive/cashu", { token });
+      logger.log(`[receiveCashu] Receiving Cashu token...`);
+      logger.log(`[receiveCashu] Token:`, token);
+      const response = await callDaemon<string>("/receive/cashu", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      logger.log(`[receiveCashu] Full response.output:`, response);
+      return response;
     },
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
       return post<string>("/receive/bolt11", { amount, mintUrl });
