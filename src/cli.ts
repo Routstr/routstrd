@@ -418,20 +418,13 @@ program
       process.exit(1);
     }
 
-    const output = result.output as
-      | {
-          entries?: UsageEntry[];
-          totalEntries?: number;
-          totalSatsCost?: number;
-          recentSatsCost?: number;
-          limit?: number;
-        }
-      | undefined;
+    // The daemon returns { output: UsageEntry[] } where output is the array directly
+    const entries = (result.output as UsageEntry[] | undefined) || [];
 
-    const entries = output?.entries || [];
-    const totalEntries = output?.totalEntries || 0;
-    const totalSatsCost = output?.totalSatsCost || 0;
-    const recentSatsCost = output?.recentSatsCost || 0;
+    // Calculate totals from entries
+    const totalEntries = entries.length;
+    const totalSatsCost = entries.reduce((sum, e) => sum + (e.satsCost || 0), 0);
+    const recentSatsCost = totalSatsCost; // For now, recent = total since we don't have time window
 
     console.log(`Usage entries: showing ${entries.length} of ${totalEntries}`);
     console.log(`Total sats cost (all time): ${totalSatsCost.toFixed(3)} sats`);

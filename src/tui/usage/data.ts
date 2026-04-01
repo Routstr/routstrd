@@ -82,20 +82,27 @@ export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
     const result = await callDaemon(`/usage?limit=${limit}`);
     if (result.error) return null;
 
-    const output = result.output as {
-      entries?: UsageTrackingEntry[];
-      totalEntries?: number;
-      totalSatsCost?: number;
-      recentSatsCost?: number;
-      limit?: number;
-    };
+    // The daemon returns { output: [...] } where output is the entries array directly
+    const entries = result.output as UsageTrackingEntry[] | undefined;
+    const entriesArray = Array.isArray(entries) ? entries : [];
+
+    // Calculate totals from entries
+    const totals = entriesArray.reduce(
+      (acc, entry) => ({
+        promptTokens: acc.promptTokens + entry.promptTokens,
+        completionTokens: acc.completionTokens + entry.completionTokens,
+        totalTokens: acc.totalTokens + entry.totalTokens,
+        satsCost: acc.satsCost + entry.satsCost,
+      }),
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0, satsCost: 0 },
+    );
 
     return {
-      entries: output?.entries || [],
-      totalEntries: output?.totalEntries || 0,
-      totalSatsCost: output?.totalSatsCost || 0,
-      recentSatsCost: output?.recentSatsCost || 0,
-      limit: output?.limit || limit,
+      entries: entriesArray,
+      totalEntries: entriesArray.length,
+      totalSatsCost: totals.satsCost,
+      recentSatsCost: totals.satsCost, // For now, recent = total since we don't have time window
+      limit,
     };
   } catch {
     return null;
@@ -215,7 +222,10 @@ export function getClientStats(entries: UsageTrackingEntry[]): ClientStats[] {
   return Array.from(clients.values()).sort((a, b) => b.satsCost - a.satsCost);
 }
 
-export function getTotals(entries: UsageTrackingEntry[]) {
+export function getTotals(entries: UsageTrackingEntry[] | undefined) {
+  if (!entries || !Array.isArray(entries)) {
+    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, satsCost: 0 };
+  }
   return entries.reduce(
     (acc, entry) => ({
       promptTokens: acc.promptTokens + entry.promptTokens,
