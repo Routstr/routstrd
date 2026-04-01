@@ -16,6 +16,7 @@ import {
   createBunSqliteUsageTrackingDriver,
 } from "@routstr/sdk/storage";
 import { createWalletAdapter, parseBalances, runWalletCommand } from "./wallet";
+import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { RoutstrClient } from "@routstr/sdk";
@@ -48,7 +49,11 @@ async function main(): Promise<void> {
   const { ensureProvidersBootstrapped, getRoutstr21Models } =
     createModelService(modelManager);
 
-  const walletAdapter = await createWalletAdapter();
+  const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+  const walletAdapter = await createWalletAdapter({
+    cocodPath: config.cocodPath,
+    walletClient,
+  });
 
   const server = createServer();
   server.on(
@@ -57,6 +62,7 @@ async function main(): Promise<void> {
       provider,
       server,
       store,
+      walletClient,
       walletAdapter,
       storageAdapter,
       providerRegistry,
@@ -64,8 +70,6 @@ async function main(): Promise<void> {
       modelManager,
       ensureProvidersBootstrapped,
       getRoutstr21Models,
-      runWalletCommand,
-      parseBalances,
       mode: config.mode || "apikeys",
       usageTrackingDriver,
     }),
