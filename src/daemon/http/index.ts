@@ -3,6 +3,7 @@ import { type IncomingMessage, type ServerResponse } from "http";
 import {
   routeRequestsToNodeResponse,
   InsufficientBalanceError,
+  ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
@@ -37,6 +38,7 @@ type DaemonDeps = {
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   mode?: ClientMode;
+  providerManager: ProviderManager;
 };
 
 /**
@@ -277,6 +279,7 @@ export function createDaemonRequestHandler(deps: {
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   mode?: "xcashu" | "apikeys";
   usageTrackingDriver: UsageTrackingDriver;
+  providerManager: ProviderManager;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -1193,6 +1196,7 @@ export function createDaemonRequestHandler(deps: {
         mode: deps.mode,
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
+        providerManager: deps.providerManager,
         res,
       });
       return;

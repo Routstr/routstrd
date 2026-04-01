@@ -2,6 +2,7 @@ import { createServer } from "http";
 import { existsSync } from "fs";
 import {
   ModelManager,
+  ProviderManager,
   createDiscoveryAdapterFromStore,
   createProviderRegistryFromStore,
   createStorageAdapterFromStore,
@@ -46,6 +47,8 @@ async function main(): Promise<void> {
   const providerRegistry = createProviderRegistryFromStore(store);
   const storageAdapter = createStorageAdapterFromStore(store);
   const modelManager = new ModelManager(discoveryAdapter);
+  // Create shared ProviderManager for consistent failure tracking across all requests
+  const providerManager = new ProviderManager(providerRegistry, store);
   const { ensureProvidersBootstrapped, getRoutstr21Models } =
     createModelService(modelManager);
 
@@ -72,6 +75,7 @@ async function main(): Promise<void> {
       getRoutstr21Models,
       mode: config.mode || "apikeys",
       usageTrackingDriver,
+      providerManager,
     }),
   );
 
