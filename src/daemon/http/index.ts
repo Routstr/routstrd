@@ -267,6 +267,7 @@ export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
   store: any;
+  walletClient: CocodClient;
   walletAdapter: any;
   storageAdapter: any;
   providerRegistry: any;
@@ -274,8 +275,6 @@ export function createDaemonRequestHandler(deps: {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
-  runWalletCommand: (args: string[]) => Promise<string>;
-  parseBalances: (output: string) => Record<string, number>;
   mode?: "xcashu" | "apikeys";
   usageTrackingDriver: UsageTrackingDriver;
 }) {

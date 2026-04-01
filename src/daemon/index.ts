@@ -15,7 +15,7 @@ import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
 } from "@routstr/sdk/storage";
-import { createWalletAdapter, parseBalances, runWalletCommand } from "./wallet";
+import { createWalletAdapter } from "./wallet";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
