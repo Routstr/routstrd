@@ -205,7 +205,9 @@ function getCurrentMode(deps: DaemonDeps): ClientMode {
   return stateMode || deps.mode || "apikeys";
 }
 
-async function buildStatusOutput(deps: DaemonDeps): Promise<WalletStatusOutput> {
+async function buildStatusOutput(
+  deps: DaemonDeps,
+): Promise<WalletStatusOutput> {
   const mode = getCurrentMode(deps);
 
   try {
@@ -260,9 +262,6 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
     activeMint: deps.walletAdapter.getActiveMintUrl(),
   };
 }
-
-export function createDaemonRequestHandler(deps: DaemonDeps) {
-  const usageTracker = createUsageTracker(deps.store);
 
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
@@ -790,7 +789,6 @@ export function createDaemonRequestHandler(deps: {
 
         logger.log(`Added client '${name}' with id '${clientId}'`);
 
-
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
@@ -1078,9 +1076,9 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
-        const output = usageTracker.listRecent(
-          parseLimit(url.searchParams.get("limit")),
-        );
+        const output = await deps.usageTrackingDriver.list({
+          limit: parseLimit(url.searchParams.get("limit")),
+        });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
       } catch (error) {
@@ -1194,90 +1192,13 @@ export function createDaemonRequestHandler(deps: {
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
         mode: deps.mode,
+        usageTrackingDriver: deps.usageTrackingDriver,
+        sdkStore: deps.store,
+        res,
       });
-
-      const isStream = bodyObj.stream === true;
-      const requestId =
-        response.headers.get("x-routstr-request-id") || undefined;
-      logger.log("Request ID, ", requestId, " with path: ", url.pathname);
-      const usageBaseUrl = resolveUsageBaseUrl(response, forcedProvider);
-
-      if (isStream) {
-        res.statusCode = response.status;
-        response.headers.forEach((value, key) => {
-          res.setHeader(key, value);
-        });
-
-        const body = response.body;
-        if (body) {
-          let capturedUsage: UsageData | null = null;
-          let capturedResponseId: string | undefined;
-          const nodeReadable = Readable.fromWeb(
-            body as unknown as WebReadableStream,
-          );
-          const sseParser = createSSEParserTransform(
-            (usage) => {
-              capturedUsage = usage;
-            },
-            (responseId) => {
-              capturedResponseId = responseId;
-            },
-          );
-          nodeReadable.pipe(sseParser).pipe(res);
-
-          res.on("finish", () => {
-            if (capturedUsage) {
-              const usageRequestId =
-                capturedResponseId || requestId || "unknown";
-              logger.log(req);
-              usageTracker.append({
-                id:
-                  usageRequestId === "unknown"
-                    ? `req-${Date.now()}-${modelId}`
-                    : usageRequestId,
-                timestamp: Date.now(),
-                modelId,
-                baseUrl: usageBaseUrl,
-                requestId: usageRequestId,
-                client: getClientIdFromRequest(req, deps.store),
-                ...capturedUsage,
-              });
-              logger.log(
-                "Streaming request usage:",
-                JSON.stringify(capturedUsage),
-              );
-            }
-          });
-        } else {
-          res.end();
-        }
-        return;
-      }
-
-      const responseBody = await response.json();
-      const nonStreamUsage = extractUsageFromResponseBody(responseBody);
-      if (nonStreamUsage) {
-        const responseRequestId =
-          extractResponseId(responseBody) || requestId || "unknown";
-        usageTracker.append({
-          id:
-            responseRequestId === "unknown"
-              ? `req-${Date.now()}-${modelId}`
-              : responseRequestId,
-          timestamp: Date.now(),
-          modelId,
-          baseUrl: usageBaseUrl,
-          requestId: responseRequestId,
-          client: getClientIdFromRequest(req, deps.store),
-          ...nonStreamUsage,
-        });
-      }
-      res.writeHead(response.status, {
-        "Content-Type": "application/json",
-      });
-      res.end(JSON.stringify(responseBody));
+      return;
     } catch (error) {
-      const message = toErrorMessage(error);
+      const message = error instanceof Error ? error.message : String(error);
       logger.error(`[daemon] Error: ${message}`);
 
       if (error instanceof InsufficientBalanceError) {
@@ -1287,18 +1208,22 @@ export function createDaemonRequestHandler(deps: {
           maxMintBalance?: number;
           maxMintUrl?: string;
         };
-        sendJson(res, 402, {
-          error: message,
-          error_type: "insufficient_balance",
-          required: balanceError.required,
-          available: balanceError.available,
-          maxMintBalance: balanceError.maxMintBalance,
-          maxMintUrl: balanceError.maxMintUrl,
-        });
+        res.writeHead(402, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: message,
+            error_type: "insufficient_balance",
+            required: balanceError.required,
+            available: balanceError.available,
+            maxMintBalance: balanceError.maxMintBalance,
+            maxMintUrl: balanceError.maxMintUrl,
+          }),
+        );
         return;
       }
 
-      respondWithError(res, error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: message }));
     }
   };
 }
