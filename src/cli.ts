@@ -423,7 +423,10 @@ program
 
     // Calculate totals from entries
     const totalEntries = entries.length;
-    const totalSatsCost = entries.reduce((sum, e) => sum + (e.satsCost || 0), 0);
+    const totalSatsCost = entries.reduce(
+      (sum, e) => sum + (e.satsCost || 0),
+      0,
+    );
     const recentSatsCost = totalSatsCost; // For now, recent = total since we don't have time window
 
     console.log(`Usage entries: showing ${entries.length} of ${totalEntries}`);
@@ -883,12 +886,12 @@ program
 
     const selectedMode = modes[selectedIndex];
 
-    if (selectedMode === "xcashu") {
-      console.log(
-        "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
-      );
-      return;
-    }
+    // if (selectedMode === "xcashu") {
+    //   console.log(
+    //     "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
+    //   );
+    //   return;
+    // }
 
     if (selectedMode === currentMode) {
       console.log(`Mode is already set to '${selectedMode}'. No changes made.`);

@@ -150,7 +150,7 @@ export function createCocodClient(
 
     const response = await fetchImpl(`http://localhost${path}`, requestInit);
     const rawText = await response.text();
-    logger.log(`[fetchJson] ${init.method || "GET"} ${path} status=${response.status} body=${rawText}`);
+    // logger.log(`[fetchJson] ${init.method || "GET"} ${path} status=${response.status} body=${rawText}`);
     const data = JSON.parse(rawText) as CommandResponse<T>;
     const errorMessage =
       typeof data.error === "string" ? data.error.trim() : "";
