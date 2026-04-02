@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
-  LOG_FILE,
+  LOGS_DIR,
   type RoutstrdConfig,
 } from "./utils/config";
 
@@ -56,17 +56,20 @@ export async function isDaemonRunning(): Promise<boolean> {
 }
 
 export async function startDaemonProcess(): Promise<void> {
-  const logFile = Bun.file(LOG_FILE);
+  // Ensure logs directory exists (logger handles date-based files)
+  if (!existsSync(LOGS_DIR)) {
+    await Bun.$`mkdir -p ${LOGS_DIR}`;
+  }
 
   const proc = Bun.spawn([
     "bun", "run", `${import.meta.dir}/daemon/index.ts`
   ], {
-    stdout: logFile,
-    stderr: logFile,
+    stdout: "inherit",
+    stderr: "inherit",
     stdin: "ignore",
     detached: true,
   });
-  
+
   proc.unref();
 
   for (let i = 0; i < 50; i++) {

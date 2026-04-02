@@ -13,7 +13,7 @@ import {
   DB_PATH,
   CONFIG_FILE,
   DEFAULT_CONFIG,
-  LOG_FILE,
+  LOGS_DIR,
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
@@ -932,22 +932,47 @@ program
   });
 
 // Logs
+function getLogFileForDate(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${LOGS_DIR}/${year}-${month}-${day}.log`;
+}
+
 program
   .command("logs")
   .description("View daemon logs")
   .option("-f, --follow", "Follow log output", false)
   .option("-n, --lines <number>", "Number of lines to show", "50")
   .action(async (options: { follow: boolean; lines: string }) => {
-    if (!existsSync(LOG_FILE)) {
-      console.log("No log file found. Daemon may not have started yet.");
+    const todayFile = getLogFileForDate();
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayFile = getLogFileForDate(yesterday);
+
+    if (!existsSync(todayFile) && !existsSync(yesterdayFile)) {
+      console.log("No log files found. Daemon may not have started yet.");
+      console.log(`Logs directory: ${LOGS_DIR}`);
       process.exit(1);
     }
 
     const lines = parseInt(options.lines, 10);
 
     const readLastLines = async (): Promise<string[]> => {
-      const content = await Bun.file(LOG_FILE).text();
-      const allLines = content.split("\n").filter(Boolean);
+      let allLines: string[] = [];
+
+      // Read yesterday's log first if it exists
+      if (existsSync(yesterdayFile)) {
+        const yesterdayContent = await Bun.file(yesterdayFile).text();
+        allLines = yesterdayContent.split("\n").filter(Boolean);
+      }
+
+      // Then read today's log
+      if (existsSync(todayFile)) {
+        const todayContent = await Bun.file(todayFile).text();
+        allLines = allLines.concat(todayContent.split("\n").filter(Boolean));
+      }
+
       return allLines.slice(-lines);
     };
 
@@ -959,25 +984,40 @@ program
     };
 
     if (options.follow) {
-      const logFile = Bun.file(LOG_FILE);
-      const initialContent = await logFile.text();
-      let lastSize = initialContent.length;
+      let currentLogFile = todayFile;
+      let lastSize = 0;
+
+      if (existsSync(currentLogFile)) {
+        lastSize = (await Bun.file(currentLogFile).text()).length;
+      }
 
       await printLines();
 
       const interval = setInterval(async () => {
-        const content = await Bun.file(LOG_FILE).text();
-        const currentSize = content.length;
-        if (currentSize > lastSize) {
-          const allLines = content.split("\n").filter(Boolean);
-          const newLines = allLines.slice(
-            Math.floor(lastSize === 0 ? 0 : -1),
-            -1,
-          );
-          for (const line of newLines) {
-            console.log(line);
+        // Check if we need to switch to a new date file
+        const newLogFile = getLogFileForDate();
+        if (newLogFile !== currentLogFile) {
+          console.log(`\n--- Switched to ${newLogFile} ---\n`);
+          currentLogFile = newLogFile;
+          lastSize = existsSync(currentLogFile)
+            ? (await Bun.file(currentLogFile).text()).length
+            : 0;
+        }
+
+        if (existsSync(currentLogFile)) {
+          const content = await Bun.file(currentLogFile).text();
+          const currentSize = content.length;
+          if (currentSize > lastSize) {
+            const allLines = content.split("\n").filter(Boolean);
+            const newLines = allLines.slice(
+              Math.floor(lastSize === 0 ? 0 : -1),
+              -1,
+            );
+            for (const line of newLines) {
+              console.log(line);
+            }
+            lastSize = currentSize;
           }
-          lastSize = currentSize;
         }
       }, 1000);
 

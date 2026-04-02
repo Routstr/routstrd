@@ -4,11 +4,18 @@ import { join } from "path";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const LOG_DIR = process.env.ROUTSTRD_DIR || `${HOME}/.routstrd`;
-const LOG_FILE = join(LOG_DIR, "routstrd.log");
+const LOGS_DIR = join(LOG_DIR, "logs");
+
+function getLogFileForDate(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return join(LOGS_DIR, `${year}-${month}-${day}.log`);
+}
 
 async function ensureLogDir() {
-  if (!existsSync(LOG_DIR)) {
-    await mkdir(LOG_DIR, { recursive: true });
+  if (!existsSync(LOGS_DIR)) {
+    await mkdir(LOGS_DIR, { recursive: true });
   }
 }
 
@@ -31,8 +38,9 @@ async function writeLog(level: string, ...args: unknown[]) {
     })
     .join(" ");
   const line = `[${timestamp}] [${level}] ${message}\n`;
+  const logFile = getLogFileForDate(new Date(timestamp));
   try {
-    await appendFile(LOG_FILE, line);
+    await appendFile(logFile, line);
   } catch (error) {
     console.error("Failed to write log:", error);
   }

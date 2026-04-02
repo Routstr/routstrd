@@ -11,6 +11,9 @@ build/
 npm-debug.log*
 bun-debug.log*
 
+# Date-based log files in logs folder
+logs/
+
 .DS_Store
 Thumbs.db
 

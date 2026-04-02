@@ -1,7 +1,6 @@
-import { LOG_FILE } from "./utils/config";
 import { logger } from "./utils/logger";
-import { existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import { existsSync } from "fs";
+import { LOGS_DIR } from "./utils/config";
 
 export async function startDaemon(
   options: { port?: string; provider?: string } = {},
@@ -33,16 +32,13 @@ export async function startDaemon(
     args.push("--provider", options.provider);
   }
 
-  // Ensure log directory exists
-  const logDir = dirname(LOG_FILE);
-  if (!existsSync(logDir)) {
-    mkdirSync(logDir, { recursive: true });
+  // Ensure logs directory exists (logger handles date-based files)
+  if (!existsSync(LOGS_DIR)) {
+    await Bun.$`mkdir -p ${LOGS_DIR}`;
   }
 
-  // Use shell redirection to append stdout/stderr to log file
-  // Bun.file() overwrites, so we need shell >> for appending
   const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
-  const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")} >> "${LOG_FILE}" 2>&1`;
+  const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")}`;
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
     stdout: "inherit",
@@ -64,7 +60,7 @@ export async function startDaemon(
 
     if (exitCode !== null) {
       throw new Error(
-        `Daemon process exited early with code ${exitCode}. Check logs at ${LOG_FILE}`,
+        `Daemon process exited early with code ${exitCode}. Check logs in ${LOGS_DIR}`,
       );
     }
 
@@ -85,6 +81,6 @@ export async function startDaemon(
   }
 
   throw new Error(
-    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs at ${LOG_FILE}`,
+    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs in ${LOGS_DIR}`,
   );
 }
