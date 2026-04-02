@@ -2,6 +2,14 @@ import { logger } from "./utils/logger";
 import { existsSync } from "fs";
 import { LOGS_DIR } from "./utils/config";
 
+function getTodayLogFile(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${LOGS_DIR}/${year}-${month}-${day}.log`;
+}
+
 export async function startDaemon(
   options: { port?: string; provider?: string } = {},
 ): Promise<void> {
@@ -38,7 +46,8 @@ export async function startDaemon(
   }
 
   const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
-  const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")}`;
+  const todayLogFile = getTodayLogFile();
+  const shellCmd = `bun run "${daemonScript}" ${args.map(a => `'${a}'`).join(" ")} >> "${todayLogFile}" 2>&1`;
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
     stdout: "inherit",
