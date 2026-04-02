@@ -152,6 +152,14 @@ export function createCocodClient(
     const rawText = await response.text();
     logger.log(`[fetchJson] ${init.method || "GET"} ${path} status=${response.status} body=${rawText}`);
     const data = JSON.parse(rawText) as CommandResponse<T>;
+    const errorMessage =
+      typeof data.error === "string" ? data.error.trim() : "";
+    if (errorMessage) {
+      throw new CocodHttpError(
+        response.ok ? 400 : response.status,
+        errorMessage,
+      );
+    }
 
     if (!response.ok) {
       throw new CocodHttpError(
@@ -251,13 +259,19 @@ export function createCocodClient(
     async receiveCashu(token: string): Promise<string> {
       logger.log(`[receiveCashu] Receiving Cashu token...`);
       logger.log(`[receiveCashu] Token:`, token);
-      const response = await callDaemon<string>("/receive/cashu", {
+      const message = await callDaemon<string>("/receive/cashu", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
       });
-      logger.log(`[receiveCashu] Full response.output:`, response);
-      return response;
+      if (typeof message !== "string" || !message.trim()) {
+        throw new CocodHttpError(
+          502,
+          "Unexpected response from cocod while receiving Cashu token.",
+        );
+      }
+      logger.log(`[receiveCashu] Full response.output:`, message);
+      return message;
     },
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
       return post<string>("/receive/bolt11", { amount, mintUrl });
