@@ -1,23 +1,15 @@
-import { randomBytes } from "crypto";
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
+import type { IntegrationConfig, RoutstrModel } from "./registry";
+import { generateApiKey } from "./registry";
 
-const OPENCLAW_CONFIG_PATH = join(process.env.HOME || "", ".openclaw/openclaw.json");
 const OPENCLAW_PROVIDER_ID = "routstr";
-const OPENCLAW_API_BASE = "http://localhost:8008/v1";
 const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/minimax-m2.5";
 const OPENCLAW_DEFAULT_FALLBACK_MODEL = "routstr/kimi-k2.5";
-const OPENCLAW_CLIENT_ID = "openclaw";
-const OPENCLAW_NAME = "OpenClaw";
-
-type RoutstrModel = {
-  id: string;
-  name?: string;
-};
 
 type OpenClawModelEntry = {
   id: string;
@@ -58,15 +50,13 @@ function toAlias(modelId: string): string {
   return modelId;
 }
 
-function generateApiKey(): string {
-  const bytes = randomBytes(24);
-  return `sk-${bytes.toString("hex")}`;
-}
-
 export async function installOpenClawIntegration(
   config: RoutstrdConfig,
   store: SdkStore,
+  integrationConfig: IntegrationConfig,
 ): Promise<void> {
+  const { clientId, name, configPath } = integrationConfig;
+
   logger.log("\nInstalling routstr models in openclaw.json...");
 
   const port = config.port || 8008;
@@ -74,33 +64,33 @@ export async function installOpenClawIntegration(
   // Get or create clientId entry for OpenClaw
   const state = store.getState();
   const existingClient = (state.clientIds || []).find(
-    (c: { clientId: string }) => c.clientId === OPENCLAW_CLIENT_ID,
+    (c: { clientId: string }) => c.clientId === clientId,
   );
 
   let apiKey: string;
   if (existingClient) {
     apiKey = existingClient.apiKey;
-    logger.log(`Using existing API key for ${OPENCLAW_NAME}`);
+    logger.log(`Using existing API key for ${name}`);
   } else {
     apiKey = generateApiKey();
     // Add new clientId entry using proper store action
     store.getState().setClientIds((prev) => [
       ...(prev || []),
       {
-        clientId: OPENCLAW_CLIENT_ID,
-        name: OPENCLAW_NAME,
+        clientId,
+        name,
         apiKey,
         createdAt: Date.now(),
       },
     ]);
-    logger.log(`Created new API key for ${OPENCLAW_NAME}`);
+    logger.log(`Created new API key for ${name}`);
   }
 
   let openclawConfig: OpenClawConfig = {};
 
   try {
-    if (existsSync(OPENCLAW_CONFIG_PATH)) {
-      const content = await readFile(OPENCLAW_CONFIG_PATH, "utf-8");
+    if (existsSync(configPath)) {
+      const content = await readFile(configPath, "utf-8");
       openclawConfig = JSON.parse(content) as OpenClawConfig;
     }
   } catch {
@@ -121,7 +111,7 @@ export async function installOpenClawIntegration(
   }
 
   try {
-    mkdirSync(dirname(OPENCLAW_CONFIG_PATH), { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
 
     const response = await fetch(`http://localhost:${port}/models`);
     const data = await response.json() as { output?: { models: RoutstrModel[] } };
@@ -139,7 +129,7 @@ export async function installOpenClawIntegration(
     }));
 
     openclawConfig.models.providers[OPENCLAW_PROVIDER_ID] = {
-      baseUrl: OPENCLAW_API_BASE,
+      baseUrl: `http://localhost:${port}/v1`,
       apiKey,
       api: "openai-completions",
       models: providerModels,
@@ -169,7 +159,7 @@ export async function installOpenClawIntegration(
     // }
     // openclawConfig.agents.defaults.models = aliasMap;
 
-    await writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify(openclawConfig, null, 2));
+    await writeFile(configPath, JSON.stringify(openclawConfig, null, 2));
     logger.log(`Added "${OPENCLAW_PROVIDER_ID}" provider with ${models.length} models to openclaw.json`);
   } catch (error) {
     logger.error("Failed to install models in openclaw.json:", error);

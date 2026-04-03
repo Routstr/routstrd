@@ -90,7 +90,7 @@ async function main(): Promise<void> {
     // Ignore
   }
 
-  const REFRESH_INTERVAL_MS = 3.5 * 60 * 60 * 1000; // 3.5 hours
+  const REFRESH_INTERVAL_MS = 21 * 60 * 1000; // 21 mins
 
   // Recurring job to refresh routstr21 models
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
@@ -110,9 +110,7 @@ async function main(): Promise<void> {
         const state = store.getState();
         const clientIds = state.clientIds || [];
         if (clientIds.length > 0) {
-          logger.log(
-            `Refreshing ${clientIds.length} client integration(s)...`,
-          );
+          logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
           await runIntegrationsForClients(clientIds, updatedConfig, store);
           logger.log("Client integrations refreshed.");
         }
@@ -221,9 +219,7 @@ async function main(): Promise<void> {
         const state = store.getState();
         const clientIds = state.clientIds || [];
         if (clientIds.length > 0) {
-          logger.log(
-            `Refreshing ${clientIds.length} client integration(s)...`,
-          );
+          logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
           await runIntegrationsForClients(clientIds, updatedConfig, store);
           logger.log("Client integrations refreshed.");
         }

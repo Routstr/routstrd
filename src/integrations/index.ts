@@ -4,7 +4,8 @@ import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
 import type { SdkStore } from "@routstr/sdk";
-export { CLIENT_INTEGRATIONS, runIntegrationsForClients } from "./registry";
+import { CLIENT_CONFIGS } from "./registry";
+export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -50,17 +51,17 @@ export async function setupIntegration(
   const choice = parseChoice(answer);
 
   if (choice === 1) {
-    await installOpencodeIntegration(config, store);
+    await installOpencodeIntegration(config, store, CLIENT_CONFIGS.opencode!);
     return;
   }
 
   if (choice === 2) {
-    await installOpenClawIntegration(config, store);
+    await installOpenClawIntegration(config, store, CLIENT_CONFIGS.openclaw!);
     return;
   }
 
   if (choice === 3) {
-    await installPiIntegration(config, store);
+    await installPiIntegration(config, store, CLIENT_CONFIGS["pi-agent"]!);
     return;
   }
 

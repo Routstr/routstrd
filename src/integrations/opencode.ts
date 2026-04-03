@@ -1,30 +1,21 @@
-import { randomBytes } from "crypto";
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
+import type { IntegrationConfig, RoutstrModel } from "./registry";
+import { generateApiKey } from "./registry";
 
-const OPENCODE_CONFIG_PATH = join(process.env.HOME || "", ".config/opencode/opencode.json");
 const OPENCODE_SMALL_MODEL = "routstr/minimax-m2.5";
-const OPENCODE_CLIENT_ID = "opencode";
-const OPENCODE_NAME = "OpenCode";
-
-type RoutstrModel = {
-  id: string;
-  name?: string;
-};
-
-function generateApiKey(): string {
-  const bytes = randomBytes(24);
-  return `sk-${bytes.toString("hex")}`;
-}
 
 export async function installOpencodeIntegration(
   config: RoutstrdConfig,
   store: SdkStore,
+  integrationConfig: IntegrationConfig,
 ): Promise<void> {
+  const { clientId, name, configPath } = integrationConfig;
+
   logger.log("\nInstalling routstr models in opencode.json...");
 
   const port = config.port || 8008;
@@ -32,26 +23,26 @@ export async function installOpencodeIntegration(
   // Get or create clientId entry for OpenCode
   const state = store.getState();
   const existingClient = (state.clientIds || []).find(
-    (c: { clientId: string }) => c.clientId === OPENCODE_CLIENT_ID,
+    (c: { clientId: string }) => c.clientId === clientId,
   );
 
   let apiKey: string;
   if (existingClient) {
     apiKey = existingClient.apiKey;
-    logger.log(`Using existing API key for ${OPENCODE_NAME}`);
+    logger.log(`Using existing API key for ${name}`);
   } else {
     apiKey = generateApiKey();
     // Add new clientId entry using proper store action
     store.getState().setClientIds((prev) => [
       ...(prev || []),
       {
-        clientId: OPENCODE_CLIENT_ID,
-        name: OPENCODE_NAME,
+        clientId,
+        name,
         apiKey,
         createdAt: Date.now(),
       },
     ]);
-    logger.log(`Created new API key for ${OPENCODE_NAME}`);
+    logger.log(`Created new API key for ${name}`);
   }
 
   let opencodeConfig: {
@@ -69,8 +60,8 @@ export async function installOpencodeIntegration(
   };
 
   try {
-    if (existsSync(OPENCODE_CONFIG_PATH)) {
-      const content = await readFile(OPENCODE_CONFIG_PATH, "utf-8");
+    if (existsSync(configPath)) {
+      const content = await readFile(configPath, "utf-8");
       opencodeConfig = JSON.parse(content);
     } else {
       opencodeConfig = { provider: {} };
@@ -84,7 +75,7 @@ export async function installOpencodeIntegration(
   }
 
   try {
-    mkdirSync(dirname(OPENCODE_CONFIG_PATH), { recursive: true });
+    mkdirSync(dirname(configPath), { recursive: true });
 
     const response = await fetch(`http://localhost:${port}/models`);
     const data = await response.json() as { output?: { models: RoutstrModel[] } };
@@ -112,7 +103,7 @@ export async function installOpencodeIntegration(
     };
     opencodeConfig.small_model = OPENCODE_SMALL_MODEL;
 
-    await writeFile(OPENCODE_CONFIG_PATH, JSON.stringify(opencodeConfig, null, 2));
+    await writeFile(configPath, JSON.stringify(opencodeConfig, null, 2));
     logger.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
   } catch (error) {
     logger.error("Failed to install models in opencode.json:", error);
