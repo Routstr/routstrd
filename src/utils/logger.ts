@@ -51,6 +51,9 @@ export const logger = {
     console.log(...args);
     writeLog("INFO", ...args);
   },
+  debug: (...args: unknown[]) => {
+    writeLog("DEBUG", ...args);
+  },
   error: (...args: unknown[]) => {
     console.error(...args);
     writeLog("ERROR", ...args);

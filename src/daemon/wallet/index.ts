@@ -93,17 +93,14 @@ export async function createWalletAdapter(
       message?: string;
     }> {
       try {
-        const res = await client.receiveCashu(token);
-        logger.log("DEBUGSDF", res);
+        const message = await client.receiveCashu(token);
         const { amount, unit } = decodeCashuTokenAmount(token);
-        return { success: true, amount, unit };
+        return { success: true, amount, unit, message };
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        const message = errorMessage.includes("Failed to fetch mint")
-          ? errorMessage
-          : undefined;
-        return { success: false, amount: 0, unit: "sat", message };
+        logger.error("Error in walletAdapter receiveToken:", error);
+        return { success: false, amount: 0, unit: "sat", message: errorMessage };
       }
     },
   };
