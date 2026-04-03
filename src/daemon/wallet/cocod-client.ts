@@ -1,4 +1,5 @@
 import { existsSync } from "fs";
+import { createHash } from "crypto";
 import { logger } from "../../utils/logger";
 
 const DEFAULT_CONFIG_DIR = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
@@ -107,6 +108,24 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function toErrorText(value: unknown): string {
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (value === null || value === undefined) {
+    return "";
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
 export function createCocodClient(
   options: {
     cocodPath?: string | null;
@@ -143,6 +162,7 @@ export function createCocodClient(
     path: string,
     init: Omit<UnixRequestInit, "unix"> = {},
   ): Promise<CommandResponse<T>> {
+    const method = init.method || "GET";
     const requestInit: UnixRequestInit = {
       ...init,
       unix: socketPath,
@@ -150,10 +170,35 @@ export function createCocodClient(
 
     const response = await fetchImpl(`http://localhost${path}`, requestInit);
     const rawText = await response.text();
-    logger.log(`[fetchJson] ${init.method || "GET"} ${path} status=${response.status} body=${rawText}`);
-    const data = JSON.parse(rawText) as CommandResponse<T>;
-    const errorMessage =
-      typeof data.error === "string" ? data.error.trim() : "";
+    logger.log(
+      `[fetchJson] ${method} ${path} status=${response.status} body=${rawText}`,
+    );
+
+    if (!rawText.trim()) {
+      throw new CocodHttpError(
+        response.ok ? 502 : response.status,
+        `Empty response from cocod for ${method} ${path}`,
+      );
+    }
+
+    let data: CommandResponse<T>;
+    try {
+      data = JSON.parse(rawText) as CommandResponse<T>;
+    } catch {
+      throw new CocodHttpError(
+        response.ok ? 502 : response.status,
+        `Invalid JSON response from cocod for ${method} ${path}`,
+      );
+    }
+
+    if (!data || typeof data !== "object") {
+      throw new CocodHttpError(
+        response.ok ? 502 : response.status,
+        `Unexpected response shape from cocod for ${method} ${path}`,
+      );
+    }
+
+    const errorMessage = toErrorText((data as CommandResponse<T>).error);
     if (errorMessage) {
       throw new CocodHttpError(
         response.ok ? 400 : response.status,
@@ -233,13 +278,11 @@ export function createCocodClient(
   }
 
   function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-    const res = callDaemon<T>(path, {
+    return callDaemon<T>(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    logger.log("DEBUG", res);
-    return res;
   }
 
   return {
@@ -257,8 +300,9 @@ export function createCocodClient(
       return normalizeBalances(output);
     },
     async receiveCashu(token: string): Promise<string> {
-      logger.log(`[receiveCashu] Receiving Cashu token...`);
-      logger.log(`[receiveCashu] Token:`, token);
+      logger.log(
+        `[receiveCashu] Receiving Cashu token ${tokenFingerprint(token)}`,
+      );
       const message = await callDaemon<string>("/receive/cashu", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
