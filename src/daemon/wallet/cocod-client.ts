@@ -170,9 +170,9 @@ export function createCocodClient(
 
     const response = await fetchImpl(`http://localhost${path}`, requestInit);
     const rawText = await response.text();
-    logger.debug(
-      `[fetchJson] ${method} ${path} status=${response.status} body=${rawText}`,
-    );
+    // logger.debug(
+    //   `[fetchJson] ${method} ${path} status=${response.status} body=${rawText}`,
+    // );
 
     if (!rawText.trim()) {
       throw new CocodHttpError(
