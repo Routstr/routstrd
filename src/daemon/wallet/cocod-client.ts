@@ -170,7 +170,7 @@ export function createCocodClient(
 
     const response = await fetchImpl(`http://localhost${path}`, requestInit);
     const rawText = await response.text();
-    logger.log(
+    logger.debug(
       `[fetchJson] ${method} ${path} status=${response.status} body=${rawText}`,
     );
 
@@ -243,7 +243,7 @@ export function createCocodClient(
       }
 
       if (await pingInternal()) {
-        logger.log(`Connected to cocod daemon on ${socketPath}`);
+        logger.debug(`Connected to cocod daemon on ${socketPath}`);
         return;
       }
     }
@@ -259,7 +259,7 @@ export function createCocodClient(
     }
 
     if (!startPromise) {
-      logger.log(`Starting cocod daemon via ${executable}...`);
+      logger.debug(`Starting cocod daemon via ${executable}...`);
       startPromise = startDaemon().finally(() => {
         startPromise = null;
       });
@@ -300,7 +300,7 @@ export function createCocodClient(
       return normalizeBalances(output);
     },
     async receiveCashu(token: string): Promise<string> {
-      logger.log(
+      logger.debug(
         `[receiveCashu] Receiving Cashu token ${tokenFingerprint(token)}`,
       );
       const message = await callDaemon<string>("/receive/cashu", {
@@ -314,7 +314,7 @@ export function createCocodClient(
           "Unexpected response from cocod while receiving Cashu token.",
         );
       }
-      logger.log(`[receiveCashu] Full response.output:`, message);
+      logger.debug(`[receiveCashu] Full response.output:`, message);
       return message;
     },
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
