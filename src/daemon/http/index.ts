@@ -823,12 +823,16 @@ export function createDaemonRequestHandler(deps: {
           disabled: disabledProviders.includes(baseUrl),
         }));
 
+        // Only count disabled providers that are actually in the current list
+        // (filter out stale entries from previously disabled providers that are no longer present)
+        const activeDisabledCount = providers.filter((p) => p.disabled).length;
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
               providers,
-              disabledCount: disabledProviders.length,
+              disabledCount: activeDisabledCount,
               totalCount: baseUrlsList.length,
             },
           }),
