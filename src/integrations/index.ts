@@ -4,6 +4,7 @@ import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
 import type { SdkStore } from "@routstr/sdk";
+export { CLIENT_INTEGRATIONS, runIntegrationsForClients } from "./registry";
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);

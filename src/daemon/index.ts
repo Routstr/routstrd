@@ -20,6 +20,7 @@ import { createWalletAdapter } from "./wallet";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
+import { runIntegrationsForClients } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
 async function main(): Promise<void> {
@@ -104,6 +105,17 @@ async function main(): Promise<void> {
       try {
         await getRoutstr21Models(true);
         logger.log("Scheduled model refresh completed successfully.");
+
+        // Refresh integrations for all registered clients
+        const state = store.getState();
+        const clientIds = state.clientIds || [];
+        if (clientIds.length > 0) {
+          logger.log(
+            `Refreshing ${clientIds.length} client integration(s)...`,
+          );
+          await runIntegrationsForClients(clientIds, updatedConfig, store);
+          logger.log("Client integrations refreshed.");
+        }
       } catch (error) {
         logger.error("Scheduled model refresh failed:", error);
       }
@@ -203,8 +215,18 @@ async function main(): Promise<void> {
         logger.log("Running initial model refresh...");
         return getRoutstr21Models(true);
       })
-      .then(() => {
+      .then(async () => {
         logger.log("Initial model refresh completed.");
+        // Refresh integrations for all registered clients after initial bootstrap
+        const state = store.getState();
+        const clientIds = state.clientIds || [];
+        if (clientIds.length > 0) {
+          logger.log(
+            `Refreshing ${clientIds.length} client integration(s)...`,
+          );
+          await runIntegrationsForClients(clientIds, updatedConfig, store);
+          logger.log("Client integrations refreshed.");
+        }
       })
       .catch((error) => {
         logger.error("Initial model refresh failed:", error);
