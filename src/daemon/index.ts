@@ -208,7 +208,7 @@ async function main(): Promise<void> {
     void ensureProvidersBootstrapped()
       .then(() => {
         startModelRefreshJob();
-        startRefundJob();
+        // startRefundJob(); DISABLING refund job for now.
         // Run an immediate refresh to populate models right away
         logger.log("Running initial model refresh...");
         return getRoutstr21Models(true);
@@ -228,7 +228,7 @@ async function main(): Promise<void> {
         logger.error("Initial model refresh failed:", error);
         // Still start the jobs even if initial refresh fails
         startModelRefreshJob();
-        startRefundJob();
+        // startRefundJob(); DISABLING refund job for now.
       });
   });
 }
