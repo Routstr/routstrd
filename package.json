@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "file:../routstr-chat/sdk",
+    "@routstr/sdk": "^0.2.7",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "commander": "^14.0.2",
