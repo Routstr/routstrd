@@ -886,12 +886,12 @@ program
 
     const selectedMode = modes[selectedIndex];
 
-    // if (selectedMode === "xcashu") {
-    //   console.log(
-    //     "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
-    //   );
-    //   return;
-    // }
+    if (selectedMode === "xcashu") {
+      console.log(
+        "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
+      );
+      return;
+    }
 
     if (selectedMode === currentMode) {
       console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
