@@ -365,9 +365,59 @@ program
   .command("models")
   .description("List available routstr21 models")
   .option("-r, --refresh", "Force refresh routstr21 models from Nostr", false)
-  .action(async (options: { refresh: boolean }) => {
+  .option("-m, --model <id>", "Show providers for a specific model")
+  .action(async (options: { refresh: boolean; model?: string }) => {
     await ensureDaemonRunning();
 
+    if (options.model) {
+      // Show providers for specific model
+      const result = await callDaemon(`/models/${encodeURIComponent(options.model)}/providers`);
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const modelData = result.output as {
+        id: string;
+        name?: string;
+        description?: string;
+        context_length?: number;
+        providers: Array<{
+          baseUrl: string;
+          pricing: {
+            prompt: number;
+            completion: number;
+            request: number;
+            max_cost: number;
+          };
+        }>;
+      } | undefined;
+
+      if (!modelData) {
+        console.log("Model not found");
+        process.exit(1);
+      }
+
+      console.log(`\n${modelData.name || modelData.id}`);
+      if (modelData.description) {
+        console.log(`  ${modelData.description}`);
+      }
+      if (modelData.context_length) {
+        console.log(`  Context: ${modelData.context_length.toLocaleString()} tokens`);
+      }
+      console.log(`\n  Providers (${modelData.providers.length}):`);
+      for (const provider of modelData.providers) {
+        console.log(`\n    ${provider.baseUrl}`);
+        console.log(`      Prompt:     ${provider.pricing.prompt.toFixed(2)} sats/M tokens`);
+        console.log(`      Completion: ${provider.pricing.completion.toFixed(2)} sats/M tokens`);
+        console.log(`      Request:    ${provider.pricing.request.toFixed(2)} sats`);
+        console.log(`      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`);
+      }
+      console.log("");
+      return;
+    }
+
+    // List all models with interactive selection
     const result = await callDaemon(
       options.refresh ? "/models?refresh=true" : "/models",
     );
@@ -386,6 +436,7 @@ program
         console.log("No routstr21 models found");
       } else {
         console.log(`\nFound ${models.length} routstr21 models:`);
+        console.log("(Use 'routstrd models -m <model_id>' to see providers and pricing)\n");
         models.forEach((model, i) => {
           const details = [
             model.name && model.name !== model.id ? model.name : null,
@@ -393,8 +444,9 @@ program
           ]
             .filter(Boolean)
             .join(" - ");
-          console.log(`${i + 1}. ${model.id}${details ? ` (${details})` : ""}`);
+          console.log(`  ${String(i + 1).padStart(2)}. ${model.id}${details ? ` (${details})` : ""}`);
         });
+        console.log("");
       }
     }
   });

@@ -2,6 +2,20 @@ import { ModelManager } from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
 
+export type ModelProviderInfo = {
+  baseUrl: string;
+  pricing: {
+    prompt: number;
+    completion: number;
+    request: number;
+    max_cost: number;
+  };
+};
+
+export type ModelWithProviders = ExposedModel & {
+  providers: ModelProviderInfo[];
+};
+
 export function createModelService(modelManager: ModelManager) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
@@ -42,8 +56,57 @@ export function createModelService(modelManager: ModelManager) {
     });
   };
 
+  const getModelProviders = async (
+    modelId: string,
+  ): Promise<ModelWithProviders | null> => {
+    await ensureProvidersBootstrapped();
+
+    const allModels = modelManager.getAllCachedModels();
+    const providers: ModelProviderInfo[] = [];
+
+    for (const [baseUrl, models] of Object.entries(allModels)) {
+      const model = models.find((m) => m.id === modelId);
+      if (model && model.sats_pricing) {
+        providers.push({
+          baseUrl,
+          pricing: {
+            prompt: model.sats_pricing.prompt,
+            completion: model.sats_pricing.completion,
+            request: model.sats_pricing.request,
+            max_cost: model.sats_pricing.max_cost,
+          },
+        });
+      }
+    }
+
+    // Sort by max_cost (cheapest first)
+    providers.sort((a, b) => a.pricing.max_cost - b.pricing.max_cost);
+
+    if (providers.length === 0) {
+      return null;
+    }
+
+    // Get model metadata from first provider that has it
+    const cheapest = providers[0]!;
+    const firstProvider = allModels[cheapest.baseUrl];
+    const modelInfo = firstProvider?.find((m: { id: string }) => m.id === modelId);
+
+    if (!modelInfo) {
+      return null;
+    }
+
+    return {
+      id: modelInfo.id,
+      name: modelInfo.name,
+      description: modelInfo.description,
+      context_length: modelInfo.context_length,
+      providers,
+    };
+  };
+
   return {
     ensureProvidersBootstrapped,
     getRoutstr21Models,
+    getModelProviders,
   };
 }

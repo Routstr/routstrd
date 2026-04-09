@@ -37,6 +37,7 @@ type DaemonDeps = {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
+  getModelProviders: (modelId: string) => Promise<any>;
   mode?: ClientMode;
   providerManager: ProviderManager;
 };
@@ -277,6 +278,7 @@ export function createDaemonRequestHandler(deps: {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
+  getModelProviders: (modelId: string) => Promise<any>;
   mode?: "xcashu" | "apikeys";
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
@@ -417,6 +419,23 @@ export function createDaemonRequestHandler(deps: {
           url.searchParams.get("refresh")?.toLowerCase() === "true";
         const models = await deps.getRoutstr21Models(forceRefresh);
         sendJson(res, 200, { output: { models } });
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    // Get providers for a specific model
+    const modelProvidersMatch = url.pathname.match(/^\/models\/([^\/]+)\/providers$/);
+    if (req.method === "GET" && modelProvidersMatch && modelProvidersMatch[1]) {
+      try {
+        const modelId = decodeURIComponent(modelProvidersMatch[1]);
+        const modelWithProviders = await deps.getModelProviders(modelId);
+        if (!modelWithProviders) {
+          sendJson(res, 404, { error: `Model '${modelId}' not found` });
+          return;
+        }
+        sendJson(res, 200, { output: modelWithProviders });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }
