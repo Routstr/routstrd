@@ -408,8 +408,8 @@ program
       console.log(`\n  Providers (${modelData.providers.length}):`);
       for (const provider of modelData.providers) {
         console.log(`\n    ${provider.baseUrl}`);
-        console.log(`      Prompt:     ${provider.pricing.prompt.toFixed(2)} sats/M tokens`);
-        console.log(`      Completion: ${provider.pricing.completion.toFixed(2)} sats/M tokens`);
+        console.log(`      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`);
+        console.log(`      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`);
         console.log(`      Request:    ${provider.pricing.request.toFixed(2)} sats`);
         console.log(`      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`);
       }
