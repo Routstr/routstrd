@@ -8,6 +8,7 @@ import {
   loadConfig,
 } from "./cli-shared";
 import { existsSync, mkdirSync } from "fs";
+import { execSync } from "child_process";
 import {
   CONFIG_DIR,
   DB_PATH,
@@ -864,6 +865,81 @@ program
   .description("Stop the background daemon")
   .action(async () => {
     await handleDaemonCommand("/stop", { method: "POST" });
+  });
+
+// Service - PM2 management
+const serviceCmd = program
+  .command("service")
+  .description("Manage routstrd as a system service using PM2");
+
+serviceCmd
+  .command("install")
+  .description("Install and start routstrd using PM2 for persistence")
+  .action(async () => {
+    // 1. Check if PM2 is installed
+    try {
+      execSync("pm2 -v", { stdio: "ignore" });
+    } catch (e) {
+      console.log("PM2 not found. Installing PM2 globally with bun...");
+      try {
+        execSync("bun install -g pm2", { stdio: "inherit" });
+      } catch (err) {
+        console.error("Failed to install PM2. Please install it manually: bun install -g pm2");
+        process.exit(1);
+      }
+    }
+
+    // 2. Resolve the path to the daemon
+    // In a global install, we want the bundled daemon in dist/daemon/index.js
+    const daemonPath = Bun.resolveSync("./daemon/index.js", import.meta.url);
+
+    if (!existsSync(daemonPath)) {
+      console.error(`Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`);
+      process.exit(1);
+    }
+
+    console.log("Starting routstrd via PM2...");
+    try {
+      // Use --interpreter bun to ensure it runs with bun
+      execSync(`pm2 start "${daemonPath}" --name routstrd --interpreter bun`, {
+        stdio: "inherit",
+      });
+
+      console.log("\n✅ routstrd is now managed by PM2.");
+      console.log("\nTo ensure it starts on system reboot, run:");
+      console.log("  pm2 startup");
+      console.log("  pm2 save");
+      console.log("\nTo view logs:");
+      console.log("  pm2 logs routstrd");
+    } catch (err) {
+      console.error("Failed to start routstrd via PM2.");
+      process.exit(1);
+    }
+  });
+
+serviceCmd
+  .command("uninstall")
+  .description("Stop and remove routstrd from PM2")
+  .action(() => {
+    try {
+      execSync("pm2 delete routstrd", { stdio: "inherit" });
+      console.log("✅ routstrd service removed from PM2.");
+    } catch (e) {
+      console.error(
+        "Failed to remove service. It might not be running in PM2.",
+      );
+    }
+  });
+
+serviceCmd
+  .command("logs")
+  .description("View PM2 logs for routstrd")
+  .action(() => {
+    try {
+      execSync("pm2 logs routstrd", { stdio: "inherit" });
+    } catch (e) {
+      // Ignored
+    }
   });
 
 // Restart
