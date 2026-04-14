@@ -204,6 +204,9 @@ async function initDaemon(): Promise<void> {
   logger.log(
     "\n use 'routstrd wallet receive cashu <token>' or 'routstrd wallet receive bolt11 2100' to top up your local wallet!",
   );
+  logger.log(
+    "\nTo ensure routstrd persists across system restarts, run: 'routstrd service install'",
+  );
 }
 
 async function checkCocodInstalled(): Promise<boolean> {
