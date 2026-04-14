@@ -902,7 +902,15 @@ serviceCmd
 
     // 2. Resolve the path to the daemon
     // In a global install, we want the bundled daemon in dist/daemon/index.js
-    const daemonPath = Bun.resolveSync("./daemon/index.js", import.meta.url);
+    let daemonPath: string;
+    try {
+      // Try to resolve relative to this file first (works in dev and global)
+      daemonPath = Bun.resolveSync("./daemon/index.js", import.meta.url);
+    } catch (e) {
+      // Fallback for some bundling scenarios
+      const path = require("path");
+      daemonPath = path.join(path.dirname(import.meta.url).replace("file://", ""), "daemon", "index.js");
+    }
 
     if (!existsSync(daemonPath)) {
       console.error(`Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`);
