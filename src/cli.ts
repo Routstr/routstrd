@@ -722,6 +722,14 @@ program
     await runUsageTui();
   });
 
+program
+  .command("top")
+  .description("Open interactive TUI for usage monitoring (alias for monitor)")
+  .action(async () => {
+    const { runUsageTui } = await import("./tui/usage/index.ts");
+    await runUsageTui();
+  });
+
 const walletCmd = program.command("wallet").description("Wallet operations");
 
 walletCmd
