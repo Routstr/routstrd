@@ -1108,76 +1108,29 @@ program
 
     const lines = parseInt(options.lines, 10);
 
-    const readLastLines = async (): Promise<string[]> => {
-      let allLines: string[] = [];
-
-      // Read yesterday's log first if it exists
-      if (existsSync(yesterdayFile)) {
-        const yesterdayContent = await Bun.file(yesterdayFile).text();
-        allLines = yesterdayContent.split("\n").filter(Boolean);
-      }
-
-      // Then read today's log
-      if (existsSync(todayFile)) {
-        const todayContent = await Bun.file(todayFile).text();
-        allLines = allLines.concat(todayContent.split("\n").filter(Boolean));
-      }
-
-      return allLines.slice(-lines);
-    };
-
-    const printLines = async (): Promise<void> => {
-      const lastLines = await readLastLines();
-      for (const line of lastLines) {
-        console.log(line);
-      }
-    };
+    const logFiles = [yesterdayFile, todayFile].filter((file, index, files) => {
+      return existsSync(file) && files.indexOf(file) === index;
+    });
 
     if (options.follow) {
-      let currentLogFile = todayFile;
-      let lastSize = 0;
-
-      if (existsSync(currentLogFile)) {
-        lastSize = (await Bun.file(currentLogFile).text()).length;
-      }
-
-      await printLines();
-
-      const interval = setInterval(async () => {
-        // Check if we need to switch to a new date file
-        const newLogFile = getLogFileForDate();
-        if (newLogFile !== currentLogFile) {
-          console.log(`\n--- Switched to ${newLogFile} ---\n`);
-          currentLogFile = newLogFile;
-          lastSize = existsSync(currentLogFile)
-            ? (await Bun.file(currentLogFile).text()).length
-            : 0;
-        }
-
-        if (existsSync(currentLogFile)) {
-          const content = await Bun.file(currentLogFile).text();
-          const currentSize = content.length;
-          if (currentSize > lastSize) {
-            const allLines = content.split("\n").filter(Boolean);
-            const newLines = allLines.slice(
-              Math.floor(lastSize === 0 ? 0 : -1),
-              -1,
-            );
-            for (const line of newLines) {
-              console.log(line);
-            }
-            lastSize = currentSize;
-          }
-        }
-      }, 1000);
-
-      process.on("SIGINT", () => {
-        clearInterval(interval);
-        process.exit(0);
+      const proc = Bun.spawn(["tail", "-n", String(lines), "-f", todayFile], {
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "inherit",
       });
-    } else {
-      await printLines();
+
+      const exitCode = await proc.exited;
+      process.exit(exitCode);
     }
+
+    const proc = Bun.spawn(["tail", "-n", String(lines), ...logFiles], {
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "inherit",
+    });
+
+    const exitCode = await proc.exited;
+    process.exit(exitCode);
   });
 
 export function cli(args: string[]) {
