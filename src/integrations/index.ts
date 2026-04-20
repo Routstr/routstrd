@@ -3,6 +3,7 @@ import { logger } from "../utils/logger";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
+import { installClaudeCodeIntegration } from "./claudecode";
 import type { SdkStore } from "@routstr/sdk";
 import { CLIENT_CONFIGS } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
@@ -30,7 +31,7 @@ function parseChoice(input: string): number {
   }
 
   const parsed = Number.parseInt(input, 10);
-  if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 4) {
+  if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 5) {
     return parsed;
   }
 
@@ -45,7 +46,8 @@ export async function setupIntegration(
   logger.log("1. OpenCode (default)");
   logger.log("2. OpenClaw");
   logger.log("3. Pi");
-  logger.log("4. Skip for now");
+  logger.log("4. Claude Code");
+  logger.log("5. Skip for now");
 
   const answer = await ask("Select integration [1]: ");
   const choice = parseChoice(answer);
@@ -62,6 +64,11 @@ export async function setupIntegration(
 
   if (choice === 3) {
     await installPiIntegration(config, store, CLIENT_CONFIGS["pi-agent"]!);
+    return;
+  }
+
+  if (choice === 4) {
+    await installClaudeCodeIntegration(config, store, CLIENT_CONFIGS["claude-code"]!);
     return;
   }
 

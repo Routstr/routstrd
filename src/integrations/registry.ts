@@ -5,6 +5,7 @@ import type { SdkStore } from "@routstr/sdk";
 import { installOpencodeIntegration } from "./opencode";
 import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
+import { installClaudeCodeIntegration } from "./claudecode";
 
 export interface IntegrationConfig {
   clientId: string;
@@ -44,12 +45,18 @@ export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
     name: "OpenClaw",
     configPath: join(process.env.HOME || "", ".openclaw/openclaw.json"),
   },
+  "claude-code": {
+    clientId: "claude-code",
+    name: "Claude Code",
+    configPath: join(process.env.HOME || "", ".claude/settings.json"),
+  },
 };
 
 export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
   opencode: installOpencodeIntegration,
   "pi-agent": installPiIntegration,
   openclaw: installOpenClawIntegration,
+  "claude-code": installClaudeCodeIntegration,
 };
 
 export async function runIntegrationsForClients(
