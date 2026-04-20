@@ -99,7 +99,7 @@ export async function createWalletAdapter(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        logger.error("Error in walletAdapter receiveToken:", error);
+        logger.error("Error in walletAdapter receiveToken:", errorMessage);
         return { success: false, amount: 0, unit: "sat", message: errorMessage };
       }
     },
