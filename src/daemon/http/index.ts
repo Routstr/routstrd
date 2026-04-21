@@ -1,5 +1,7 @@
 import { randomBytes } from "crypto";
+import { readFile } from "fs/promises";
 import { type IncomingMessage, type ServerResponse } from "http";
+import { join } from "path";
 import {
   routeRequestsToNodeResponse,
   InsufficientBalanceError,
@@ -206,6 +208,30 @@ function optionalStringField(
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
+}
+
+type StoredRoutedRequest = {
+  path: string;
+  headers: Record<string, string>;
+  modelId: string;
+  body: unknown;
+  forcedProvider?: string;
+};
+
+async function readStoredRoutedRequest(): Promise<StoredRoutedRequest> {
+  const fixturePath = join(
+    process.cwd(),
+    "1776709153726-c8a1f436f357b6f3.json",
+  );
+  const raw = await readFile(fixturePath, "utf8");
+  const parsed = JSON.parse(raw) as StoredRoutedRequest;
+  return {
+    path: parsed.path,
+    headers: parsed.headers,
+    modelId: parsed.modelId,
+    body: parsed.body,
+    forcedProvider: parsed.forcedProvider,
+  };
 }
 
 async function buildStatusOutput(
@@ -949,31 +975,16 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    const forcedProvider: string | undefined =
-      url.searchParams.get("provider") ||
-      (req.headers["x-routstr-provider"] as string | undefined) ||
-      deps.provider ||
-      undefined;
-
-    // Convert req.headers to Record<string, string>
-    const incomingHeaders: Record<string, string> = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      if (typeof value === "string") {
-        incomingHeaders[key] = value;
-      } else if (Array.isArray(value) && value.length > 0) {
-        incomingHeaders[key] = value[0]!;
-      }
-    }
-
     try {
       await deps.ensureProvidersBootstrapped();
-      logger.log("Routing request with path: ", url.pathname);
+      const storedRequest = await readStoredRoutedRequest();
+      logger.log("Routing stored request with path: ", storedRequest.path);
       await routeRequestsToNodeResponse({
-        modelId,
-        requestBody,
-        path: url.pathname,
-        forcedProvider,
-        headers: incomingHeaders,
+        modelId: storedRequest.modelId,
+        requestBody: storedRequest.body,
+        path: storedRequest.path,
+        forcedProvider: storedRequest.forcedProvider,
+        headers: storedRequest.headers,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
         providerRegistry: deps.providerRegistry,

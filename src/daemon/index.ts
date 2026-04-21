@@ -208,7 +208,7 @@ async function main(): Promise<void> {
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
       .then(() => {
-        startModelRefreshJob();
+        // startModelRefreshJob();
         // startRefundJob(); DISABLING refund job for now.
         // Run an immediate refresh to populate models right away
         logger.log("Running initial model refresh...");
@@ -228,7 +228,7 @@ async function main(): Promise<void> {
       .catch((error) => {
         logger.error("Initial model refresh failed:", error);
         // Still start the jobs even if initial refresh fails
-        startModelRefreshJob();
+        // startModelRefreshJob();
         // startRefundJob(); DISABLING refund job for now.
       });
   });
