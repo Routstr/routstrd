@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.1.5",
+  "version": "0.1.8",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -13,6 +13,7 @@
     "lint": "tsc --noEmit",
     "test": "bun test",
     "build": "mkdir -p dist/daemon && bun build src/index.ts --target=bun --outfile=dist/index.js && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js",
+    "build:dev": "sed -i '' 's/\"@routstr\\/sdk\": \"\\^0.2.11\"/\"@routstr\\/sdk\": \"file:..\\/routstr-chat\\/sdk\"/' package.json && bun install && bun run build && sed -i '' 's/\"@routstr\\/sdk\": \"file:..\\/routstr-chat\\/sdk\"/\"@routstr\\/sdk\": \"^0.2.11\"/' package.json && bun install",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
@@ -24,7 +25,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "^0.2.8",
+    "@routstr/sdk": "^0.2.11",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "commander": "^14.0.2",
