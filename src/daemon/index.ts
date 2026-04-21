@@ -129,8 +129,8 @@ async function main(): Promise<void> {
     }
   };
 
-  // Recurring job to refund pending tokens every 10 minutes
-  const REFUND_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+  // Recurring job to refund pending tokens every 42 minutes
+  const REFUND_INTERVAL_MS = 42 * 60 * 1000; // 42 minutes
   let refundInterval: ReturnType<typeof setInterval> | null = null;
 
   const startRefundJob = async () => {
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
     void ensureProvidersBootstrapped()
       .then(() => {
         startModelRefreshJob();
-        // startRefundJob(); DISABLING refund job for now.
+        startRefundJob(); 
         // Run an immediate refresh to populate models right away
         logger.log("Running initial model refresh...");
         return getRoutstr21Models(true);
@@ -229,7 +229,7 @@ async function main(): Promise<void> {
         logger.error("Initial model refresh failed:", error);
         // Still start the jobs even if initial refresh fails
         startModelRefreshJob();
-        // startRefundJob(); DISABLING refund job for now.
+        startRefundJob(); 
       });
   });
 }
