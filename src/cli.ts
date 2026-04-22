@@ -59,6 +59,10 @@ function parsePositiveIntOrExit(value: string, fieldName: string): number {
   return parsed;
 }
 
+function isPositiveIntegerString(value: string): boolean {
+  return /^[1-9]\d*$/.test(value.trim());
+}
+
 async function printLightningInvoice(invoice: string): Promise<void> {
   const paymentUri = `lightning:${invoice}`;
   const qr = await QRCode.toString(paymentUri, {
@@ -202,7 +206,10 @@ async function initDaemon(): Promise<void> {
 
   logger.log("\nInitialization complete!");
   logger.log(
-    "\n use 'routstrd wallet receive cashu <token>' or 'routstrd wallet receive bolt11 2100' to top up your local wallet!",
+    "\n use 'routstrd receive <cashu-token>' or 'routstrd receive 2100' to top up your local wallet using Lightning!",
+  );
+  logger.log(
+    "\n full wallet commands still work too, e.g. 'routstrd wallet receive cashu <token>' and 'routstrd wallet receive bolt11 2100'.",
   );
   logger.log(
     "\nTo ensure routstrd persists across system restarts, run: 'routstrd service install'",
@@ -731,6 +738,77 @@ program
   .action(async () => {
     const { runUsageTui } = await import("./tui/usage/index.ts");
     await runUsageTui();
+  });
+
+program
+  .command("send <target>")
+  .description(
+    "Shortcut: numbers send Cashu, non-numbers pay a Lightning invoice",
+  )
+  .option("--mint-url <url>", "Mint URL to use")
+  .action(async (target: string, options: { mintUrl?: string }) => {
+    if (isPositiveIntegerString(target)) {
+      await handleDaemonCommand("/wallet/send/cashu", {
+        method: "POST",
+        body: {
+          amount: parsePositiveIntOrExit(target, "amount"),
+          mintUrl: options.mintUrl,
+        },
+      });
+      return;
+    }
+
+    await handleDaemonCommand("/wallet/send/bolt11", {
+      method: "POST",
+      body: {
+        invoice: target,
+        mintUrl: options.mintUrl,
+      },
+    });
+  });
+
+program
+  .command("receive <value>")
+  .description(
+    "Shortcut: numbers create a Lightning invoice, non-numbers receive a Cashu token",
+  )
+  .option("--mint-url <url>", "Mint URL to use for bolt11 receive")
+  .action(async (value: string, options: { mintUrl?: string }) => {
+    if (isPositiveIntegerString(value)) {
+      try {
+        await ensureDaemonRunning();
+
+        const result = await callDaemon("/wallet/receive/bolt11", {
+          method: "POST",
+          body: {
+            amount: parsePositiveIntOrExit(value, "amount"),
+            mintUrl: options.mintUrl,
+          },
+        });
+
+        const output = result.output as
+          | { invoice?: string; amount?: number; mintUrl?: string }
+          | undefined;
+
+        if (typeof output?.invoice === "string" && output.invoice) {
+          await printLightningInvoice(output.invoice);
+          return;
+        }
+
+        if (result.output !== undefined) {
+          console.log(JSON.stringify(result.output, null, 2));
+        }
+      } catch (error) {
+        console.error((error as Error).message);
+        process.exit(1);
+      }
+      return;
+    }
+
+    await handleDaemonCommand("/wallet/receive/cashu", {
+      method: "POST",
+      body: { token: value },
+    });
   });
 
 const walletCmd = program.command("wallet").description("Wallet operations");
