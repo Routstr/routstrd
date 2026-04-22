@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "^0.2.12",
+    "@routstr/sdk": "file:../routstr-chat/sdk",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "commander": "^14.0.2",

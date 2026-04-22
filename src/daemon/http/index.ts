@@ -1,7 +1,8 @@
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
+import { Readable } from "stream";
 import {
-  routeRequestsToNodeResponse,
+  routeRequests,
   InsufficientBalanceError,
   ProviderManager,
 } from "@routstr/sdk";
@@ -968,7 +969,8 @@ export function createDaemonRequestHandler(deps: {
     try {
       await deps.ensureProvidersBootstrapped();
       logger.log("Routing request with path: ", url.pathname);
-      await routeRequestsToNodeResponse({
+
+      const response = await routeRequests({
         modelId,
         requestBody,
         path: url.pathname,
@@ -984,8 +986,58 @@ export function createDaemonRequestHandler(deps: {
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
         providerManager: deps.providerManager,
-        res,
       });
+
+      // Bridge the Web `Response` to the Node `ServerResponse` with no
+      // transforms: status + headers + pipe(body → res).
+      res.statusCode = response.status;
+      response.headers.forEach((value, key) => {
+        res.setHeader(key, value);
+      });
+
+      const finalize = (response as any).finalize as
+        | (() => Promise<number>)
+        | undefined;
+
+      if (!response.body) {
+        res.end();
+        if (finalize) {
+          try {
+            await finalize();
+          } catch (err) {
+            logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+          }
+        }
+        return;
+      }
+
+      const nodeReadable = Readable.fromWeb(response.body as any);
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const fail = (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(err);
+        };
+        res.once("finish", finish);
+        res.once("close", finish);
+        res.once("error", fail);
+        nodeReadable.once("error", fail);
+        nodeReadable.pipe(res);
+      });
+
+      if (finalize) {
+        try {
+          await finalize();
+        } catch (err) {
+          logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+        }
+      }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
