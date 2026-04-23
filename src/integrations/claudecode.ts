@@ -4,7 +4,7 @@ import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
-import type { IntegrationConfig } from "./registry";
+import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { generateApiKey } from "./registry";
 
 export async function installClaudeCodeIntegration(
@@ -61,11 +61,28 @@ export async function installClaudeCodeIntegration(
 
   settings.env["ANTHROPIC_AUTH_TOKEN"] = apiKey;
   settings.env["ANTHROPIC_BASE_URL"] = `http://localhost:${port}`;
-  
-  // Default models as requested
-  settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = "gpt-5.4";
-  settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = "claude-opus-4.7";
-  settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "minimax-m2.7";
+
+  try {
+    const response = await fetch(`http://localhost:${port}/models`);
+    const data = await response.json() as { output?: { models: RoutstrModel[] } };
+    const models = data.output?.models || [];
+
+    if (models.length >= 3) {
+      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = models[0].id;
+      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = models[1].id;
+      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[2].id;
+      logger.log(`Set Claude models: Opus=${models[0].id}, Sonnet=${models[1].id}, Haiku=${models[2].id}`);
+    } else if (models.length > 0) {
+      logger.log(`Only ${models.length} models available, falling back to defaults.`);
+      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = models[0].id;
+      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = models[0].id;
+      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[0].id;
+    } else {
+      logger.log("No models available from routstr daemon.");
+    }
+  } catch (error) {
+    logger.error("Failed to fetch models for Claude Code integration:", error);
+  }
 
   try {
     mkdirSync(dirname(configPath), { recursive: true });
