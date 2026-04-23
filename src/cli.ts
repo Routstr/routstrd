@@ -18,7 +18,11 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
-import { setupIntegration } from "./integrations";
+import {
+  setupIntegration,
+  CLIENT_CONFIGS,
+  CLIENT_INTEGRATIONS,
+} from "./integrations";
 import { createSdkStore } from "@routstr/sdk";
 import { createBunSqliteDriver } from "@routstr/sdk/storage";
 import * as QRCode from "qrcode";
@@ -76,7 +80,7 @@ async function printLightningInvoice(invoice: string): Promise<void> {
 async function installCocodOrExit(): Promise<void> {
   logger.log("cocod not found. Installing globally with bun...");
 
-  const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
+  const installProc = Bun.spawn(["bun", "install", "--global", "@routstr/cocod"], {
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -84,7 +88,7 @@ async function installCocodOrExit(): Promise<void> {
   const installCode = await installProc.exited;
   if (installCode !== 0 || !(await isCocodInstalled())) {
     logger.error(
-      "Failed to install cocod. Please run 'bun install --global cocod' manually.",
+      "Failed to install cocod. Please run 'bun install --global @routstr/cocod' manually.",
     );
     throw new Error("cocod installation failed");
   }
@@ -657,11 +661,70 @@ clientsCmd
 
 clientsCmd
   .command("add")
-  .description("Add a new client")
-  .requiredOption("-n, --name <name>", "Client name")
-  .action(async (options: { name: string }) => {
+  .description("Add a new client or set up client integrations")
+  .option("-n, --name <name>", "Client name")
+  .option("--opencode", "Set up OpenCode integration")
+  .option("--openclaw", "Set up OpenClaw integration")
+  .option("--pi-agent", "Set up Pi Agent integration")
+  .option("--claude-code", "Set up Claude Code integration")
+  .action(async (options: {
+    name?: string;
+    opencode?: boolean;
+    openclaw?: boolean;
+    piAgent?: boolean;
+    claudeCode?: boolean;
+  }) => {
     await ensureDaemonRunning();
     const config = await loadConfig();
+
+    const integrationKeys: string[] = [];
+    if (options.opencode) integrationKeys.push("opencode");
+    if (options.openclaw) integrationKeys.push("openclaw");
+    if (options.piAgent) integrationKeys.push("pi-agent");
+    if (options.claudeCode) integrationKeys.push("claude-code");
+
+    if (integrationKeys.length > 0) {
+      const sqliteDriver = await createBunSqliteDriver(DB_PATH);
+      const { store } = await createSdkStore({ driver: sqliteDriver });
+
+      for (const key of integrationKeys) {
+        const integrationFn = CLIENT_INTEGRATIONS[key];
+        const integrationConfig = CLIENT_CONFIGS[key];
+        if (!integrationFn || !integrationConfig) continue;
+
+        try {
+          await integrationFn(config, store, integrationConfig);
+        } catch (error) {
+          logger.error(
+            `Failed to set up ${integrationConfig.name} integration:`,
+            error,
+          );
+          continue;
+        }
+
+        const state = store.getState();
+        const client = (state.clientIds || []).find(
+          (c: { clientId: string }) => c.clientId === key,
+        );
+        if (client) {
+          console.log(`\n  ${integrationConfig.name}:`);
+          console.log(`    Client ID: ${client.clientId}`);
+          console.log(`    API Key:   ${client.apiKey}`);
+        }
+      }
+
+      console.log(
+        `\n  Access Routstr at: http://localhost:${config.port || 8008}`,
+      );
+      return;
+    }
+
+    if (!options.name) {
+      console.error(
+        "error: required option '-n, --name <name>' not specified",
+      );
+      process.exit(1);
+    }
 
     const result = await callDaemon("/clients/add", {
       method: "POST",

@@ -49,10 +49,6 @@ Restart the daemon (stops if running, then starts).
 
 Check daemon and wallet status. Returns JSON with current state.
 
-### `routstrd ping`
-
-Test connection to the daemon.
-
 ### `routstrd balance`
 
 Get wallet and API key balances. Shows per-mint wallet balances, per-key API balances, and a grand total (all in sats).
@@ -117,11 +113,36 @@ List all registered clients with their ID, name, API key, and creation date.
 
 #### `routstrd clients add`
 
-Add a new client.
+Add a new client or set up a client integration.
 
 | Option | Description |
 |--------|-------------|
-| `-n, --name <name>` | **Required.** Client name |
+| `-n, --name <name>` | Client name (required when not using integration flags) |
+| `--opencode` | Set up OpenCode integration |
+| `--openclaw` | Set up OpenClaw integration |
+| `--pi-agent` | Set up Pi Agent integration |
+| `--claude-code` | Set up Claude Code integration |
+
+Set up a specific client integration (creates API key and writes config to the client's config file):
+
+```sh
+routstrd clients add --opencode
+routstrd clients add --claude-code
+routstrd clients add --pi-agent
+routstrd clients add --openclaw
+```
+
+You can also set up multiple integrations at once:
+
+```sh
+routstrd clients add --opencode --pi-agent --claude-code
+```
+
+Add a generic client manually:
+
+```sh
+routstrd clients add -n "My App"
+```
 
 Returns the client ID and API key for use with the OpenAI-compatible API.
 
