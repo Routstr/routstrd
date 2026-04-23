@@ -73,27 +73,27 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
+async function installCocodOrExit(): Promise<void> {
+  logger.log("cocod not found. Installing globally with bun...");
+
+  const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  const installCode = await installProc.exited;
+  if (installCode !== 0 || !(await isCocodInstalled())) {
+    logger.error(
+      "Failed to install cocod. Please run 'bun install --global cocod' manually.",
+    );
+    throw new Error("cocod installation failed");
+  }
+
+  logger.log("cocod installed successfully.");
+}
+
 async function initDaemon(): Promise<void> {
   logger.log("Initializing routstrd...");
-
-  if (!(await checkCocodInstalled())) {
-    logger.log("cocod not found. Installing globally with bun...");
-
-    const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-
-    const installCode = await installProc.exited;
-    if (installCode !== 0 || !(await checkCocodInstalled())) {
-      logger.error(
-        "Failed to install cocod. Please run 'bun install --global cocod' manually.",
-      );
-      return;
-    }
-
-    logger.log("cocod installed successfully.");
-  }
 
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
@@ -112,7 +112,6 @@ async function initDaemon(): Promise<void> {
   }
 
   const config = await loadConfig();
-  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
 
   if (!(await isCocodInstalled(config.cocodPath))) {
     if (config.cocodPath) {
@@ -122,23 +121,10 @@ async function initDaemon(): Promise<void> {
       return;
     }
 
-    logger.log("cocod not found. Installing globally with bun...");
-
-    const installProc = Bun.spawn(["bun", "install", "--global", "cocod"], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-
-    const installCode = await installProc.exited;
-    if (installCode !== 0 || !(await isCocodInstalled(config.cocodPath))) {
-      logger.error(
-        "Failed to install cocod. Please run 'bun install --global cocod' manually.",
-      );
-      return;
-    }
-
-    logger.log("cocod installed successfully.");
+    await installCocodOrExit();
   }
+
+  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
 
   console.log(`Database will be stored at: ${DB_PATH}`);
   console.log("\nInitializing cocod...");
@@ -214,19 +200,6 @@ async function initDaemon(): Promise<void> {
   logger.log(
     "\nTo ensure routstrd persists across system restarts, run: 'routstrd service install'",
   );
-}
-
-async function checkCocodInstalled(): Promise<boolean> {
-  try {
-    const proc = Bun.spawn({
-      cmd: ["which", "cocod"],
-      stdout: "pipe",
-    });
-    const code = await proc.exited;
-    return code === 0;
-  } catch {
-    return false;
-  }
 }
 
 program
