@@ -26,7 +26,7 @@ export async function startDaemon(
     });
     clearTimeout(timeoutId);
     if (existing.ok) {
-      logger.log(`Routstr daemon already running on http://localhost:${port}`);
+      logger.log(`Routstr daemon already running on http://localhost:${port}/v1`);
       return;
     }
   } catch {

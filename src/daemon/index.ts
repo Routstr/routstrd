@@ -203,7 +203,7 @@ async function main(): Promise<void> {
   });
 
   server.listen(port, async () => {
-    logger.log(`Routstr daemon listening on http://localhost:${port}`);
+    logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);
 
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
