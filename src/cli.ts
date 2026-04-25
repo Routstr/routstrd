@@ -714,7 +714,7 @@ clientsCmd
       }
 
       console.log(
-        `\n  Access Routstr at: http://localhost:${config.port || 8008}`,
+        `\n  Access Routstr at: http://localhost:${config.port || 8008}/v1`,
       );
       return;
     }
@@ -754,7 +754,7 @@ clientsCmd
       console.log(`  Name:   ${output.client.name}`);
       console.log(`  API Key: ${output.client.apiKey}`);
       console.log(
-        `\n  Access Routstr at: http://localhost:${config.port || 8008}`,
+        `\n  Access Routstr at: http://localhost:${config.port || 8008}/v1`,
       );
     }
   });
