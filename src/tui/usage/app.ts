@@ -28,7 +28,7 @@ import {
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
 import type { TabId, UsageStats } from "./types.ts";
-import { isDaemonRunning } from "../../cli-shared.ts";
+import { isDaemonRunning } from "../../utils/daemon-client.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();

@@ -1,12 +1,12 @@
+import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import {
-  program,
   handleDaemonCommand,
   callDaemon,
   ensureDaemonRunning,
   isDaemonRunning,
   loadConfig,
-} from "./cli-shared";
+} from "./utils/daemon-client";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
 import {
@@ -210,6 +210,81 @@ program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
   .version(cliVersion, "--version", "output the version number");
+
+program
+  .command("refund")
+  .description("Refund pending tokens and API keys to a specified mint")
+  .option("-m, --mint-url <mintUrl>", "Mint URL to refund to (defaults to first mint in wallet)")
+  .option("-y, --yes", "Skip confirmation prompt", false)
+  .action(async (options: { mintUrl?: string; yes: boolean }) => {
+    const config = await loadConfig();
+
+    let mintUrl = options.mintUrl;
+    if (!mintUrl) {
+      const balanceResponse = await fetch(`http://localhost:${config.port}/balance`);
+      const balanceResult = (await balanceResponse.json()) as {
+        output?: { balances?: Record<string, number> };
+        error?: string;
+      };
+      if (balanceResult.error) {
+        console.log(balanceResult.error);
+        process.exit(1);
+      }
+      const balances = balanceResult.output?.balances;
+      if (!balances || Object.keys(balances).length === 0) {
+        console.log("No mint URLs found in wallet balance");
+        process.exit(1);
+      }
+      mintUrl = Object.keys(balances)[0];
+      console.log(`Using mint URL: ${mintUrl}`);
+    }
+
+    try {
+      const response = await fetch(`http://localhost:${config.port}/refund`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mintUrl }),
+      });
+
+      if (!response.ok) {
+        const errorData = (await response.json()) as { error?: string };
+        throw new Error(errorData.error || `HTTP ${response.status}`);
+      }
+
+      const result = (await response.json()) as {
+        output?: {
+          message: string;
+          pendingTokens: number;
+          apiKeys: number;
+          results: Array<{ baseUrl: string; success: boolean }>;
+        };
+        error?: string;
+      };
+
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      if (result.output) {
+        console.log(result.output.message);
+        console.log(`\nPending tokens: ${result.output.pendingTokens}`);
+        console.log(`API keys: ${result.output.apiKeys}`);
+        console.log("\nResults:");
+        for (const r of result.output.results) {
+          console.log(`  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`);
+        }
+      }
+    } catch (error) {
+      const message = (error as Error).message;
+      if (message?.includes("fetch failed") || message?.includes("Connection refused")) {
+        console.error("Daemon is not running");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
 
 // Onboard - initialize the daemon
 program
