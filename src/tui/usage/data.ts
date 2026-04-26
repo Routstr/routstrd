@@ -1,5 +1,5 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import { callDaemon, isDaemonRunning } from "../../cli-shared.ts";
+import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
 import type { ClientStats, DayStats, ModelStats, ProviderStats, UsageStats } from "./types.ts";
 
 export interface BalanceKey {

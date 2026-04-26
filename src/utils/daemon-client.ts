@@ -1,11 +1,10 @@
-import { program } from "commander";
 import { existsSync } from "fs";
 import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
   LOGS_DIR,
   type RoutstrdConfig,
-} from "./utils/config";
+} from "./config";
 
 export interface CommandResponse {
   output?: unknown;
@@ -24,7 +23,7 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
   return DEFAULT_CONFIG;
 }
 
-async function callDaemon(
+export async function callDaemon(
   path: string,
   options: { method?: "GET" | "POST"; body?: object } = {},
 ): Promise<CommandResponse> {
@@ -61,9 +60,7 @@ export async function startDaemonProcess(): Promise<void> {
     await Bun.$`mkdir -p ${LOGS_DIR}`;
   }
 
-  const proc = Bun.spawn([
-    "bun", "run", `${import.meta.dir}/daemon/index.ts`
-  ], {
+  const proc = Bun.spawn(["bun", "run", `${import.meta.dir}/../daemon/index.ts`], {
     stdout: "inherit",
     stderr: "inherit",
     stdin: "ignore",
@@ -128,80 +125,3 @@ export async function handleDaemonCommand(
     process.exit(1);
   }
 }
-
-export { program, callDaemon };
-
-program
-  .command("refund")
-  .description("Refund pending tokens and API keys to a specified mint")
-  .option("-m, --mint-url <mintUrl>", "Mint URL to refund to (defaults to first mint in wallet)")
-  .option("-y, --yes", "Skip confirmation prompt", false)
-  .action(async (options: { mintUrl?: string; yes: boolean }) => {
-    const config = await loadConfig();
-
-    let mintUrl = options.mintUrl;
-    if (!mintUrl) {
-      const balanceResponse = await fetch(`http://localhost:${config.port}/balance`);
-      const balanceResult = (await balanceResponse.json()) as {
-        output?: { balances?: Record<string, number> };
-        error?: string;
-      };
-      if (balanceResult.error) {
-        console.log(balanceResult.error);
-        process.exit(1);
-      }
-      const balances = balanceResult.output?.balances;
-      if (!balances || Object.keys(balances).length === 0) {
-        console.log("No mint URLs found in wallet balance");
-        process.exit(1);
-      }
-      mintUrl = Object.keys(balances)[0];
-      console.log(`Using mint URL: ${mintUrl}`);
-    }
-
-    try {
-      const response = await fetch(`http://localhost:${config.port}/refund`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mintUrl }),
-      });
-
-      if (!response.ok) {
-        const errorData = (await response.json()) as { error?: string };
-        throw new Error(errorData.error || `HTTP ${response.status}`);
-      }
-
-      const result = (await response.json()) as {
-        output?: {
-          message: string;
-          pendingTokens: number;
-          apiKeys: number;
-          results: Array<{ baseUrl: string; success: boolean }>;
-        };
-        error?: string;
-      };
-
-      if (result.error) {
-        console.log(result.error);
-        process.exit(1);
-      }
-
-      if (result.output) {
-        console.log(result.output.message);
-        console.log(`\nPending tokens: ${result.output.pendingTokens}`);
-        console.log(`API keys: ${result.output.apiKeys}`);
-        console.log("\nResults:");
-        for (const r of result.output.results) {
-          console.log(`  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`);
-        }
-      }
-    } catch (error) {
-      const message = (error as Error).message;
-      if (message?.includes("fetch failed") || message?.includes("Connection refused")) {
-        console.error("Daemon is not running");
-        process.exit(1);
-      }
-      console.error(message);
-      process.exit(1);
-    }
-  });
