@@ -831,6 +831,65 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/clients/delete") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const id = body.id as string | undefined;
+
+        if (!id || typeof id !== "string" || id.trim() === "") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error:
+                "Missing required 'id' field (must be a non-empty string).",
+            }),
+          );
+          return;
+        }
+
+        const state = deps.store.getState();
+        const existingClients = state.clientIds || [];
+        const index = existingClients.findIndex(
+          (c: { clientId: string }) => c.clientId === id,
+        );
+
+        if (index === -1) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `Client with id '${id}' not found.`,
+            }),
+          );
+          return;
+        }
+
+        const removedClient = existingClients[index];
+        const updatedClients = existingClients.filter(
+          (_c: unknown, i: number) => i !== index,
+        );
+
+        deps.store.getState().setClientIds(updatedClients);
+
+        logger.log(
+          `Deleted client '${removedClient.name}' with id '${id}'`,
+        );
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: `Client '${removedClient.name}' deleted successfully`,
+              id,
+            },
+          }),
+        );
+      } catch (error) {
+        respondWithError(res, error);
+      }
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/providers") {
       try {
         const state = deps.store.getState();

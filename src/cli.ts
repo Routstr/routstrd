@@ -735,6 +735,34 @@ clientsCmd
   });
 
 clientsCmd
+  .command("delete <id>")
+  .description("Delete a client by its ID")
+  .action(async (id: string) => {
+    await ensureDaemonRunning();
+
+    const result = await callDaemon("/clients/delete", {
+      method: "POST",
+      body: { id },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          message: string;
+          id: string;
+        }
+      | undefined;
+
+    if (output) {
+      console.log(output.message);
+    }
+  });
+
+clientsCmd
   .command("add")
   .description("Add a new client or set up client integrations")
   .option("-n, --name <name>", "Client name")
