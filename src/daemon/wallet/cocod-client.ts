@@ -2,7 +2,8 @@ import { existsSync } from "fs";
 import { createHash } from "crypto";
 import { logger } from "../../utils/logger";
 
-const DEFAULT_CONFIG_DIR = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
+const DEFAULT_CONFIG_DIR =
+  process.env.COCOD_DIR || `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
 const DEFAULT_SOCKET_PATH =
   process.env.COCOD_SOCKET || `${DEFAULT_CONFIG_DIR}/cocod.sock`;
 
