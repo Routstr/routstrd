@@ -30,6 +30,7 @@ import {
   isCocodInstalled,
   resolveCocodExecutable,
 } from "./daemon/wallet/cocod-client";
+import packageJson from "../package.json" with { type: "json" };
 
 type RoutstrModel = {
   id: string;
@@ -51,8 +52,6 @@ type UsageEntry = {
   totalTokens: number;
   client?: string;
 };
-
-const cliVersion = "0.1.1";
 
 function parsePositiveIntOrExit(value: string, fieldName: string): number {
   const parsed = Number.parseInt(value, 10);
@@ -209,7 +208,7 @@ async function initDaemon(): Promise<void> {
 program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
-  .version(cliVersion, "--version", "output the version number");
+  .version(packageJson.version, "--version", "output the version number");
 
 program
   .command("refund")
