@@ -95,6 +95,16 @@ async function installCocodOrExit(): Promise<void> {
   logger.log("cocod installed successfully.");
 }
 
+async function requireLocalDaemon(): Promise<void> {
+  const config = await loadConfig();
+  if (config.daemonUrl) {
+    console.error(
+      `This command is not available when using a remote daemon (${config.daemonUrl}).`,
+    );
+    process.exit(1);
+  }
+}
+
 async function initDaemon(): Promise<void> {
   logger.log("Initializing routstrd...");
 
@@ -292,6 +302,7 @@ program
     "Initialize routstrd (creates config directory and initializes cocod)",
   )
   .action(async () => {
+    await requireLocalDaemon();
     await initDaemon();
   });
 
@@ -302,6 +313,7 @@ program
   .option("--port <port>", "Port to listen on")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
+    await requireLocalDaemon();
     const config = await loadConfig();
     if (!(await isCocodInstalled(config.cocodPath))) {
       const installHint = config.cocodPath
@@ -1103,6 +1115,7 @@ serviceCmd
   .command("install")
   .description("Install and start routstrd using PM2 for persistence")
   .action(async () => {
+    await requireLocalDaemon();
     // 1. Check if PM2 is installed
     try {
       execSync("pm2 -v", { stdio: "ignore" });
@@ -1184,6 +1197,7 @@ program
   .option("--port <port>", "Port to listen on")
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; provider?: string }) => {
+    await requireLocalDaemon();
     const config = await loadConfig();
     const wasRunning = await isDaemonRunning();
 
@@ -1221,6 +1235,7 @@ program
   .command("mode")
   .description("Set the client mode (lazyrefund/apikeys or xcashu)")
   .action(async () => {
+    await requireLocalDaemon();
     const config = await loadConfig();
     const currentMode = config.mode || "apikeys";
 
@@ -1311,6 +1326,7 @@ program
   .option("-f, --follow", "Follow log output", false)
   .option("-n, --lines <number>", "Number of lines to show", "50")
   .action(async (options: { follow: boolean; lines: string }) => {
+    await requireLocalDaemon();
     const todayFile = getLogFileForDate();
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);

@@ -23,14 +23,19 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
   return DEFAULT_CONFIG;
 }
 
+function getDaemonBaseUrl(config: RoutstrdConfig): string {
+  return config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`;
+}
+
 export async function callDaemon(
   path: string,
   options: { method?: "GET" | "POST"; body?: object } = {},
 ): Promise<CommandResponse> {
   const { method = "GET", body } = options;
   const config = await loadConfig();
+  const baseUrl = getDaemonBaseUrl(config);
 
-  const response = await fetch(`http://localhost:${config.port}${path}`, {
+  const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
@@ -47,7 +52,8 @@ export async function callDaemon(
 export async function isDaemonRunning(): Promise<boolean> {
   try {
     const config = await loadConfig();
-    const response = await fetch(`http://localhost:${config.port}/health`);
+    const baseUrl = getDaemonBaseUrl(config);
+    const response = await fetch(`${baseUrl}/health`);
     return response.ok;
   } catch {
     return false;
@@ -82,6 +88,11 @@ export async function startDaemonProcess(): Promise<void> {
 export async function ensureDaemonRunning(): Promise<void> {
   if (await isDaemonRunning()) {
     return;
+  }
+
+  const config = await loadConfig();
+  if (config.daemonUrl) {
+    throw new Error(`Daemon is not reachable at ${config.daemonUrl}`);
   }
 
   console.log("Starting daemon...");

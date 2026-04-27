@@ -12,6 +12,7 @@ export interface RoutstrdConfig {
   provider: string | null;
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
+  daemonUrl?: string;
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
