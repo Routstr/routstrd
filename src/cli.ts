@@ -28,6 +28,10 @@ import { createSdkStore } from "@routstr/sdk";
 import { createBunSqliteDriver } from "@routstr/sdk/storage";
 import * as QRCode from "qrcode";
 import {
+  normalizeNostrPubkey,
+  npubFromPubkey,
+} from "./utils/nip98";
+import {
   isCocodInstalled,
   resolveCocodExecutable,
 } from "./daemon/wallet/cocod-client";
@@ -864,6 +868,85 @@ clientsCmd
         `\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`,
       );
     }
+  });
+
+// Npubs - manage admin npubs
+const npubsCmd = program
+  .command("npubs")
+  .description("Manage admin npubs on the daemon");
+
+npubsCmd
+  .command("list")
+  .description("List configured admin npubs")
+  .action(async () => {
+    await ensureDaemonRunning();
+    const result = await callDaemon("/npubs");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+    const npubs = (result.output as { npubs?: string[] } | undefined)?.npubs ?? [];
+    if (npubs.length === 0) {
+      console.log("No admin npubs configured.");
+      return;
+    }
+    console.log(`Admin npubs (${npubs.length}):`);
+    for (const npub of npubs) {
+      console.log(`- ${npub}`);
+    }
+  });
+
+npubsCmd
+  .command("add <npub>")
+  .description("Add an admin npub (hex pubkey or npub1...)")
+  .action(async (npubArg: string) => {
+    await ensureDaemonRunning();
+    const normalized = normalizeNostrPubkey(npubArg);
+    if (!normalized) {
+      console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
+      process.exit(1);
+    }
+    const result = await callDaemon("/npubs", {
+      method: "POST",
+      body: { npub: npubFromPubkey(normalized) },
+    });
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+    const output = result.output as
+      | { npub?: string; added?: boolean; error?: string }
+      | undefined;
+    if (output?.npub) {
+      console.log(
+        `${output.added ? "Added" : "Already configured"} admin npub: ${output.npub}`,
+      );
+    }
+  });
+
+npubsCmd
+  .command("delete <npub>")
+  .description("Delete an admin npub (hex pubkey or npub1...)")
+  .action(async (npubArg: string) => {
+    await ensureDaemonRunning();
+    const normalized = normalizeNostrPubkey(npubArg);
+    if (!normalized) {
+      console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
+      process.exit(1);
+    }
+    const result = await callDaemon(`/npubs/${encodeURIComponent(npubFromPubkey(normalized))}`, {
+      method: "DELETE",
+    });
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+    const output = result.output as
+      | { removed?: boolean; error?: string }
+      | undefined;
+    console.log(
+      output?.removed ? "Removed admin npub." : "Admin npub was not configured.",
+    );
   });
 
 // Monitor - interactive TUI

@@ -30,3 +30,7 @@ temp/
 .pi/
 
 .worktrees/
+.routstrd/
+
+# Standalone prototype scripts
+index.ts

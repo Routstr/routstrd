@@ -1,4 +1,4 @@
-import { finalizeEvent, nip19, type EventTemplate } from "nostr-tools";
+import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
 
 const NIP98_KIND = 27235;
 
@@ -43,6 +43,36 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
 
 function base64EncodeUtf8(value: string): string {
   return btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+}
+
+export function normalizeNostrPubkey(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (/^[a-f0-9]{64}$/i.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+
+  if (trimmed.toLowerCase().startsWith("npub1")) {
+    try {
+      const decoded = nip19.decode(trimmed);
+      if (decoded.type === "npub" && typeof decoded.data === "string") {
+        return decoded.data.toLowerCase();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+export function npubFromPubkey(pubkey: string): string {
+  return nip19.npubEncode(pubkey.toLowerCase());
+}
+
+export function npubFromSecretKey(secretKey: Uint8Array): string {
+  return npubFromPubkey(getPublicKey(secretKey));
 }
 
 export async function createNIP98Authorization(
