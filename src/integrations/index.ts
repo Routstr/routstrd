@@ -1,8 +1,7 @@
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import {
-  addDaemonClient,
-  callDaemon,
+  ensureDaemonClient,
   type DaemonClient,
 } from "../utils/daemon-client";
 import { installOpencodeIntegration } from "./opencode";
@@ -12,8 +11,6 @@ import { installClaudeCodeIntegration } from "./claudecode";
 import type { IntegrationConfig } from "./registry";
 import { CLIENT_CONFIGS } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
-
-export type IntegrationClient = DaemonClient;
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -45,37 +42,6 @@ function parseChoice(input: string): number {
   return 1;
 }
 
-export async function ensureIntegrationClient(
-  integrationConfig: IntegrationConfig,
-): Promise<IntegrationClient> {
-  try {
-    const { client } = await addDaemonClient(integrationConfig.name);
-
-    logger.log(`Created new API key for ${integrationConfig.name}`);
-    return client;
-  } catch (error) {
-    const message = (error as Error).message || "";
-    if (!message.includes("already exists")) {
-      throw error;
-    }
-
-    const clientsResult = await callDaemon("/clients");
-    const clients =
-      (clientsResult.output as { clients?: IntegrationClient[] } | undefined)
-        ?.clients || [];
-    const client = clients.find((c) => c.id === integrationConfig.clientId);
-
-    if (!client?.apiKey) {
-      throw new Error(
-        `Client '${integrationConfig.clientId}' already exists but could not be fetched from the daemon.`,
-      );
-    }
-
-    logger.log(`Using existing API key for ${integrationConfig.name}`);
-    return client;
-  }
-}
-
 export async function setupIntegration(
   config: RoutstrdConfig,
 ): Promise<void> {
@@ -103,7 +69,16 @@ export async function setupIntegration(
   }
 
   const integrationConfig = CLIENT_CONFIGS[key]!;
-  const client = await ensureIntegrationClient(integrationConfig);
+  const { client, created } = await ensureDaemonClient(
+    integrationConfig.name,
+    integrationConfig.clientId,
+  );
+
+  if (created) {
+    logger.log(`Created new API key for ${integrationConfig.name}`);
+  } else {
+    logger.log(`Using existing API key for ${integrationConfig.name}`);
+  }
 
   if (key === "opencode") {
     await installOpencodeIntegration(config, client.apiKey, integrationConfig);
