@@ -17,6 +17,33 @@ export interface CommandResponse {
   error?: string;
 }
 
+export interface DaemonClient {
+  id: string;
+  name: string;
+  apiKey: string;
+  createdAt: number;
+  lastUsed?: number | null;
+}
+
+export async function addDaemonClient(
+  name: string,
+): Promise<{ message?: string; client: DaemonClient }> {
+  const result = await callDaemon("/clients/add", {
+    method: "POST",
+    body: { name },
+  });
+
+  const output = result.output as
+    | { message?: string; client?: DaemonClient }
+    | undefined;
+
+  if (!output?.client?.apiKey) {
+    throw new Error(`Daemon did not return an API key for ${name}.`);
+  }
+
+  return { message: output.message, client: output.client };
+}
+
 export async function loadConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {

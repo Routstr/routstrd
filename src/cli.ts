@@ -8,6 +8,7 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getNpubSuffix,
+  addDaemonClient,
 } from "./utils/daemon-client";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
@@ -761,9 +762,7 @@ clientsCmd
         name: c.name.endsWith(suffixStr)
           ? c.name.slice(0, -suffixStr.length)
           : c.name,
-        id: c.id.endsWith(suffixStr)
-          ? c.id.slice(0, -suffixStr.length)
-          : c.id,
+        id: c.id.endsWith(suffixStr) ? c.id.slice(0, -suffixStr.length) : c.id,
       }));
     }
 
@@ -883,38 +882,21 @@ clientsCmd
       }
 
       const suffix = getNpubSuffix(config);
-      const resolvedName = suffix
-        ? `${options.name}_${suffix}`
-        : options.name;
+      const resolvedName = suffix ? `${options.name} ${suffix}` : options.name;
 
-      const result = await callDaemon("/clients/add", {
-        method: "POST",
-        body: { name: resolvedName },
-      });
+      try {
+        const { message, client } = await addDaemonClient(resolvedName);
 
-      if (result.error) {
-        console.log(result.error);
-        process.exit(1);
-      }
-
-      const output = result.output as
-        | {
-            message: string;
-            client: {
-              id: string;
-              name: string;
-              apiKey: string;
-              createdAt: number;
-            };
-          }
-        | undefined;
-
-      if (output) {
-        console.log(output.message);
-        console.log(`\n  ID:     ${output.client.id}`);
-        console.log(`  Name:   ${output.client.name}`);
-        console.log(`  API Key: ${output.client.apiKey}`);
+        if (message) {
+          console.log(message);
+        }
+        console.log(`\n  ID:     ${client.id}`);
+        console.log(`  Name:   ${client.name}`);
+        console.log(`  API Key: ${client.apiKey}`);
         console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
+      } catch (error) {
+        console.log((error as Error).message);
+        process.exit(1);
       }
     },
   );

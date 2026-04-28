@@ -1,6 +1,10 @@
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
-import { callDaemon } from "../utils/daemon-client";
+import {
+  addDaemonClient,
+  callDaemon,
+  type DaemonClient,
+} from "../utils/daemon-client";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
@@ -9,13 +13,7 @@ import type { IntegrationConfig } from "./registry";
 import { CLIENT_CONFIGS } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 
-export type IntegrationClient = {
-  id: string;
-  name: string;
-  apiKey: string;
-  createdAt: number;
-  lastUsed?: number | null;
-};
+export type IntegrationClient = DaemonClient;
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -51,18 +49,7 @@ export async function ensureIntegrationClient(
   integrationConfig: IntegrationConfig,
 ): Promise<IntegrationClient> {
   try {
-    const result = await callDaemon("/clients/add", {
-      method: "POST",
-      body: { name: integrationConfig.name },
-    });
-
-    const client = (result.output as { client?: IntegrationClient } | undefined)
-      ?.client;
-    if (!client?.apiKey) {
-      throw new Error(
-        `Daemon did not return an API key for ${integrationConfig.name}.`,
-      );
-    }
+    const { client } = await addDaemonClient(integrationConfig.name);
 
     logger.log(`Created new API key for ${integrationConfig.name}`);
     return client;
