@@ -7,6 +7,7 @@ import {
   isDaemonRunning,
   loadConfig,
   getDaemonBaseUrl,
+  getNpubSuffix,
 } from "./utils/daemon-client";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
@@ -726,6 +727,9 @@ clientsCmd
   .action(async () => {
     await ensureDaemonRunning();
 
+    const config = await loadConfig();
+    const suffix = getNpubSuffix(config);
+
     const result = await callDaemon("/clients");
     if (result.error) {
       console.log(result.error);
@@ -745,13 +749,31 @@ clientsCmd
         }
       | undefined;
 
-    if (!output?.clients || output.clients.length === 0) {
+    let clients = output?.clients || [];
+
+    if (suffix) {
+      const suffixStr = `_${suffix}`;
+      clients = clients.filter(
+        (c) => c.name.endsWith(suffixStr) || c.id.endsWith(suffixStr),
+      );
+      clients = clients.map((c) => ({
+        ...c,
+        name: c.name.endsWith(suffixStr)
+          ? c.name.slice(0, -suffixStr.length)
+          : c.name,
+        id: c.id.endsWith(suffixStr)
+          ? c.id.slice(0, -suffixStr.length)
+          : c.id,
+      }));
+    }
+
+    if (clients.length === 0) {
       console.log("No clients found.");
       return;
     }
 
-    console.log(`Clients (${output.totalCount} total):\n`);
-    for (const client of output.clients) {
+    console.log(`Clients (${clients.length} total):\n`);
+    for (const client of clients) {
       const createdAt = new Date(client.createdAt).toISOString();
       const lastUsed = client.lastUsed
         ? new Date(client.lastUsed).toISOString()
@@ -770,9 +792,19 @@ clientsCmd
   .action(async (id: string) => {
     await ensureDaemonRunning();
 
+    const config = await loadConfig();
+    const suffix = getNpubSuffix(config);
+    let resolvedId = id;
+    if (suffix) {
+      const suffixStr = `_${suffix}`;
+      if (!id.endsWith(suffixStr)) {
+        resolvedId = `${id}${suffixStr}`;
+      }
+    }
+
     const result = await callDaemon("/clients/delete", {
       method: "POST",
-      body: { id },
+      body: { id: resolvedId },
     });
 
     if (result.error) {
@@ -850,9 +882,14 @@ clientsCmd
         process.exit(1);
       }
 
+      const suffix = getNpubSuffix(config);
+      const resolvedName = suffix
+        ? `${options.name}_${suffix}`
+        : options.name;
+
       const result = await callDaemon("/clients/add", {
         method: "POST",
-        body: { name: options.name },
+        body: { name: resolvedName },
       });
 
       if (result.error) {

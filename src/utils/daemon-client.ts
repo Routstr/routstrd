@@ -8,6 +8,7 @@ import {
 import {
   createNIP98Authorization,
   parseSecretKey,
+  npubFromSecretKey,
   type HttpMethod,
 } from "./nip98";
 
@@ -94,6 +95,17 @@ export async function isDaemonRunning(): Promise<boolean> {
     return response.ok;
   } catch {
     return false;
+  }
+}
+
+export function getNpubSuffix(config: RoutstrdConfig): string | null {
+  if (!config.daemonUrl || !config.nsec) return null;
+  try {
+    const secretKey = parseSecretKey(config.nsec);
+    const npub = npubFromSecretKey(secretKey);
+    return npub.slice(-7);
+  } catch {
+    return null;
   }
 }
 
