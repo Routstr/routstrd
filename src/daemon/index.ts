@@ -112,7 +112,7 @@ async function main(): Promise<void> {
         const clientIds = state.clientIds || [];
         if (clientIds.length > 0) {
           logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
-          await runIntegrationsForClients(clientIds, updatedConfig, store);
+          await runIntegrationsForClients(clientIds, updatedConfig);
           logger.log("Client integrations refreshed.");
         }
       } catch (error) {
@@ -221,7 +221,7 @@ async function main(): Promise<void> {
         const clientIds = state.clientIds || [];
         if (clientIds.length > 0) {
           logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
-          await runIntegrationsForClients(clientIds, updatedConfig, store);
+          await runIntegrationsForClients(clientIds, updatedConfig);
           logger.log("Client integrations refreshed.");
         }
       })

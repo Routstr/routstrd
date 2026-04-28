@@ -3,9 +3,7 @@ import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
-import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
-import { generateApiKey } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 type PiModelEntry = {
@@ -25,39 +23,15 @@ type PiConfig = {
 
 export async function installPiIntegration(
   config: RoutstrdConfig,
-  store: SdkStore,
+  apiKey: string,
   integrationConfig: IntegrationConfig,
 ): Promise<void> {
-  const { clientId, name, configPath } = integrationConfig;
+  const { name, configPath } = integrationConfig;
 
   logger.log("\nInstalling routstr models in pi models.json...");
+  logger.log(`Using API key for ${name}`);
 
   const baseUrl = `${getDaemonBaseUrl(config)}/v1`;
-
-  // Get or create clientId entry for Pi Agent
-  const state = store.getState();
-  const existingClient = (state.clientIds || []).find(
-    (c: { clientId: string }) => c.clientId === clientId,
-  );
-
-  let apiKey: string;
-  if (existingClient) {
-    apiKey = existingClient.apiKey;
-    logger.log(`Using existing API key for ${name}`);
-  } else {
-    apiKey = generateApiKey();
-    // Add new clientId entry using proper store action
-    store.getState().setClientIds((prev) => [
-      ...(prev || []),
-      {
-        clientId,
-        name,
-        apiKey,
-        createdAt: Date.now(),
-      },
-    ]);
-    logger.log(`Created new API key for ${name}`);
-  }
 
   let piConfig: PiConfig = {};
 

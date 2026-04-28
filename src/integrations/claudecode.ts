@@ -3,45 +3,20 @@ import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
-import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
-import { generateApiKey } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 export async function installClaudeCodeIntegration(
   config: RoutstrdConfig,
-  store: SdkStore,
+  apiKey: string,
   integrationConfig: IntegrationConfig,
 ): Promise<void> {
-  const { clientId, name, configPath } = integrationConfig;
+  const { name, configPath } = integrationConfig;
 
   logger.log(`\nInstalling routstr configuration in ${configPath}...`);
+  logger.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrl(config);
-
-  // Get or create clientId entry
-  const state = store.getState();
-  const existingClient = (state.clientIds || []).find(
-    (c: { clientId: string }) => c.clientId === clientId,
-  );
-
-  let apiKey: string;
-  if (existingClient) {
-    apiKey = existingClient.apiKey;
-    logger.log(`Using existing API key for ${name}`);
-  } else {
-    apiKey = generateApiKey();
-    store.getState().setClientIds((prev) => [
-      ...(prev || []),
-      {
-        clientId,
-        name,
-        apiKey,
-        createdAt: Date.now(),
-      },
-    ]);
-    logger.log(`Created new API key for ${name}`);
-  }
 
   let settings: {
     env?: Record<string, string>;
@@ -68,15 +43,19 @@ export async function installClaudeCodeIntegration(
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length >= 3) {
-      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = models[0].id;
-      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = models[1].id;
-      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[2].id;
-      logger.log(`Set Claude models: Opus=${models[0].id}, Sonnet=${models[1].id}, Haiku=${models[2].id}`);
+      const opus = models[0]!;
+      const sonnet = models[1]!;
+      const haiku = models[2]!;
+      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = opus.id;
+      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = sonnet.id;
+      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku.id;
+      logger.log(`Set Claude models: Opus=${opus.id}, Sonnet=${sonnet.id}, Haiku=${haiku.id}`);
     } else if (models.length > 0) {
+      const model = models[0]!;
       logger.log(`Only ${models.length} models available, falling back to defaults.`);
-      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = models[0].id;
-      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = models[0].id;
-      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = models[0].id;
+      settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model.id;
+      settings.env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model.id;
+      settings.env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model.id;
     } else {
       logger.log("No models available from routstr daemon.");
     }

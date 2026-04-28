@@ -1,7 +1,5 @@
-import { randomBytes } from "crypto";
 import { join } from "path";
 import type { RoutstrdConfig } from "../utils/config";
-import type { SdkStore } from "@routstr/sdk";
 import { installOpencodeIntegration } from "./opencode";
 import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
@@ -18,14 +16,9 @@ export type RoutstrModel = {
   name?: string;
 };
 
-export function generateApiKey(): string {
-  const bytes = randomBytes(24);
-  return `sk-${bytes.toString("hex")}`;
-}
-
 export type IntegrationFn = (
   config: RoutstrdConfig,
-  store: SdkStore,
+  apiKey: string,
   integrationConfig: IntegrationConfig,
 ) => Promise<void>;
 
@@ -60,16 +53,15 @@ export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
 };
 
 export async function runIntegrationsForClients(
-  clientIds: Array<{ clientId: string }>,
+  clientIds: Array<{ clientId: string; apiKey?: string }>,
   config: RoutstrdConfig,
-  store: SdkStore,
 ): Promise<void> {
   for (const client of clientIds) {
     const integrationFn = CLIENT_INTEGRATIONS[client.clientId];
     const integrationConfig = CLIENT_CONFIGS[client.clientId];
-    if (integrationFn && integrationConfig) {
+    if (integrationFn && integrationConfig && client.apiKey) {
       try {
-        await integrationFn(config, store, integrationConfig);
+        await integrationFn(config, client.apiKey, integrationConfig);
       } catch (error) {
         console.error(`Integration failed for ${client.clientId}:`, error);
       }

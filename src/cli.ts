@@ -23,9 +23,8 @@ import {
   setupIntegration,
   CLIENT_CONFIGS,
   CLIENT_INTEGRATIONS,
+  ensureIntegrationClient,
 } from "./integrations";
-import { createSdkStore } from "@routstr/sdk";
-import { createBunSqliteDriver } from "@routstr/sdk/storage";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey } from "./utils/nip98";
 import {
@@ -202,11 +201,7 @@ async function initDaemon(): Promise<void> {
 
   await startDaemon({ port: String(config.port || 8008) });
 
-  // Create SDK store for integrations
-  const sqliteDriver = await createBunSqliteDriver(DB_PATH);
-  const { store } = await createSdkStore({ driver: sqliteDriver });
-
-  await setupIntegration(config, store);
+  await setupIntegration(config);
 
   logger.log("\nInitialization complete!");
   logger.log(
@@ -823,32 +818,24 @@ clientsCmd
       if (options.claudeCode) integrationKeys.push("claude-code");
 
       if (integrationKeys.length > 0) {
-        const sqliteDriver = await createBunSqliteDriver(DB_PATH);
-        const { store } = await createSdkStore({ driver: sqliteDriver });
-
         for (const key of integrationKeys) {
           const integrationFn = CLIENT_INTEGRATIONS[key];
           const integrationConfig = CLIENT_CONFIGS[key];
           if (!integrationFn || !integrationConfig) continue;
 
           try {
-            await integrationFn(config, store, integrationConfig);
+            const client = await ensureIntegrationClient(integrationConfig);
+            await integrationFn(config, client.apiKey, integrationConfig);
+
+            console.log(`\n  ${integrationConfig.name}:`);
+            console.log(`    Client ID: ${client.id}`);
+            console.log(`    API Key:   ${client.apiKey}`);
           } catch (error) {
             logger.error(
               `Failed to set up ${integrationConfig.name} integration:`,
               error,
             );
             continue;
-          }
-
-          const state = store.getState();
-          const client = (state.clientIds || []).find(
-            (c: { clientId: string }) => c.clientId === key,
-          );
-          if (client) {
-            console.log(`\n  ${integrationConfig.name}:`);
-            console.log(`    Client ID: ${client.clientId}`);
-            console.log(`    API Key:   ${client.apiKey}`);
           }
         }
 

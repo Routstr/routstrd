@@ -3,9 +3,7 @@ import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
-import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
-import { generateApiKey } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 const OPENCLAW_PROVIDER_ID = "routstr";
@@ -53,39 +51,15 @@ function toAlias(modelId: string): string {
 
 export async function installOpenClawIntegration(
   config: RoutstrdConfig,
-  store: SdkStore,
+  apiKey: string,
   integrationConfig: IntegrationConfig,
 ): Promise<void> {
-  const { clientId, name, configPath } = integrationConfig;
+  const { name, configPath } = integrationConfig;
 
   logger.log("\nInstalling routstr models in openclaw.json...");
+  logger.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrl(config);
-
-  // Get or create clientId entry for OpenClaw
-  const state = store.getState();
-  const existingClient = (state.clientIds || []).find(
-    (c: { clientId: string }) => c.clientId === clientId,
-  );
-
-  let apiKey: string;
-  if (existingClient) {
-    apiKey = existingClient.apiKey;
-    logger.log(`Using existing API key for ${name}`);
-  } else {
-    apiKey = generateApiKey();
-    // Add new clientId entry using proper store action
-    store.getState().setClientIds((prev) => [
-      ...(prev || []),
-      {
-        clientId,
-        name,
-        apiKey,
-        createdAt: Date.now(),
-      },
-    ]);
-    logger.log(`Created new API key for ${name}`);
-  }
 
   let openclawConfig: OpenClawConfig = {};
 

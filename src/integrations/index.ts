@@ -1,12 +1,21 @@
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
+import { callDaemon } from "../utils/daemon-client";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
 import { installClaudeCodeIntegration } from "./claudecode";
-import type { SdkStore } from "@routstr/sdk";
+import type { IntegrationConfig } from "./registry";
 import { CLIENT_CONFIGS } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
+
+export type IntegrationClient = {
+  id: string;
+  name: string;
+  apiKey: string;
+  createdAt: number;
+  lastUsed?: number | null;
+};
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);
@@ -38,9 +47,50 @@ function parseChoice(input: string): number {
   return 1;
 }
 
+export async function ensureIntegrationClient(
+  integrationConfig: IntegrationConfig,
+): Promise<IntegrationClient> {
+  try {
+    const result = await callDaemon("/clients/add", {
+      method: "POST",
+      body: { name: integrationConfig.name },
+    });
+
+    const client = (result.output as { client?: IntegrationClient } | undefined)
+      ?.client;
+    if (!client?.apiKey) {
+      throw new Error(
+        `Daemon did not return an API key for ${integrationConfig.name}.`,
+      );
+    }
+
+    logger.log(`Created new API key for ${integrationConfig.name}`);
+    return client;
+  } catch (error) {
+    const message = (error as Error).message || "";
+    if (!message.includes("already exists")) {
+      throw error;
+    }
+
+    const clientsResult = await callDaemon("/clients");
+    const clients =
+      (clientsResult.output as { clients?: IntegrationClient[] } | undefined)
+        ?.clients || [];
+    const client = clients.find((c) => c.id === integrationConfig.clientId);
+
+    if (!client?.apiKey) {
+      throw new Error(
+        `Client '${integrationConfig.clientId}' already exists but could not be fetched from the daemon.`,
+      );
+    }
+
+    logger.log(`Using existing API key for ${integrationConfig.name}`);
+    return client;
+  }
+}
+
 export async function setupIntegration(
   config: RoutstrdConfig,
-  store: SdkStore,
 ): Promise<void> {
   logger.log("\nChoose an integration to set up:");
   logger.log("1. OpenCode (default)");
@@ -52,25 +102,38 @@ export async function setupIntegration(
   const answer = await ask("Select integration [1]: ");
   const choice = parseChoice(answer);
 
-  if (choice === 1) {
-    await installOpencodeIntegration(config, store, CLIENT_CONFIGS.opencode!);
+  const integrationByChoice: Record<number, keyof typeof CLIENT_CONFIGS> = {
+    1: "opencode",
+    2: "openclaw",
+    3: "pi-agent",
+    4: "claude-code",
+  };
+
+  const key = integrationByChoice[choice];
+  if (!key) {
+    logger.log("Skipping integration setup.");
     return;
   }
 
-  if (choice === 2) {
-    await installOpenClawIntegration(config, store, CLIENT_CONFIGS.openclaw!);
+  const integrationConfig = CLIENT_CONFIGS[key]!;
+  const client = await ensureIntegrationClient(integrationConfig);
+
+  if (key === "opencode") {
+    await installOpencodeIntegration(config, client.apiKey, integrationConfig);
     return;
   }
 
-  if (choice === 3) {
-    await installPiIntegration(config, store, CLIENT_CONFIGS["pi-agent"]!);
+  if (key === "openclaw") {
+    await installOpenClawIntegration(config, client.apiKey, integrationConfig);
     return;
   }
 
-  if (choice === 4) {
-    await installClaudeCodeIntegration(config, store, CLIENT_CONFIGS["claude-code"]!);
+  if (key === "pi-agent") {
+    await installPiIntegration(config, client.apiKey, integrationConfig);
     return;
   }
 
-  logger.log("Skipping integration setup.");
+  if (key === "claude-code") {
+    await installClaudeCodeIntegration(config, client.apiKey, integrationConfig);
+  }
 }
