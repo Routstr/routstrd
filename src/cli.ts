@@ -27,10 +27,7 @@ import {
 import { createSdkStore } from "@routstr/sdk";
 import { createBunSqliteDriver } from "@routstr/sdk/storage";
 import * as QRCode from "qrcode";
-import {
-  normalizeNostrPubkey,
-  npubFromPubkey,
-} from "./utils/nip98";
+import { normalizeNostrPubkey, npubFromPubkey } from "./utils/nip98";
 import {
   isCocodInstalled,
   resolveCocodExecutable,
@@ -84,10 +81,13 @@ async function printLightningInvoice(invoice: string): Promise<void> {
 async function installCocodOrExit(): Promise<void> {
   logger.log("cocod not found. Installing globally with bun...");
 
-  const installProc = Bun.spawn(["bun", "install", "--global", "@routstr/cocod"], {
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  const installProc = Bun.spawn(
+    ["bun", "install", "--global", "@routstr/cocod"],
+    {
+      stdout: "inherit",
+      stderr: "inherit",
+    },
+  );
 
   const installCode = await installProc.exited;
   if (installCode !== 0 || !(await isCocodInstalled())) {
@@ -228,7 +228,10 @@ program
 program
   .command("refund")
   .description("Refund pending tokens and API keys to a specified mint")
-  .option("-m, --mint-url <mintUrl>", "Mint URL to refund to (defaults to first mint in wallet)")
+  .option(
+    "-m, --mint-url <mintUrl>",
+    "Mint URL to refund to (defaults to first mint in wallet)",
+  )
   .option("-y, --yes", "Skip confirmation prompt", false)
   .action(async (options: { mintUrl?: string; yes: boolean }) => {
     await ensureDaemonRunning();
@@ -240,9 +243,13 @@ program
         console.log(balanceResult.error);
         process.exit(1);
       }
-      const balances = (balanceResult.output as {
-        balances?: Record<string, number>;
-      } | undefined)?.balances;
+      const balances = (
+        balanceResult.output as
+          | {
+              balances?: Record<string, number>;
+            }
+          | undefined
+      )?.balances;
       if (!balances || Object.keys(balances).length === 0) {
         console.log("No mint URLs found in wallet balance");
         process.exit(1);
@@ -262,12 +269,14 @@ program
         process.exit(1);
       }
 
-      const output = result.output as {
-        message: string;
-        pendingTokens: number;
-        apiKeys: number;
-        results: Array<{ baseUrl: string; success: boolean }>;
-      } | undefined;
+      const output = result.output as
+        | {
+            message: string;
+            pendingTokens: number;
+            apiKeys: number;
+            results: Array<{ baseUrl: string; success: boolean }>;
+          }
+        | undefined;
 
       if (output) {
         console.log(output.message);
@@ -442,27 +451,31 @@ program
 
     if (options.model) {
       // Show providers for specific model
-      const result = await callDaemon(`/models/${encodeURIComponent(options.model)}/providers`);
+      const result = await callDaemon(
+        `/models/${encodeURIComponent(options.model)}/providers`,
+      );
       if (result.error) {
         console.log(result.error);
         process.exit(1);
       }
 
-      const modelData = result.output as {
-        id: string;
-        name?: string;
-        description?: string;
-        context_length?: number;
-        providers: Array<{
-          baseUrl: string;
-          pricing: {
-            prompt: number;
-            completion: number;
-            request: number;
-            max_cost: number;
-          };
-        }>;
-      } | undefined;
+      const modelData = result.output as
+        | {
+            id: string;
+            name?: string;
+            description?: string;
+            context_length?: number;
+            providers: Array<{
+              baseUrl: string;
+              pricing: {
+                prompt: number;
+                completion: number;
+                request: number;
+                max_cost: number;
+              };
+            }>;
+          }
+        | undefined;
 
       if (!modelData) {
         console.log("Model not found");
@@ -474,15 +487,25 @@ program
         console.log(`  ${modelData.description}`);
       }
       if (modelData.context_length) {
-        console.log(`  Context: ${modelData.context_length.toLocaleString()} tokens`);
+        console.log(
+          `  Context: ${modelData.context_length.toLocaleString()} tokens`,
+        );
       }
       console.log(`\n  Providers (${modelData.providers.length}):`);
       for (const provider of modelData.providers) {
         console.log(`\n    ${provider.baseUrl}`);
-        console.log(`      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`);
-        console.log(`      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`);
-        console.log(`      Request:    ${provider.pricing.request.toFixed(2)} sats`);
-        console.log(`      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`);
+        console.log(
+          `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
+        );
+        console.log(
+          `      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`,
+        );
+        console.log(
+          `      Request:    ${provider.pricing.request.toFixed(2)} sats`,
+        );
+        console.log(
+          `      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`,
+        );
       }
       console.log("");
       return;
@@ -507,7 +530,9 @@ program
         console.log("No routstr21 models found");
       } else {
         console.log(`\nFound ${models.length} routstr21 models:`);
-        console.log("(Use 'routstrd models -m <model_id>' to see providers and pricing)\n");
+        console.log(
+          "(Use 'routstrd models -m <model_id>' to see providers and pricing)\n",
+        );
         models.forEach((model, i) => {
           const details = [
             model.name && model.name !== model.id ? model.name : null,
@@ -515,7 +540,9 @@ program
           ]
             .filter(Boolean)
             .join(" - ");
-          console.log(`  ${String(i + 1).padStart(2)}. ${model.id}${details ? ` (${details})` : ""}`);
+          console.log(
+            `  ${String(i + 1).padStart(2)}. ${model.id}${details ? ` (${details})` : ""}`,
+          );
         });
         console.log("");
       }
@@ -778,97 +805,95 @@ clientsCmd
   .option("--openclaw", "Set up OpenClaw integration")
   .option("--pi-agent", "Set up Pi Agent integration")
   .option("--claude-code", "Set up Claude Code integration")
-  .action(async (options: {
-    name?: string;
-    opencode?: boolean;
-    openclaw?: boolean;
-    piAgent?: boolean;
-    claudeCode?: boolean;
-  }) => {
-    await ensureDaemonRunning();
-    const config = await loadConfig();
+  .action(
+    async (options: {
+      name?: string;
+      opencode?: boolean;
+      openclaw?: boolean;
+      piAgent?: boolean;
+      claudeCode?: boolean;
+    }) => {
+      await ensureDaemonRunning();
+      const config = await loadConfig();
 
-    const integrationKeys: string[] = [];
-    if (options.opencode) integrationKeys.push("opencode");
-    if (options.openclaw) integrationKeys.push("openclaw");
-    if (options.piAgent) integrationKeys.push("pi-agent");
-    if (options.claudeCode) integrationKeys.push("claude-code");
+      const integrationKeys: string[] = [];
+      if (options.opencode) integrationKeys.push("opencode");
+      if (options.openclaw) integrationKeys.push("openclaw");
+      if (options.piAgent) integrationKeys.push("pi-agent");
+      if (options.claudeCode) integrationKeys.push("claude-code");
 
-    if (integrationKeys.length > 0) {
-      const sqliteDriver = await createBunSqliteDriver(DB_PATH);
-      const { store } = await createSdkStore({ driver: sqliteDriver });
+      if (integrationKeys.length > 0) {
+        const sqliteDriver = await createBunSqliteDriver(DB_PATH);
+        const { store } = await createSdkStore({ driver: sqliteDriver });
 
-      for (const key of integrationKeys) {
-        const integrationFn = CLIENT_INTEGRATIONS[key];
-        const integrationConfig = CLIENT_CONFIGS[key];
-        if (!integrationFn || !integrationConfig) continue;
+        for (const key of integrationKeys) {
+          const integrationFn = CLIENT_INTEGRATIONS[key];
+          const integrationConfig = CLIENT_CONFIGS[key];
+          if (!integrationFn || !integrationConfig) continue;
 
-        try {
-          await integrationFn(config, store, integrationConfig);
-        } catch (error) {
-          logger.error(
-            `Failed to set up ${integrationConfig.name} integration:`,
-            error,
+          try {
+            await integrationFn(config, store, integrationConfig);
+          } catch (error) {
+            logger.error(
+              `Failed to set up ${integrationConfig.name} integration:`,
+              error,
+            );
+            continue;
+          }
+
+          const state = store.getState();
+          const client = (state.clientIds || []).find(
+            (c: { clientId: string }) => c.clientId === key,
           );
-          continue;
+          if (client) {
+            console.log(`\n  ${integrationConfig.name}:`);
+            console.log(`    Client ID: ${client.clientId}`);
+            console.log(`    API Key:   ${client.apiKey}`);
+          }
         }
 
-        const state = store.getState();
-        const client = (state.clientIds || []).find(
-          (c: { clientId: string }) => c.clientId === key,
-        );
-        if (client) {
-          console.log(`\n  ${integrationConfig.name}:`);
-          console.log(`    Client ID: ${client.clientId}`);
-          console.log(`    API Key:   ${client.apiKey}`);
-        }
+        console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
+        return;
       }
 
-      console.log(
-        `\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`,
-      );
-      return;
-    }
+      if (!options.name) {
+        console.error(
+          "error: required option '-n, --name <name>' not specified",
+        );
+        process.exit(1);
+      }
 
-    if (!options.name) {
-      console.error(
-        "error: required option '-n, --name <name>' not specified",
-      );
-      process.exit(1);
-    }
+      const result = await callDaemon("/clients/add", {
+        method: "POST",
+        body: { name: options.name },
+      });
 
-    const result = await callDaemon("/clients/add", {
-      method: "POST",
-      body: { name: options.name },
-    });
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
 
-    if (result.error) {
-      console.log(result.error);
-      process.exit(1);
-    }
+      const output = result.output as
+        | {
+            message: string;
+            client: {
+              id: string;
+              name: string;
+              apiKey: string;
+              createdAt: number;
+            };
+          }
+        | undefined;
 
-    const output = result.output as
-      | {
-          message: string;
-          client: {
-            id: string;
-            name: string;
-            apiKey: string;
-            createdAt: number;
-          };
-        }
-      | undefined;
-
-    if (output) {
-      console.log(output.message);
-      console.log(`\n  ID:     ${output.client.id}`);
-      console.log(`  Name:   ${output.client.name}`);
-      console.log(`  API Key: ${output.client.apiKey}`);
-      console.log(
-        `\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`,
-      );
-    }
-  });
+      if (output) {
+        console.log(output.message);
+        console.log(`\n  ID:     ${output.client.id}`);
+        console.log(`  Name:   ${output.client.name}`);
+        console.log(`  API Key: ${output.client.apiKey}`);
+        console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
+      }
+    },
+  );
 
 // Npubs - manage admin npubs
 const npubsCmd = program
@@ -885,7 +910,11 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    const npubs = (result.output as { npubs?: string[] } | undefined)?.npubs ?? [];
+    // Handle both wrapped { output: { npubs } } and direct { npubs } response formats
+    const data = (result.output as { npubs?: string[] } | undefined)?.npubs
+      ? result.output
+      : result;
+    const npubs = (data as { npubs?: string[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
       console.log("No admin npubs configured.");
       return;
@@ -934,9 +963,12 @@ npubsCmd
       console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
       process.exit(1);
     }
-    const result = await callDaemon(`/npubs/${encodeURIComponent(npubFromPubkey(normalized))}`, {
-      method: "DELETE",
-    });
+    const result = await callDaemon(
+      `/npubs/${encodeURIComponent(npubFromPubkey(normalized))}`,
+      {
+        method: "DELETE",
+      },
+    );
     if (result.error) {
       console.log(result.error);
       process.exit(1);
@@ -945,7 +977,9 @@ npubsCmd
       | { removed?: boolean; error?: string }
       | undefined;
     console.log(
-      output?.removed ? "Removed admin npub." : "Admin npub was not configured.",
+      output?.removed
+        ? "Removed admin npub."
+        : "Admin npub was not configured.",
     );
   });
 
@@ -1200,7 +1234,9 @@ serviceCmd
       try {
         execSync("bun install -g pm2", { stdio: "inherit" });
       } catch (err) {
-        console.error("Failed to install PM2. Please install it manually: bun install -g pm2");
+        console.error(
+          "Failed to install PM2. Please install it manually: bun install -g pm2",
+        );
         process.exit(1);
       }
     }
@@ -1214,11 +1250,17 @@ serviceCmd
     } catch (e) {
       // Fallback for some bundling scenarios
       const path = require("path");
-      daemonPath = path.join(path.dirname(import.meta.url).replace("file://", ""), "daemon", "index.js");
+      daemonPath = path.join(
+        path.dirname(import.meta.url).replace("file://", ""),
+        "daemon",
+        "index.js",
+      );
     }
 
     if (!existsSync(daemonPath)) {
-      console.error(`Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`);
+      console.error(
+        `Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`,
+      );
       process.exit(1);
     }
 

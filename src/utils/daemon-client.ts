@@ -29,7 +29,9 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
 }
 
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
-  return config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`;
+  return (
+    config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`
+  );
 }
 
 export async function callDaemon(
@@ -101,12 +103,15 @@ export async function startDaemonProcess(): Promise<void> {
     await Bun.$`mkdir -p ${LOGS_DIR}`;
   }
 
-  const proc = Bun.spawn(["bun", "run", `${import.meta.dir}/../daemon/index.ts`], {
-    stdout: "inherit",
-    stderr: "inherit",
-    stdin: "ignore",
-    detached: true,
-  });
+  const proc = Bun.spawn(
+    ["bun", "run", `${import.meta.dir}/../daemon/index.ts`],
+    {
+      stdout: "inherit",
+      stderr: "inherit",
+      stdin: "ignore",
+      detached: true,
+    },
+  );
 
   proc.unref();
 
@@ -163,7 +168,10 @@ export async function handleDaemonCommand(
     return result;
   } catch (error) {
     const message = (error as Error).message;
-    if (message?.includes("fetch failed") || message?.includes("Connection refused")) {
+    if (
+      message?.includes("fetch failed") ||
+      message?.includes("Connection refused")
+    ) {
       console.error("Daemon is not running and failed to auto-start");
       process.exit(1);
     }
