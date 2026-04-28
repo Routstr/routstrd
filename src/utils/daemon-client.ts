@@ -5,6 +5,11 @@ import {
   LOGS_DIR,
   type RoutstrdConfig,
 } from "./config";
+import {
+  createNIP98Authorization,
+  parseSecretKey,
+  type HttpMethod,
+} from "./nip98";
 
 export interface CommandResponse {
   output?: unknown;
@@ -34,11 +39,31 @@ export async function callDaemon(
   const { method = "GET", body } = options;
   const config = await loadConfig();
   const baseUrl = getDaemonBaseUrl(config);
+  const url = `${baseUrl}${path}`;
 
-  const response = await fetch(`${baseUrl}${path}`, {
+  const bodyString = body ? JSON.stringify(body) : undefined;
+  const bodyBytes = bodyString
+    ? new TextEncoder().encode(bodyString)
+    : undefined;
+
+  let authorization: string | undefined;
+  if (config.daemonUrl && config.nsec) {
+    const secretKey = parseSecretKey(config.nsec);
+    authorization = await createNIP98Authorization(
+      secretKey,
+      url,
+      method as HttpMethod,
+      bodyBytes,
+    );
+  }
+
+  const response = await fetch(url, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
+    headers: {
+      ...(authorization ? { Authorization: authorization } : {}),
+      ...(bodyString ? { "Content-Type": "application/json" } : {}),
+    },
+    body: bodyString,
   });
 
   if (!response.ok) {
@@ -53,7 +78,17 @@ export async function isDaemonRunning(): Promise<boolean> {
   try {
     const config = await loadConfig();
     const baseUrl = getDaemonBaseUrl(config);
-    const response = await fetch(`${baseUrl}/health`);
+    const url = `${baseUrl}/health`;
+
+    let authorization: string | undefined;
+    if (config.daemonUrl && config.nsec) {
+      const secretKey = parseSecretKey(config.nsec);
+      authorization = await createNIP98Authorization(secretKey, url, "GET");
+    }
+
+    const response = await fetch(url, {
+      headers: authorization ? { Authorization: authorization } : {},
+    });
     return response.ok;
   } catch {
     return false;
