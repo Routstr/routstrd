@@ -6,6 +6,7 @@ import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { generateApiKey } from "./registry";
+import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 type PiModelEntry = {
   id: string;
@@ -31,8 +32,7 @@ export async function installPiIntegration(
 
   logger.log("\nInstalling routstr models in pi models.json...");
 
-  const port = config.port || 8008;
-  const baseUrl = `http://localhost:${port}/v1`;
+  const baseUrl = `${getDaemonBaseUrl(config)}/v1`;
 
   // Get or create clientId entry for Pi Agent
   const state = store.getState();
@@ -78,9 +78,8 @@ export async function installPiIntegration(
     // Ensure directory exists
     mkdirSync(dirname(configPath), { recursive: true });
 
-    const response = await fetch(`http://localhost:${port}/models`);
-    const data = await response.json() as { output?: { models: RoutstrModel[] } };
-    const models = data.output?.models || [];
+    const data = await callDaemon("/models");
+    const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
       logger.log("No models found from routstr daemon.");

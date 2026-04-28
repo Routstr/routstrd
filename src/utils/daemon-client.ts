@@ -28,7 +28,7 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
   return DEFAULT_CONFIG;
 }
 
-function getDaemonBaseUrl(config: RoutstrdConfig): string {
+export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   return config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`;
 }
 

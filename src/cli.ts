@@ -6,6 +6,7 @@ import {
   ensureDaemonRunning,
   isDaemonRunning,
   loadConfig,
+  getDaemonBaseUrl,
 } from "./utils/daemon-client";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
@@ -820,7 +821,7 @@ clientsCmd
       }
 
       console.log(
-        `\n  Access Routstr at: http://localhost:${config.port || 8008}/v1`,
+        `\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`,
       );
       return;
     }
@@ -860,7 +861,7 @@ clientsCmd
       console.log(`  Name:   ${output.client.name}`);
       console.log(`  API Key: ${output.client.apiKey}`);
       console.log(
-        `\n  Access Routstr at: http://localhost:${config.port || 8008}/v1`,
+        `\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`,
       );
     }
   });

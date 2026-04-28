@@ -6,6 +6,7 @@ import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { generateApiKey } from "./registry";
+import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 const OPENCLAW_PROVIDER_ID = "routstr";
 const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/minimax-m2.5";
@@ -59,7 +60,7 @@ export async function installOpenClawIntegration(
 
   logger.log("\nInstalling routstr models in openclaw.json...");
 
-  const port = config.port || 8008;
+  const baseUrl = getDaemonBaseUrl(config);
 
   // Get or create clientId entry for OpenClaw
   const state = store.getState();
@@ -113,9 +114,8 @@ export async function installOpenClawIntegration(
   try {
     mkdirSync(dirname(configPath), { recursive: true });
 
-    const response = await fetch(`http://localhost:${port}/models`);
-    const data = await response.json() as { output?: { models: RoutstrModel[] } };
-    const models = data.output?.models || [];
+    const data = await callDaemon("/models");
+    const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
       logger.log("No models found from routstr daemon.");
@@ -129,7 +129,7 @@ export async function installOpenClawIntegration(
     }));
 
     openclawConfig.models.providers[OPENCLAW_PROVIDER_ID] = {
-      baseUrl: `http://localhost:${port}/v1`,
+      baseUrl: `${baseUrl}/v1`,
       apiKey,
       api: "openai-completions",
       models: providerModels,

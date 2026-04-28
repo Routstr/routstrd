@@ -6,6 +6,7 @@ import { logger } from "../utils/logger";
 import type { SdkStore } from "@routstr/sdk";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { generateApiKey } from "./registry";
+import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 export async function installClaudeCodeIntegration(
   config: RoutstrdConfig,
@@ -16,7 +17,7 @@ export async function installClaudeCodeIntegration(
 
   logger.log(`\nInstalling routstr configuration in ${configPath}...`);
 
-  const port = config.port || 8008;
+  const baseUrl = getDaemonBaseUrl(config);
 
   // Get or create clientId entry
   const state = store.getState();
@@ -60,12 +61,11 @@ export async function installClaudeCodeIntegration(
   }
 
   settings.env["ANTHROPIC_AUTH_TOKEN"] = apiKey;
-  settings.env["ANTHROPIC_BASE_URL"] = `http://localhost:${port}`;
+  settings.env["ANTHROPIC_BASE_URL"] = baseUrl;
 
   try {
-    const response = await fetch(`http://localhost:${port}/models`);
-    const data = await response.json() as { output?: { models: RoutstrModel[] } };
-    const models = data.output?.models || [];
+    const data = await callDaemon("/models");
+    const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length >= 3) {
       settings.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = models[0].id;
