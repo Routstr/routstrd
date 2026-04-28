@@ -44,6 +44,35 @@ export async function addDaemonClient(
   return { message: output.message, client: output.client };
 }
 
+export async function ensureDaemonClient(
+  name: string,
+  clientId: string,
+): Promise<{ client: DaemonClient; created: boolean }> {
+  try {
+    const { client } = await addDaemonClient(name);
+    return { client, created: true };
+  } catch (error) {
+    const message = (error as Error).message || "";
+    if (!message.includes("already exists")) {
+      throw error;
+    }
+
+    const clientsResult = await callDaemon("/clients");
+    const clients =
+      (clientsResult.output as { clients?: DaemonClient[] } | undefined)
+        ?.clients || [];
+    const client = clients.find((c) => c.id === clientId);
+
+    if (!client?.apiKey) {
+      throw new Error(
+        `Client '${clientId}' already exists but could not be fetched from the daemon.`,
+      );
+    }
+
+    return { client, created: false };
+  }
+}
+
 export async function loadConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {

@@ -9,6 +9,7 @@ import {
   getDaemonBaseUrl,
   getNpubSuffix,
   addDaemonClient,
+  ensureDaemonClient,
 } from "./utils/daemon-client";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
@@ -25,7 +26,6 @@ import {
   setupIntegration,
   CLIENT_CONFIGS,
   CLIENT_INTEGRATIONS,
-  ensureIntegrationClient,
 } from "./integrations";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey } from "./utils/nip98";
@@ -855,7 +855,15 @@ clientsCmd
           if (!integrationFn || !integrationConfig) continue;
 
           try {
-            const client = await ensureIntegrationClient(integrationConfig);
+            const { client, created } = await ensureDaemonClient(
+              integrationConfig.name,
+              integrationConfig.clientId,
+            );
+            if (created) {
+              logger.log(`Created new API key for ${integrationConfig.name}`);
+            } else {
+              logger.log(`Using existing API key for ${integrationConfig.name}`);
+            }
             await integrationFn(config, client.apiKey, integrationConfig);
 
             console.log(`\n  ${integrationConfig.name}:`);
