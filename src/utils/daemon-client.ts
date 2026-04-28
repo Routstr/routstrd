@@ -171,6 +171,16 @@ export function getNpubSuffix(config: RoutstrdConfig): string | null {
   }
 }
 
+export function getUserNpub(config: RoutstrdConfig): string | null {
+  if (!config.nsec) return null;
+  try {
+    const secretKey = parseSecretKey(config.nsec);
+    return npubFromSecretKey(secretKey);
+  } catch {
+    return null;
+  }
+}
+
 export async function startDaemonProcess(): Promise<void> {
   // Ensure logs directory exists (logger handles date-based files)
   if (!existsSync(LOGS_DIR)) {

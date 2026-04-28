@@ -10,6 +10,7 @@ import {
   getNpubSuffix,
   addDaemonClient,
   ensureDaemonClient,
+  getUserNpub,
 } from "./utils/daemon-client";
 import { getClientsList } from "./utils/clients";
 import { existsSync, mkdirSync } from "fs";
@@ -909,6 +910,8 @@ npubsCmd
   .description("List configured admin npubs")
   .action(async () => {
     await ensureDaemonRunning();
+    const config = await loadConfig();
+    const userNpub = getUserNpub(config);
     const result = await callDaemon("/npubs");
     if (result.error) {
       console.log(result.error);
@@ -924,8 +927,18 @@ npubsCmd
       return;
     }
     console.log(`Admin npubs (${npubs.length}):`);
+    let found = false;
     for (const npub of npubs) {
-      console.log(`- ${npub}`);
+      const marker = npub === userNpub ? " → you" : "";
+      if (npub === userNpub) found = true;
+      console.log(`- ${npub}${marker}`);
+    }
+    if (userNpub && !found) {
+      console.log("");
+      console.log(
+        "Your npub is not in the admin list. Ask the admin to add your npub:",
+      );
+      console.log(`  ${userNpub}`);
     }
   });
 
