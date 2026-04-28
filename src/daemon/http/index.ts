@@ -750,6 +750,7 @@ export function createDaemonRequestHandler(deps: {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const name = body.name as string | undefined;
+        const explicitId = body.id as string | undefined;
 
         if (!name || typeof name !== "string" || name.trim() === "") {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -762,17 +763,31 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const clientId = name
-          .toLowerCase()
-          .replace(/\s+/g, "-")
-          .replace(/[^a-z0-9-]/g, "");
+        if (!explicitId || typeof explicitId !== "string" || explicitId.trim() === "") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error:
+                "Missing required 'id' field (must be a non-empty string).",
+            }),
+          );
+          return;
+        }
+
+        const sanitizeId = (value: string) =>
+          value
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+            .replace(/[^a-z0-9-]/g, "");
+
+        const clientId = sanitizeId(explicitId);
 
         if (!clientId) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
               error:
-                "Invalid client name. Must contain alphanumeric characters.",
+                "Invalid client id. Must contain alphanumeric characters.",
             }),
           );
           return;
