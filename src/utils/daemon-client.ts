@@ -11,6 +11,7 @@ import {
   npubFromSecretKey,
   type HttpMethod,
 } from "./nip98";
+import { getClientsList } from "./clients";
 
 export interface CommandResponse {
   output?: unknown;
@@ -57,17 +58,22 @@ export async function ensureDaemonClient(
       throw error;
     }
 
-    const clientsResult = await callDaemon("/clients");
-    const clients =
-      (clientsResult.output as { clients?: DaemonClient[] } | undefined)
-        ?.clients || [];
-    const client = clients.find((c) => c.id === clientId);
+    const clients = await getClientsList();
+    const entry = clients.find((c) => c.clientId === clientId);
 
-    if (!client?.apiKey) {
+    if (!entry?.apiKey) {
       throw new Error(
         `Client '${clientId}' already exists but could not be fetched from the daemon.`,
       );
     }
+
+    const client: DaemonClient = {
+      id: entry.clientId,
+      name: entry.name,
+      apiKey: entry.apiKey,
+      createdAt: entry.createdAt,
+      lastUsed: entry.lastUsed,
+    };
 
     return { client, created: false };
   }

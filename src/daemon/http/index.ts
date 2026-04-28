@@ -14,6 +14,7 @@ import {
   type CocodState,
 } from "../wallet/cocod-client";
 import { decodeCashuTokenAmount } from "../wallet";
+import { getClientsFromStore } from "../../utils/clients";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -63,12 +64,8 @@ function getClientIdFromRequest(
     return undefined;
   }
 
-  const state = store.getState();
-  const clientIds = state.clientIds || [];
-
-  const matchingClient = (
-    clientIds as { clientId: string; apiKey: string }[]
-  ).find((c) => c.apiKey === apiKey);
+  const clients = getClientsFromStore(store);
+  const matchingClient = clients.find((c) => c.apiKey === apiKey);
 
   return matchingClient?.clientId;
 }
@@ -710,24 +707,13 @@ export function createDaemonRequestHandler(deps: {
     // Client management endpoints
     if (req.method === "GET" && url.pathname === "/clients") {
       try {
-        const state = deps.store.getState();
-        const clientIds = state.clientIds || [];
-
-        const clients = clientIds.map(
-          (c: {
-            clientId: string;
-            name: string;
-            apiKey: string;
-            createdAt: number;
-            lastUsed?: number | null;
-          }) => ({
-            id: c.clientId,
-            name: c.name,
-            apiKey: c.apiKey,
-            createdAt: c.createdAt,
-            lastUsed: c.lastUsed,
-          }),
-        );
+        const clients = getClientsFromStore(deps.store).map((c) => ({
+          id: c.clientId,
+          name: c.name,
+          apiKey: c.apiKey,
+          createdAt: c.createdAt,
+          lastUsed: c.lastUsed,
+        }));
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -793,10 +779,9 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const state = deps.store.getState();
-        const existingClients = state.clientIds || [];
+        const existingClients = getClientsFromStore(deps.store);
         const existingClient = existingClients.find(
-          (c: { clientId: string }) => c.clientId === clientId,
+          (c) => c.clientId === clientId,
         );
 
         if (existingClient) {
@@ -863,10 +848,9 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const state = deps.store.getState();
-        const existingClients = state.clientIds || [];
+        const existingClients = getClientsFromStore(deps.store);
         const index = existingClients.findIndex(
-          (c: { clientId: string }) => c.clientId === id,
+          (c) => c.clientId === id,
         );
 
         if (index === -1) {
@@ -879,7 +863,7 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const removedClient = existingClients[index];
+        const removedClient = existingClients[index]!;
         const updatedClients = existingClients.filter(
           (_c: unknown, i: number) => i !== index,
         );

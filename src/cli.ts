@@ -11,6 +11,7 @@ import {
   addDaemonClient,
   ensureDaemonClient,
 } from "./utils/daemon-client";
+import { getClientsList } from "./utils/clients";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
 import {
@@ -731,26 +732,15 @@ clientsCmd
     const config = await loadConfig();
     const suffix = getNpubSuffix(config);
 
-    const result = await callDaemon("/clients");
-    if (result.error) {
-      console.log(result.error);
-      process.exit(1);
-    }
+    const entries = await getClientsList();
 
-    const output = result.output as
-      | {
-          clients: Array<{
-            id: string;
-            name: string;
-            apiKey: string;
-            createdAt: number;
-            lastUsed?: number | null;
-          }>;
-          totalCount: number;
-        }
-      | undefined;
-
-    let clients = output?.clients || [];
+    let clients = entries.map((c) => ({
+      id: c.clientId,
+      name: c.name,
+      apiKey: c.apiKey,
+      createdAt: c.createdAt,
+      lastUsed: c.lastUsed,
+    }));
 
     if (suffix) {
       const suffixStr = `_${suffix}`;
