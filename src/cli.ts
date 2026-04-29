@@ -30,7 +30,8 @@ import {
   CLIENT_INTEGRATIONS,
 } from "./integrations";
 import * as QRCode from "qrcode";
-import { normalizeNostrPubkey, npubFromPubkey } from "./utils/nip98";
+import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { generateSecretKey, nip19 } from "nostr-tools";
 import {
   isCocodInstalled,
   resolveCocodExecutable,
@@ -297,6 +298,53 @@ program
       }
       console.error(message);
       process.exit(1);
+    }
+  });
+
+// Remote - configure a remote daemon URL
+program
+  .command("remote <url>")
+  .description("Configure a remote daemon URL")
+  .action(async (url: string) => {
+    try {
+      new URL(url);
+    } catch {
+      console.error(`Invalid URL: ${url}`);
+      process.exit(1);
+    }
+
+    if (!existsSync(CONFIG_DIR)) {
+      mkdirSync(CONFIG_DIR, { recursive: true });
+    }
+
+    const config = await loadConfig();
+    const updates: Partial<RoutstrdConfig> = { daemonUrl: url };
+    let generatedNpub: string | undefined;
+
+    if (!config.nsec) {
+      const secretKey = generateSecretKey();
+      const nsec = nip19.nsecEncode(secretKey);
+      const npub = npubFromSecretKey(secretKey);
+      updates.nsec = nsec;
+      generatedNpub = npub;
+    }
+
+    const updatedConfig: RoutstrdConfig = {
+      ...config,
+      ...updates,
+    };
+
+    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+
+    console.log(`Remote daemon URL set to: ${url}`);
+    if (generatedNpub) {
+      console.log(
+        `\nA new Nostr identity has been generated for remote authentication.`,
+      );
+      console.log(`Your npub: ${generatedNpub}`);
+      console.log(
+        `You can view it in the config file at: ${CONFIG_FILE}`,
+      );
     }
   });
 
