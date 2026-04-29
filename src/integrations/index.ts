@@ -3,7 +3,7 @@ import { logger } from "../utils/logger";
 import {
   ensureDaemonClient,
   type DaemonClient,
-} from "../utils/daemon-client";
+} from "../utils/clients";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
