@@ -121,12 +121,15 @@ export async function getClientsList(): Promise<ClientEntry[]> {
 
 export async function addDaemonClient(
   name: string,
-  clientId?: string,
 ): Promise<{ message?: string; client: DaemonClient; created: boolean }> {
   const existingClients = await getClientsList();
-  const existing = clientId
-    ? existingClients.find((c) => c.clientId === clientId)
-    : existingClients.find((c) => c.name === name);
+  // Derive id from name by replacing spaces with hyphens
+  const derivedId = name.replace(/\s+/g, "-").toLowerCase();
+  const config = await loadConfig();
+  const suffix = getNpubSuffix(config);
+  const clientId = suffix ? addSuffixToId(derivedId, suffix) : derivedId;
+
+  const existing = existingClients.find((c) => c.clientId === clientId); 
 
   if (existing) {
     const client: DaemonClient = {
@@ -138,9 +141,6 @@ export async function addDaemonClient(
     };
     return { client, created: false };
   }
-
-  // Derive id from name by replacing spaces with hyphens
-  const derivedId = name.replace(/\s+/g, "-").toLowerCase();
 
   const result = await callDaemon("/clients/add", {
     method: "POST",
@@ -246,8 +246,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
 
       try {
         const { client, created } = await addDaemonClient(
-          integrationConfig.name,
-          integrationConfig.clientId,
+          integrationConfig.name
         );
         if (created) {
           logger.log(`Created new API key for ${integrationConfig.name}`);
