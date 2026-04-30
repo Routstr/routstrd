@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.2.10",
+  "version": "0.2.12",
   "module": "src/index.ts",
   "type": "module",
   "private": false,

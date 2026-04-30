@@ -125,11 +125,8 @@ export async function addDaemonClient(
   const existingClients = await getClientsList();
   // Derive id from name by replacing spaces with hyphens
   const derivedId = name.replace(/\s+/g, "-").toLowerCase();
-  const config = await loadConfig();
-  const suffix = getNpubSuffix(config);
-  const clientId = suffix ? addSuffixToId(derivedId, suffix) : derivedId;
+  const existing = existingClients.find((c) => c.clientId === derivedId); 
 
-  const existing = existingClients.find((c) => c.clientId === clientId); 
 
   if (existing) {
     const client: DaemonClient = {
@@ -141,6 +138,11 @@ export async function addDaemonClient(
     };
     return { client, created: false };
   }
+
+  const config = await loadConfig();
+  const suffix = getNpubSuffix(config);
+  const clientId = suffix ? addSuffixToId(derivedId, suffix) : derivedId;
+
 
   const result = await callDaemon("/clients/add", {
     method: "POST",
@@ -231,6 +233,7 @@ export interface AddClientOptions {
 export async function addClientAction(options: AddClientOptions): Promise<void> {
   await ensureDaemonRunning();
   const config = await loadConfig();
+  const suffix = getNpubSuffix(config);
 
   const integrationKeys: string[] = [];
   if (options.opencode) integrationKeys.push("opencode");
@@ -256,7 +259,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         await integrationFn(config, client.apiKey, integrationConfig);
 
         console.log(`\n  ${integrationConfig.name}:`);
-        console.log(`    Client ID: ${client.id}`);
+        console.log(`    Client ID: ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
         console.log(`    API Key:   ${client.apiKey}`);
       } catch (error) {
         logger.error(
@@ -283,7 +286,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
 
     if (!created) {
       console.log(`Client '${options.name}' already exists.`);
-      console.log(`\n  ID:     ${client.id}`);
+      console.log(`\n  ID:     ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
       console.log(`  Name:   ${client.name}`);
       console.log(`  API Key: ${client.apiKey}`);
       return;
@@ -292,7 +295,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
     if (message) {
       console.log(message);
     }
-    console.log(`\n  ID:     ${client.id}`);
+    console.log(`\n  ID:     ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
     console.log(`  Name:   ${client.name}`);
     console.log(`  API Key: ${client.apiKey}`);
     console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
