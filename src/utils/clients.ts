@@ -83,11 +83,29 @@ export async function getClientsList(): Promise<ClientEntry[]> {
 
 export async function addDaemonClient(
   name: string,
-): Promise<{ message?: string; client: DaemonClient }> {
+  clientId?: string,
+): Promise<{ message?: string; client: DaemonClient; created: boolean }> {
+  const existingClients = await getClientsList();
+  const existing = clientId
+    ? existingClients.find((c) => c.clientId === clientId)
+    : existingClients.find((c) => c.name === name);
+
+  if (existing) {
+    const client: DaemonClient = {
+      id: existing.clientId,
+      name: existing.name,
+      apiKey: existing.apiKey,
+      createdAt: existing.createdAt,
+      lastUsed: existing.lastUsed,
+    };
+    return { client, created: false };
+  }
+
   const result = await callDaemon("/clients/add", {
     method: "POST",
     body: { name },
   });
+
 
   const output = result.output as
     | { message?: string; client?: DaemonClient }
@@ -97,41 +115,7 @@ export async function addDaemonClient(
     throw new Error(`Daemon did not return an API key for ${name}.`);
   }
 
-  return { message: output.message, client: output.client };
-}
-
-export async function ensureDaemonClient(
-  name: string,
-  clientId: string,
-): Promise<{ client: DaemonClient; created: boolean }> {
-  try {
-    const { client } = await addDaemonClient(name);
-    return { client, created: true };
-  } catch (error) {
-    const message = (error as Error).message || "";
-    if (!message.includes("already exists")) {
-      throw error;
-    }
-
-    const clients = await getClientsList();
-    const entry = clients.find((c) => c.clientId === clientId);
-
-    if (!entry?.apiKey) {
-      throw new Error(
-        `Client '${clientId}' already exists but could not be fetched from the daemon.`,
-      );
-    }
-
-    const client: DaemonClient = {
-      id: entry.clientId,
-      name: entry.name,
-      apiKey: entry.apiKey,
-      createdAt: entry.createdAt,
-      lastUsed: entry.lastUsed,
-    };
-
-    return { client, created: false };
-  }
+  return { message: output.message, client: output.client, created: true };
 }
 
 export async function listClientsAction(): Promise<void> {
@@ -243,7 +227,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
       if (!integrationFn || !integrationConfig) continue;
 
       try {
-        const { client, created } = await ensureDaemonClient(
+        const { client, created } = await addDaemonClient(
           integrationConfig.name,
           integrationConfig.clientId,
         );
@@ -281,7 +265,15 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   const resolvedName = suffix ? `${options.name} ${suffix}` : options.name;
 
   try {
-    const { message, client } = await addDaemonClient(resolvedName);
+    const { message, client, created } = await addDaemonClient(resolvedName);
+
+    if (!created) {
+      console.log(`Client '${resolvedName}' already exists.`);
+      console.log(`\n  ID:     ${client.id}`);
+      console.log(`  Name:   ${client.name}`);
+      console.log(`  API Key: ${client.apiKey}`);
+      return;
+    }
 
     if (message) {
       console.log(message);

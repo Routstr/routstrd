@@ -1,7 +1,7 @@
 import type { RoutstrdConfig } from "../utils/config";
 import { logger } from "../utils/logger";
 import {
-  ensureDaemonClient,
+  addDaemonClient,
   type DaemonClient,
 } from "../utils/clients";
 import { installOpencodeIntegration } from "./opencode";
@@ -69,7 +69,7 @@ export async function setupIntegration(
   }
 
   const integrationConfig = CLIENT_CONFIGS[key]!;
-  const { client, created } = await ensureDaemonClient(
+  const { client, created } = await addDaemonClient(
     integrationConfig.name,
     integrationConfig.clientId,
   );
