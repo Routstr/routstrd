@@ -34,7 +34,7 @@ export function addSuffixToId(id: string, suffix: string): string {
  * Remove suffix from a client ID if present.
  */
 export function removeSuffixFromId(id: string, suffix: string): string {
-  const suffixStr = `_${suffix}`;
+  const suffixStr = `-${suffix}`;
   if (id.endsWith(suffixStr)) {
     return id.slice(0, -suffixStr.length);
   }
@@ -109,7 +109,7 @@ export async function getClientsList(): Promise<ClientEntry[]> {
   const suffix = config.daemonUrl ? getNpubSuffix(config) : null;
 
   return clients
-    .filter((c) => !suffix || c.id.endsWith(`_${suffix}`))
+    .filter((c) => !suffix || c.id.endsWith(`-${suffix}`))
     .map((c) => ({
       clientId: suffix ? removeSuffixFromId(c.id, suffix) : c.id,
       name: c.name,
