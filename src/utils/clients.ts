@@ -27,7 +27,7 @@ export function getNpubSuffix(config: RoutstrdConfig): string | null {
  * Add suffix to a client ID.
  */
 export function addSuffixToId(id: string, suffix: string): string {
-  return `${id}_${suffix}`;
+  return `${id}-${suffix}`;
 }
 
 /**
