@@ -58,15 +58,8 @@ This will:
 
 Then fund with Cashu/Lightning:
 ```sh
-routstrd receive 2100 # to top up 2100 sats with lightning
-```
-or
-```sh
-cocod receive cashu <token>
-```
-or
-```sh
-cocod receive bolt11 <amount>
+routstrd receive <cashu>       # receive a Cashu token
+routstrd receive 2100         # to top up 2100 sats with lightning
 ```
 
 ### That's it! You can start using it on http://localhost:8008
