@@ -23,46 +23,36 @@ curl -fsSL https://bun.com/install | bash
 
 ## Installation
 
-### Install (global with bun)
+### Step 1: Install
 
+**Option 1 - Global with bun:**
 ```sh
 bun i -g routstrd
-routstrd onboard
 ```
 
-### From Source
-
+**Option 2 - From source:**
 ```sh
 git clone https://github.com/routstr/routstrd.git
 cd routstrd
 bun install
 bun link
-routstrd onboard
 ```
 
-## Usage
-
-### Initialize
-
-Initialize routstrd (creates config directory and sets up cocod):
+### Step 2: Setup & Fund
 
 ```sh
 routstrd onboard
-```
-
-This will:
-- Create `~/.routstrd/` directory
-- Create config file at `~/.routstrd/config.json`
-- Run `cocod init` to set up the wallet
-
-
-Then fund with Cashu/Lightning:
-```sh
 routstrd receive <cashu>       # receive a Cashu token
 routstrd receive 2100         # to top up 2100 sats with lightning
 ```
 
-### That's it! You can start using it on http://localhost:8008
+### Step 3: Integrate with Claude Code
+
+```sh
+routstrd clients add --claude-code
+```
+
+## Usage
 
 ## More Commands
 ###Start Daemon
