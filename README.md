@@ -49,13 +49,15 @@ routstrd receive 2100         # to top up 2100 sats with lightning
 ### Step 3: Integrate with Claude Code
 
 ```sh
-routstrd clients add --claude-code
+routstrd clients add --claude-code  # or --pi-agent / --opencode
 ```
 
 ## Usage
 
+> **Tip:** You can also install the [routstrd skill](https://github.com/Routstr/routstrd/blob/main/SKILL.md) so the agent can manage routstrd for you.
+
 ## More Commands
-###Start Daemon
+### Start Daemon
 
 Start the background daemon:
 
