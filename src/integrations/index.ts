@@ -18,7 +18,7 @@ export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "
  * Used both on initial daemon startup and in the recurring scheduled job.
  */
 export async function refreshModelsAndIntegrations(
-  getRoutstr21Models: (force?: boolean) => Promise<void>,
+  getRoutstr21Models: (force?: boolean) => Promise<any[]>,
   config: RoutstrdConfig,
   label: string = "Scheduled",
 ): Promise<void> {

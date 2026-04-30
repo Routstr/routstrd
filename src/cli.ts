@@ -26,7 +26,8 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
-import { setupIntegration } from "./integrations";
+import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
@@ -483,6 +484,34 @@ program
   .description("Test connection to the daemon")
   .action(async () => {
     await handleDaemonCommand("/ping");
+  });
+
+// Refresh - refresh models and integrations
+program
+  .command("refresh")
+  .description("Refresh routstr21 models and client integrations")
+  .action(async () => {
+    await ensureDaemonRunning();
+    const config = await loadConfig();
+
+    // Refresh models via daemon API
+    console.log("Refreshing routstr21 models...");
+    const result = await callDaemon("/v1/models?refresh=true");
+    if (result.error) {
+      console.log(`Model refresh failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log("Models refreshed.");
+
+    // Refresh integrations for all clients
+    const clients = await getClientsList();
+    if (clients.length > 0) {
+      console.log(`Refreshing ${clients.length} client integration(s)...`);
+      await runIntegrationsForClients(clients, config);
+      console.log("Client integrations refreshed.");
+    } else {
+      console.log("No clients to refresh.");
+    }
   });
 
 // Models - list routstr21 models
