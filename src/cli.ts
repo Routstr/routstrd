@@ -856,7 +856,7 @@ npubsCmd
       : result;
     const npubs = (data as { npubs?: string[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
-      console.log("No admin npubs configured.");
+      console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
       return;
     }
     console.log(`Admin npubs (${npubs.length}):`);
@@ -872,6 +872,55 @@ npubsCmd
         "Your npub is not in the admin list. Ask the admin to add your npub:",
       );
       console.log(`  ${userNpub}`);
+    }
+  });
+
+npubsCmd
+  .command("register")
+  .description("Register yourself as the first admin (only when no admins exist)")
+  .action(async () => {
+    await ensureDaemonRunning();
+    const config = await loadConfig();
+    const userNpub = getUserNpub(config);
+    if (!userNpub) {
+      console.error(
+        "No Nostr identity configured. Run 'routstrd remote <url>' to set one up.",
+      );
+      process.exit(1);
+    }
+    const result = await callDaemon("/npubs");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+    const data = (result.output as { npubs?: string[] } | undefined)?.npubs
+      ? result.output
+      : result;
+    const npubs = (data as { npubs?: string[] } | undefined)?.npubs ?? [];
+    if (npubs.length > 0) {
+      console.log(`Admin npubs already configured (${npubs.length}). Ask your admin to add your npub. \n Your npub: ${userNpub}`);
+      return;
+    }
+    const normalized = normalizeNostrPubkey(userNpub);
+    if (!normalized) {
+      console.error("Failed to normalize user npub.");
+      process.exit(1);
+    }
+    const addResult = await callDaemon("/npubs", {
+      method: "POST",
+      body: { npub: npubFromPubkey(normalized) },
+    });
+    if (addResult.error) {
+      console.log(addResult.error);
+      process.exit(1);
+    }
+    const output = addResult.output as
+      | { npub?: string; added?: boolean; error?: string }
+      | undefined;
+    if (output?.npub) {
+      console.log(`Successfully registered as first admin npub: ${output.npub}`);
+    } else {
+      console.log(`Successfully registered as first admin npub: ${userNpub}`);
     }
   });
 
