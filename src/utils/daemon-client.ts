@@ -108,6 +108,12 @@ export function getUserNpub(config: RoutstrdConfig): string | null {
   }
 }
 
+export function getNpubSuffix(config: RoutstrdConfig): string | null {
+  const npub = getUserNpub(config);
+  if (!npub) return null;
+  return npub.slice(-7);
+}
+
 export async function startDaemonProcess(): Promise<void> {
   // Ensure logs directory exists (logger handles date-based files)
   if (!existsSync(LOGS_DIR)) {
