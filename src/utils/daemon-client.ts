@@ -1,8 +1,8 @@
 import { existsSync } from "fs";
+import { startDaemon } from "../start-daemon";
 import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
-  LOGS_DIR,
   type RoutstrdConfig,
 } from "./config";
 import {
@@ -115,31 +115,11 @@ export function getNpubSuffix(config: RoutstrdConfig): string | null {
 }
 
 export async function startDaemonProcess(): Promise<void> {
-  // Ensure logs directory exists (logger handles date-based files)
-  if (!existsSync(LOGS_DIR)) {
-    await Bun.$`mkdir -p ${LOGS_DIR}`;
-  }
-
-  const proc = Bun.spawn(
-    ["bun", "run", `${import.meta.dir}/../daemon/index.ts`],
-    {
-      stdout: "inherit",
-      stderr: "inherit",
-      stdin: "ignore",
-      detached: true,
-    },
-  );
-
-  proc.unref();
-
-  for (let i = 0; i < 50; i++) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    if (await isDaemonRunning()) {
-      return;
-    }
-  }
-
-  throw new Error("Daemon failed to start within 5 seconds");
+  const config = await loadConfig();
+  await startDaemon({
+    port: String(config.port || 8008),
+    provider: config.provider || undefined,
+  });
 }
 
 export async function ensureDaemonRunning(): Promise<void> {

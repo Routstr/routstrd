@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { createHash } from "crypto";
 import { logger } from "../../utils/logger";
+import { withCrossProcessLock } from "../../utils/process-lock";
 
 const DEFAULT_CONFIG_DIR =
   process.env.COCOD_DIR || `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
@@ -139,6 +140,7 @@ export function createCocodClient(
 ): CocodClient {
   const executable = resolveCocodExecutable(options.cocodPath);
   const socketPath = options.socketPath || DEFAULT_SOCKET_PATH;
+  const startupLockPath = `${socketPath}.startup.lock`;
   const fetchImpl = options.fetchImpl || (fetch as CocodFetch);
   const pollIntervalMs = options.pollIntervalMs ?? 100;
   const startupTimeoutMs = options.startupTimeoutMs ?? 5000;
@@ -228,7 +230,7 @@ export function createCocodClient(
 
   async function startDaemon(): Promise<void> {
     const env = { ...process.env, COCOD_SOCKET: socketPath };
-    const proc = spawnDaemon([executable, "daemon"], env);
+    const proc = spawnDaemon([executable, "init"], env);
     const maxPolls = Math.ceil(startupTimeoutMs / pollIntervalMs);
     let exitCode: number | null = null;
 
@@ -239,8 +241,8 @@ export function createCocodClient(
     for (let i = 0; i < maxPolls; i++) {
       await delay(pollIntervalMs);
 
-      if (exitCode !== null) {
-        throw new Error(`cocod daemon exited early with code ${exitCode}`);
+      if (exitCode !== null && exitCode !== 0) {
+        throw new Error(`cocod init exited early with code ${exitCode}`);
       }
 
       if (await pingInternal()) {
@@ -250,7 +252,7 @@ export function createCocodClient(
     }
 
     throw new Error(
-      `cocod daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds`,
+      `cocod failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds`,
     );
   }
 
@@ -260,8 +262,22 @@ export function createCocodClient(
     }
 
     if (!startPromise) {
-      logger.debug(`Starting cocod daemon via ${executable}...`);
-      startPromise = startDaemon().finally(() => {
+      startPromise = withCrossProcessLock(
+        startupLockPath,
+        async () => {
+          if (await pingInternal()) {
+            return;
+          }
+
+          logger.debug(`Starting cocod daemon via ${executable} init...`);
+          await startDaemon();
+        },
+        {
+          acquireTimeoutMs: startupTimeoutMs + 30_000,
+          staleAfterMs: startupTimeoutMs + 30_000,
+          log: (message) => logger.debug(message),
+        },
+      ).finally(() => {
         startPromise = null;
       });
     }
