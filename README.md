@@ -25,12 +25,12 @@ curl -fsSL https://bun.com/install | bash
 
 ### Step 1: Install
 
-**Option 1 - Global with bun:**
+**Global with bun:**
 ```sh
 bun i -g routstrd
 ```
 
-**Option 2 - From source:**
+**OR - From source:**
 ```sh
 git clone https://github.com/routstr/routstrd.git
 cd routstrd
