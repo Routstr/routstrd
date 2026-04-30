@@ -2,11 +2,44 @@ import {
   callDaemon,
   loadConfig,
   getDaemonBaseUrl,
-  getNpubSuffix,
   ensureDaemonRunning,
 } from "./daemon-client";
+import {
+  parseSecretKey,
+  npubFromSecretKey,
+} from "./nip98";
+import { type RoutstrdConfig } from "./config";
 import { logger } from "./logger";
 import { CLIENT_INTEGRATIONS, CLIENT_CONFIGS } from "../integrations/registry";
+
+export function getNpubSuffix(config: RoutstrdConfig): string | null {
+  if (!config.daemonUrl || !config.nsec) return null;
+  try {
+    const secretKey = parseSecretKey(config.nsec);
+    const npub = npubFromSecretKey(secretKey);
+    return npub.slice(-7);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Add suffix to a client ID.
+ */
+export function addSuffixToId(id: string, suffix: string): string {
+  return `${id}_${suffix}`;
+}
+
+/**
+ * Remove suffix from a client ID if present.
+ */
+export function removeSuffixFromId(id: string, suffix: string): string {
+  const suffixStr = `_${suffix}`;
+  if (id.endsWith(suffixStr)) {
+    return id.slice(0, -suffixStr.length);
+  }
+  return id;
+}
 
 export interface ClientEntry {
   clientId: string;
@@ -74,12 +107,11 @@ export async function getClientsList(): Promise<ClientEntry[]> {
   }
 
   const suffix = config.daemonUrl ? getNpubSuffix(config) : null;
-  const suffixStr = suffix ? `_${suffix}` : null;
 
   return clients
-    .filter((c) => !suffixStr || c.id.endsWith(suffixStr))
+    .filter((c) => !suffix || c.id.endsWith(`_${suffix}`))
     .map((c) => ({
-      clientId: suffixStr ? c.id.slice(0, -suffixStr.length) : c.id,
+      clientId: suffix ? removeSuffixFromId(c.id, suffix) : c.id,
       name: c.name,
       apiKey: c.apiKey,
       createdAt: c.createdAt,
@@ -161,13 +193,7 @@ export async function deleteClientAction(id: string): Promise<void> {
 
   const config = await loadConfig();
   const suffix = getNpubSuffix(config);
-  let resolvedId = id;
-  if (suffix) {
-    const suffixStr = `_${suffix}`;
-    if (!id.endsWith(suffixStr)) {
-      resolvedId = `${id}${suffixStr}`;
-    }
-  }
+  const resolvedId = suffix ? addSuffixToId(id, suffix) : id;
 
   const result = await callDaemon("/clients/delete", {
     method: "POST",
@@ -250,14 +276,11 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
     process.exit(1);
   }
 
-  const suffix = getNpubSuffix(config);
-  const resolvedName = suffix ? `${options.name} ${suffix}` : options.name;
-
   try {
-    const { message, client, created } = await addDaemonClient(resolvedName);
+    const { message, client, created } = await addDaemonClient(options.name);
 
     if (!created) {
-      console.log(`Client '${resolvedName}' already exists.`);
+      console.log(`Client '${options.name}' already exists.`);
       console.log(`\n  ID:     ${client.id}`);
       console.log(`  Name:   ${client.name}`);
       console.log(`  API Key: ${client.apiKey}`);

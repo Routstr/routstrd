@@ -98,17 +98,6 @@ export async function isDaemonRunning(): Promise<boolean> {
   }
 }
 
-export function getNpubSuffix(config: RoutstrdConfig): string | null {
-  if (!config.daemonUrl || !config.nsec) return null;
-  try {
-    const secretKey = parseSecretKey(config.nsec);
-    const npub = npubFromSecretKey(secretKey);
-    return npub.slice(-7);
-  } catch {
-    return null;
-  }
-}
-
 export function getUserNpub(config: RoutstrdConfig): string | null {
   if (!config.nsec) return null;
   try {
