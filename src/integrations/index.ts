@@ -4,13 +4,34 @@ import {
   addDaemonClient,
   type DaemonClient,
 } from "../utils/clients";
+import { getClientsList } from "../utils/clients";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
 import { installClaudeCodeIntegration } from "./claudecode";
 import type { IntegrationConfig } from "./registry";
-import { CLIENT_CONFIGS } from "./registry";
+import { CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
+
+/**
+ * Refresh routstr21 models and then run integrations for all registered clients.
+ * Used both on initial daemon startup and in the recurring scheduled job.
+ */
+export async function refreshModelsAndIntegrations(
+  getRoutstr21Models: (force?: boolean) => Promise<void>,
+  config: RoutstrdConfig,
+  label: string = "Scheduled",
+): Promise<void> {
+  await getRoutstr21Models(true);
+  logger.log(`${label} model refresh completed successfully.`);
+
+  const clientIds = await getClientsList();
+  if (clientIds.length > 0) {
+    logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
+    await runIntegrationsForClients(clientIds, config);
+    logger.log("Client integrations refreshed.");
+  }
+}
 
 function ask(question: string): Promise<string> {
   process.stdout.write(question);

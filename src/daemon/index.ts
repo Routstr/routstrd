@@ -20,8 +20,7 @@ import { createWalletAdapter } from "./wallet";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
-import { runIntegrationsForClients } from "../integrations";
-import { getClientsList } from "../utils/clients";
+import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
 async function main(): Promise<void> {
@@ -37,7 +36,8 @@ async function main(): Promise<void> {
   saveDaemonConfig(updatedConfig);
 
   const sqliteDriver = await createBunSqliteDriver(DB_PATH);
-  const { store } = await createSdkStore({ driver: sqliteDriver });
+  const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
+  await hydrate;
   const { Database } = await import("bun:sqlite");
   const usageTrackingDriver = createBunSqliteUsageTrackingDriver({
     dbPath: DB_PATH,
@@ -105,16 +105,7 @@ async function main(): Promise<void> {
     refreshInterval = setInterval(async () => {
       logger.log("Running scheduled model refresh...");
       try {
-        await getRoutstr21Models(true);
-        logger.log("Scheduled model refresh completed successfully.");
-
-        // Refresh integrations for all registered clients
-        const clientIds = await getClientsList();
-        if (clientIds.length > 0) {
-          logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
-          await runIntegrationsForClients(clientIds, updatedConfig);
-          logger.log("Client integrations refreshed.");
-        }
+        await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
       } catch (error) {
         logger.error("Scheduled model refresh failed:", error);
       }
@@ -207,28 +198,18 @@ async function main(): Promise<void> {
 
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
-      .then(() => {
+      .then(async () => {
         startModelRefreshJob();
-        startRefundJob(); 
+        startRefundJob();
         // Run an immediate refresh to populate models right away
         logger.log("Running initial model refresh...");
-        return getRoutstr21Models(true);
-      })
-      .then(async () => {
-        logger.log("Initial model refresh completed.");
-        // Refresh integrations for all registered clients after initial bootstrap
-        const clientIds = await getClientsList();
-        if (clientIds.length > 0) {
-          logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
-          await runIntegrationsForClients(clientIds, updatedConfig);
-          logger.log("Client integrations refreshed.");
-        }
+        await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Initial");
       })
       .catch((error) => {
         logger.error("Initial model refresh failed:", error);
         // Still start the jobs even if initial refresh fails
         startModelRefreshJob();
-        startRefundJob(); 
+        startRefundJob();
       });
   });
 }
