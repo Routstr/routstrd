@@ -139,9 +139,12 @@ export async function addDaemonClient(
     return { client, created: false };
   }
 
+  // Derive id from name by replacing spaces with hyphens
+  const derivedId = name.replace(/\s+/g, "-").toLowerCase();
+
   const result = await callDaemon("/clients/add", {
     method: "POST",
-    body: { name },
+    body: { name, id: derivedId },
   });
 
 

@@ -21,7 +21,7 @@ import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { runIntegrationsForClients } from "../integrations";
-import { getClientsFromStore } from "../utils/clients";
+import { getClientsList } from "../utils/clients";
 import { RoutstrClient } from "@routstr/sdk";
 
 async function main(): Promise<void> {
@@ -109,7 +109,7 @@ async function main(): Promise<void> {
         logger.log("Scheduled model refresh completed successfully.");
 
         // Refresh integrations for all registered clients
-        const clientIds = getClientsFromStore(store);
+        const clientIds = await getClientsList();
         if (clientIds.length > 0) {
           logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
           await runIntegrationsForClients(clientIds, updatedConfig);
@@ -217,7 +217,7 @@ async function main(): Promise<void> {
       .then(async () => {
         logger.log("Initial model refresh completed.");
         // Refresh integrations for all registered clients after initial bootstrap
-        const clientIds = getClientsFromStore(store);
+        const clientIds = await getClientsList();
         if (clientIds.length > 0) {
           logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
           await runIntegrationsForClients(clientIds, updatedConfig);
