@@ -52,7 +52,7 @@ routstrd receive 2100         # to top up 2100 sats with lightning
 routstrd clients add --claude-code  # or --pi-agent / --opencode
 ```
 
-## Usage
+## Use Routstrd Skill
 
 > **Tip:** You can also install the [routstrd skill](https://github.com/Routstr/routstrd/blob/main/SKILL.md) so the agent can manage routstrd for you.
 
