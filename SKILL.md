@@ -111,6 +111,7 @@ List and manage API clients (subcommand required).
 
 List all registered clients with their ID, name, API key, and creation date.
 
+
 #### `routstrd clients add`
 
 Add a new client or set up a client integration.
@@ -123,28 +124,53 @@ Add a new client or set up a client integration.
 | `--pi-agent` | Set up Pi Agent integration |
 | `--claude-code` | Set up Claude Code integration |
 
-Set up a specific client integration (creates API key and writes config to the client's config file):
-
 ```sh
-routstrd clients add --opencode
-routstrd clients add --claude-code
-routstrd clients add --pi-agent
-routstrd clients add --openclaw
-```
-
-You can also set up multiple integrations at once:
-
-```sh
-routstrd clients add --opencode --pi-agent --claude-code
-```
-
-Add a generic client manually:
-
-```sh
-routstrd clients add -n "My App"
+routstrd clients add --opencode --pi-agent --claude-code  # multiple integrations
+routstrd clients add -n "My App"                            # generic client
 ```
 
 Returns the client ID and API key for use with the OpenAI-compatible API.
+
+#### `routstrd clients delete <id>`
+
+Delete a registered client by its ID.
+
+### `routstrd npubs`
+
+
+Manage admin npubs (subcommand required).
+
+| Command | Description |
+|---------|-------------|
+| `routstrd npubs list` | List configured admin npubs |
+| `routstrd npubs add <npub>` | Add an admin npub (accepts hex or npub1...) |
+| `routstrd npubs delete <npub>` | Delete an admin npub |
+
+### `routstrd remote <url>`
+
+Configure a remote daemon URL. Generates a Nostr identity (nsec/npub) for NIP-98 authentication automatically.
+
+```sh
+routstrd remote https://your-remote-daemon.com
+```
+
+### `routstrd refresh`
+
+Refresh routstr21 models from Nostr and re-run integrations for all registered clients.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `port` | number | 8008 | Daemon HTTP port |
+| `provider` | string\|null | null | Default provider URL |
+| `daemonUrl` | string\|null | null | Remote daemon URL |
+| `nsec` | string\|null | null | Nostr secret key for NIP-98 auth |
+| `cocodPath` | string\|null | null | Custom path to cocod executable |
+| `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ROUTSTRD_DIR` | `~/.routstrd` | Config directory |
+| `COCOD_DIR` | `~/.cocod` | Wallet config directory |
 
 ### `routstrd mode`
 
@@ -265,6 +291,13 @@ Config file: `~/.routstrd/config.json`
 | `ROUTSTRD_DIR` | `~/.routstrd` | Config directory |
 | `ROUTSTRD_SOCKET` | `~/.routstrd/routstrd.sock` | IPC socket path |
 | `ROUTSTRD_PID` | `~/.routstrd/routstrd.pid` | PID file path |
+
+## Remote Mode
+
+When `daemonUrl` is configured, commands connect to a remote daemon instead of a local one:
+- Client names are suffixed with the last 7 chars of your npub
+- All requests are automatically NIP-98 signed using your local nsec
+- Local-only commands (`onboard`, `start`, `restart`, `mode`, `logs`, `service`) are disabled
 
 ## Pi Integration
 
