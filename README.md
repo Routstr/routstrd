@@ -23,9 +23,17 @@ curl -fsSL https://bun.com/install | bash
 
 ## Installation
 
+### Install (global with bun)
+
+```sh
+bun i -g routstrd
+routstrd onboard
+```
+
 ### From Source
 
 ```sh
+git clone https://github.com/routstr/routstrd.git
 cd routstrd
 bun install
 bun link
@@ -50,9 +58,13 @@ This will:
 
 Then fund with Cashu/Lightning:
 ```sh
+routstrd receive 2100 # to top up 2100 sats with lightning
+```
+or
+```sh
 cocod receive cashu <token>
 ```
-or 
+or
 ```sh
 cocod receive bolt11 <amount>
 ```
