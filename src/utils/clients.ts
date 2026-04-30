@@ -53,6 +53,7 @@ export function getClientsFromStore(store: { getState(): any }): ClientEntry[] {
  * Use this when running remotely (CLI in remote mode).
  */
 export async function getClientsList(): Promise<ClientEntry[]> {
+  const config = await loadConfig();
   const result = await callDaemon("/clients");
   const clients = (
     result.output as
@@ -72,13 +73,18 @@ export async function getClientsList(): Promise<ClientEntry[]> {
     return [];
   }
 
-  return clients.map((c) => ({
-    clientId: c.id,
-    name: c.name,
-    apiKey: c.apiKey,
-    createdAt: c.createdAt,
-    lastUsed: c.lastUsed,
-  }));
+  const suffix = config.daemonUrl ? getNpubSuffix(config) : null;
+  const suffixStr = suffix ? `_${suffix}` : null;
+
+  return clients
+    .filter((c) => !suffixStr || c.id.endsWith(suffixStr))
+    .map((c) => ({
+      clientId: suffixStr ? c.id.slice(0, -suffixStr.length) : c.id,
+      name: c.name,
+      apiKey: c.apiKey,
+      createdAt: c.createdAt,
+      lastUsed: c.lastUsed,
+    }));
 }
 
 export async function addDaemonClient(
@@ -121,32 +127,15 @@ export async function addDaemonClient(
 export async function listClientsAction(): Promise<void> {
   await ensureDaemonRunning();
 
-  const config = await loadConfig();
-  const suffix = getNpubSuffix(config);
-
   const entries = await getClientsList();
 
-  let clients = entries.map((c) => ({
+  const clients = entries.map((c) => ({
     id: c.clientId,
     name: c.name,
     apiKey: c.apiKey,
     createdAt: c.createdAt,
     lastUsed: c.lastUsed,
   }));
-
-  if (suffix) {
-    const suffixStr = `_${suffix}`;
-    clients = clients.filter(
-      (c) => c.name.endsWith(suffixStr) || c.id.endsWith(suffixStr),
-    );
-    clients = clients.map((c) => ({
-      ...c,
-      name: c.name.endsWith(suffixStr)
-        ? c.name.slice(0, -suffixStr.length)
-        : c.name,
-      id: c.id.endsWith(suffixStr) ? c.id.slice(0, -suffixStr.length) : c.id,
-    }));
-  }
 
   if (clients.length === 0) {
     console.log("No clients found.");
