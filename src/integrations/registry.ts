@@ -4,6 +4,7 @@ import { installOpencodeIntegration } from "./opencode";
 import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
 import { installClaudeCodeIntegration } from "./claudecode";
+import { installHermesIntegration } from "./hermes";
 
 export interface IntegrationConfig {
   clientId: string;
@@ -43,6 +44,11 @@ export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
     name: "Claude Code",
     configPath: join(process.env.HOME || "", ".claude/settings.json"),
   },
+  hermes: {
+    clientId: "hermes",
+    name: "Hermes",
+    configPath: join(process.env.HOME || "", ".hermes/config.yaml"),
+  },
 };
 
 export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
@@ -50,6 +56,7 @@ export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
   "pi-agent": installPiIntegration,
   openclaw: installOpenClawIntegration,
   "claude-code": installClaudeCodeIntegration,
+  hermes: installHermesIntegration,
 };
 
 export async function runIntegrationsForClients(
