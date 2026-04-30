@@ -8,11 +8,13 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getNpubSuffix,
-  addDaemonClient,
-  ensureDaemonClient,
   getUserNpub,
 } from "./utils/daemon-client";
-import { getClientsList } from "./utils/clients";
+import {
+  listClientsAction,
+  deleteClientAction,
+  addClientAction,
+} from "./utils/clients";
 import { existsSync, mkdirSync } from "fs";
 import { execSync } from "child_process";
 import {
@@ -24,11 +26,8 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { logger } from "./utils/logger";
-import {
-  setupIntegration,
-  CLIENT_CONFIGS,
-  CLIENT_INTEGRATIONS,
-} from "./integrations";
+import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
@@ -487,6 +486,34 @@ program
     await handleDaemonCommand("/ping");
   });
 
+// Refresh - refresh models and integrations
+program
+  .command("refresh")
+  .description("Refresh routstr21 models and client integrations")
+  .action(async () => {
+    await ensureDaemonRunning();
+    const config = await loadConfig();
+
+    // Refresh models via daemon API
+    console.log("Refreshing routstr21 models...");
+    const result = await callDaemon("/v1/models?refresh=true");
+    if (result.error) {
+      console.log(`Model refresh failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log("Models refreshed.");
+
+    // Refresh integrations for all clients
+    const clients = await getClientsList();
+    if (clients.length > 0) {
+      console.log(`Refreshing ${clients.length} client integration(s)...`);
+      await runIntegrationsForClients(clients, config);
+      console.log("Client integrations refreshed.");
+    } else {
+      console.log("No clients to refresh.");
+    }
+  });
+
 // Models - list routstr21 models
 program
   .command("models")
@@ -776,90 +803,14 @@ clientsCmd
   .command("list")
   .description("List all clients")
   .action(async () => {
-    await ensureDaemonRunning();
-
-    const config = await loadConfig();
-    const suffix = getNpubSuffix(config);
-
-    const entries = await getClientsList();
-
-    let clients = entries.map((c) => ({
-      id: c.clientId,
-      name: c.name,
-      apiKey: c.apiKey,
-      createdAt: c.createdAt,
-      lastUsed: c.lastUsed,
-    }));
-
-    if (suffix) {
-      const suffixStr = `_${suffix}`;
-      clients = clients.filter(
-        (c) => c.name.endsWith(suffixStr) || c.id.endsWith(suffixStr),
-      );
-      clients = clients.map((c) => ({
-        ...c,
-        name: c.name.endsWith(suffixStr)
-          ? c.name.slice(0, -suffixStr.length)
-          : c.name,
-        id: c.id.endsWith(suffixStr) ? c.id.slice(0, -suffixStr.length) : c.id,
-      }));
-    }
-
-    if (clients.length === 0) {
-      console.log("No clients found.");
-      return;
-    }
-
-    console.log(`Clients (${clients.length} total):\n`);
-    for (const client of clients) {
-      const createdAt = new Date(client.createdAt).toISOString();
-      const lastUsed = client.lastUsed
-        ? new Date(client.lastUsed).toISOString()
-        : "never";
-      console.log(`  ${client.id}`);
-      console.log(`    Name:     ${client.name}`);
-      console.log(`    API Key:  ${client.apiKey}`);
-      console.log(`    Created:  ${createdAt}`);
-      console.log("");
-    }
+    await listClientsAction();
   });
 
 clientsCmd
   .command("delete <id>")
   .description("Delete a client by its ID")
   .action(async (id: string) => {
-    await ensureDaemonRunning();
-
-    const config = await loadConfig();
-    const suffix = getNpubSuffix(config);
-    let resolvedId = id;
-    if (suffix) {
-      const suffixStr = `_${suffix}`;
-      if (!id.endsWith(suffixStr)) {
-        resolvedId = `${id}${suffixStr}`;
-      }
-    }
-
-    const result = await callDaemon("/clients/delete", {
-      method: "POST",
-      body: { id: resolvedId },
-    });
-
-    if (result.error) {
-      console.log(result.error);
-      process.exit(1);
-    }
-
-    const output = result.output as
-      | {
-          message: string;
-          id: string;
-        }
-      | undefined;
-
-    if (output) {
-      console.log(output.message);
-    }
+    await deleteClientAction(id);
   });
 
 clientsCmd
@@ -878,73 +829,7 @@ clientsCmd
       piAgent?: boolean;
       claudeCode?: boolean;
     }) => {
-      await ensureDaemonRunning();
-      const config = await loadConfig();
-
-      const integrationKeys: string[] = [];
-      if (options.opencode) integrationKeys.push("opencode");
-      if (options.openclaw) integrationKeys.push("openclaw");
-      if (options.piAgent) integrationKeys.push("pi-agent");
-      if (options.claudeCode) integrationKeys.push("claude-code");
-
-      if (integrationKeys.length > 0) {
-        for (const key of integrationKeys) {
-          const integrationFn = CLIENT_INTEGRATIONS[key];
-          const integrationConfig = CLIENT_CONFIGS[key];
-          if (!integrationFn || !integrationConfig) continue;
-
-          try {
-            const { client, created } = await ensureDaemonClient(
-              integrationConfig.name,
-              integrationConfig.clientId,
-            );
-            if (created) {
-              logger.log(`Created new API key for ${integrationConfig.name}`);
-            } else {
-              logger.log(`Using existing API key for ${integrationConfig.name}`);
-            }
-            await integrationFn(config, client.apiKey, integrationConfig);
-
-            console.log(`\n  ${integrationConfig.name}:`);
-            console.log(`    Client ID: ${client.id}`);
-            console.log(`    API Key:   ${client.apiKey}`);
-          } catch (error) {
-            logger.error(
-              `Failed to set up ${integrationConfig.name} integration:`,
-              error,
-            );
-            continue;
-          }
-        }
-
-        console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
-        return;
-      }
-
-      if (!options.name) {
-        console.error(
-          "error: required option '-n, --name <name>' not specified",
-        );
-        process.exit(1);
-      }
-
-      const suffix = getNpubSuffix(config);
-      const resolvedName = suffix ? `${options.name} ${suffix}` : options.name;
-
-      try {
-        const { message, client } = await addDaemonClient(resolvedName);
-
-        if (message) {
-          console.log(message);
-        }
-        console.log(`\n  ID:     ${client.id}`);
-        console.log(`  Name:   ${client.name}`);
-        console.log(`  API Key: ${client.apiKey}`);
-        console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
-      } catch (error) {
-        console.log((error as Error).message);
-        process.exit(1);
-      }
+      await addClientAction(options);
     },
   );
 

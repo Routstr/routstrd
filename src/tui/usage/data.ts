@@ -88,7 +88,7 @@ export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
     const entries = result.output as UsageTrackingEntry[] | undefined;
     const entriesArray = Array.isArray(entries) ? entries : [];
     const suffix = getNpubSuffix(await loadConfig());
-    const suffixStr = suffix ? `_${suffix}` : null;
+    const suffixStr = suffix ? `-${suffix}` : null;
     const visibleEntries = suffixStr
       ? entriesArray
         .filter((entry) => entry.client?.endsWith(suffixStr))

@@ -11,72 +11,10 @@ import {
   npubFromSecretKey,
   type HttpMethod,
 } from "./nip98";
-import { getClientsList } from "./clients";
 
 export interface CommandResponse {
   output?: unknown;
   error?: string;
-}
-
-export interface DaemonClient {
-  id: string;
-  name: string;
-  apiKey: string;
-  createdAt: number;
-  lastUsed?: number | null;
-}
-
-export async function addDaemonClient(
-  name: string,
-): Promise<{ message?: string; client: DaemonClient }> {
-  const result = await callDaemon("/clients/add", {
-    method: "POST",
-    body: { name },
-  });
-
-  const output = result.output as
-    | { message?: string; client?: DaemonClient }
-    | undefined;
-
-  if (!output?.client?.apiKey) {
-    throw new Error(`Daemon did not return an API key for ${name}.`);
-  }
-
-  return { message: output.message, client: output.client };
-}
-
-export async function ensureDaemonClient(
-  name: string,
-  clientId: string,
-): Promise<{ client: DaemonClient; created: boolean }> {
-  try {
-    const { client } = await addDaemonClient(name);
-    return { client, created: true };
-  } catch (error) {
-    const message = (error as Error).message || "";
-    if (!message.includes("already exists")) {
-      throw error;
-    }
-
-    const clients = await getClientsList();
-    const entry = clients.find((c) => c.clientId === clientId);
-
-    if (!entry?.apiKey) {
-      throw new Error(
-        `Client '${clientId}' already exists but could not be fetched from the daemon.`,
-      );
-    }
-
-    const client: DaemonClient = {
-      id: entry.clientId,
-      name: entry.name,
-      apiKey: entry.apiKey,
-      createdAt: entry.createdAt,
-      lastUsed: entry.lastUsed,
-    };
-
-    return { client, created: false };
-  }
 }
 
 export async function loadConfig(): Promise<RoutstrdConfig> {
@@ -157,17 +95,6 @@ export async function isDaemonRunning(): Promise<boolean> {
     return response.ok;
   } catch {
     return false;
-  }
-}
-
-export function getNpubSuffix(config: RoutstrdConfig): string | null {
-  if (!config.daemonUrl || !config.nsec) return null;
-  try {
-    const secretKey = parseSecretKey(config.nsec);
-    const npub = npubFromSecretKey(secretKey);
-    return npub.slice(-7);
-  } catch {
-    return null;
   }
 }
 
