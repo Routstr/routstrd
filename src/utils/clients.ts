@@ -144,7 +144,7 @@ export async function addDaemonClient(
 
   const result = await callDaemon("/clients/add", {
     method: "POST",
-    body: { name, id: derivedId },
+    body: { name, id: clientId },
   });
 
 
