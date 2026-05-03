@@ -837,6 +837,11 @@ const npubsCmd = program
   .command("npubs")
   .description("Manage admin npubs on the daemon");
 
+type NpubEntry = {
+  npub: string;
+  role: string;
+};
+
 npubsCmd
   .command("list")
   .description("List configured admin npubs")
@@ -850,17 +855,18 @@ npubsCmd
       process.exit(1);
     }
     // Handle both wrapped { output: { npubs } } and direct { npubs } response formats
-    const data = (result.output as { npubs?: string[] } | undefined)?.npubs
+    const data = (result.output as { npubs?: NpubEntry[] } | undefined)?.npubs
       ? result.output
       : result;
-    const npubs = (data as { npubs?: string[] } | undefined)?.npubs ?? [];
+    const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
       console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
       return;
     }
     console.log(`Admin npubs (${npubs.length}):`);
     let found = false;
-    for (const npub of npubs) {
+    for (const entry of npubs) {
+      const npub = entry.npub;
       const marker = npub === userNpub ? " → you" : "";
       if (npub === userNpub) found = true;
       console.log(`- ${npub}${marker}`);
@@ -892,10 +898,10 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    const data = (result.output as { npubs?: string[] } | undefined)?.npubs
+    const data = (result.output as { npubs?: NpubEntry[] } | undefined)?.npubs
       ? result.output
       : result;
-    const npubs = (data as { npubs?: string[] } | undefined)?.npubs ?? [];
+    const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length > 0) {
       console.log(`Admin npubs already configured (${npubs.length}). Ask your admin to add your npub. \n Your npub: ${userNpub}`);
       return;
