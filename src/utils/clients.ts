@@ -4,42 +4,8 @@ import {
   getDaemonBaseUrl,
   ensureDaemonRunning,
 } from "./daemon-client";
-import {
-  parseSecretKey,
-  npubFromSecretKey,
-} from "./nip98";
-import { type RoutstrdConfig } from "./config";
 import { logger } from "./logger";
 import { CLIENT_INTEGRATIONS, CLIENT_CONFIGS } from "../integrations/registry";
-
-export function getNpubSuffix(config: RoutstrdConfig): string | null {
-  if (!config.daemonUrl || !config.nsec) return null;
-  try {
-    const secretKey = parseSecretKey(config.nsec);
-    const npub = npubFromSecretKey(secretKey);
-    return npub.slice(-7);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Add suffix to a client ID.
- */
-export function addSuffixToId(id: string, suffix: string): string {
-  return `${id}-${suffix}`;
-}
-
-/**
- * Remove suffix from a client ID if present.
- */
-export function removeSuffixFromId(id: string, suffix: string): string {
-  const suffixStr = `-${suffix}`;
-  if (id.endsWith(suffixStr)) {
-    return id.slice(0, -suffixStr.length);
-  }
-  return id;
-}
 
 export interface ClientEntry {
   clientId: string;
@@ -47,6 +13,7 @@ export interface ClientEntry {
   apiKey: string;
   createdAt: number;
   lastUsed?: number | null;
+  ownerNpub?: string;
 }
 
 export interface DaemonClient {
@@ -55,6 +22,7 @@ export interface DaemonClient {
   apiKey: string;
   createdAt: number;
   lastUsed?: number | null;
+  ownerNpub?: string;
 }
 
 /**
@@ -71,12 +39,14 @@ export function getClientsFromStore(store: { getState(): any }): ClientEntry[] {
       apiKey: string;
       createdAt: number;
       lastUsed?: number | null;
+      ownerNpub?: string;
     }) => ({
       clientId: c.clientId,
       name: c.name,
       apiKey: c.apiKey,
       createdAt: c.createdAt,
       lastUsed: c.lastUsed,
+      ownerNpub: c.ownerNpub,
     }),
   );
 }
@@ -86,7 +56,6 @@ export function getClientsFromStore(store: { getState(): any }): ClientEntry[] {
  * Use this when running remotely (CLI in remote mode).
  */
 export async function getClientsList(): Promise<ClientEntry[]> {
-  const config = await loadConfig();
   const result = await callDaemon("/clients");
   const clients = (
     result.output as
@@ -97,6 +66,7 @@ export async function getClientsList(): Promise<ClientEntry[]> {
             apiKey: string;
             createdAt: number;
             lastUsed?: number | null;
+            ownerNpub?: string;
           }>;
         }
       | undefined
@@ -106,17 +76,14 @@ export async function getClientsList(): Promise<ClientEntry[]> {
     return [];
   }
 
-  const suffix = config.daemonUrl ? getNpubSuffix(config) : null;
-
-  return clients
-    .filter((c) => !suffix || c.id.endsWith(`-${suffix}`))
-    .map((c) => ({
-      clientId: suffix ? removeSuffixFromId(c.id, suffix) : c.id,
-      name: c.name,
-      apiKey: c.apiKey,
-      createdAt: c.createdAt,
-      lastUsed: c.lastUsed,
-    }));
+  return clients.map((c) => ({
+    clientId: c.id,
+    name: c.name,
+    apiKey: c.apiKey,
+    createdAt: c.createdAt,
+    lastUsed: c.lastUsed,
+    ownerNpub: c.ownerNpub,
+  }));
 }
 
 export async function addDaemonClient(
@@ -135,18 +102,14 @@ export async function addDaemonClient(
       apiKey: existing.apiKey,
       createdAt: existing.createdAt,
       lastUsed: existing.lastUsed,
+      ownerNpub: existing.ownerNpub,
     };
     return { client, created: false };
   }
 
-  const config = await loadConfig();
-  const suffix = getNpubSuffix(config);
-  const clientId = suffix ? addSuffixToId(derivedId, suffix) : derivedId;
-
-
   const result = await callDaemon("/clients/add", {
     method: "POST",
-    body: { name, id: clientId },
+    body: { name, id: derivedId },
   });
 
 
@@ -196,13 +159,9 @@ export async function listClientsAction(): Promise<void> {
 export async function deleteClientAction(id: string): Promise<void> {
   await ensureDaemonRunning();
 
-  const config = await loadConfig();
-  const suffix = getNpubSuffix(config);
-  const resolvedId = suffix ? addSuffixToId(id, suffix) : id;
-
   const result = await callDaemon("/clients/delete", {
     method: "POST",
-    body: { id: resolvedId },
+    body: { id },
   });
 
   if (result.error) {
@@ -233,7 +192,6 @@ export interface AddClientOptions {
 export async function addClientAction(options: AddClientOptions): Promise<void> {
   await ensureDaemonRunning();
   const config = await loadConfig();
-  const suffix = getNpubSuffix(config);
 
   const integrationKeys: string[] = [];
   if (options.opencode) integrationKeys.push("opencode");
@@ -259,7 +217,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         await integrationFn(config, client.apiKey, integrationConfig);
 
         console.log(`\n  ${integrationConfig.name}:`);
-        console.log(`    Client ID: ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
+        console.log(`    Client ID: ${client.id}`);
         console.log(`    API Key:   ${client.apiKey}`);
       } catch (error) {
         logger.error(
@@ -286,7 +244,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
 
     if (!created) {
       console.log(`Client '${options.name}' already exists.`);
-      console.log(`\n  ID:     ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
+      console.log(`\n  ID:     ${client.id}`);
       console.log(`  Name:   ${client.name}`);
       console.log(`  API Key: ${client.apiKey}`);
       return;
@@ -295,7 +253,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
     if (message) {
       console.log(message);
     }
-    console.log(`\n  ID:     ${suffix ? removeSuffixFromId(client.id, suffix) : client.id}`);
+    console.log(`\n  ID:     ${client.id}`);
     console.log(`  Name:   ${client.name}`);
     console.log(`  API Key: ${client.apiKey}`);
     console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);

@@ -713,6 +713,7 @@ export function createDaemonRequestHandler(deps: {
           apiKey: c.apiKey,
           createdAt: c.createdAt,
           lastUsed: c.lastUsed,
+          ownerNpub: c.ownerNpub,
         }));
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -737,6 +738,7 @@ export function createDaemonRequestHandler(deps: {
         const body = bodyText ? JSON.parse(bodyText) : {};
         const name = body.name as string | undefined;
         const explicitId = body.id as string | undefined;
+        const ownerNpub = body.ownerNpub as string | undefined;
 
         if (!name || typeof name !== "string" || name.trim() === "") {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -800,6 +802,7 @@ export function createDaemonRequestHandler(deps: {
           name: name.trim(),
           apiKey,
           createdAt: Date.now(),
+          ...(ownerNpub && typeof ownerNpub === "string" ? { ownerNpub } : {}),
         };
 
         deps.store
@@ -821,6 +824,7 @@ export function createDaemonRequestHandler(deps: {
                 name: name.trim(),
                 apiKey,
                 createdAt: newClient.createdAt,
+                ownerNpub: newClient.ownerNpub,
               },
             },
           }),
