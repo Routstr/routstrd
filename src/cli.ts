@@ -7,7 +7,6 @@ import {
   isDaemonRunning,
   loadConfig,
   getDaemonBaseUrl,
-  getNpubSuffix,
   getUserNpub,
 } from "./utils/daemon-client";
 import {
