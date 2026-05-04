@@ -832,10 +832,10 @@ clientsCmd
     },
   );
 
-// Npubs - manage admin npubs
+// Npubs - manage npubs (admin and user roles)
 const npubsCmd = program
   .command("npubs")
-  .description("Manage admin npubs on the daemon");
+  .description("Manage npubs on the daemon (admin or user roles)");
 
 type NpubEntry = {
   npub: string;
@@ -844,7 +844,7 @@ type NpubEntry = {
 
 npubsCmd
   .command("list")
-  .description("List configured admin npubs")
+  .description("List configured npubs with their roles")
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -863,13 +863,12 @@ npubsCmd
       console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
       return;
     }
-    console.log(`Admin npubs (${npubs.length}):`);
+    console.log(`Npubs (${npubs.length}):`);
     let found = false;
     for (const entry of npubs) {
-      const npub = entry.npub;
-      const marker = npub === userNpub ? " → you" : "";
-      if (npub === userNpub) found = true;
-      console.log(`- ${npub}${marker}`);
+      const marker = entry.npub === userNpub ? " → you" : "";
+      if (entry.npub === userNpub) found = true;
+      console.log(`- ${entry.npub} [${entry.role}]${marker}`);
     }
     if (userNpub && !found) {
       console.log("");
@@ -931,7 +930,7 @@ npubsCmd
 
 npubsCmd
   .command("add <npub>")
-  .description("Add an admin npub (hex pubkey or npub1...)")
+  .description("Add a npub (hex pubkey or npub1...). First becomes admin, subsequent become user.")
   .action(async (npubArg: string) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
@@ -952,7 +951,7 @@ npubsCmd
       | undefined;
     if (output?.npub) {
       console.log(
-        `${output.added ? "Added" : "Already configured"} admin npub: ${output.npub}`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub}`,
       );
     }
   });
