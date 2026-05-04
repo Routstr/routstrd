@@ -187,6 +187,7 @@ export interface AddClientOptions {
   openclaw?: boolean;
   piAgent?: boolean;
   claudeCode?: boolean;
+  hermes?: boolean;
 }
 
 export async function addClientAction(options: AddClientOptions): Promise<void> {
@@ -198,6 +199,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   if (options.openclaw) integrationKeys.push("openclaw");
   if (options.piAgent) integrationKeys.push("pi-agent");
   if (options.claudeCode) integrationKeys.push("claude-code");
+  if (options.hermes) integrationKeys.push("hermes");
 
   if (integrationKeys.length > 0) {
     for (const key of integrationKeys) {

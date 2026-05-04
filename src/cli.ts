@@ -820,6 +820,7 @@ clientsCmd
   .option("--openclaw", "Set up OpenClaw integration")
   .option("--pi-agent", "Set up Pi Agent integration")
   .option("--claude-code", "Set up Claude Code integration")
+  .option("--hermes", "Set up Hermes integration")
   .action(
     async (options: {
       name?: string;
@@ -827,6 +828,7 @@ clientsCmd
       openclaw?: boolean;
       piAgent?: boolean;
       claudeCode?: boolean;
+      hermes?: boolean;
     }) => {
       await addClientAction(options);
     },
