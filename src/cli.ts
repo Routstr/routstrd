@@ -985,11 +985,12 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    const output = result.output as
+    // PATCH /npubs returns { npub, pubkey, role } at the top level, not wrapped in { output }
+    const data = (result.output ?? result) as
       | { npub?: string; pubkey?: string; role?: string; error?: string }
       | undefined;
-    if (output?.npub) {
-      console.log(`Updated npub ${output.npub} role to '${output.role}'.`);
+    if (data?.npub) {
+      console.log(`Updated npub ${data.npub} role to '${data.role}'.`);
     } else {
       console.log("Npub not found or update failed.");
     }
