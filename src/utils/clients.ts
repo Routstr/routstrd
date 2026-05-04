@@ -235,9 +235,14 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   }
 
   if (!options.name) {
-    console.error(
-      "error: required option '-n, --name <name>' not specified",
-    );
+    console.error("error: either provide a client name or specify an integration flag.\n");
+    console.error("Options:");
+    console.error("  -n, --name <name>    Client name");
+    console.error("  --opencode           Set up OpenCode integration");
+    console.error("  --openclaw           Set up OpenClaw integration");
+    console.error("  --pi-agent           Set up Pi Agent integration");
+    console.error("  --claude-code        Set up Claude Code integration");
+    console.error("  --hermes             Set up Hermes integration");
     process.exit(1);
   }
 
