@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.2.12",
+  "version": "0.2.14",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -24,7 +24,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^3.1.1",
-    "@routstr/sdk": "^0.3.0",
+    "@routstr/sdk": "^0.3.2",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "commander": "^14.0.2",
