@@ -1,5 +1,5 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import { callDaemon, getNpubSuffix, isDaemonRunning, loadConfig } from "../../utils/daemon-client.ts";
+import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
 import type { ClientStats, DayStats, ModelStats, ProviderStats, UsageStats } from "./types.ts";
 
 export interface BalanceKey {
@@ -82,21 +82,10 @@ export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
     const result = await callDaemon(`/usage?limit=${limit}`);
     if (result.error) return null;
 
-    // The daemon returns { output: [...] } where output is the entries array directly.
-    // In remote daemon mode, client IDs are suffixed with the last 7 chars of our npub.
-    // Fetch the full daemon result, but only display/aggregate entries for our clients.
+    // The auth proxy filters usage to the authenticated npub's clients and
+    // returns client IDs without the owner suffix.
     const entries = result.output as UsageTrackingEntry[] | undefined;
-    const entriesArray = Array.isArray(entries) ? entries : [];
-    const suffix = getNpubSuffix(await loadConfig());
-    const suffixStr = suffix ? `-${suffix}` : null;
-    const visibleEntries = suffixStr
-      ? entriesArray
-        .filter((entry) => entry.client?.endsWith(suffixStr))
-        .map((entry) => ({
-          ...entry,
-          client: entry.client?.slice(0, -suffixStr.length),
-        }))
-      : entriesArray;
+    const visibleEntries = Array.isArray(entries) ? entries : [];
 
     // Calculate totals from visible entries
     const totals = visibleEntries.reduce(
