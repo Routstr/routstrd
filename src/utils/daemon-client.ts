@@ -37,7 +37,7 @@ export function getDaemonBaseUrl(config: RoutstrdConfig): string {
 
 export async function callDaemon(
   path: string,
-  options: { method?: "GET" | "POST" | "DELETE"; body?: object } = {},
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
 ): Promise<CommandResponse> {
   const { method = "GET", body } = options;
   const config = await loadConfig();

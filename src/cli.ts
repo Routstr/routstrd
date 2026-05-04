@@ -930,35 +930,74 @@ npubsCmd
 
 npubsCmd
   .command("add <npub>")
-  .description("Add a npub (hex pubkey or npub1...). First becomes admin, subsequent become user.")
-  .action(async (npubArg: string) => {
+  .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
+  .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
+  .action(async (npubArg: string, options: { role: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
       console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
       process.exit(1);
     }
+    if (options.role !== "admin" && options.role !== "user") {
+      console.error("Invalid role. Expected 'admin' or 'user'.");
+      process.exit(1);
+    }
+    const body: Record<string, string> = { npub: npubFromPubkey(normalized), role: options.role };
     const result = await callDaemon("/npubs", {
       method: "POST",
-      body: { npub: npubFromPubkey(normalized) },
+      body,
     });
     if (result.error) {
       console.log(result.error);
       process.exit(1);
     }
     const output = result.output as
-      | { npub?: string; added?: boolean; error?: string }
+      | { npub?: string; role?: string; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
       console.log(
-        `${output.added ? "Added" : "Already configured"} npub: ${output.npub}`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]`,
       );
     }
   });
 
 npubsCmd
+  .command("update <npub>")
+  .description("Update the role of an existing npub (requires admin)")
+  .requiredOption("-r, --role <role>", "New role: 'admin' or 'user'")
+  .action(async (npubArg: string, options: { role: string }) => {
+    await ensureDaemonRunning();
+    const normalized = normalizeNostrPubkey(npubArg);
+    if (!normalized) {
+      console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
+      process.exit(1);
+    }
+    if (options.role !== "admin" && options.role !== "user") {
+      console.error("Invalid role. Expected 'admin' or 'user'.");
+      process.exit(1);
+    }
+    const result = await callDaemon("/npubs", {
+      method: "PATCH",
+      body: { npub: npubFromPubkey(normalized), role: options.role },
+    });
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+    const output = result.output as
+      | { npub?: string; pubkey?: string; role?: string; error?: string }
+      | undefined;
+    if (output?.npub) {
+      console.log(`Updated npub ${output.npub} role to '${output.role}'.`);
+    } else {
+      console.log("Npub not found or update failed.");
+    }
+  });
+
+npubsCmd
   .command("delete <npub>")
-  .description("Delete an admin npub (hex pubkey or npub1...)")
+  .description("Delete an npub (hex pubkey or npub1...)")
   .action(async (npubArg: string) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
