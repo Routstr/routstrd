@@ -34,3 +34,4 @@ temp/
 
 # Standalone prototype scripts
 index.ts
+.worktrees/
