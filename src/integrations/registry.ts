@@ -5,6 +5,7 @@ import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
 import { installClaudeCodeIntegration } from "./claudecode";
 import { installHermesIntegration } from "./hermes";
+import { installGooseIntegration } from "./goose";
 
 export interface IntegrationConfig {
   clientId: string;
@@ -49,6 +50,11 @@ export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
     name: "Hermes",
     configPath: join(process.env.HOME || "", ".hermes/config.yaml"),
   },
+  goose: {
+    clientId: "goose",
+    name: "Goose",
+    configPath: join(process.env.HOME || "", ".config/goose/config.yaml"),
+  },
 };
 
 export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
@@ -57,6 +63,7 @@ export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
   openclaw: installOpenClawIntegration,
   "claude-code": installClaudeCodeIntegration,
   hermes: installHermesIntegration,
+  goose: installGooseIntegration,
 };
 
 export async function runIntegrationsForClients(
