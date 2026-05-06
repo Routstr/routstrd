@@ -188,6 +188,7 @@ export interface AddClientOptions {
   piAgent?: boolean;
   claudeCode?: boolean;
   hermes?: boolean;
+  goose?: boolean;
 }
 
 export async function addClientAction(options: AddClientOptions): Promise<void> {
@@ -200,6 +201,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   if (options.piAgent) integrationKeys.push("pi-agent");
   if (options.claudeCode) integrationKeys.push("claude-code");
   if (options.hermes) integrationKeys.push("hermes");
+  if (options.goose) integrationKeys.push("goose");
 
   if (integrationKeys.length > 0) {
     for (const key of integrationKeys) {
@@ -243,6 +245,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
     console.error("  --pi-agent           Set up Pi Agent integration");
     console.error("  --claude-code        Set up Claude Code integration");
     console.error("  --hermes             Set up Hermes integration");
+    console.error("  --goose              Set up Goose integration");
     process.exit(1);
   }
 
