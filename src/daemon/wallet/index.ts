@@ -1,4 +1,5 @@
 import { getDecodedToken } from "@cashu/cashu-ts";
+import { InsufficientBalanceError } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
 
@@ -77,6 +78,10 @@ export async function createWalletAdapter(
             );
             await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
             continue;
+          }
+
+          if (errorMessage.includes("Not enough proofs")) {
+            throw new InsufficientBalanceError(amount, 0);
           }
 
           logger.error("Error in walletAdapter sendToken:", error);
