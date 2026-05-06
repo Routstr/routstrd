@@ -1,4 +1,4 @@
-import { ModelManager } from "@routstr/sdk";
+import { ModelManager, type SdkStore } from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
 
@@ -16,7 +16,7 @@ export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
 };
 
-export function createModelService(modelManager: ModelManager) {
+export function createModelService(modelManager: ModelManager, store: SdkStore) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
   const ensureProvidersBootstrapped = (): Promise<void> => {
@@ -26,6 +26,22 @@ export function createModelService(modelManager: ModelManager) {
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
         await modelManager.fetchModels(providers);
+
+        // Sync discovered providers into the store so `providers list` reflects
+        // the same set that the model manager knows about.
+        const { baseUrlsList, setBaseUrlsList } = store.getState();
+        const existing = new Set(baseUrlsList);
+        const merged = [
+          ...baseUrlsList,
+          ...providers.filter((url) => !existing.has(url)),
+        ];
+        if (merged.length !== baseUrlsList.length) {
+          setBaseUrlsList(merged);
+          logger.log(
+            `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
+          );
+        }
+
         logger.log("Provider bootstrap complete.");
       })().catch((error) => {
         logger.error("Provider bootstrap failed:", error);

@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(providerRegistry, store);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders } =
-    createModelService(modelManager);
+    createModelService(modelManager, store);
 
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
   const walletAdapter = await createWalletAdapter({
