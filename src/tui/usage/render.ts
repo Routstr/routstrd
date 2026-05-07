@@ -511,18 +511,21 @@ export function renderRecent(stats: UsageStats, width: number): string {
   const recentEntries = stats.entries.slice(0, 50);
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
+  const clientCol = 10;
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"TOKENS".padEnd(10)} ${"COST".padEnd(12)} ${"PROVIDER".slice(0, Math.max(0, width - 60))}${COLORS.reset}`);
+  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"CLIENT".padEnd(clientCol)} ${"MODEL".padEnd(18)} ${"TOKENS".padEnd(10)} ${"COST".padEnd(12)} ${"PROVIDER".slice(0, Math.max(0, width - 70))}${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
   for (const entry of recentEntries) {
     const time = formatTime(entry.timestamp).slice(0, 8);
+    const clientName = (entry.client || "unknown").slice(0, clientCol - 1).padEnd(clientCol);
+    const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const model = entry.modelId.slice(0, 18).padEnd(18);
     const tokens = `${formatNumber(entry.totalTokens).padEnd(6)} (${formatNumber(entry.promptTokens)}+${formatNumber(entry.completionTokens)})`;
     const cost = `${formatCost(entry.satsCost).padEnd(8)} sats`;
-    const provider = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "").slice(0, Math.max(0, width - 60));
-    const color = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
-    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${color}${model}${COLORS.reset} ${tokens.padEnd(10)} ${COLORS.green}${cost}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset}`);
+    const provider = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "").slice(0, Math.max(0, width - 70));
+    const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
+    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(10)} ${COLORS.green}${cost}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset}`);
   }
 
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
