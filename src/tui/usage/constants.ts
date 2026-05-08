@@ -1,14 +1,27 @@
 import type { Tab } from "./types.ts";
 
-export const TABS: Tab[] = [
+export const ALL_TABS: Tab[] = [
   { id: "overview", name: "Overview", key: "1" },
   { id: "today", name: "Today", key: "2" },
   { id: "models", name: "Models", key: "3" },
   { id: "providers", name: "Providers", key: "4" },
   { id: "tokens", name: "Tokens", key: "5" },
   { id: "clients", name: "Clients", key: "6" },
-  { id: "recent", name: "Recent", key: "7" },
+  { id: "npubs", name: "Npubs", key: "7" },
+  { id: "recent", name: "Recent", key: "8" },
 ];
+
+/**
+ * Returns the visible tab list, hiding the Npubs tab when no clients
+ * have an ownerNpub. Keys are re-assigned sequentially (1..N).
+ */
+export function getVisibleTabs(hasNpubs: boolean): Tab[] {
+  const tabs = ALL_TABS.filter((t) => t.id !== "npubs" || hasNpubs);
+  return tabs.map((t, i) => ({ ...t, key: String(i + 1) }));
+}
+
+/** Default tab list (no npub data yet). */
+export const TABS: Tab[] = getVisibleTabs(false);
 
 export const COLORS = {
   reset: "\x1b[0m",

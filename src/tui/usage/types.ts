@@ -44,12 +44,21 @@ export interface ClientStats {
   totalTokens: number;
 }
 
-export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "recent";
+export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
 
 export interface Tab {
   id: TabId;
   name: string;
   key: string;
+}
+
+export interface NpubStats {
+  npub: string;
+  requests: number;
+  satsCost: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 export interface VimState {

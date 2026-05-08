@@ -1,5 +1,6 @@
-import { TABS } from "./constants.ts";
-import { fetchBalance, fetchStatus, fetchUsage, type BalanceInfo, type StatusInfo } from "./data.ts";
+import { getVisibleTabs } from "./constants.ts";
+import type { Tab } from "./types.ts";
+import { fetchBalance, fetchClients, fetchStatus, fetchUsage, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -28,7 +29,6 @@ import {
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
 import type { TabId, UsageStats } from "./types.ts";
-import { isDaemonRunning } from "../../utils/daemon-client.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();
@@ -46,6 +46,8 @@ export async function runUsageTui(): Promise<void> {
   let stats: UsageStats | null = null;
   let balance: BalanceInfo | null = null;
   let status: StatusInfo | null = null;
+  let clients: ClientInfo[] = [];
+  let visibleTabs: Tab[] = getVisibleTabs(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let shouldUpdate = true;
   let autoRefresh = true;
@@ -90,6 +92,14 @@ export async function runUsageTui(): Promise<void> {
         stats = await fetchUsage(10000);
         balance = await fetchBalance();
         status = await fetchStatus();
+        clients = await fetchClients();
+        const npubsVisible = hasAnyNpubs(clients);
+        visibleTabs = getVisibleTabs(npubsVisible);
+        // If current tab is npubs but it's no longer visible, fall back to clients
+        if (currentTab === "npubs" && !npubsVisible) {
+          currentTab = "clients";
+          vimState.scrollPos = 0;
+        }
         shouldUpdate = false;
       }
 
@@ -104,9 +114,9 @@ export async function runUsageTui(): Promise<void> {
         return;
       }
 
-      const content = renderTabContent(currentTab, stats, balance, status, width);
+      const content = renderTabContent(currentTab, stats, balance, status, width, clients);
       const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-      const chrome = renderHeader(currentTab, width) + renderTabs(currentTab) + renderSeparator(width) + renderSearchBar();
+      const chrome = renderHeader(currentTab, width, visibleTabs) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
       const chromeLines = chrome.split("\n").length - 1;
       const footerSeparator = renderSeparator(width);
       const footerLines = footerSeparator.split("\n").length - 1;
@@ -176,15 +186,15 @@ export async function runUsageTui(): Promise<void> {
       return;
     }
     if (key === "l" || key === "\x1b[C" || key === "\x1bOC") {
-      const currentIdx = TABS.findIndex((t) => t.id === currentTab);
-      currentTab = TABS[(currentIdx + 1) % TABS.length]!.id;
+      const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
+      currentTab = visibleTabs[(currentIdx + 1) % visibleTabs.length]!.id;
       vimState.scrollPos = 0;
       void render(false);
       return;
     }
     if (key === "h" || key === "\x1b[D" || key === "\x1bOD") {
-      const currentIdx = TABS.findIndex((t) => t.id === currentTab);
-      currentTab = TABS[(currentIdx - 1 + TABS.length) % TABS.length]!.id;
+      const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
+      currentTab = visibleTabs[(currentIdx - 1 + visibleTabs.length) % visibleTabs.length]!.id;
       vimState.scrollPos = 0;
       void render(false);
       return;
@@ -226,7 +236,7 @@ export async function runUsageTui(): Promise<void> {
     }
     if (key === "\x1b") { scrollToTop(); void render(false); return; }
 
-    const tab = TABS.find((t) => t.key === key);
+    const tab = visibleTabs.find((t) => t.key === key);
     if (tab) {
       currentTab = tab.id;
       vimState.scrollPos = 0;
