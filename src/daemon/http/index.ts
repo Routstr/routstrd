@@ -6,7 +6,7 @@ import {
   InsufficientBalanceError,
   ProviderManager,
 } from "@routstr/sdk";
-import type { UsageTrackingDriver } from "@routstr/sdk";
+import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 import {
   CocodHttpError,
@@ -263,6 +263,19 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
     activeMint: deps.walletAdapter.getActiveMintUrl(),
   };
 }
+
+function makeSdkLogger(prefix?: string): SdkLogger {
+  const tag = prefix ? `[${prefix}]` : undefined;
+  const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
+  return {
+    log: (...args: unknown[]) => logger.log(...fmt(...args)),
+    warn: (...args: unknown[]) => logger.log(...fmt(...args)),
+    error: (...args: unknown[]) => logger.error(...fmt(...args)),
+    debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
+    child: (p: string) => makeSdkLogger(prefix ? `${prefix}:${p}` : p),
+  };
+}
+const sdkLogger: SdkLogger = makeSdkLogger();
 
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
@@ -1030,7 +1043,9 @@ export function createDaemonRequestHandler(deps: {
 
     try {
       await deps.ensureProvidersBootstrapped();
-      logger.log("Routing request with path: ", url.pathname);
+      const reqId = randomBytes(4).toString("hex");
+      const reqLogger = sdkLogger.child(`req:${reqId}`);
+      logger.log(`[req:${reqId}] Routing request with path: `, url.pathname);
 
       const response = await routeRequests({
         modelId,
@@ -1048,6 +1063,7 @@ export function createDaemonRequestHandler(deps: {
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
         providerManager: deps.providerManager,
+        logger: reqLogger,
       });
 
       // Bridge the Web `Response` to the Node `ServerResponse` with no
