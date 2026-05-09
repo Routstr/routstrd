@@ -1,17 +1,8 @@
 import { logger } from "./utils/logger";
-import { existsSync } from "fs";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
-
-function getTodayLogFile(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${LOGS_DIR}/${year}-${month}-${day}.log`;
-}
 
 async function isDaemonHealthy(port: string): Promise<boolean> {
   const controller = new AbortController();
@@ -48,14 +39,8 @@ async function startDaemonUnlocked(
     args.push("--provider", options.provider);
   }
 
-  // Ensure logs directory exists (logger handles date-based files)
-  if (!existsSync(LOGS_DIR)) {
-    await Bun.$`mkdir -p ${LOGS_DIR}`;
-  }
-
   const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
-  const todayLogFile = getTodayLogFile();
-  const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")} >> "${todayLogFile}" 2>&1`;
+  const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")}`;
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
     stdout: "inherit",

@@ -8,8 +8,22 @@ import {
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
+import type { SdkLogger } from "@routstr/sdk";
 import { DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
+
+function makeSdkLogger(prefix?: string): SdkLogger {
+  const tag = prefix ? `[${prefix}]` : undefined;
+  const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
+  return {
+    log: (...args: unknown[]) => logger.log(...fmt(...args)),
+    warn: (...args: unknown[]) => logger.log(...fmt(...args)),
+    error: (...args: unknown[]) => logger.error(...fmt(...args)),
+    debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
+    child: (p: string) => makeSdkLogger(prefix ? `${prefix}:${p}` : p),
+  };
+}
+const daemonSdkLogger: SdkLogger = makeSdkLogger();
 import { parseArgs } from "./args";
 import { ensureDirs, loadDaemonConfig, saveDaemonConfig } from "./config-store";
 import {
@@ -35,7 +49,7 @@ async function main(): Promise<void> {
   const updatedConfig = { ...config, port, provider };
   saveDaemonConfig(updatedConfig);
 
-  const sqliteDriver = await createBunSqliteDriver(DB_PATH);
+  const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
   const { Database } = await import("bun:sqlite");
@@ -46,11 +60,11 @@ async function main(): Promise<void> {
   });
 
   const discoveryAdapter = createDiscoveryAdapterFromStore(store);
-  const providerRegistry = createProviderRegistryFromStore(store);
+  const providerRegistry = createProviderRegistryFromStore(store, daemonSdkLogger);
   const storageAdapter = createStorageAdapterFromStore(store);
-  const modelManager = new ModelManager(discoveryAdapter);
+  const modelManager = new ModelManager(discoveryAdapter, { logger: daemonSdkLogger });
   // Create shared ProviderManager for consistent failure tracking across all requests
-  const providerManager = new ProviderManager(providerRegistry, store);
+  const providerManager = new ProviderManager(providerRegistry, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders } =
     createModelService(modelManager, store);
 
