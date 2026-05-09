@@ -1,6 +1,8 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
-import type { ClientStats, DayStats, ModelStats, ProviderStats, UsageStats } from "./types.ts";
+import type { ClientStats, DayStats, ModelStats, NpubStats, ProviderStats, UsageStats } from "./types.ts";
+
+export { isDaemonRunning };
 
 export interface BalanceKey {
   id: string;
@@ -222,6 +224,78 @@ export function getClientStats(entries: UsageTrackingEntry[]): ClientStats[] {
   }
   return Array.from(clients.values()).sort((a, b) => b.satsCost - a.satsCost);
 }
+
+// ─── Client / Npub helpers ────────────────────────────────────────────
+
+export interface ClientInfo {
+  clientId: string;
+  name: string;
+  ownerNpub?: string;
+}
+
+export async function fetchClients(): Promise<ClientInfo[]> {
+  try {
+    const running = await isDaemonRunning();
+    if (!running) return [];
+
+    const result = await callDaemon("/clients");
+    if (result.error) return [];
+
+    const output = result.output as {
+      clients?: Array<{ id: string; name: string; ownerNpub?: string }>;
+    };
+
+    return (output?.clients || []).map((c) => ({
+      clientId: c.id,
+      name: c.name,
+      ownerNpub: c.ownerNpub,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function hasAnyNpubs(clients: ClientInfo[]): boolean {
+  return clients.some((c) => !!c.ownerNpub);
+}
+
+export function getNpubStats(entries: UsageTrackingEntry[], clients: ClientInfo[]): NpubStats[] {
+  // Build client-id → ownerNpub lookup
+  const clientNpubMap = new Map<string, string>();
+  for (const c of clients) {
+    if (c.ownerNpub) {
+      clientNpubMap.set(c.clientId, c.ownerNpub);
+    }
+  }
+
+  // Aggregate usage per npub
+  const npubs = new Map<string, NpubStats>();
+  for (const entry of entries) {
+    const npub = clientNpubMap.get(entry.client || "");
+    if (!npub) continue; // skip entries whose client has no ownerNpub
+
+    const existing = npubs.get(npub) || {
+      npub,
+      requests: 0,
+      satsCost: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    npubs.set(npub, {
+      ...existing,
+      requests: existing.requests + 1,
+      satsCost: existing.satsCost + entry.satsCost,
+      promptTokens: existing.promptTokens + entry.promptTokens,
+      completionTokens: existing.completionTokens + entry.completionTokens,
+      totalTokens: existing.totalTokens + entry.totalTokens,
+    });
+  }
+
+  return Array.from(npubs.values()).sort((a, b) => b.satsCost - a.satsCost);
+}
+
+// ─── Totals ───────────────────────────────────────────────────────────
 
 export function getTotals(entries: UsageTrackingEntry[] | undefined) {
   if (!entries || !Array.isArray(entries)) {

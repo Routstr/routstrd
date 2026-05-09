@@ -1,4 +1,5 @@
-import { CLIENT_COLORS, COLORS, MODEL_COLORS, TABS } from "./constants.ts";
+import { CLIENT_COLORS, COLORS, MODEL_COLORS } from "./constants.ts";
+import type { Tab } from "./types.ts";
 import {
   formatDate,
   formatNumber,
@@ -7,9 +8,11 @@ import {
   getDayStats,
   getHourlyToday,
   getModelStats,
+  getNpubStats,
   getProviderStats,
   getTodayStart,
   getTotals,
+  type ClientInfo,
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
@@ -30,10 +33,11 @@ function formatReqs(value: number): string {
   return value.toString();
 }
 
-export function renderHeader(activeTab: TabId, width: number): string {
+export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[]): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
   const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
-  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-7] Tabs  [R] Refresh${COLORS.reset}`;
+  const maxKey = visibleTabs.length;
+  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-${maxKey}] Tabs  [R] Refresh${COLORS.reset}`;
   const fill = width - title.length - help.length - vimIndicator.length - 6;
   return `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}\n`;
 }
@@ -49,8 +53,8 @@ export function renderSearchBar(): string {
   return `\n${searchLine}${placeholder}\n`;
 }
 
-export function renderTabs(activeTab: TabId): string {
-  const tabStr = TABS.map((tab) => tab.id === activeTab
+export function renderTabs(activeTab: TabId, visibleTabs: Tab[]): string {
+  const tabStr = visibleTabs.map((tab) => tab.id === activeTab
     ? `${COLORS.bgBlue} ${tab.key}:${tab.name} ${COLORS.reset}`
     : `${COLORS.dim}[${tab.key}]${COLORS.reset} ${tab.name}`).join("  ");
   return `${" ".repeat(2)}${tabStr}\n`;
@@ -507,6 +511,99 @@ export function renderClients(stats: UsageStats, width: number): string {
   return output;
 }
 
+export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: number): string {
+  const npubStats = getNpubStats(stats.entries, clients);
+  if (npubStats.length === 0) return renderBox(["No npub data available"], width, "Npub Breakdown");
+
+  const totalCost = stats.totalSatsCost;
+  const maxCost = npubStats[0]!.satsCost;
+  const lines: string[] = [];
+
+  const col1 = 24; // Npub (truncated)
+  const col2 = 12; // Requests
+  const col3 = 24; // Cost
+  const col4 = 12; // Tokens
+
+  const hNpub = "Npub".padEnd(col1);
+  const hReqs = "Requests".padEnd(col2);
+  const hCost = "Cost".padEnd(col3);
+  const hTok = "Tokens".padEnd(col4);
+  lines.push(`${COLORS.bold}${hNpub}${hReqs}${hCost}${hTok}Avg Cost${COLORS.reset}`);
+  lines.push(COLORS.dim + "─".repeat(Math.max(0, width - 4)) + COLORS.reset);
+
+  startBarSection("npub-detail", col1);
+  for (const npub of npubStats) {
+    const pct = totalCost > 0 ? ((npub.satsCost / totalCost) * 100).toFixed(1) : "0.0";
+    const avgCostFormatted = formatCost(npub.requests > 0 ? npub.satsCost / npub.requests : 0);
+    const shortNpub = truncateNpub(npub.npub);
+
+    const dNpub = shortNpub.padEnd(col1);
+    const dReqs = formatReqs(npub.requests).padEnd(col2);
+    const dCost = `${formatCost(npub.satsCost)} sats (${pct}%)`.padEnd(col3);
+    const dTok = formatNumber(npub.totalTokens).padEnd(col4);
+    const dAvg = `${avgCostFormatted} sats/req`;
+
+    lines.push(
+      `${COLORS.magenta}${COLORS.bold}${dNpub}${COLORS.reset}` +
+      `${dReqs}` +
+      `${COLORS.green}${dCost}${COLORS.reset}` +
+      `${COLORS.dim}${dTok}${dAvg}${COLORS.reset}`
+    );
+    // Full npub on its own line for copy-ability
+    lines.push(`  ${COLORS.dim}${npub.npub}${COLORS.reset}`);
+    lines.push(`  ${renderBarChart("", npub.satsCost, maxCost, width - 6, COLORS.magenta, Number(pct), "npub-detail")}`);
+    lines.push("");
+  }
+  endBarSection("npub-detail");
+
+  let output = renderBox(lines, width, "Npub Breakdown");
+
+  // Top models per npub (same pattern as clients tab)
+  const npubModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
+  const clientNpubMap = new Map<string, string>();
+  for (const c of clients) {
+    if (c.ownerNpub) clientNpubMap.set(c.clientId, c.ownerNpub);
+  }
+
+  for (const entry of stats.entries) {
+    const npub = clientNpubMap.get(entry.client || "");
+    if (!npub) continue;
+    const model = entry.modelId;
+    if (!npubModelMap.has(npub)) npubModelMap.set(npub, new Map());
+    const modelMap = npubModelMap.get(npub)!;
+    const existing = modelMap.get(model) || { requests: 0, satsCost: 0, tokens: 0 };
+    modelMap.set(model, {
+      requests: existing.requests + 1,
+      satsCost: existing.satsCost + entry.satsCost,
+      tokens: existing.tokens + entry.totalTokens,
+    });
+  }
+
+  const npubModelLines: string[] = [];
+  for (const topNpub of npubStats.slice(0, 5)) {
+    const modelMap = npubModelMap.get(topNpub.npub);
+    if (!modelMap) continue;
+    const models = Array.from(modelMap.entries()).sort((a, b) => b[1].satsCost - a[1].satsCost).slice(0, 5);
+    npubModelLines.push(`${COLORS.bold}${truncateNpub(topNpub.npub)}${COLORS.reset} (${formatReqs(topNpub.requests)} reqs, ${formatCost(topNpub.satsCost)} sats)`);
+    for (const [model, data] of models) {
+      npubModelLines.push(`  ${(MODEL_COLORS[model] || MODEL_COLORS.default)}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${formatCost(data.satsCost)} sats`);
+    }
+    npubModelLines.push("");
+  }
+
+  if (npubModelLines.length > 0) {
+    output += "\n" + renderBox(npubModelLines, width, "Top Models per Npub");
+  }
+
+  return output;
+}
+
+/** Truncate an npub for display: first 10 chars + … + last 6 chars. */
+function truncateNpub(npub: string): string {
+  if (npub.length <= 24) return npub;
+  return npub.slice(0, 10) + "…" + npub.slice(-6);
+}
+
 export function renderRecent(stats: UsageStats, width: number): string {
   const recentEntries = stats.entries.slice(0, 50);
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
@@ -531,7 +628,7 @@ export function renderRecent(stats: UsageStats, width: number): string {
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, clients: ClientInfo[] = []): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width);
     case "today": return renderToday(stats, width);
@@ -539,6 +636,7 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "providers": return renderProviders(stats, width);
     case "tokens": return renderTokens(stats, width);
     case "clients": return renderClients(stats, width);
+    case "npubs": return renderNpubs(stats, clients, width);
     case "recent": return renderRecent(stats, width);
     default: return "Unknown tab";
   }
