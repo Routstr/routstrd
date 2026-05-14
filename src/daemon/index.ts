@@ -91,6 +91,7 @@ async function main(): Promise<void> {
       getRoutstr21Models,
       getModelProviders,
       mode: config.mode || "apikeys",
+      routstrPubkey: config.routstrPubkey,
       usageTrackingDriver,
       providerManager,
     }),

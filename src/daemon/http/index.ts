@@ -41,6 +41,8 @@ type DaemonDeps = {
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
   mode?: ClientMode;
+  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  routstrPubkey?: string;
   providerManager: ProviderManager;
 };
 
@@ -291,6 +293,8 @@ export function createDaemonRequestHandler(deps: {
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
   mode?: "xcashu" | "apikeys";
+  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  routstrPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
 }) {
@@ -1064,6 +1068,7 @@ export function createDaemonRequestHandler(deps: {
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,
+        ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });
 
       // Bridge the Web `Response` to the Node `ServerResponse` with no

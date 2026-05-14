@@ -14,6 +14,8 @@ export interface RoutstrdConfig {
   mode?: "xcashu" | "apikeys";
   daemonUrl?: string;
   nsec?: string;
+  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  routstrPubkey?: string;
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
