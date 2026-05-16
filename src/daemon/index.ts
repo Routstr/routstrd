@@ -17,7 +17,7 @@ function makeSdkLogger(prefix?: string): SdkLogger {
   const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
   return {
     log: (...args: unknown[]) => logger.log(...fmt(...args)),
-    warn: (...args: unknown[]) => logger.log(...fmt(...args)),
+    warn: (...args: unknown[]) => logger.warn(...fmt(...args)),
     error: (...args: unknown[]) => logger.error(...fmt(...args)),
     debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
     child: (p: string) => makeSdkLogger(prefix ? `${prefix}:${p}` : p),
