@@ -1,0 +1,14 @@
+services:
+  bun:
+    build: .
+    container_name: routstrd-bun
+    working_dir: /app
+    volumes:
+      - .:/app
+      - bun_home:/root/.bun
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+volumes:
+  bun_home:

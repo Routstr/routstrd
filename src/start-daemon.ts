@@ -28,7 +28,7 @@ async function startDaemonUnlocked(
   const startupTimeoutMs = 10 * 60 * 1000;
 
   if (await isDaemonHealthy(port)) {
-    logger.log(`Routstr daemon already running on http://localhost:${port}/v1`);
+    console.log(`Routstr daemon already running on http://localhost:${port}/v1`);
     return;
   }
 
@@ -43,8 +43,8 @@ async function startDaemonUnlocked(
   const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")}`;
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: "ignore",
+    stderr: "ignore",
     stdin: "ignore",
     detached: true,
   });
@@ -67,7 +67,7 @@ async function startDaemonUnlocked(
     }
 
     if (await isDaemonHealthy(port)) {
-      logger.log(`Routstr daemon started (PID: ${proc.pid}).`);
+      console.log(`Routstr daemon started (PID: ${proc.pid}).`);
       return;
     }
   }
@@ -84,7 +84,7 @@ export async function startDaemon(
   const startupTimeoutMs = 10 * 60 * 1000;
 
   if (await isDaemonHealthy(port)) {
-    logger.log(`Routstr daemon already running on http://localhost:${port}/v1`);
+    console.log(`Routstr daemon already running on http://localhost:${port}/v1`);
     return;
   }
 

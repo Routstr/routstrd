@@ -1,4 +1,4 @@
-import { getDecodedToken } from "@cashu/cashu-ts";
+import { getDecodedToken, Amount } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
@@ -7,9 +7,9 @@ export function decodeCashuTokenAmount(token: string): {
   amount: number;
   unit: "sat" | "msat";
 } {
-  const decoded = getDecodedToken(token);
+  const decoded = getDecodedToken(token, []);
   const amount =
-    decoded?.proofs?.reduce((sum, proof) => sum + proof.amount, 0) ?? 0;
+    decoded?.proofs?.reduce((sum, proof) => sum + proof.amount.toNumber(), 0) ?? 0;
   const unit = decoded?.unit === "msat" ? "msat" : "sat";
   return { amount, unit };
 }
