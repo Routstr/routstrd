@@ -44,6 +44,7 @@ type DaemonDeps = {
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
   providerManager: ProviderManager;
+  refundClient: any;
 };
 
 /**
@@ -297,6 +298,7 @@ export function createDaemonRequestHandler(deps: {
   routstrPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
+  refundClient: any;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -512,16 +514,7 @@ export function createDaemonRequestHandler(deps: {
           .map((p: { baseUrl: string }) => p.baseUrl)
           .concat(apiKeysStored.map((p: { baseUrl: string }) => p.baseUrl));
 
-        const { RoutstrClient } = await import("@routstr/sdk");
-        const client = new RoutstrClient(
-          deps.walletAdapter,
-          deps.storageAdapter,
-          deps.providerRegistry,
-          "min",
-          "apikeys",
-        );
-
-        const spender = client.getCashuSpender();
+        const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundProviders(mintUrl, true);
 
         sendJson(res, 200, {

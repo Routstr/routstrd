@@ -74,6 +74,15 @@ async function main(): Promise<void> {
     walletClient,
   });
 
+  const refundClient = new RoutstrClient(
+    walletAdapter,
+    storageAdapter,
+    providerRegistry,
+    "min",
+    "apikeys",
+    { logger: daemonSdkLogger },
+  );
+
   const server = createServer();
   server.on(
     "request",
@@ -94,6 +103,7 @@ async function main(): Promise<void> {
       routstrPubkey: config.routstrPubkey,
       usageTrackingDriver,
       providerManager,
+      refundClient,
     }),
   );
 
@@ -172,15 +182,7 @@ async function main(): Promise<void> {
           return;
         }
 
-        const client = new RoutstrClient(
-          walletAdapter,
-          storageAdapter,
-          providerRegistry,
-          "min",
-          "apikeys",
-        );
-
-        const spender = client.getCashuSpender();
+        const spender = refundClient.getCashuSpender();
         const results = await spender.refundProviders(mintUrl);
 
         const successCount = results.filter(
