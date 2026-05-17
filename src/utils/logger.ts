@@ -48,18 +48,18 @@ async function writeLog(level: string, ...args: unknown[]) {
 
 export const logger = {
   log: (...args: unknown[]) => {
-    console.log(...args);
     writeLog("INFO", ...args);
   },
   debug: (...args: unknown[]) => {
     writeLog("DEBUG", ...args);
   },
+  warn: (...args: unknown[]) => {
+    writeLog("WARN", ...args);
+  },
   error: (...args: unknown[]) => {
-    console.error(...args);
     writeLog("ERROR", ...args);
   },
   info: (...args: unknown[]) => {
-    console.log(...args);
     writeLog("INFO", ...args);
   },
 };
