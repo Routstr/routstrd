@@ -3,7 +3,6 @@
 // Bun's native WebSocket for relay communication.
 
 import {
-  generateSecretKey,
   getPublicKey,
   nip04,
   finalizeEvent,
@@ -130,12 +129,12 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
   const publishTimeoutMs = options.publishTimeoutMs ?? 10000;
   const maxReconnectAttempts = options.maxReconnectAttempts ?? 5;
 
-  // Generate or use provided client keypair
+  // Client keypair — use secret from the connection string (per NIP-47)
   const clientSecretKey = options.clientSecretKey
     ? Buffer.from(options.clientSecretKey, "hex")
-    : generateSecretKey();
-  const clientPubkey = getPublicKey(clientSecretKey);
-  const clientPubkeyHex = Buffer.from(clientPubkey).toString("hex");
+    : Buffer.from(parsed.secret, "hex");
+  // getPublicKey returns a hex string (not Uint8Array) so use it directly
+  const clientPubkeyHex = getPublicKey(clientSecretKey);
 
   // ── State ──────────────────────────────────────────────────────
   let ws: WebSocket | null = null;
@@ -371,15 +370,12 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
 
           // Subscribe to response events (kind 23195) tagged for us
           subscriptionId = `routstrd-nwc-${clientPubkeyHex.slice(0, 8)}`;
-          sendRaw([
-            "REQ",
-            subscriptionId,
-            {
-              kinds: [NWC_RESPONSE_KIND],
-              "#p": [clientPubkeyHex],
-              since: Math.floor(Date.now() / 1000),
-            },
-          ]);
+          const subFilter = {
+            kinds: [NWC_RESPONSE_KIND],
+            "#p": [clientPubkeyHex],
+          };
+          debugLog(`REQ filter: ${JSON.stringify(subFilter)}`);
+          sendRaw(["REQ", subscriptionId, subFilter]);
           debugLog(`Subscribed to responses: ${subscriptionId}`);
           resolve();
         };
