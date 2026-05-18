@@ -231,7 +231,8 @@ program
     "Mint URL to refund to (defaults to first mint in wallet)",
   )
   .option("-y, --yes", "Skip confirmation prompt", false)
-  .action(async (options: { mintUrl?: string; yes: boolean }) => {
+  .option("--xcashu", "Refund xcashu tokens only (uses refundXcashuTokens)", false)
+  .action(async (options: { mintUrl?: string; yes: boolean; xcashu: boolean }) => {
     await ensureDaemonRunning();
 
     let mintUrl = options.mintUrl;
@@ -257,6 +258,36 @@ program
     }
 
     try {
+      if (options.xcashu) {
+        // xcashu path: only refund xcashu tokens
+        const result = await callDaemon("/refund/xcashu", {
+          method: "POST",
+          body: { mintUrl },
+        });
+
+        if (result.error) {
+          console.log(result.error);
+          process.exit(1);
+        }
+
+        const output = result.output as
+          | {
+              message: string;
+              results: Array<{ baseUrl: string; token: string; success: boolean; error?: string }>;
+            }
+          | undefined;
+
+        if (output) {
+          console.log(output.message);
+          console.log("\nResults:");
+          for (const r of output.results) {
+            const status = r.success ? "success" : `failed: ${r.error || "unknown"}`;
+            console.log(`  - ${r.baseUrl}: ${status}`);
+          }
+        }
+        return;
+      }
+
       const result = await callDaemon("/refund", {
         method: "POST",
         body: { mintUrl },

@@ -670,6 +670,34 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/refund/xcashu") {
+      try {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "mintUrl");
+
+        const spender = deps.refundClient.getCashuSpender();
+        const results = await spender.refundXcashuTokens(mintUrl);
+
+        sendJson(res, 200, {
+          output: {
+            message: `Refunded xcashu tokens to ${mintUrl}`,
+            results: results.map(
+              (r: { baseUrl: string; token: string; success: boolean; error?: string }) => ({
+                baseUrl: r.baseUrl,
+                token: r.token,
+                success: r.success,
+                error: r.error,
+              }),
+            ),
+          },
+        });
+      } catch (error) {
+        logger.error(`xcashu refund error: ${toErrorMessage(error)}`);
+        respondWithError(res, error);
+      }
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/balance") {
       try {
         const balances = await deps.walletAdapter.getBalances();
