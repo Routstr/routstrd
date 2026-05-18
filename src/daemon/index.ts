@@ -11,6 +11,8 @@ import {
 import type { SdkLogger } from "@routstr/sdk";
 import { DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
+import { createNwcClient, parseConnectionString } from "./wallet/nwc-client";
+import type { NwcClient } from "./wallet/nwc-client";
 
 function makeSdkLogger(prefix?: string): SdkLogger {
   const tag = prefix ? `[${prefix}]` : undefined;
@@ -69,10 +71,68 @@ async function main(): Promise<void> {
     createModelService(modelManager, store);
 
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+
+  // ── NWC (Nostr Wallet Connect) setup ──────────────────────────
+
+  let nwcClient: NwcClient | undefined;
+  let nwcCleanup: (() => void) | undefined;
+
+  if (config.nwc?.connectionString) {
+    try {
+      parseConnectionString(config.nwc.connectionString);
+
+      nwcClient = createNwcClient({
+        connectionString: config.nwc.connectionString,
+      });
+
+      logger.log("[nwc] NWC connection configured, connecting...");
+      await nwcClient.connect();
+
+      const info = await nwcClient.getInfo();
+      logger.log(
+        `[nwc] Connected to NWC wallet: ${info.alias} (${info.pubkey.slice(0, 8)}...)`,
+      );
+      logger.log(`[nwc] Supported methods: ${info.methods.join(", ")}`);
+
+      try {
+        const balance = await nwcClient.getBalance();
+        logger.log(`[nwc] Wallet balance: ${balance} sats`);
+      } catch {
+        // balance might not be available
+      }
+    } catch (error) {
+      logger.error(
+        "[nwc] Failed to connect NWC:",
+        (error as Error).message,
+      );
+      // Don't crash — continue without NWC
+      nwcClient = undefined;
+    }
+  }
+
+  const nwcAutoRefill =
+    config.nwc?.autoRefill?.enabled && nwcClient
+      ? {
+          threshold: config.nwc.autoRefill.threshold,
+          amount: config.nwc.autoRefill.amount,
+          cooldownMs: config.nwc.autoRefill.cooldownMs,
+        }
+      : undefined;
+
   const walletAdapter = await createWalletAdapter({
     cocodPath: config.cocodPath,
     walletClient,
+    nwcClient,
+    autoRefill: nwcAutoRefill,
   });
+
+  // Handle NWC cleanup on shutdown
+  if (nwcClient) {
+    nwcCleanup = () => {
+      logger.log("[nwc] Shutting down NWC connection...");
+      nwcClient!.disconnect();
+    };
+  }
 
   const refundClient = new RoutstrClient(
     walletAdapter,
@@ -208,6 +268,7 @@ async function main(): Promise<void> {
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
+    if (nwcCleanup) nwcCleanup();
   });
 
   server.listen(port, async () => {
