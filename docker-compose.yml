@@ -1,14 +1,15 @@
 services:
-  bun:
+  routstrd:
     build: .
-    container_name: routstrd-bun
-    working_dir: /app
-    volumes:
-      - .:/app
-      - bun_home:/root/.bun
+    container_name: routstrd
     stdin_open: true
     tty: true
+    volumes:
+      - routstrd_data:/data
+    ports:
+      - "8008:8008"
+    restart: unless-stopped
     command: /bin/bash
 
 volumes:
-  bun_home:
+  routstrd_data:
