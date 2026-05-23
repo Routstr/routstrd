@@ -211,9 +211,9 @@ export async function createWalletAdapter(
       }
     },
 
-    /** Get the auto-refill config */
+    /** Get the current auto-refill config, re-reading from the getter if available */
     getAutoRefillConfig(): AutoRefillConfig | undefined {
-      return options.autoRefill;
+      return options.getAutoRefillConfig?.() ?? options.autoRefill;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
       const maxRetries = 3;
