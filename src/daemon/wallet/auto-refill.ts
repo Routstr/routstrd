@@ -20,7 +20,7 @@ export interface AutoRefillConfig {
 export function startAutoRefillLoop(
   cocod: CocodClient,
   wallet: WalletConnect,
-  config: AutoRefillConfig,
+  getConfig: () => AutoRefillConfig | undefined,
   intervalMs: number = 5000,
 ): () => void {
   let lastRefillAt = 0;
@@ -33,6 +33,13 @@ export function startAutoRefillLoop(
     if (checkInProgress) return;
     if (!wallet.service) {
       // NWC not connected — nothing to do
+      return;
+    }
+
+    // Read config fresh each cycle so changes apply without restart
+    const config = getConfig();
+    if (!config) {
+      // Auto-refill disabled
       return;
     }
 

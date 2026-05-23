@@ -558,7 +558,7 @@ export function createDaemonRequestHandler(deps: {
 
         return {
           output: {
-            message: `Auto-refill ${enabled ? "enabled" : "disabled"}. Restart daemon to apply.`,
+            message: `Auto-refill ${enabled ? "enabled" : "disabled"}.`,
             autoRefill: config.nwc.autoRefill,
           },
         };

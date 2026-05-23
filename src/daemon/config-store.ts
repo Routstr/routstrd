@@ -1,5 +1,5 @@
 import { mkdir } from "fs/promises";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import {
   CONFIG_DIR,
   CONFIG_FILE,
@@ -23,6 +23,18 @@ export async function loadDaemonConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {
       const content = await Bun.file(CONFIG_FILE).text();
+      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+    }
+  } catch (error) {
+    logger.error("Failed to load config:", error);
+  }
+  return DEFAULT_CONFIG;
+}
+
+export function loadDaemonConfigSync(): RoutstrdConfig {
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const content = readFileSync(CONFIG_FILE, "utf-8");
       return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
     }
   } catch (error) {

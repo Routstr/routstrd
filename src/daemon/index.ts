@@ -26,12 +26,13 @@ function makeSdkLogger(prefix?: string): SdkLogger {
 }
 const daemonSdkLogger: SdkLogger = makeSdkLogger();
 import { parseArgs } from "./args";
-import { ensureDirs, loadDaemonConfig, saveDaemonConfig } from "./config-store";
+import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
 import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
 } from "@routstr/sdk/storage";
 import { createWalletAdapter } from "./wallet";
+import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
@@ -72,20 +73,25 @@ async function main(): Promise<void> {
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
 
   // ── Auto-refill configuration ────────────────────────────────
+  // Uses a getter that reads config from disk each cycle, so
+  // CLI changes take effect immediately without a daemon restart.
 
-  const nwcAutoRefill =
-    config.nwc?.autoRefill?.enabled && config.nwc?.connectionString
-      ? {
-          threshold: config.nwc.autoRefill.threshold,
-          amount: config.nwc.autoRefill.amount,
-          cooldownMs: config.nwc.autoRefill.cooldownMs,
-        }
-      : undefined;
+  const getAutoRefillConfig = (): AutoRefillConfig | undefined => {
+    const cfg = loadDaemonConfigSync();
+    if (cfg.nwc?.autoRefill?.enabled && cfg.nwc?.connectionString) {
+      return {
+        threshold: cfg.nwc.autoRefill.threshold,
+        amount: cfg.nwc.autoRefill.amount,
+        cooldownMs: cfg.nwc.autoRefill.cooldownMs,
+      };
+    }
+    return undefined;
+  };
 
   const walletAdapter = await createWalletAdapter({
     cocodPath: config.cocodPath,
     walletClient,
-    autoRefill: nwcAutoRefill,
+    getAutoRefillConfig,
     nwcConnectionString: config.nwc?.connectionString,
   });
 

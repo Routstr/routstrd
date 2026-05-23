@@ -1309,13 +1309,9 @@ nwcCmd
       });
     }
 
-    // Validate the connection string format
-    const { validateConnectionString } = await import(
-      "./daemon/wallet/nwc-client"
-    );
-    const validation = validateConnectionString(connectionString);
-    if (!validation.valid) {
-      console.error(`Invalid NWC connection string: ${validation.error}`);
+    // Quick validation: must be nostr+walletconnect:// with a 64-char hex pubkey
+    if (!/^nostr\+walletconnect:\/\/[0-9a-fA-F]{64}\?relay=/.test(connectionString)) {
+      console.error("Invalid NWC connection string: expected nostr+walletconnect://<64-char-hex>?relay=...");
       process.exit(1);
     }
 
@@ -1387,7 +1383,6 @@ autoRefillCmd
         cooldownMs: cooldownSec * 1000,
       },
     });
-    console.log("\nRun 'routstrd restart' to apply.");
   });
 
 autoRefillCmd
@@ -1398,7 +1393,6 @@ autoRefillCmd
       method: "POST",
       body: { enabled: false },
     });
-    console.log("\nRun 'routstrd restart' to apply.");
   });
 
 // Stop

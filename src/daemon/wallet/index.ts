@@ -22,8 +22,14 @@ export interface WalletAdapterOptions {
   walletClient?: CocodClient;
   /** NWC connection string for Lightning funding (uses applesauce-wallet-connect) */
   nwcConnectionString?: string;
-  /** Auto-refill configuration */
+  /** Auto-refill configuration (static, for startup only) */
   autoRefill?: AutoRefillConfig;
+  /**
+   * Config getter called on every check cycle to allow live updates.
+   * Return undefined to disable auto-refill, or a config to use.
+   * When provided, this replaces the static `autoRefill` option.
+   */
+  getAutoRefillConfig?: () => AutoRefillConfig | undefined;
 }
 
 export async function createWalletAdapter(
@@ -266,15 +272,21 @@ export async function createWalletAdapter(
 
   let stopAutoRefill: (() => void) | undefined;
 
-  if (options.autoRefill && wallet) {
-    stopAutoRefill = startAutoRefillLoop(
-      client,
-      wallet,
-      options.autoRefill,
-    );
+  const autoRefillConfig = options.getAutoRefillConfig
+    ? options.getAutoRefillConfig()
+    : options.autoRefill;
+
+  if (autoRefillConfig && wallet) {
+    const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
+    stopAutoRefill = startAutoRefillLoop(client, wallet, getConfig);
     logger.log(
-      `[wallet] Auto-refill enabled: threshold=${options.autoRefill.threshold} sats, amount=${options.autoRefill.amount} sats, cooldown=${options.autoRefill.cooldownMs}ms`,
+      `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs}ms`,
     );
+  } else if (wallet && options.getAutoRefillConfig) {
+    // Wallet exists but auto-refill is not currently enabled.
+    // Start the loop anyway so it can pick up changes without a restart.
+    stopAutoRefill = startAutoRefillLoop(client, wallet, options.getAutoRefillConfig);
+    logger.log("[wallet] Auto-refill loop started (currently disabled — enable via CLI to activate)");
   }
 
   try {
