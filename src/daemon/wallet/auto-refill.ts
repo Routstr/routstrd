@@ -15,6 +15,21 @@ export interface AutoRefillConfig {
   amount: number;
   /** Minimum time between refills (milliseconds) */
   cooldownMs: number;
+  /** Maximum consecutive failures before stopping (0 = never stop on failures) */
+  maxConsecutiveFailures?: number;
+}
+
+// Errors that cannot be resolved by retrying — the user must intervene.
+const FATAL_ERROR_PATTERNS = [
+  /insufficient (?:balance|funds)/i,
+  /invalid (?:credentials|auth)/i,
+  /forbidden/i,
+  /unauthorized/i,
+  /invoice.*expired/i,
+];
+
+function isFatalError(message: string): boolean {
+  return FATAL_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 export function startAutoRefillLoop(
@@ -27,6 +42,7 @@ export function startAutoRefillLoop(
   let running = true;
   let timeout: ReturnType<typeof setInterval> | null = null;
   let checkInProgress = false;
+  let consecutiveFailures = 0;
 
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
@@ -49,6 +65,16 @@ export function startAutoRefillLoop(
     }
 
     checkInProgress = true;
+
+    // If we've been failing too much, back off rather than retrying at full speed.
+    // This prevents tight loops on transient errors.
+    const backoffInterval = Math.min(
+      intervalMs * Math.pow(2, consecutiveFailures),
+      5 * 60 * 1000, // cap at 5 minutes
+    );
+    if (now - lastRefillAt < backoffInterval) {
+      return;
+    }
 
     try {
       const balances = await cocod.getBalances();
@@ -94,9 +120,38 @@ export function startAutoRefillLoop(
         logger.log(`[auto-refill] Fees paid: ${fees_paid} msats`);
       }
       lastRefillAt = now;
+      consecutiveFailures = 0; // reset on success
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[auto-refill] Error: ${message}`);
+      consecutiveFailures++;
+
+      if (isFatalError(message)) {
+        // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
+        // We don't stop permanently so it auto-recovers without a restart.
+        const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
+        logger.error(
+          `[auto-refill] FATAL: ${message}. The funding wallet (NWC) cannot pay. ` +
+            `Cooling down for ${FATAL_COOLDOWN_MS / 60000} minutes. ` +
+            `Fund your NWC wallet and auto-refill will retry automatically.`,
+        );
+        lastRefillAt = now; // skip the cooldownMs check, backoff handles the wait
+        checkInProgress = false;
+        return;
+      }
+
+      const maxFailures = config.maxConsecutiveFailures ?? 0;
+      if (maxFailures > 0 && consecutiveFailures >= maxFailures) {
+        logger.error(
+          `[auto-refill] Stopping after ${consecutiveFailures} consecutive failures (maxConsecutiveFailures=${maxFailures}). ` +
+            `Last error: ${message}`,
+        );
+        running = false;
+        return;
+      }
+
+      logger.error(
+        `[auto-refill] Error (attempt ${consecutiveFailures}, next in ${Math.round(backoffInterval / 1000)}s): ${message}`,
+      );
     } finally {
       checkInProgress = false;
     }
