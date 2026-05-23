@@ -1,9 +1,11 @@
 // Auto-refill loop for routstrd
 // Monitors Cocod Cashu balance and triggers NWC funding when below threshold.
 // This runs server-side, so refills happen regardless of whether a frontend is open.
+//
+// Uses applesauce-wallet-connect (same approach as nwc_integration/pay_invoice.mts).
 
 import type { CocodClient } from "./cocod-client";
-import type { NwcClient } from "./nwc-client";
+import type { WalletConnect } from "applesauce-wallet-connect";
 import { logger } from "../../utils/logger";
 
 export interface AutoRefillConfig {
@@ -17,7 +19,7 @@ export interface AutoRefillConfig {
 
 export function startAutoRefillLoop(
   cocod: CocodClient,
-  nwc: NwcClient,
+  wallet: WalletConnect,
   config: AutoRefillConfig,
   intervalMs: number = 5000,
 ): () => void {
@@ -29,7 +31,7 @@ export function startAutoRefillLoop(
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
     if (checkInProgress) return;
-    if (!nwc.isConnected()) {
+    if (!wallet.service) {
       // NWC not connected — nothing to do
       return;
     }
@@ -71,9 +73,9 @@ export function startAutoRefillLoop(
       );
       const invoice = await cocod.receiveBolt11(config.amount, mintUrl);
 
-      // Step 2: Pay the invoice via NWC
+      // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
-      const { preimage } = await nwc.payInvoice(invoice, config.amount);
+      const { preimage, fees_paid } = await wallet.payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
       // and issue tokens. We don't need to explicitly mint here; cocod
@@ -81,6 +83,9 @@ export function startAutoRefillLoop(
       logger.log(
         `[auto-refill] Successfully refilled ${config.amount} sats. Preimage: ${preimage.slice(0, 16)}...`,
       );
+      if (fees_paid !== undefined) {
+        logger.log(`[auto-refill] Fees paid: ${fees_paid} msats`);
+      }
       lastRefillAt = now;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

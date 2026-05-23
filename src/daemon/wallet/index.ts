@@ -1,8 +1,9 @@
 import { getDecodedToken, Amount } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
+import { WalletConnect } from "applesauce-wallet-connect";
+import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
-import type { NwcClient } from "./nwc-client";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
 
 export function decodeCashuTokenAmount(token: string): {
@@ -19,9 +20,9 @@ export function decodeCashuTokenAmount(token: string): {
 export interface WalletAdapterOptions {
   cocodPath?: string | null;
   walletClient?: CocodClient;
-  /** Optional NWC client for Lightning funding */
-  nwcClient?: NwcClient;
-  /** Auto-refill configuration (requires nwcClient) */
+  /** NWC connection string for Lightning funding (uses applesauce-wallet-connect) */
+  nwcConnectionString?: string;
+  /** Auto-refill configuration */
   autoRefill?: AutoRefillConfig;
 }
 
@@ -55,6 +56,27 @@ export async function createWalletAdapter(
     return nextBalances;
   }
 
+  // ── NWC connection (applesauce approach) ──────────────────────
+
+  let wallet: WalletConnect | undefined;
+  let pool: RelayPool | undefined;
+
+  if (options.nwcConnectionString) {
+    pool = new RelayPool();
+    wallet = WalletConnect.fromConnectURI(options.nwcConnectionString, { pool });
+
+    // Connect in background (non-blocking)
+    wallet.waitForService()
+      .then(() => {
+        logger.log(
+          `[nwc] NWC wallet connected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
+        );
+      })
+      .catch((err) => {
+        logger.error(`[nwc] NWC connection failed: ${err.message}`);
+      });
+  }
+
   const walletAdapter = {
     async getBalances(): Promise<Record<string, number>> {
       return syncMintState();
@@ -75,8 +97,7 @@ export async function createWalletAdapter(
       preimage?: string;
       error?: string;
     }> {
-      const nwc = options.nwcClient;
-      if (!nwc || !nwc.isConnected()) {
+      if (!wallet || !wallet.service) {
         return { success: false, invoice: "", error: "NWC not connected" };
       }
 
@@ -92,7 +113,7 @@ export async function createWalletAdapter(
         const invoice = await client.receiveBolt11(amount, mintUrl);
 
         // Step 2: Pay it via NWC
-        const { preimage } = await nwc.payInvoice(invoice, amount);
+        const { preimage } = await wallet.payInvoice(invoice);
 
         return { success: true, invoice, preimage };
       } catch (error) {
@@ -111,20 +132,20 @@ export async function createWalletAdapter(
       balance?: number;
       error?: string;
     }> {
-      const nwc = options.nwcClient;
-      if (!nwc) {
+      if (!wallet) {
         return { connected: false, error: "NWC not configured" };
       }
 
-      if (!nwc.isConnected()) {
+      if (!wallet.service) {
         return { connected: false, error: "NWC not connected" };
       }
 
       try {
-        const info = await nwc.getInfo();
+        const info = await wallet.getInfo();
         let balance: number | undefined;
         try {
-          balance = await nwc.getBalance();
+          const bal = await wallet.getBalance();
+          balance = Math.floor(bal.balance / 1000); // msats → sats
         } catch {
           // Balance might not be available
         }
@@ -203,27 +224,15 @@ export async function createWalletAdapter(
 
   let stopAutoRefill: (() => void) | undefined;
 
-  if (options.autoRefill && options.nwcClient) {
-    // Start after initial state sync
-    const startRefill = () => {
-      stopAutoRefill = startAutoRefillLoop(
-        client,
-        options.nwcClient!,
-        options.autoRefill!,
-      );
-      logger.log(
-        `[wallet] Auto-refill enabled: threshold=${options.autoRefill!.threshold} sats, amount=${options.autoRefill!.amount} sats, cooldown=${options.autoRefill!.cooldownMs}ms`,
-      );
-    };
-
-    // If NWC is already connected, start immediately; otherwise,
-    // the daemon will start refill after NWC connects
-    if (options.nwcClient.isConnected()) {
-      startRefill();
-    }
-
-    // Store the start function so the daemon can call it after NWC connects
-    (walletAdapter as any)._startAutoRefill = startRefill;
+  if (options.autoRefill && wallet) {
+    stopAutoRefill = startAutoRefillLoop(
+      client,
+      wallet,
+      options.autoRefill,
+    );
+    logger.log(
+      `[wallet] Auto-refill enabled: threshold=${options.autoRefill.threshold} sats, amount=${options.autoRefill.amount} sats, cooldown=${options.autoRefill.cooldownMs}ms`,
+    );
   }
 
   try {
