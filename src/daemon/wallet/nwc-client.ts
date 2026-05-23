@@ -1,16 +1,11 @@
 // NIP-47 NWC (Nostr Wallet Connect) client for routstrd
 // Uses nostr-tools for key management and encryption,
 // Bun's native WebSocket for relay communication.
-//
-// Encryption: auto-detects NIP-04 vs NIP-44 by reading the wallet's
-// kind-13194 info event on connect, per the NIP-47 encryption negotiation spec.
-// If the info event has an "encryption" tag listing supported schemes,
-// nip44_v2 is preferred. Otherwise falls back to NIP-04.
+// Encryption: uses NIP-04 (default NIP-47 scheme).
 
 import {
   getPublicKey,
   nip04,
-  nip44,
   finalizeEvent,
   type EventTemplate,
 } from "nostr-tools";
@@ -134,7 +129,6 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
     ? Buffer.from(options.clientSecretKey, "hex")
     : Buffer.from(parsed.secret, "hex");
   const clientPubkeyHex = getPublicKey(clientSecretKey);
-  const nwc44ConvKey = nip44.getConversationKey(clientSecretKey, walletPubkey);
 
   // ── State ──────────────────────────────────────────────────────
   let ws: WebSocket | null = null;
@@ -143,7 +137,6 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
   let subscriptionId: string | null = null;
   let reconnectAttempts = 0;
   let stopReconnecting = false;
-  let useEncryption: "nip04" | "nip44_v2" = "nip04";
 
   const queue: QueuedCall[] = [];
   let sending = false;
@@ -155,17 +148,11 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
   // ── Encryption helpers ─────────────────────────────────────────
 
   function encryptPayload(payload: string): string {
-    if (useEncryption === "nip44_v2") {
-      return nip44.encrypt(payload, nwc44ConvKey);
-    }
     // nostr-tools v2 nip04.encrypt is sync but typed as Promise-like
     return nip04.encrypt(clientSecretKey, walletPubkey, payload) as unknown as string;
   }
 
   function decryptPayload(payload: string): string {
-    if (useEncryption === "nip44_v2") {
-      return nip44.decrypt(payload, nwc44ConvKey);
-    }
     return nip04.decrypt(clientSecretKey, walletPubkey, payload) as unknown as string;
   }
 
@@ -190,9 +177,7 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
   }
 
   function buildRequestTags(): string[][] {
-    const tags: string[][] = [["p", walletPubkey]];
-    if (useEncryption === "nip44_v2") tags.unshift(["encryption", "nip44_v2"]);
-    return tags;
+    return [["p", walletPubkey]];
   }
 
   // ── Queue processing ───────────────────────────────────────────
@@ -204,7 +189,7 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
     try {
       const requestContent: NwcRequest = { method: call.method, params: call.params };
       const requestJson = JSON.stringify(requestContent);
-      debugLog(`Sending ${call.method} (queue: ${queue.length}, enc: ${useEncryption})`);
+      debugLog(`Sending ${call.method} (queue: ${queue.length})`);
       const encrypted = encryptPayload(requestJson);
       const event = createSignedEvent(NWC_REQUEST_KIND, encrypted, buildRequestTags());
       sendRaw(["EVENT", event]);
@@ -245,6 +230,7 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
         debugLog("No result_type, using queue head");
         call = queue.shift()!;
       }
+      if (!call) return;
       clearTimeout(call.timeout);
       if (response.error) {
         call.reject(new Error(
@@ -253,10 +239,12 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
         call.resolve(response);
       }
     } catch (error) {
-      const call = queue.shift()!;
-      clearTimeout(call.timeout);
-      call.reject(new Error(
-        `Failed to parse NWC response: ${(error as Error).message}`));
+      const failed = queue.shift();
+      if (failed) {
+        clearTimeout(failed.timeout);
+        failed.reject(new Error(
+          `Failed to parse NWC response: ${(error as Error).message}`));
+      }
     }
     sendNextFromQueue();
   }
@@ -282,69 +270,7 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
     });
   }
 
-  // ── Encryption negotiation ─────────────────────────────────────
-  // Fetches the wallet's info event (kind 13194) to check supported encryption.
-
-  function negotiateEncryption(): void {
-    const infoSubId = `nwc-info-${clientPubkeyHex.slice(0, 8)}`;
-    let resolved = false;
-
-    const finish = () => {
-      if (resolved) return;
-      resolved = true;
-      try { sendRaw(["CLOSE", infoSubId]); } catch { /* ok */ }
-    };
-
-    const timeout = setTimeout(() => {
-      debugLog("Info event fetch timed out, defaulting to nip04");
-      finish();
-    }, publishTimeoutMs);
-
-    const originalOnMsg = ws!.onmessage;
-    ws!.onmessage = (evt) => {
-      const raw = typeof evt.data === "string"
-        ? evt.data : new TextDecoder().decode(evt.data as ArrayBuffer);
-      let msg: unknown[];
-      try { msg = JSON.parse(raw); } catch {
-        originalOnMsg?.call(ws, evt); return;
-      }
-      if (!Array.isArray(msg) || msg.length < 2) {
-        originalOnMsg?.call(ws, evt); return;
-      }
-
-      if (msg[0] === "EVENT" && msg.length >= 3) {
-        const ev = msg[2] as NostrEvent;
-        if (ev.kind === 13194 && ev.pubkey === walletPubkey) {
-          clearTimeout(timeout);
-          debugLog(`Got wallet info: "${ev.content}" tags: ${JSON.stringify(ev.tags)}`);
-          const encTag = ev.tags.find((t) => t.length >= 2 && t[0] === "encryption");
-          if (encTag) {
-            const schemes = encTag[1].split(/\s+/);
-            debugLog(`Wallet encryption: ${schemes.join(", ")}`);
-            if (schemes.includes("nip44_v2")) {
-              useEncryption = "nip44_v2";
-              log("Negotiated encryption: nip44_v2");
-            }
-          } else {
-            debugLog("No encryption tag, using nip04 (default)");
-          }
-          ws!.onmessage = originalOnMsg;
-          finish(); return;
-        }
-      }
-      if (msg[0] === "EOSE") {
-        clearTimeout(timeout);
-        debugLog("Info event not found, defaulting to nip04");
-        ws!.onmessage = originalOnMsg;
-        finish(); return;
-      }
-      originalOnMsg?.call(ws, evt);
-    };
-
-    sendRaw(["REQ", infoSubId, { kinds: [13194], authors: [walletPubkey] }]);
-  }
-
-  // ── Relay message handler ──────────────────────────────────────
+  // ── Relay message handler ────────────────────────────────────
 
   function handleRelayMessage(raw: string): void {
     let msg: unknown[];
@@ -396,9 +322,6 @@ export function createNwcClient(options: NwcClientOptions): NwcClient {
             kinds: [NWC_RESPONSE_KIND], "#p": [clientPubkeyHex],
           }]);
           debugLog(`Subscribed: ${subscriptionId}`);
-
-          // Fetch wallet info event for encryption negotiation
-          negotiateEncryption();
 
           // Wait for EOSE to confirm subscription is active
           const waitForReady = () => {
