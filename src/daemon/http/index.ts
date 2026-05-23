@@ -503,12 +503,15 @@ export function createDaemonRequestHandler(deps: {
         if (!result.success) {
           throw new Error(result.error || "NWC funding failed");
         }
+        const balances = await deps.walletAdapter.getBalances();
+        const activeMint = deps.walletAdapter.getActiveMintUrl();
+        const balance = activeMint ? (balances[activeMint] ?? 0) : 0;
+
         return {
           output: {
             message: `Successfully funded ${amount} sats via NWC`,
-            invoice: result.invoice,
-            preimage: result.preimage,
             amount,
+            balance,
           },
         };
       });

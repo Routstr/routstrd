@@ -97,7 +97,12 @@ export async function createWalletAdapter(
       preimage?: string;
       error?: string;
     }> {
+      logger.log("=".repeat(50));
+      logger.log(`[nwc] Fund Cashu wallet from NWC — amount: ${amount} sats`);
+      logger.log("=".repeat(50));
+
       if (!wallet || !wallet.service) {
+        logger.error("[nwc] NWC not connected");
         return { success: false, invoice: "", error: "NWC not connected" };
       }
 
@@ -105,19 +110,56 @@ export async function createWalletAdapter(
       await syncMintState();
       const mintUrl = activeMintUrl;
       if (!mintUrl) {
+        logger.error("[nwc] No active mint configured");
         return { success: false, invoice: "", error: "No active mint configured" };
       }
 
       try {
-        // Step 1: Create a BOLT-11 invoice via cocod
+        // Step 1: Check initial balance
+        logger.log(`[nwc] Checking initial cocod balance on mint ${mintUrl}...`);
+        let initialBalance: number | null = null;
+        try {
+          const balances = await client.getBalances();
+          initialBalance = balances[mintUrl] ?? 0;
+          logger.log(`[nwc]   Initial balance: ${initialBalance} sats`);
+        } catch {
+          logger.log("[nwc]   Could not retrieve initial balance");
+        }
+
+        // Step 2: Create a BOLT-11 invoice via cocod
+        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
         const invoice = await client.receiveBolt11(amount, mintUrl);
+        logger.log(`[nwc]   Invoice: ${invoice}`);
 
-        // Step 2: Pay it via NWC
-        const { preimage } = await wallet.payInvoice(invoice);
+        // Step 3: Pay it via NWC
+        logger.log("[nwc] Paying invoice via NWC...");
+        const { preimage, fees_paid } = await wallet.payInvoice(invoice);
+        logger.log(`[nwc]   ✅ Payment successful!`);
+        logger.log(`[nwc]   Preimage: ${preimage}`);
+        if (fees_paid !== undefined) {
+          logger.log(`[nwc]   Fees paid: ${fees_paid} msats`);
+        }
 
+        // Step 4: Check final balance
+        logger.log("[nwc] Checking final cocod balance...");
+        try {
+          const balances = await client.getBalances();
+          const finalBalance = balances[mintUrl] ?? 0;
+          logger.log(`[nwc]   Final balance: ${finalBalance} sats`);
+          if (initialBalance !== null) {
+            const diff = finalBalance - initialBalance;
+            logger.log(`[nwc]   Balance change: ${diff > 0 ? "+" : ""}${diff} sats`);
+          }
+        } catch {
+          logger.log("[nwc]   Could not retrieve final balance");
+        }
+
+        logger.log("=".repeat(50));
         return { success: true, invoice, preimage };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[nwc]   ❌ Fund from NWC failed: ${message}`);
+        logger.log("=".repeat(50));
         return { success: false, invoice: "", error: message };
       }
     },
