@@ -34,7 +34,7 @@ function isFatalError(message: string): boolean {
 
 export function startAutoRefillLoop(
   cocod: CocodClient,
-  wallet: WalletConnect,
+  getWallet: () => WalletConnect | undefined,
   getConfig: () => AutoRefillConfig | undefined,
   intervalMs: number = 5000,
 ): () => void {
@@ -47,7 +47,8 @@ export function startAutoRefillLoop(
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
     if (checkInProgress) return;
-    if (!wallet.service) {
+    const wallet = getWallet();
+    if (!wallet?.service) {
       // NWC not connected — nothing to do
       return;
     }
@@ -108,7 +109,12 @@ export function startAutoRefillLoop(
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
-      const { preimage, fees_paid } = await wallet.payInvoice(invoice);
+      const currentWallet = getWallet();
+      if (!currentWallet?.service) {
+        logger.log("[auto-refill] Wallet disconnected during refill check");
+        return;
+      }
+      const { preimage, fees_paid } = await currentWallet.payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
       // and issue tokens. We don't need to explicitly mint here; cocod

@@ -1319,8 +1319,6 @@ nwcCmd
       method: "POST",
       body: { connectionString },
     });
-
-    console.log("\nRun 'routstrd restart' to connect to the NWC wallet.");
   });
 
 nwcCmd
@@ -1330,7 +1328,6 @@ nwcCmd
     await handleDaemonCommand("/nwc/disconnect", {
       method: "POST",
     });
-    console.log("\nRun 'routstrd restart' to apply.");
   });
 
 nwcCmd

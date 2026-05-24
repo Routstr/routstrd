@@ -67,6 +67,9 @@ export async function createWalletAdapter(
   let wallet: WalletConnect | undefined;
   let pool: RelayPool | undefined;
 
+  // Getter for the current wallet instance (used by auto-refill loop)
+  const getWallet = (): WalletConnect | undefined => wallet;
+
   if (options.nwcConnectionString) {
     pool = new RelayPool();
     wallet = WalletConnect.fromConnectURI(options.nwcConnectionString, { pool });
@@ -84,6 +87,42 @@ export async function createWalletAdapter(
   }
 
   const walletAdapter = {
+    async reconnect(connectionString?: string): Promise<void> {
+      logger.log(
+        `[nwc] Reconnecting NWC wallet... ${connectionString ? "new connection string provided" : "disconnecting"}`,
+      );
+
+      // 1. Close existing relay pool connections
+      if (pool) {
+        for (const [url] of pool.relays) {
+          pool.remove(url, true);
+        }
+      }
+
+      // 2. Update wallet reference
+      wallet = undefined;
+      pool = undefined;
+
+      // 3. Create new wallet if connection string provided
+      if (connectionString) {
+        pool = new RelayPool();
+        wallet = WalletConnect.fromConnectURI(connectionString, { pool });
+
+        // Connect in background (non-blocking)
+        wallet.waitForService()
+          .then(() => {
+            logger.log(
+              `[nwc] NWC wallet reconnected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
+            );
+          })
+          .catch((err) => {
+            logger.error(`[nwc] NWC reconnection failed: ${err.message}`);
+          });
+      } else {
+        logger.log("[nwc] NWC wallet disconnected.");
+      }
+    },
+
     async getBalances(): Promise<Record<string, number>> {
       return syncMintState();
     },
@@ -278,14 +317,14 @@ export async function createWalletAdapter(
 
   if (autoRefillConfig && wallet) {
     const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
-    stopAutoRefill = startAutoRefillLoop(client, wallet, getConfig);
+    stopAutoRefill = startAutoRefillLoop(client, getWallet, getConfig);
     logger.log(
       `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs}ms`,
     );
   } else if (wallet && options.getAutoRefillConfig) {
     // Wallet exists but auto-refill is not currently enabled.
     // Start the loop anyway so it can pick up changes without a restart.
-    stopAutoRefill = startAutoRefillLoop(client, wallet, options.getAutoRefillConfig);
+    stopAutoRefill = startAutoRefillLoop(client, getWallet, options.getAutoRefillConfig);
     logger.log("[wallet] Auto-refill loop started (currently disabled — enable via CLI to activate)");
   }
 

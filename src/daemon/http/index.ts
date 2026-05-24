@@ -468,10 +468,12 @@ export function createDaemonRequestHandler(deps: {
         };
         saveDaemonConfig(config);
 
+        // Hot-reload: reconnect the wallet adapter with the new connection string
+        await deps.walletAdapter.reconnect(connectionString);
+
         return {
           output: {
-            message:
-              "NWC connection string saved. Restart the daemon to connect.",
+            message: "NWC connection string saved and connected.",
           },
         };
       });
@@ -488,8 +490,12 @@ export function createDaemonRequestHandler(deps: {
           }
         }
         saveDaemonConfig(config);
+
+        // Hot-reload: disconnect the wallet adapter
+        await deps.walletAdapter.reconnect();
+
         return {
-          output: { message: "NWC disconnected. Restart the daemon to apply." },
+          output: { message: "NWC disconnected." },
         };
       });
       return;
