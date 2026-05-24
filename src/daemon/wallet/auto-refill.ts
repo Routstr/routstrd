@@ -128,13 +128,15 @@ export function startAutoRefillLoop(
       if (isFatalError(message)) {
         // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
         // We don't stop permanently so it auto-recovers without a restart.
+        // Set lastRefillAt into the future so all time-gate checks block.
         const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
         logger.error(
           `[auto-refill] FATAL: ${message}. The funding wallet (NWC) cannot pay. ` +
             `Cooling down for ${FATAL_COOLDOWN_MS / 60000} minutes. ` +
             `Fund your NWC wallet and auto-refill will retry automatically.`,
         );
-        lastRefillAt = now; // skip the cooldownMs check, backoff handles the wait
+        lastRefillAt = now + FATAL_COOLDOWN_MS;
+        consecutiveFailures = 0; // reset — no point counting these as transient backoffs
         checkInProgress = false;
         return;
       }
