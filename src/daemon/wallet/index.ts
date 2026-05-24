@@ -319,7 +319,7 @@ export async function createWalletAdapter(
     const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
     stopAutoRefill = startAutoRefillLoop(client, getWallet, getConfig);
     logger.log(
-      `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs}ms`,
+      `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs / 60000} minutes`,
     );
   } else if (wallet && options.getAutoRefillConfig) {
     // Wallet exists but auto-refill is not currently enabled.

@@ -446,6 +446,7 @@ export function createDaemonRequestHandler(deps: {
                   threshold: autoRefill.threshold,
                   amount: autoRefill.amount,
                   cooldownMs: autoRefill.cooldownMs,
+                  cooldownMinutes: autoRefill.cooldownMs / 60000,
                 }
               : undefined,
           },
@@ -565,7 +566,10 @@ export function createDaemonRequestHandler(deps: {
         return {
           output: {
             message: `Auto-refill ${enabled ? "enabled" : "disabled"}.`,
-            autoRefill: config.nwc.autoRefill,
+            autoRefill: {
+              ...config.nwc.autoRefill,
+              cooldownMinutes: config.nwc.autoRefill.cooldownMs / 60000,
+            },
           },
         };
       });
