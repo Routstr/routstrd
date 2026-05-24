@@ -1284,6 +1284,114 @@ walletMintsCmd
     });
   });
 
+// ── NWC (Nostr Wallet Connect) commands ─────────────────────────
+
+const nwcCmd = program
+  .command("nwc")
+  .description("Manage NWC (Nostr Wallet Connect) integration");
+
+nwcCmd
+  .command("connect")
+  .description("Connect to a Lightning wallet via NWC")
+  .argument("[connection-string]", "NWC connection string (nostr+walletconnect://...)")
+  .action(async (connectionString?: string) => {
+    if (!connectionString) {
+      // Interactive mode: prompt for connection string
+      const rl = require("readline").createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      connectionString = await new Promise<string>((resolve) => {
+        rl.question("Paste your NWC connection string: ", (answer: string) => {
+          rl.close();
+          resolve(answer.trim());
+        });
+      });
+    }
+
+    // Quick validation: must be nostr+walletconnect:// with a 64-char hex pubkey
+    if (!/^nostr\+walletconnect:\/\/[0-9a-fA-F]{64}\?relay=/.test(connectionString)) {
+      console.error("Invalid NWC connection string: expected nostr+walletconnect://<64-char-hex>?relay=...");
+      process.exit(1);
+    }
+
+    await handleDaemonCommand("/nwc/connect", {
+      method: "POST",
+      body: { connectionString },
+    });
+  });
+
+nwcCmd
+  .command("disconnect")
+  .description("Disconnect from NWC wallet")
+  .action(async () => {
+    await handleDaemonCommand("/nwc/disconnect", {
+      method: "POST",
+    });
+  });
+
+nwcCmd
+  .command("status")
+  .description("Show NWC connection status and wallet info")
+  .action(async () => {
+    await handleDaemonCommand("/nwc/status");
+  });
+
+nwcCmd
+  .command("fund <amount>")
+  .description("Manually fund the Cashu wallet from the connected NWC wallet")
+  .action(async (amount: string) => {
+    const parsedAmount = parsePositiveIntOrExit(amount, "amount");
+    await handleDaemonCommand("/nwc/fund", {
+      method: "POST",
+      body: { amount: parsedAmount },
+    });
+  });
+
+const autoRefillCmd = nwcCmd
+  .command("auto-refill")
+  .description("Manage automatic wallet refill from NWC");
+
+autoRefillCmd
+  .command("on")
+  .description("Enable auto-refill")
+  .option(
+    "--threshold <sats>",
+    "Refill when Cashu balance drops below this many sats",
+    "500",
+  )
+  .option("--amount <sats>", "Refill this many sats at a time", "1000")
+  .option(
+    "--cooldown <seconds>",
+    "Minimum time between refills in seconds",
+    "300",
+  )
+  .action(async (options: { threshold: string; amount: string; cooldown: string }) => {
+    const threshold = parsePositiveIntOrExit(options.threshold, "threshold");
+    const amount = parsePositiveIntOrExit(options.amount, "amount");
+    const cooldownSec = parsePositiveIntOrExit(options.cooldown, "cooldown");
+
+    await handleDaemonCommand("/nwc/auto-refill", {
+      method: "POST",
+      body: {
+        enabled: true,
+        threshold,
+        amount,
+        cooldownMs: cooldownSec * 1000,
+      },
+    });
+  });
+
+autoRefillCmd
+  .command("off")
+  .description("Disable auto-refill")
+  .action(async () => {
+    await handleDaemonCommand("/nwc/auto-refill", {
+      method: "POST",
+      body: { enabled: false },
+    });
+  });
+
 // Stop
 program
   .command("stop")

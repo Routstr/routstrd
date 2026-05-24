@@ -8,6 +8,7 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import { logger } from "../../utils/logger";
+import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
   CocodHttpError,
   type CocodClient,
@@ -426,6 +427,151 @@ export function createDaemonRequestHandler(deps: {
         const mintUrl = getRequiredStringField(body, "url");
         const info = await deps.walletClient.getMintInfo(mintUrl);
         return { output: { url: mintUrl, info } };
+      });
+      return;
+    }
+
+    // ── NWC endpoints ─────────────────────────────────────────────
+
+    if (req.method === "GET" && url.pathname === "/nwc/status") {
+      await respond(res, async () => {
+        const status = await deps.walletAdapter.getNwcStatus();
+        const autoRefill = deps.walletAdapter.getAutoRefillConfig();
+        return {
+          output: {
+            ...status,
+            autoRefill: autoRefill
+              ? {
+                  enabled: autoRefill.enabled,
+                  threshold: autoRefill.threshold,
+                  amount: autoRefill.amount,
+                  cooldownMs: autoRefill.cooldownMs,
+                  cooldownMinutes: autoRefill.cooldownMs / 60000,
+                }
+              : undefined,
+          },
+        };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/nwc/connect") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const connectionString = getRequiredStringField(body, "connectionString");
+
+        // Reload config and set NWC connection
+        const config = await loadDaemonConfig();
+        config.nwc = {
+          mode: "funding_source",
+          connectionString,
+          autoRefill: config.nwc?.autoRefill,
+        };
+        saveDaemonConfig(config);
+
+        // Hot-reload: reconnect the wallet adapter with the new connection string
+        await deps.walletAdapter.reconnect(connectionString);
+
+        return {
+          output: {
+            message: "NWC connection string saved and connected.",
+          },
+        };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/nwc/disconnect") {
+      await respond(res, async () => {
+        const config = await loadDaemonConfig();
+        if (config.nwc) {
+          delete config.nwc.connectionString;
+          if (config.nwc.autoRefill) {
+            config.nwc.autoRefill.enabled = false;
+          }
+        }
+        saveDaemonConfig(config);
+
+        // Hot-reload: disconnect the wallet adapter
+        await deps.walletAdapter.reconnect();
+
+        return {
+          output: { message: "NWC disconnected." },
+        };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/nwc/fund") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const amount = getRequiredPositiveNumberField(body, "amount");
+        const result = await deps.walletAdapter.fundFromNWC(amount);
+        if (!result.success) {
+          throw new Error(result.error || "NWC funding failed");
+        }
+        const balances = await deps.walletAdapter.getBalances();
+        const activeMint = deps.walletAdapter.getActiveMintUrl();
+        const balance = activeMint ? (balances[activeMint] ?? 0) : 0;
+
+        return {
+          output: {
+            message: `Successfully funded ${amount} sats via NWC`,
+            amount,
+            balance,
+          },
+        };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/nwc/auto-refill") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const enabled = body.enabled === true || body.enabled === "true";
+
+        const config = await loadDaemonConfig();
+        if (!config.nwc) {
+          config.nwc = { mode: "funding_source" };
+        }
+
+        if (enabled) {
+          const threshold =
+            typeof body.threshold === "number" && body.threshold > 0
+              ? body.threshold
+              : 500;
+          const amount =
+            typeof body.amount === "number" && body.amount > 0
+              ? body.amount
+              : 1000;
+          const cooldownMs =
+            typeof body.cooldownMs === "number" && body.cooldownMs > 0
+              ? body.cooldownMs
+              : 300000;
+
+          config.nwc.autoRefill = {
+            enabled: true,
+            threshold,
+            amount,
+            cooldownMs,
+          };
+        } else {
+          config.nwc.autoRefill = config.nwc.autoRefill
+            ? { ...config.nwc.autoRefill, enabled: false }
+            : { enabled: false, threshold: 500, amount: 1000, cooldownMs: 300000 };
+        }
+
+        saveDaemonConfig(config);
+
+        return {
+          output: {
+            message: `Auto-refill ${enabled ? "enabled" : "disabled"}.`,
+            autoRefill: {
+              ...config.nwc.autoRefill,
+              cooldownMinutes: config.nwc.autoRefill.cooldownMs / 60000,
+            },
+          },
+        };
       });
       return;
     }

@@ -1,7 +1,10 @@
 import { getDecodedToken, Amount } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
+import { WalletConnect } from "applesauce-wallet-connect";
+import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
+import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
 
 export function decodeCashuTokenAmount(token: string): {
   amount: number;
@@ -14,11 +17,23 @@ export function decodeCashuTokenAmount(token: string): {
   return { amount, unit };
 }
 
+export interface WalletAdapterOptions {
+  cocodPath?: string | null;
+  walletClient?: CocodClient;
+  /** NWC connection string for Lightning funding (uses applesauce-wallet-connect) */
+  nwcConnectionString?: string;
+  /** Auto-refill configuration (static, for startup only) */
+  autoRefill?: AutoRefillConfig;
+  /**
+   * Config getter called on every check cycle to allow live updates.
+   * Return undefined to disable auto-refill, or a config to use.
+   * When provided, this replaces the static `autoRefill` option.
+   */
+  getAutoRefillConfig?: () => AutoRefillConfig | undefined;
+}
+
 export async function createWalletAdapter(
-  options: {
-    cocodPath?: string | null;
-    walletClient?: CocodClient;
-  } = {},
+  options: WalletAdapterOptions = {},
 ) {
   const client =
     options.walletClient || createCocodClient({ cocodPath: options.cocodPath });
@@ -47,7 +62,67 @@ export async function createWalletAdapter(
     return nextBalances;
   }
 
+  // ── NWC connection (applesauce approach) ──────────────────────
+
+  let wallet: WalletConnect | undefined;
+  let pool: RelayPool | undefined;
+
+  // Getter for the current wallet instance (used by auto-refill loop)
+  const getWallet = (): WalletConnect | undefined => wallet;
+
+  if (options.nwcConnectionString) {
+    pool = new RelayPool();
+    wallet = WalletConnect.fromConnectURI(options.nwcConnectionString, { pool });
+
+    // Connect in background (non-blocking)
+    wallet.waitForService()
+      .then(() => {
+        logger.log(
+          `[nwc] NWC wallet connected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
+        );
+      })
+      .catch((err) => {
+        logger.error(`[nwc] NWC connection failed: ${err.message}`);
+      });
+  }
+
   const walletAdapter = {
+    async reconnect(connectionString?: string): Promise<void> {
+      logger.log(
+        `[nwc] Reconnecting NWC wallet... ${connectionString ? "new connection string provided" : "disconnecting"}`,
+      );
+
+      // 1. Close existing relay pool connections
+      if (pool) {
+        for (const [url] of pool.relays) {
+          pool.remove(url, true);
+        }
+      }
+
+      // 2. Update wallet reference
+      wallet = undefined;
+      pool = undefined;
+
+      // 3. Create new wallet if connection string provided
+      if (connectionString) {
+        pool = new RelayPool();
+        wallet = WalletConnect.fromConnectURI(connectionString, { pool });
+
+        // Connect in background (non-blocking)
+        wallet.waitForService()
+          .then(() => {
+            logger.log(
+              `[nwc] NWC wallet reconnected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
+            );
+          })
+          .catch((err) => {
+            logger.error(`[nwc] NWC reconnection failed: ${err.message}`);
+          });
+      } else {
+        logger.log("[nwc] NWC wallet disconnected.");
+      }
+    },
+
     async getBalances(): Promise<Record<string, number>> {
       return syncMintState();
     },
@@ -56,6 +131,128 @@ export async function createWalletAdapter(
     },
     getActiveMintUrl(): string | null {
       return activeMintUrl;
+    },
+
+    // ── NWC funding methods ────────────────────────────────────
+
+    /** Fund the Cashu wallet from NWC by creating & paying a BOLT-11 invoice */
+    async fundFromNWC(amount: number): Promise<{
+      success: boolean;
+      invoice: string;
+      preimage?: string;
+      error?: string;
+    }> {
+      logger.log("=".repeat(50));
+      logger.log(`[nwc] Fund Cashu wallet from NWC — amount: ${amount} sats`);
+      logger.log("=".repeat(50));
+
+      if (!wallet || !wallet.service) {
+        logger.error("[nwc] NWC not connected");
+        return { success: false, invoice: "", error: "NWC not connected" };
+      }
+
+      // Ensure we have an active mint
+      await syncMintState();
+      const mintUrl = activeMintUrl;
+      if (!mintUrl) {
+        logger.error("[nwc] No active mint configured");
+        return { success: false, invoice: "", error: "No active mint configured" };
+      }
+
+      try {
+        // Step 1: Check initial balance
+        logger.log(`[nwc] Checking initial cocod balance on mint ${mintUrl}...`);
+        let initialBalance: number | null = null;
+        try {
+          const balances = await client.getBalances();
+          initialBalance = balances[mintUrl] ?? 0;
+          logger.log(`[nwc]   Initial balance: ${initialBalance} sats`);
+        } catch {
+          logger.log("[nwc]   Could not retrieve initial balance");
+        }
+
+        // Step 2: Create a BOLT-11 invoice via cocod
+        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
+        const invoice = await client.receiveBolt11(amount, mintUrl);
+        logger.log(`[nwc]   Invoice: ${invoice}`);
+
+        // Step 3: Pay it via NWC
+        logger.log("[nwc] Paying invoice via NWC...");
+        const { preimage, fees_paid } = await wallet.payInvoice(invoice);
+        logger.log(`[nwc]   ✅ Payment successful!`);
+        logger.log(`[nwc]   Preimage: ${preimage}`);
+        if (fees_paid !== undefined) {
+          logger.log(`[nwc]   Fees paid: ${fees_paid} msats`);
+        }
+
+        // Step 4: Check final balance
+        logger.log("[nwc] Checking final cocod balance...");
+        try {
+          const balances = await client.getBalances();
+          const finalBalance = balances[mintUrl] ?? 0;
+          logger.log(`[nwc]   Final balance: ${finalBalance} sats`);
+          if (initialBalance !== null) {
+            const diff = finalBalance - initialBalance;
+            logger.log(`[nwc]   Balance change: ${diff > 0 ? "+" : ""}${diff} sats`);
+          }
+        } catch {
+          logger.log("[nwc]   Could not retrieve final balance");
+        }
+
+        logger.log("=".repeat(50));
+        return { success: true, invoice, preimage };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[nwc]   ❌ Fund from NWC failed: ${message}`);
+        logger.log("=".repeat(50));
+        return { success: false, invoice: "", error: message };
+      }
+    },
+
+    /** Get NWC connection status and wallet info */
+    async getNwcStatus(): Promise<{
+      connected: boolean;
+      alias?: string;
+      pubkey?: string;
+      network?: string;
+      methods?: string[];
+      balance?: number;
+      error?: string;
+    }> {
+      if (!wallet) {
+        return { connected: false, error: "NWC not configured" };
+      }
+
+      if (!wallet.service) {
+        return { connected: false, error: "NWC not connected" };
+      }
+
+      try {
+        const info = await wallet.getInfo();
+        let balance: number | undefined;
+        try {
+          const bal = await wallet.getBalance();
+          balance = Math.floor(bal.balance / 1000); // msats → sats
+        } catch {
+          // Balance might not be available
+        }
+        return {
+          connected: true,
+          alias: info.alias,
+          pubkey: info.pubkey,
+          network: info.network,
+          methods: info.methods,
+          balance,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { connected: false, error: message };
+      }
+    },
+
+    /** Get the current auto-refill config, re-reading from the getter if available */
+    getAutoRefillConfig(): AutoRefillConfig | undefined {
+      return options.getAutoRefillConfig?.() ?? options.autoRefill;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
       const maxRetries = 3;
@@ -109,6 +306,27 @@ export async function createWalletAdapter(
       }
     },
   };
+
+  // ── Auto-refill setup ────────────────────────────────────────
+
+  let stopAutoRefill: (() => void) | undefined;
+
+  const autoRefillConfig = options.getAutoRefillConfig
+    ? options.getAutoRefillConfig()
+    : options.autoRefill;
+
+  if (autoRefillConfig && wallet) {
+    const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
+    stopAutoRefill = startAutoRefillLoop(client, getWallet, getConfig);
+    logger.log(
+      `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs / 60000} minutes`,
+    );
+  } else if (wallet && options.getAutoRefillConfig) {
+    // Wallet exists but auto-refill is not currently enabled.
+    // Start the loop anyway so it can pick up changes without a restart.
+    stopAutoRefill = startAutoRefillLoop(client, getWallet, options.getAutoRefillConfig);
+    logger.log("[wallet] Auto-refill loop started (currently disabled — enable via CLI to activate)");
+  }
 
   try {
     const [balances, mints] = await Promise.all([

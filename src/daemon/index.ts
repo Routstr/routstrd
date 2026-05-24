@@ -12,6 +12,7 @@ import type { SdkLogger } from "@routstr/sdk";
 import { DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
 
+
 function makeSdkLogger(prefix?: string): SdkLogger {
   const tag = prefix ? `[${prefix}]` : undefined;
   const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
@@ -25,12 +26,13 @@ function makeSdkLogger(prefix?: string): SdkLogger {
 }
 const daemonSdkLogger: SdkLogger = makeSdkLogger();
 import { parseArgs } from "./args";
-import { ensureDirs, loadDaemonConfig, saveDaemonConfig } from "./config-store";
+import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
 import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
 } from "@routstr/sdk/storage";
 import { createWalletAdapter } from "./wallet";
+import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
@@ -69,9 +71,28 @@ async function main(): Promise<void> {
     createModelService(modelManager, store);
 
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+
+  // ── Auto-refill configuration ────────────────────────────────
+  // Uses a getter that reads config from disk each cycle, so
+  // CLI changes take effect immediately without a daemon restart.
+
+  const getAutoRefillConfig = (): AutoRefillConfig | undefined => {
+    const cfg = loadDaemonConfigSync();
+    if (cfg.nwc?.autoRefill?.enabled && cfg.nwc?.connectionString) {
+      return {
+        threshold: cfg.nwc.autoRefill.threshold,
+        amount: cfg.nwc.autoRefill.amount,
+        cooldownMs: cfg.nwc.autoRefill.cooldownMs,
+      };
+    }
+    return undefined;
+  };
+
   const walletAdapter = await createWalletAdapter({
     cocodPath: config.cocodPath,
     walletClient,
+    getAutoRefillConfig,
+    nwcConnectionString: config.nwc?.connectionString,
   });
 
   const refundClient = new RoutstrClient(
@@ -208,6 +229,7 @@ async function main(): Promise<void> {
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
+
   });
 
   server.listen(port, async () => {
