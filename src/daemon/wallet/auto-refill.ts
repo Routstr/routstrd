@@ -39,6 +39,7 @@ export function startAutoRefillLoop(
   intervalMs: number = 5000,
 ): () => void {
   let lastRefillAt = 0;
+  let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
   let running = true;
   let timeout: ReturnType<typeof setInterval> | null = null;
   let checkInProgress = false;
@@ -73,7 +74,7 @@ export function startAutoRefillLoop(
       intervalMs * Math.pow(2, consecutiveFailures),
       5 * 60 * 1000, // cap at 5 minutes
     );
-    if (now - lastRefillAt < backoffInterval) {
+    if (now - lastAttemptAt < backoffInterval) {
       return;
     }
 
@@ -114,21 +115,30 @@ export function startAutoRefillLoop(
         logger.log("[auto-refill] Wallet disconnected during refill check");
         return;
       }
-      const { preimage, fees_paid } = await currentWallet.payInvoice(invoice);
+      const payment = await currentWallet.payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
       // and issue tokens. We don't need to explicitly mint here; cocod
       // handles this on its end when the mint sees the payment.
-      logger.log(
-        `[auto-refill] Successfully refilled ${config.amount} sats. Preimage: ${preimage.slice(0, 16)}...`,
-      );
-      if (fees_paid !== undefined) {
-        logger.log(`[auto-refill] Fees paid: ${fees_paid} msats`);
+      const preimage = payment.preimage;
+      if (preimage) {
+        logger.log(
+          `[auto-refill] Successfully refilled ${config.amount} sats. Preimage: ${preimage.slice(0, 16)}...`,
+        );
+      } else {
+        logger.log(
+          `[auto-refill] Successfully refilled ${config.amount} sats (no preimage returned).`,
+        );
+      }
+      if (payment.fees_paid !== undefined) {
+        logger.log(`[auto-refill] Fees paid: ${payment.fees_paid} msats`);
       }
       lastRefillAt = now;
+      lastAttemptAt = now;
       consecutiveFailures = 0; // reset on success
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      lastAttemptAt = now; // track for backoff regardless of success/failure
       consecutiveFailures++;
 
       if (isFatalError(message)) {
