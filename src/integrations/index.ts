@@ -10,6 +10,7 @@ import { installOpenClawIntegration } from "./openclaw";
 import { installPiIntegration } from "./pi";
 import { installClaudeCodeIntegration } from "./claudecode";
 import { installHermesIntegration } from "./hermes";
+import { installGooseIntegration } from "./goose";
 import type { IntegrationConfig } from "./registry";
 import { CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
@@ -57,7 +58,7 @@ function parseChoice(input: string): number {
   }
 
   const parsed = Number.parseInt(input, 10);
-  if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 6) {
+  if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 7) {
     return parsed;
   }
 
@@ -73,7 +74,8 @@ export async function setupIntegration(
   logger.log("3. Pi");
   logger.log("4. Claude Code");
   logger.log("5. Hermes");
-  logger.log("6. Skip for now");
+  logger.log("6. Goose");
+  logger.log("7. Skip for now");
 
   const answer = await ask("Select integration [1]: ");
   const choice = parseChoice(answer);
@@ -84,6 +86,7 @@ export async function setupIntegration(
     3: "pi-agent",
     4: "claude-code",
     5: "hermes",
+    6: "goose",
   };
 
   const key = integrationByChoice[choice];
@@ -125,6 +128,11 @@ export async function setupIntegration(
 
   if (key === "hermes") {
     await installHermesIntegration(config, client.apiKey, integrationConfig);
+    return;
+  }
+
+  if (key === "goose") {
+    await installGooseIntegration(config, client.apiKey, integrationConfig);
     return;
   }
 }
