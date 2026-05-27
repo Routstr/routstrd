@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
-import { logger } from "../utils/logger";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
@@ -28,8 +27,8 @@ export async function installPiIntegration(
 ): Promise<void> {
   const { name, configPath } = integrationConfig;
 
-  logger.log("\nInstalling routstr models in pi models.json...");
-  logger.log(`Using API key for ${name}`);
+  console.log("\nInstalling routstr models in pi models.json...");
+  console.log(`Using API key for ${name}`);
 
   const baseUrl = `${getDaemonBaseUrl(config)}/v1`;
 
@@ -56,7 +55,7 @@ export async function installPiIntegration(
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      logger.log("No models found from routstr daemon.");
+      console.log("No models found from routstr daemon.");
       return;
     }
 
@@ -72,8 +71,8 @@ export async function installPiIntegration(
     };
 
     await writeFile(configPath, JSON.stringify(piConfig, null, 2));
-    logger.log(`Added "routstr" provider with ${models.length} models to pi models.json`);
+    console.log(`Added "routstr" provider with ${models.length} models to pi models.json`);
   } catch (error) {
-    logger.error("Failed to install models in pi models.json:", error);
+    console.error("Failed to install models in pi models.json:", error);
   }
 }

@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
-import { logger } from "../utils/logger";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
@@ -15,8 +14,8 @@ export async function installOpencodeIntegration(
 ): Promise<void> {
   const { name, configPath } = integrationConfig;
 
-  logger.log("\nInstalling routstr models in opencode.json...");
-  logger.log(`Using API key for ${name}`);
+  console.log("\nInstalling routstr models in opencode.json...");
+  console.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrl(config);
 
@@ -56,7 +55,7 @@ export async function installOpencodeIntegration(
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      logger.log("No models found from routstr daemon.");
+      console.log("No models found from routstr daemon.");
       return;
     }
 
@@ -78,8 +77,8 @@ export async function installOpencodeIntegration(
     opencodeConfig.small_model = OPENCODE_SMALL_MODEL;
 
     await writeFile(configPath, JSON.stringify(opencodeConfig, null, 2));
-    logger.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
+    console.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
   } catch (error) {
-    logger.error("Failed to install models in opencode.json:", error);
+    console.error("Failed to install models in opencode.json:", error);
   }
 }

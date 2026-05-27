@@ -81,7 +81,7 @@ async function printLightningInvoice(invoice: string): Promise<void> {
 }
 
 async function installCocodOrExit(): Promise<void> {
-  logger.log("cocod not found. Installing globally with bun...");
+  console.log("cocod not found. Installing globally with bun...");
 
   const installProc = Bun.spawn(
     ["bun", "install", "--global", "@routstr/cocod"],
@@ -93,13 +93,13 @@ async function installCocodOrExit(): Promise<void> {
 
   const installCode = await installProc.exited;
   if (installCode !== 0 || !(await isCocodInstalled())) {
-    logger.error(
+    console.error(
       "Failed to install cocod. Please run 'bun install --global @routstr/cocod' manually.",
     );
     throw new Error("cocod installation failed");
   }
 
-  logger.log("cocod installed successfully.");
+  console.log("cocod installed successfully.");
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -113,12 +113,12 @@ async function requireLocalDaemon(): Promise<void> {
 }
 
 async function initDaemon(): Promise<void> {
-  logger.log("Initializing routstrd...");
+  console.log("Initializing routstrd...");
 
   // Create config directory
   if (!existsSync(CONFIG_DIR)) {
     mkdirSync(CONFIG_DIR, { recursive: true });
-    logger.log(`Created config directory: ${CONFIG_DIR}`);
+    console.log(`Created config directory: ${CONFIG_DIR}`);
   }
 
   // Create initial config
@@ -128,7 +128,7 @@ async function initDaemon(): Promise<void> {
       cocodPath: null,
     };
     await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
-    logger.log(`Created config file: ${CONFIG_FILE}`);
+    console.log(`Created config file: ${CONFIG_FILE}`);
   }
 
   const config = await loadConfig();
@@ -190,30 +190,30 @@ async function initDaemon(): Promise<void> {
   const alreadyInitialized = combinedOutput.includes("already initialized");
 
   if (initCode !== 0 && !alreadyInitialized) {
-    logger.error(
+    console.error(
       "Failed to initialize cocod. Please run 'cocod init' manually.",
     );
     return;
   }
 
   if (alreadyInitialized) {
-    logger.log("cocod is already initialized.");
+    console.log("cocod is already initialized.");
   } else {
-    logger.log("cocod initialized successfully.");
+    console.log("cocod initialized successfully.");
   }
 
   await startDaemon({ port: String(config.port || 8008) });
 
   await setupIntegration(config);
 
-  logger.log("\nInitialization complete!");
-  logger.log(
+  console.log("\nInitialization complete!");
+  console.log(
     "\n use 'routstrd receive <cashu-token>' or 'routstrd receive 2100' to top up your local wallet using Lightning!",
   );
-  logger.log(
+  console.log(
     "\n full wallet commands still work too, e.g. 'routstrd wallet receive cashu <token>' and 'routstrd wallet receive bolt11 2100'.",
   );
-  logger.log(
+  console.log(
     "\nTo ensure routstrd persists across system restarts, run: 'routstrd service install'",
   );
 }
