@@ -35,6 +35,9 @@ export interface RoutstrdConfig {
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
   daemonUrl?: string;
+  /** URL of the auth proxy (routstrd-auth) for management endpoints (npubs, clients, usage).
+   * Defaults to daemonUrl or localhost:{port} if not set. */
+  authUrl?: string;
   nsec?: string;
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;

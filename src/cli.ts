@@ -3,6 +3,7 @@ import { startDaemon } from "./start-daemon";
 import {
   handleDaemonCommand,
   callDaemon,
+  callAuth,
   ensureDaemonRunning,
   isDaemonRunning,
   loadConfig,
@@ -334,12 +335,22 @@ program
 program
   .command("remote <url>")
   .description("Configure a remote daemon URL")
-  .action(async (url: string) => {
+  .option("--auth-url <authUrl>", "URL of the auth proxy for management commands (npubs, clients, usage)")
+  .action(async (url: string, options: { authUrl?: string }) => {
     try {
       new URL(url);
     } catch {
       console.error(`Invalid URL: ${url}`);
       process.exit(1);
+    }
+
+    if (options.authUrl) {
+      try {
+        new URL(options.authUrl);
+      } catch {
+        console.error(`Invalid auth URL: ${options.authUrl}`);
+        process.exit(1);
+      }
     }
 
     if (!existsSync(CONFIG_DIR)) {
@@ -348,6 +359,9 @@ program
 
     const config = await loadConfig();
     const updates: Partial<RoutstrdConfig> = { daemonUrl: url };
+    if (options.authUrl) {
+      updates.authUrl = options.authUrl;
+    }
     let generatedNpub: string | undefined;
 
     if (!config.nsec) {
@@ -366,6 +380,9 @@ program
     await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
 
     console.log(`Remote daemon URL set to: ${url}`);
+    if (options.authUrl) {
+      console.log(`Auth proxy URL set to: ${options.authUrl}`);
+    }
     if (generatedNpub) {
       console.log(
         `\nA new Nostr identity has been generated for remote authentication.`,
@@ -666,7 +683,7 @@ program
         ? Math.min(requested, 1000)
         : 10;
 
-    const result = await callDaemon(`/usage?limit=${limit}`);
+    const result = await callAuth(`/usage?limit=${limit}`);
     if (result.error) {
       console.log(result.error);
       process.exit(1);
@@ -882,7 +899,7 @@ npubsCmd
     await ensureDaemonRunning();
     const config = await loadConfig();
     const userNpub = getUserNpub(config);
-    const result = await callDaemon("/npubs");
+    const result = await callAuth("/npubs");
     if (result.error) {
       console.log(result.error);
       process.exit(1);
@@ -925,7 +942,7 @@ npubsCmd
       );
       process.exit(1);
     }
-    const result = await callDaemon("/npubs");
+    const result = await callAuth("/npubs");
     if (result.error) {
       console.log(result.error);
       process.exit(1);
@@ -943,7 +960,7 @@ npubsCmd
       console.error("Failed to normalize user npub.");
       process.exit(1);
     }
-    const addResult = await callDaemon("/npubs", {
+    const addResult = await callAuth("/npubs", {
       method: "POST",
       body: { npub: npubFromPubkey(normalized) },
     });
@@ -977,7 +994,7 @@ npubsCmd
       process.exit(1);
     }
     const body: Record<string, string> = { npub: npubFromPubkey(normalized), role: options.role };
-    const result = await callDaemon("/npubs", {
+    const result = await callAuth("/npubs", {
       method: "POST",
       body,
     });
@@ -1010,7 +1027,7 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const result = await callDaemon("/npubs", {
+    const result = await callAuth("/npubs", {
       method: "PATCH",
       body: { npub: npubFromPubkey(normalized), role: options.role },
     });
@@ -1039,7 +1056,7 @@ npubsCmd
       console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
       process.exit(1);
     }
-    const result = await callDaemon(
+    const result = await callAuth(
       `/npubs/${encodeURIComponent(npubFromPubkey(normalized))}`,
       {
         method: "DELETE",
