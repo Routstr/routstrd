@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
-import { logger } from "../utils/logger";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
@@ -56,8 +55,8 @@ export async function installOpenClawIntegration(
 ): Promise<void> {
   const { name, configPath } = integrationConfig;
 
-  logger.log("\nInstalling routstr models in openclaw.json...");
-  logger.log(`Using API key for ${name}`);
+  console.log("\nInstalling routstr models in openclaw.json...");
+  console.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrl(config);
 
@@ -92,7 +91,7 @@ export async function installOpenClawIntegration(
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      logger.log("No models found from routstr daemon.");
+      console.log("No models found from routstr daemon.");
       return;
     }
 
@@ -134,8 +133,8 @@ export async function installOpenClawIntegration(
     // openclawConfig.agents.defaults.models = aliasMap;
 
     await writeFile(configPath, JSON.stringify(openclawConfig, null, 2));
-    logger.log(`Added "${OPENCLAW_PROVIDER_ID}" provider with ${models.length} models to openclaw.json`);
+    console.log(`Added "${OPENCLAW_PROVIDER_ID}" provider with ${models.length} models to openclaw.json`);
   } catch (error) {
-    logger.error("Failed to install models in openclaw.json:", error);
+    console.error("Failed to install models in openclaw.json:", error);
   }
 }

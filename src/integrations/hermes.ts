@@ -2,7 +2,6 @@ import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
 import type { RoutstrdConfig } from "../utils/config";
-import { logger } from "../utils/logger";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
@@ -13,8 +12,8 @@ export async function installHermesIntegration(
 ): Promise<void> {
   const { name, configPath } = integrationConfig;
 
-  logger.log(`\nInstalling routstr configuration in ${configPath}...`);
-  logger.log(`Using API key for ${name}`);
+  console.log(`\nInstalling routstr configuration in ${configPath}...`);
+  console.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrl(config);
   const baseUrlV1 = `${baseUrl}/v1`;
@@ -27,16 +26,16 @@ export async function installHermesIntegration(
 
     if (models.length >= 3) {
       defaultModel = models[2]!.id;
-      logger.log(`Set default model to 3rd available model: ${defaultModel}`);
+      console.log(`Set default model to 3rd available model: ${defaultModel}`);
     } else if (models.length > 0) {
       defaultModel = models[0]!.id;
-      logger.log(`Only ${models.length} models available, using ${defaultModel} as default.`);
+      console.log(`Only ${models.length} models available, using ${defaultModel} as default.`);
     } else {
-      logger.log("No models available from routstr daemon, using fallback default.");
+      console.log("No models available from routstr daemon, using fallback default.");
     }
   } catch (error) {
-    logger.error("Failed to fetch models for Hermes integration:", error);
-    logger.log("Using fallback default model.");
+    console.error("Failed to fetch models for Hermes integration:", error);
+    console.log("Using fallback default model.");
   }
 
   let content = "";
@@ -45,7 +44,7 @@ export async function installHermesIntegration(
       content = await readFile(configPath, "utf-8");
     }
   } catch (error) {
-    logger.error(`Error reading ${configPath}, creating new one.`);
+    console.error(`Error reading ${configPath}, creating new one.`);
   }
 
   // Remove existing model block
@@ -80,8 +79,8 @@ export async function installHermesIntegration(
   try {
     mkdirSync(dirname(configPath), { recursive: true });
     await writeFile(configPath, newContent);
-    logger.log(`Successfully updated ${configPath} with routstr settings.`);
+    console.log(`Successfully updated ${configPath} with routstr settings.`);
   } catch (error) {
-    logger.error(`Failed to write to ${configPath}:`, error);
+    console.error(`Failed to write to ${configPath}:`, error);
   }
 }

@@ -67,13 +67,13 @@ function parseChoice(input: string): number {
 export async function setupIntegration(
   config: RoutstrdConfig,
 ): Promise<void> {
-  logger.log("\nChoose an integration to set up:");
-  logger.log("1. OpenCode (default)");
-  logger.log("2. OpenClaw");
-  logger.log("3. Pi");
-  logger.log("4. Claude Code");
-  logger.log("5. Hermes");
-  logger.log("6. Skip for now");
+  console.log("\nChoose an integration to set up:");
+  console.log("1. OpenCode (default)");
+  console.log("2. OpenClaw");
+  console.log("3. Pi");
+  console.log("4. Claude Code");
+  console.log("5. Hermes");
+  console.log("6. Skip for now");
 
   const answer = await ask("Select integration [1]: ");
   const choice = parseChoice(answer);
@@ -88,7 +88,7 @@ export async function setupIntegration(
 
   const key = integrationByChoice[choice];
   if (!key) {
-    logger.log("Skipping integration setup.");
+    console.log("Skipping integration setup.");
     return;
   }
 
@@ -98,9 +98,9 @@ export async function setupIntegration(
   );
 
   if (created) {
-    logger.log(`Created new API key for ${integrationConfig.name}`);
+    console.log(`Created new API key for ${integrationConfig.name}`);
   } else {
-    logger.log(`Using existing API key for ${integrationConfig.name}`);
+    console.log(`Using existing API key for ${integrationConfig.name}`);
   }
 
   if (key === "opencode") {
