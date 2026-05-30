@@ -35,13 +35,20 @@ export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   );
 }
 
-export async function callDaemon(
+export function getAuthBaseUrl(config: RoutstrdConfig): string {
+  if (config.authUrl) {
+    return config.authUrl.replace(/\/$/, "");
+  }
+  return getDaemonBaseUrl(config);
+}
+
+async function _callUrl(
+  baseUrl: string,
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
 ): Promise<CommandResponse> {
   const { method = "GET", body } = options;
-  const config = await loadConfig();
-  const baseUrl = getDaemonBaseUrl(config);
   const url = `${baseUrl}${path}`;
 
   const bodyString = body ? JSON.stringify(body) : undefined;
@@ -50,7 +57,7 @@ export async function callDaemon(
     : undefined;
 
   let authorization: string | undefined;
-  if (config.daemonUrl && config.nsec) {
+  if ((config.daemonUrl || config.authUrl) && config.nsec) {
     const secretKey = parseSecretKey(config.nsec);
     authorization = await createNIP98Authorization(
       secretKey,
@@ -75,6 +82,26 @@ export async function callDaemon(
   }
 
   return response.json() as Promise<CommandResponse>;
+}
+
+export async function callDaemon(
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+): Promise<CommandResponse> {
+  const config = await loadConfig();
+  const baseUrl = getDaemonBaseUrl(config);
+  return _callUrl(baseUrl, path, options, config);
+}
+
+/** Like callDaemon but sends requests to the auth proxy URL instead.
+ *  Falls back to the daemon URL if no authUrl is configured. */
+export async function callAuth(
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+): Promise<CommandResponse> {
+  const config = await loadConfig();
+  const baseUrl = getAuthBaseUrl(config);
+  return _callUrl(baseUrl, path, options, config);
 }
 
 export async function isDaemonRunning(): Promise<boolean> {
