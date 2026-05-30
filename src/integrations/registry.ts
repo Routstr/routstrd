@@ -15,6 +15,7 @@ export interface IntegrationConfig {
 export type RoutstrModel = {
   id: string;
   name?: string;
+  context_length?: number;
 };
 
 export type IntegrationFn = (
