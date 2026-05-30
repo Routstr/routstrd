@@ -7,6 +7,7 @@ import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 type PiModelEntry = {
   id: string;
+  contextWindow?: number;
 };
 
 type PiProviderConfig = {
@@ -59,9 +60,13 @@ export async function installPiIntegration(
       return;
     }
 
-    const providerModels: PiModelEntry[] = models.map((model) => ({
-      id: model.id,
-    }));
+    const providerModels: PiModelEntry[] = models.map((model) => {
+      const entry: PiModelEntry = { id: model.id };
+      if (model.context_length !== undefined && model.context_length > 0) {
+        entry.contextWindow = model.context_length;
+      }
+      return entry;
+    });
 
     piConfig.providers["routstr"] = {
       baseUrl,
