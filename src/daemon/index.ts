@@ -3,13 +3,11 @@ import { existsSync } from "fs";
 import {
   ModelManager,
   ProviderManager,
-  createDiscoveryAdapterFromStore,
-  createProviderRegistryFromStore,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
 import type { SdkLogger } from "@routstr/sdk";
-import { DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
+import { CONFIG_DIR, DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
 
 
@@ -30,6 +28,8 @@ import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } 
 import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
+  createShardedDiscoveryAdapter,
+  createProviderRegistryFromDiscoveryAdapter,
 } from "@routstr/sdk/storage";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
@@ -61,10 +61,13 @@ async function main(): Promise<void> {
     legacyStorageDriver: sqliteDriver,
   });
 
-  const discoveryAdapter = createDiscoveryAdapterFromStore(store);
-  const providerRegistry = createProviderRegistryFromStore(store, daemonSdkLogger);
+  const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
+  const providerRegistry = createProviderRegistryFromDiscoveryAdapter(discoveryAdapter, daemonSdkLogger);
   const storageAdapter = createStorageAdapterFromStore(store);
-  const modelManager = new ModelManager(discoveryAdapter, { logger: daemonSdkLogger });
+  const modelManager = new ModelManager(discoveryAdapter, {
+    logger: daemonSdkLogger,
+    eventStoreDbPath: `${CONFIG_DIR}/events.db`,
+  });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(providerRegistry, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders } =
