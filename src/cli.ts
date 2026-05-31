@@ -134,6 +134,17 @@ async function initDaemon(): Promise<void> {
 
   const config = await loadConfig();
 
+  if (!config.nsec) {
+    const secretKey = generateSecretKey();
+    const nsec = nip19.nsecEncode(secretKey);
+    const npub = npubFromSecretKey(secretKey);
+    config.nsec = nsec;
+    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+    console.log("\nA new Nostr identity has been generated for authentication.");
+    console.log(`Your npub: ${npub}`);
+    console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
+  }
+
   if (!(await isCocodInstalled(config.cocodPath))) {
     if (config.cocodPath) {
       logger.error(
