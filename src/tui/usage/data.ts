@@ -118,11 +118,15 @@ export function getTodayStart(): number {
 }
 
 export function formatDate(timestamp: number): string {
-  return new Date(timestamp).toISOString().split("T")[0] ?? "";
+  const d = new Date(timestamp);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 export function formatTime(timestamp: number): string {
-  return new Date(timestamp).toISOString().split("T")[1]?.slice(0, 8) ?? "";
+  const d = new Date(timestamp);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 export function formatNumber(n: number): string {
