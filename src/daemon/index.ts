@@ -42,12 +42,12 @@ import {
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
-import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
+import { createCocoClient } from "./wallet/coco-client";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, store);
 
-  const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+  const walletClient = await createCocoClient();
 
   // ── Auto-refill configuration ────────────────────────────────
   // Uses a getter that reads config from disk each cycle, so
