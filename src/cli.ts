@@ -15,7 +15,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import {
   CONFIG_DIR,
@@ -29,12 +29,14 @@ import { logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
-import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
-import { generateSecretKey, nip19 } from "nostr-tools";
 import {
-  isCocodInstalled,
-  resolveCocodExecutable,
-} from "./daemon/wallet/cocod-client";
+  normalizeNostrPubkey,
+  npubFromPubkey,
+  npubFromSecretKey,
+} from "./utils/nip98";
+import { generateSecretKey, nip19 } from "nostr-tools";
+import { generateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
 import packageJson from "../package.json" with { type: "json" };
 
 type RoutstrModel = {
@@ -81,26 +83,28 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
-async function installCocodOrExit(): Promise<void> {
-  console.log("cocod not found. Installing globally with bun...");
+function initializeWallet(): void {
+  const walletDir =
+    process.env.COCOD_DIR ||
+    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
+  const walletConfig = `${walletDir}/config.json`;
 
-  const installProc = Bun.spawn(
-    ["bun", "install", "--global", "@routstr/cocod"],
-    {
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  );
-
-  const installCode = await installProc.exited;
-  if (installCode !== 0 || !(await isCocodInstalled())) {
-    console.error(
-      "Failed to install cocod. Please run 'bun install --global @routstr/cocod' manually.",
-    );
-    throw new Error("cocod installation failed");
+  if (existsSync(walletConfig)) {
+    console.log("Wallet already initialized.");
+    return;
   }
 
-  console.log("cocod installed successfully.");
+  mkdirSync(walletDir, { recursive: true });
+  const mnemonic = generateMnemonic(wordlist);
+  const config = {
+    version: 1,
+    mnemonic,
+    encrypted: false,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(walletConfig, JSON.stringify(config, null, 2));
+  console.log("Initialized. Mnemonic:", mnemonic);
+  console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -144,75 +148,9 @@ async function initDaemon(): Promise<void> {
     console.log(`Your npub: ${npub}`);
     console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
   }
-
-  if (!(await isCocodInstalled(config.cocodPath))) {
-    if (config.cocodPath) {
-      logger.error(
-        `Configured cocod executable was not found: ${config.cocodPath}`,
-      );
-      return;
-    }
-
-    await installCocodOrExit();
-  }
-
-  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
-
+  
   console.log(`Database will be stored at: ${DB_PATH}`);
-  console.log("\nInitializing cocod...");
-
-  const initProc = Bun.spawn([cocodExecutable, "init"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  let initStdout = "";
-  let initStderr = "";
-
-  const stdoutDone = initProc.stdout
-    ? initProc.stdout.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStdout += text;
-            process.stdout.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const stderrDone = initProc.stderr
-    ? initProc.stderr.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStderr += text;
-            process.stderr.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const [initCode] = await Promise.all([
-    initProc.exited,
-    stdoutDone,
-    stderrDone,
-  ]);
-  const combinedOutput = `${initStdout}\n${initStderr}`.toLowerCase();
-  const alreadyInitialized = combinedOutput.includes("already initialized");
-
-  if (initCode !== 0 && !alreadyInitialized) {
-    console.error(
-      "Failed to initialize cocod. Please run 'cocod init' manually.",
-    );
-    return;
-  }
-
-  if (alreadyInitialized) {
-    console.log("cocod is already initialized.");
-  } else {
-    console.log("cocod initialized successfully.");
-  }
+  initializeWallet();
 
   await startDaemon({ port: String(config.port || 8008) });
 
@@ -243,36 +181,76 @@ program
     "Mint URL to refund to (defaults to first mint in wallet)",
   )
   .option("-y, --yes", "Skip confirmation prompt", false)
-  .option("--xcashu", "Refund xcashu tokens only (uses refundXcashuTokens)", false)
-  .action(async (options: { mintUrl?: string; yes: boolean; xcashu: boolean }) => {
-    await ensureDaemonRunning();
+  .option(
+    "--xcashu",
+    "Refund xcashu tokens only (uses refundXcashuTokens)",
+    false,
+  )
+  .action(
+    async (options: { mintUrl?: string; yes: boolean; xcashu: boolean }) => {
+      await ensureDaemonRunning();
 
-    let mintUrl = options.mintUrl;
-    if (!mintUrl) {
-      const balanceResult = await callDaemon("/balance");
-      if (balanceResult.error) {
-        console.log(balanceResult.error);
-        process.exit(1);
+      let mintUrl = options.mintUrl;
+      if (!mintUrl) {
+        const balanceResult = await callDaemon("/balance");
+        if (balanceResult.error) {
+          console.log(balanceResult.error);
+          process.exit(1);
+        }
+        const balances = (
+          balanceResult.output as
+            | {
+                balances?: Record<string, number>;
+              }
+            | undefined
+        )?.balances;
+        if (!balances || Object.keys(balances).length === 0) {
+          console.log("No mint URLs found in wallet balance");
+          process.exit(1);
+        }
+        mintUrl = Object.keys(balances)[0];
+        console.log(`Using mint URL: ${mintUrl}`);
       }
-      const balances = (
-        balanceResult.output as
-          | {
-              balances?: Record<string, number>;
+
+      try {
+        if (options.xcashu) {
+          // xcashu path: only refund xcashu tokens
+          const result = await callDaemon("/refund/xcashu", {
+            method: "POST",
+            body: { mintUrl },
+          });
+
+          if (result.error) {
+            console.log(result.error);
+            process.exit(1);
+          }
+
+          const output = result.output as
+            | {
+                message: string;
+                results: Array<{
+                  baseUrl: string;
+                  token: string;
+                  success: boolean;
+                  error?: string;
+                }>;
+              }
+            | undefined;
+
+          if (output) {
+            console.log(output.message);
+            console.log("\nResults:");
+            for (const r of output.results) {
+              const status = r.success
+                ? "success"
+                : `failed: ${r.error || "unknown"}`;
+              console.log(`  - ${r.baseUrl}: ${status}`);
             }
-          | undefined
-      )?.balances;
-      if (!balances || Object.keys(balances).length === 0) {
-        console.log("No mint URLs found in wallet balance");
-        process.exit(1);
-      }
-      mintUrl = Object.keys(balances)[0];
-      console.log(`Using mint URL: ${mintUrl}`);
-    }
+          }
+          return;
+        }
 
-    try {
-      if (options.xcashu) {
-        // xcashu path: only refund xcashu tokens
-        const result = await callDaemon("/refund/xcashu", {
+        const result = await callDaemon("/refund", {
           method: "POST",
           body: { mintUrl },
         });
@@ -285,68 +263,46 @@ program
         const output = result.output as
           | {
               message: string;
-              results: Array<{ baseUrl: string; token: string; success: boolean; error?: string }>;
+              pendingTokens: number;
+              apiKeys: number;
+              results: Array<{ baseUrl: string; success: boolean }>;
             }
           | undefined;
 
         if (output) {
           console.log(output.message);
+          console.log(`\nPending tokens: ${output.pendingTokens}`);
+          console.log(`API keys: ${output.apiKeys}`);
           console.log("\nResults:");
           for (const r of output.results) {
-            const status = r.success ? "success" : `failed: ${r.error || "unknown"}`;
-            console.log(`  - ${r.baseUrl}: ${status}`);
+            console.log(
+              `  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`,
+            );
           }
         }
-        return;
-      }
-
-      const result = await callDaemon("/refund", {
-        method: "POST",
-        body: { mintUrl },
-      });
-
-      if (result.error) {
-        console.log(result.error);
-        process.exit(1);
-      }
-
-      const output = result.output as
-        | {
-            message: string;
-            pendingTokens: number;
-            apiKeys: number;
-            results: Array<{ baseUrl: string; success: boolean }>;
-          }
-        | undefined;
-
-      if (output) {
-        console.log(output.message);
-        console.log(`\nPending tokens: ${output.pendingTokens}`);
-        console.log(`API keys: ${output.apiKeys}`);
-        console.log("\nResults:");
-        for (const r of output.results) {
-          console.log(`  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`);
+      } catch (error) {
+        const message = (error as Error).message;
+        if (
+          message?.includes("fetch failed") ||
+          message?.includes("Connection refused")
+        ) {
+          console.error("Daemon is not running");
+          process.exit(1);
         }
-      }
-    } catch (error) {
-      const message = (error as Error).message;
-      if (
-        message?.includes("fetch failed") ||
-        message?.includes("Connection refused")
-      ) {
-        console.error("Daemon is not running");
+        console.error(message);
         process.exit(1);
       }
-      console.error(message);
-      process.exit(1);
-    }
-  });
+    },
+  );
 
 // Remote - configure a remote daemon URL
 program
   .command("remote <url>")
   .description("Configure a remote daemon URL")
-  .option("--auth-url <authUrl>", "URL of the auth proxy for management commands (npubs, clients, usage)")
+  .option(
+    "--auth-url <authUrl>",
+    "URL of the auth proxy for management commands (npubs, clients, usage)",
+  )
   .action(async (url: string, options: { authUrl?: string }) => {
     try {
       new URL(url);
@@ -399,9 +355,7 @@ program
         `\nA new Nostr identity has been generated for remote authentication.`,
       );
       console.log(`Your npub: ${generatedNpub}`);
-      console.log(
-        `You can view it in the config file at: ${CONFIG_FILE}`,
-      );
+      console.log(`You can view it in the config file at: ${CONFIG_FILE}`);
     }
   });
 
@@ -425,13 +379,6 @@ program
   .action(async (options: { port?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
-    if (!(await isCocodInstalled(config.cocodPath))) {
-      const installHint = config.cocodPath
-        ? `Configured cocod executable was not found: ${config.cocodPath}`
-        : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
-      logger.error(installHint);
-      process.exit(1);
-    }
     await startDaemon({
       port: options.port || String(config.port || 8008),
       provider: options.provider,
@@ -923,7 +870,9 @@ npubsCmd
       : result;
     const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
-      console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
+      console.log(
+        "No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.",
+      );
       return;
     }
     console.log(`Npubs (${npubs.length}):`);
@@ -944,7 +893,9 @@ npubsCmd
 
 npubsCmd
   .command("register")
-  .description("Register yourself as the first admin (only when no admins exist)")
+  .description(
+    "Register yourself as the first admin (only when no admins exist)",
+  )
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -965,7 +916,9 @@ npubsCmd
       : result;
     const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length > 0) {
-      console.log(`Admin npubs already configured (${npubs.length}). Ask your admin to add your npub. \n Your npub: ${userNpub}`);
+      console.log(
+        `Admin npubs already configured (${npubs.length}). Ask your admin to add your npub. \n Your npub: ${userNpub}`,
+      );
       return;
     }
     const normalized = normalizeNostrPubkey(userNpub);
@@ -985,7 +938,9 @@ npubsCmd
       | { npub?: string; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
-      console.log(`Successfully registered as first admin npub: ${output.npub}`);
+      console.log(
+        `Successfully registered as first admin npub: ${output.npub}`,
+      );
     } else {
       console.log(`Successfully registered as first admin npub: ${userNpub}`);
     }
@@ -993,8 +948,14 @@ npubsCmd
 
 npubsCmd
   .command("add <npub>")
-  .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
-  .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
+  .description(
+    "Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.",
+  )
+  .option(
+    "-r, --role <role>",
+    "Role for the npub: 'admin' or 'user' (default: 'user')",
+    "user",
+  )
   .action(async (npubArg: string, options: { role: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
@@ -1006,7 +967,10 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const body: Record<string, string> = { npub: npubFromPubkey(normalized), role: options.role };
+    const body: Record<string, string> = {
+      npub: npubFromPubkey(normalized),
+      role: options.role,
+    };
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -1323,7 +1287,10 @@ const nwcCmd = program
 nwcCmd
   .command("connect")
   .description("Connect to a Lightning wallet via NWC")
-  .argument("[connection-string]", "NWC connection string (nostr+walletconnect://...)")
+  .argument(
+    "[connection-string]",
+    "NWC connection string (nostr+walletconnect://...)",
+  )
   .action(async (connectionString?: string) => {
     if (!connectionString) {
       // Interactive mode: prompt for connection string
@@ -1340,8 +1307,14 @@ nwcCmd
     }
 
     // Quick validation: must be nostr+walletconnect:// with a 64-char hex pubkey
-    if (!/^nostr\+walletconnect:\/\/[0-9a-fA-F]{64}\?relay=/.test(connectionString)) {
-      console.error("Invalid NWC connection string: expected nostr+walletconnect://<64-char-hex>?relay=...");
+    if (
+      !/^nostr\+walletconnect:\/\/[0-9a-fA-F]{64}\?relay=/.test(
+        connectionString,
+      )
+    ) {
+      console.error(
+        "Invalid NWC connection string: expected nostr+walletconnect://<64-char-hex>?relay=...",
+      );
       process.exit(1);
     }
 
@@ -1396,21 +1369,27 @@ autoRefillCmd
     "Minimum time between refills in seconds",
     "300",
   )
-  .action(async (options: { threshold: string; amount: string; cooldown: string }) => {
-    const threshold = parsePositiveIntOrExit(options.threshold, "threshold");
-    const amount = parsePositiveIntOrExit(options.amount, "amount");
-    const cooldownSec = parsePositiveIntOrExit(options.cooldown, "cooldown");
+  .action(
+    async (options: {
+      threshold: string;
+      amount: string;
+      cooldown: string;
+    }) => {
+      const threshold = parsePositiveIntOrExit(options.threshold, "threshold");
+      const amount = parsePositiveIntOrExit(options.amount, "amount");
+      const cooldownSec = parsePositiveIntOrExit(options.cooldown, "cooldown");
 
-    await handleDaemonCommand("/nwc/auto-refill", {
-      method: "POST",
-      body: {
-        enabled: true,
-        threshold,
-        amount,
-        cooldownMs: cooldownSec * 1000,
-      },
-    });
-  });
+      await handleDaemonCommand("/nwc/auto-refill", {
+        method: "POST",
+        body: {
+          enabled: true,
+          threshold,
+          amount,
+          cooldownMs: cooldownSec * 1000,
+        },
+      });
+    },
+  );
 
 autoRefillCmd
   .command("off")
