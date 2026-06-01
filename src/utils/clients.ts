@@ -1,5 +1,4 @@
 import {
-  callAuth,
   callDaemon,
   loadConfig,
   getDaemonBaseUrl,
@@ -57,7 +56,7 @@ export function getClientsFromStore(store: { getState(): any }): ClientEntry[] {
  * Use this when running remotely (CLI in remote mode).
  */
 export async function getClientsList(): Promise<ClientEntry[]> {
-  const result = await callAuth("/clients");
+  const result = await callDaemon("/clients");
   const clients = (
     result.output as
       | {
@@ -108,7 +107,7 @@ export async function addDaemonClient(
     return { client, created: false };
   }
 
-  const result = await callAuth("/clients/add", {
+  const result = await callDaemon("/clients/add", {
     method: "POST",
     body: { name, id: derivedId },
   });
@@ -160,7 +159,7 @@ export async function listClientsAction(): Promise<void> {
 export async function deleteClientAction(id: string): Promise<void> {
   await ensureDaemonRunning();
 
-  const result = await callAuth("/clients/delete", {
+  const result = await callDaemon("/clients/delete", {
     method: "POST",
     body: { id },
   });
