@@ -283,7 +283,12 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
 
 export function renderToday(stats: UsageStats, width: number): string {
   const currentHour = new Date().getHours();
-  const todayDateStr = formatDate(Date.now());
+  // Build today's date string from LOCAL date components so it matches the
+  // server's tz-bucketed day keys (which use the client's tzOffsetMinutes).
+  // formatDate() returns a UTC date via toISOString() and would mismatch for
+  // non-UTC users.
+  const _now = new Date();
+  const todayDateStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
 
   let todayStats: { date: string; requests: number; satsCost: number; promptTokens: number; completionTokens: number; totalTokens: number };
   let recentDays: Array<{ date: string; requests: number; satsCost: number; totalTokens: number; promptTokens: number; completionTokens: number }>;
