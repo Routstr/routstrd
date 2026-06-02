@@ -28,6 +28,8 @@ import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } 
 import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
+} from "@routstr/sdk/storage/bun";
+import {
   createShardedDiscoveryAdapter,
   createProviderRegistryFromDiscoveryAdapter,
 } from "@routstr/sdk/storage";
@@ -54,10 +56,8 @@ async function main(): Promise<void> {
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
-  const { Database } = await import("bun:sqlite");
-  const usageTrackingDriver = createBunSqliteUsageTrackingDriver({
+  const usageTrackingDriver = await createBunSqliteUsageTrackingDriver({
     dbPath: DB_PATH,
-    sqlite: { Database },
     legacyStorageDriver: sqliteDriver,
   });
 
