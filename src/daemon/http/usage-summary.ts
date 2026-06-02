@@ -122,6 +122,11 @@ interface CacheEntry {
 let _cache: CacheEntry | null = null;
 const CACHE_TTL_MS = 60_000;
 
+/** Clears the module-level memo cache. Intended for use in unit tests only. */
+export function __resetUsageSummaryCacheForTest(): void {
+  _cache = null;
+}
+
 // ─── Main builder ─────────────────────────────────────────────────────────────
 
 export async function getUsageSummary(

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
 import type { UsageTrackingEntry } from "@routstr/sdk/storage";
 import type { ClientEntry } from "../../utils/clients";
-import { getUsageSummary } from "./usage-summary";
+import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summary";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 //
@@ -116,8 +116,10 @@ describe("getUsageSummary", () => {
   let driver: ReturnType<typeof createMemoryUsageTrackingDriver>;
 
   beforeEach(async () => {
-    // Reset module-level cache between tests by creating a fresh driver with a
-    // distinct entry count each time — the cache key changes.
+    // Reset the module-level memo cache explicitly so each test starts cold.
+    // Without this, tests 2-10 would share the cached object from test 1
+    // (all use the same fixtures → identical cache key → same TTL window).
+    __resetUsageSummaryCacheForTest();
     driver = createMemoryUsageTrackingDriver(ENTRIES);
   });
 
