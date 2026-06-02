@@ -16,6 +16,7 @@ import {
 } from "../wallet/cocod-client";
 import { decodeCashuTokenAmount } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
+import { getUsageSummary } from "./usage-summary";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -1117,6 +1118,18 @@ export function createDaemonRequestHandler(deps: {
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/usage/summary") {
+      try {
+        const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const clients = getClientsFromStore(deps.store);
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz);
+        sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }
