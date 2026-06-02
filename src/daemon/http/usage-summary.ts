@@ -129,9 +129,12 @@ export async function getUsageSummary(
   clients: ClientEntry[],
   tzOffsetMinutes: number,
 ): Promise<UsageSummary> {
-  // Cheap cache key: total row count + clients length + tz
+  // Cache key: total row count + per-client identity (id + ownerNpub) + tz.
+  // Including ownerNpub ensures a client assignment change invalidates the cache
+  // even though the row count doesn't change.
   const count = await driver.count();
-  const cacheKey = `${count}:${clients.length}:${tzOffsetMinutes}`;
+  const clientIdentity = clients.map((c) => `${c.clientId}:${c.ownerNpub ?? ""}`).join(",");
+  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}`;
   const now = Date.now();
 
   if (
