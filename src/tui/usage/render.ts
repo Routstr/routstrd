@@ -508,8 +508,9 @@ export function renderClients(stats: UsageStats, width: number): string {
   const clientModelLines: string[] = [];
 
   if (stats.summary) {
-    // Use pre-aggregated topModels from summary
-    for (const topClient of stats.summary.clients.slice(0, 3)) {
+    // Use pre-aggregated topModels from summary; exclude the "unknown" bucket
+    // (null client rows have no meaningful model attribution to display here).
+    for (const topClient of stats.summary.clients.filter((c) => c.client !== "unknown").slice(0, 3)) {
       if (topClient.topModels.length === 0) continue;
       clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${formatReqs(topClient.requests)} reqs, ${formatCost(topClient.satsCost)} sats)`);
       for (const m of topClient.topModels) {
@@ -518,7 +519,8 @@ export function renderClients(stats: UsageStats, width: number): string {
       clientModelLines.push("");
     }
   } else {
-    // Fallback: compute from raw entries
+    // Fallback: compute from raw entries; exclude the "unknown" bucket to match
+    // the summary path.
     const clientModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
     for (const entry of stats.entries) {
       const client = entry.client || "unknown";
@@ -532,7 +534,7 @@ export function renderClients(stats: UsageStats, width: number): string {
         tokens: existing.tokens + entry.totalTokens,
       });
     }
-    for (const topClient of clientStats.slice(0, 3)) {
+    for (const topClient of clientStats.filter((c) => c.client !== "unknown").slice(0, 3)) {
       const modelMap = clientModelMap.get(topClient.client);
       if (!modelMap) continue;
       const models = Array.from(modelMap.entries()).sort((a, b) => b[1].satsCost - a[1].satsCost).slice(0, 5);
