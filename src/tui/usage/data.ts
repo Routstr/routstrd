@@ -1,6 +1,6 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
-import type { ClientStats, DayStats, ModelStats, NpubStats, ProviderStats, UsageStats } from "./types.ts";
+import type { ClientStats, DayStats, ModelStats, NpubStats, ProviderStats, UsageStats, UsageSummary } from "./types.ts";
 
 export { isDaemonRunning };
 
@@ -106,6 +106,31 @@ export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
       totalSatsCost: totals.satsCost,
       recentSatsCost: totals.satsCost, // For now, recent = total since we don't have time window
       limit,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchUsageSummary(): Promise<UsageStats | null> {
+  try {
+    const running = await isDaemonRunning();
+    if (!running) return null;
+
+    const tz = new Date().getTimezoneOffset();
+    const result = await callDaemon(`/usage/summary?tz=${tz}`);
+    if (result.error) return null;
+
+    const summary = result.output as UsageSummary | undefined;
+    if (!summary || typeof summary.totals !== "object") return null;
+
+    return {
+      entries: summary.recent,
+      totalEntries: summary.totals.requests,
+      totalSatsCost: summary.totals.satsCost,
+      recentSatsCost: summary.totals.satsCost,
+      limit: 50,
+      summary,
     };
   } catch {
     return null;

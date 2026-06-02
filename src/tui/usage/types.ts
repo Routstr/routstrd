@@ -1,4 +1,7 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
+import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
+
+export type { UsageSummary };
 
 export interface UsageStats {
   entries: UsageTrackingEntry[];
@@ -6,6 +9,8 @@ export interface UsageStats {
   totalSatsCost: number;
   recentSatsCost: number;
   limit: number;
+  /** Present when data was fetched via /usage/summary (server-aggregated path). */
+  summary?: UsageSummary;
 }
 
 export interface DayStats {

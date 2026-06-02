@@ -1,6 +1,6 @@
 import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
-import { fetchBalance, fetchClients, fetchStatus, fetchUsage, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type StatusInfo } from "./data.ts";
+import { fetchBalance, fetchClients, fetchStatus, fetchUsage, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -89,7 +89,7 @@ export async function runUsageTui(): Promise<void> {
       const height = getHeight();
 
       if (forceFetch || shouldUpdate) {
-        stats = await fetchUsage(10000);
+        stats = await fetchUsageSummary() ?? await fetchUsage(10000);
         balance = await fetchBalance();
         status = await fetchStatus();
         clients = await fetchClients();
