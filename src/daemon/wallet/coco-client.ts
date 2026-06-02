@@ -60,11 +60,15 @@ export async function createCocoClient(): Promise<CocodClient> {
     },
 
     async getStatus(): Promise<CocodState> {
+      // coco-core has no lock/unlock concept, the wallet is always
+      // ready once initialized. Return UNLOCKED to satisfy the interface.
       return "UNLOCKED";
     },
 
     async unlock(_passphrase: string): Promise<string> {
-      return "already unlocked";
+      // coco-core does not support passphrase locking.
+      // Wallet access is controlled via the mnemonic in ~/.cocod/config.json.
+      return "wallet does not require unlocking";
     },
 
     async getBalances(): Promise<Record<string, number>> {
