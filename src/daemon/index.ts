@@ -1,11 +1,15 @@
 import { createServer } from "http";
 import { existsSync } from "fs";
 import {
-  ModelManager,
   ProviderManager,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
+// ModelManager must come from the bun entrypoint so persistent Nostr event
+// storage (eventStoreDbPath) gets its SQLite-backed factory. The default
+// "@routstr/sdk" export is browser-safe and throws without that factory
+// (SDK 0.3.7+ browser-safe entrypoint split).
+import { ModelManager } from "@routstr/sdk/bun";
 import type { SdkLogger } from "@routstr/sdk";
 import { CONFIG_DIR, DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
