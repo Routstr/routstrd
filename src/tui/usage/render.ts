@@ -120,8 +120,10 @@ export function renderBarChart(
 
 
 export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
-  // Use the server-calculated totals (all entries) instead of summing limited entries
-  const totals = getTotals(stats.entries);
+  // Token totals must come from the all-time summary (when present) to stay on
+  // the same horizon as totalRequests/totalSatsCost below — stats.entries holds
+  // only the latest 50 in summary mode. Fall back to entries for the legacy path.
+  const totals = stats.summary?.totals ?? getTotals(stats.entries);
   const totalRequests = stats.totalEntries; // Use server's total count, not entries.length
   const totalVisibleCost = stats.totalSatsCost; // <-- Use server's total, not client-side sum of limited entries
   const avgCost = totalRequests > 0 ? totalVisibleCost / totalRequests : 0;
@@ -302,7 +304,9 @@ export function renderToday(stats: UsageStats, width: number): string {
     todayStats = todayDayStat
       ? { date: todayDayStat.date, requests: todayDayStat.requests, satsCost: todayDayStat.satsCost, promptTokens: todayDayStat.promptTokens, completionTokens: todayDayStat.completionTokens, totalTokens: todayDayStat.totalTokens }
       : { date: todayDateStr, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    recentDays = days.slice(1, 7);
+    // Exclude today by date (it has its own box) rather than by position —
+    // days[0] is only today when there was activity today.
+    recentDays = days.filter((d) => d.date !== todayDateStr).slice(0, 6);
     hourlyMap = new Map(hoursToday.map((h) => [h.hour, { requests: h.requests, satsCost: h.satsCost }]));
   } else {
     // Fallback: compute from raw entries
