@@ -60,9 +60,12 @@ export async function createCocoClient(): Promise<CocodClient> {
     },
 
     async getStatus(): Promise<CocodState> {
-      // coco-core has no lock/unlock concept, the wallet is always
-      // ready once initialized. Return UNLOCKED to satisfy the interface.
-      return "UNLOCKED";
+      try {
+        await coco.wallet.balances.total();
+        return "UNLOCKED";
+      } catch {
+        return "ERROR";
+      }
     },
 
     async unlock(_passphrase: string): Promise<string> {
@@ -97,8 +100,10 @@ export async function createCocoClient(): Promise<CocodClient> {
         amount,
         method: "bolt11",
       });
-      // PendingMintOperation extends MintQuoteSnapshot which has `request`
-      return (op as unknown as { request: string }).request;
+      if (!("request" in op)) {
+        throw new Error("mint prepare did not return a payment request");
+      }
+      return op.request as string;
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
@@ -111,8 +116,13 @@ export async function createCocoClient(): Promise<CocodClient> {
         mintUrl: targetMint,
         amount,
       });
-      const { token } = await coco.ops.send.execute(prepared);
-      return getEncodedToken(token);
+      try {
+        const { token } = await coco.ops.send.execute(prepared.id);
+        return getEncodedToken(token);
+      } catch (error) {
+        await coco.ops.send.cancel(prepared.id);
+        throw error;
+      }
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
@@ -121,16 +131,22 @@ export async function createCocoClient(): Promise<CocodClient> {
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning payment");
       }
-      await coco.ops.melt.prepare({
+      const prepared = await coco.ops.melt.prepare({
         mintUrl: targetMint,
         method: "bolt11",
         methodData: { invoice },
       });
-      return "Payment initiated successfully";
+      try {
+        await coco.ops.melt.execute(prepared.id);
+        return "Payment sent successfully";
+      } catch (error) {
+        await coco.ops.melt.cancel(prepared.id);
+        throw error;
+      }
     },
 
     async listMints(): Promise<string[]> {
-      const mints = await coco.mint.getAllMints();
+      const mints = await coco.mint.getAllTrustedMints();
       return mints.map((m) => m.mintUrl);
     },
 
