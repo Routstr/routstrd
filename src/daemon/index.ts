@@ -1,11 +1,11 @@
 import { createServer } from "http";
 import { existsSync } from "fs";
 import {
-  ModelManager,
   ProviderManager,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
+import { ModelManager } from "@routstr/sdk/bun";
 import type { SdkLogger } from "@routstr/sdk";
 import { CONFIG_DIR, DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
 import { logger } from "../utils/logger";
@@ -30,7 +30,7 @@ import {
   createBunSqliteUsageTrackingDriver,
   createShardedDiscoveryAdapter,
   createProviderRegistryFromDiscoveryAdapter,
-} from "@routstr/sdk/storage";
+} from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
@@ -54,10 +54,8 @@ async function main(): Promise<void> {
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
-  const { Database } = await import("bun:sqlite");
-  const usageTrackingDriver = createBunSqliteUsageTrackingDriver({
+  const usageTrackingDriver = await createBunSqliteUsageTrackingDriver({
     dbPath: DB_PATH,
-    sqlite: { Database },
     legacyStorageDriver: sqliteDriver,
   });
 
