@@ -1,5 +1,6 @@
 import { existsSync } from "fs";
 import { createHash } from "crypto";
+import { isAbsolute } from "path";
 import { logger } from "../../utils/logger";
 import { withCrossProcessLock } from "../../utils/process-lock";
 
@@ -68,13 +69,18 @@ export async function isCocodInstalled(
 ): Promise<boolean> {
   const executable = resolveCocodExecutable(cocodPath);
 
-  if (executable.includes("/")) {
+  if (
+    isAbsolute(executable) ||
+    executable.includes("/") ||
+    executable.includes("\\")
+  ) {
     return existsSync(executable);
   }
 
   try {
+    const command = process.platform === "win32" ? "where.exe" : "which";
     const proc = Bun.spawn({
-      cmd: ["which", executable],
+      cmd: [command, executable],
       stdout: "ignore",
       stderr: "ignore",
     });

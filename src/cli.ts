@@ -15,7 +15,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
 import { execSync } from "child_process";
 import {
   CONFIG_DIR,
@@ -429,6 +429,7 @@ program
       const installHint = config.cocodPath
         ? `Configured cocod executable was not found: ${config.cocodPath}`
         : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
+      console.error(installHint);
       logger.error(installHint);
       process.exit(1);
     }
@@ -1650,6 +1651,40 @@ function getLogFileForDate(date: Date = new Date()): string {
   return `${LOGS_DIR}/${year}-${month}-${day}.log`;
 }
 
+function readLastLines(file: string, lines: number): string {
+  const content = readFileSync(file, "utf8");
+  const allLines = content.replace(/\r\n/g, "\n").split("\n");
+  if (allLines.at(-1) === "") allLines.pop();
+  return allLines.slice(-lines).join("\n");
+}
+
+async function followLogFile(file: string, lines: number): Promise<void> {
+  const initial = readLastLines(file, lines);
+  if (initial) {
+    console.log(initial);
+  }
+
+  let position = statSync(file).size;
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (!existsSync(file)) {
+      continue;
+    }
+
+    const size = statSync(file).size;
+    if (size < position) {
+      position = 0;
+    }
+    if (size === position) {
+      continue;
+    }
+
+    const text = await Bun.file(file).slice(position, size).text();
+    process.stdout.write(text);
+    position = size;
+  }
+}
+
 program
   .command("logs")
   .description("View daemon logs")
@@ -1675,24 +1710,19 @@ program
     });
 
     if (options.follow) {
-      const proc = Bun.spawn(["tail", "-n", String(lines), "-f", todayFile], {
-        stdout: "inherit",
-        stderr: "inherit",
-        stdin: "inherit",
-      });
-
-      const exitCode = await proc.exited;
-      process.exit(exitCode);
+      await followLogFile(todayFile, lines);
+      return;
     }
 
-    const proc = Bun.spawn(["tail", "-n", String(lines), ...logFiles], {
-      stdout: "inherit",
-      stderr: "inherit",
-      stdin: "inherit",
-    });
-
-    const exitCode = await proc.exited;
-    process.exit(exitCode);
+    for (const file of logFiles) {
+      if (logFiles.length > 1) {
+        console.log(`==> ${file} <==`);
+      }
+      const output = readLastLines(file, lines);
+      if (output) {
+        console.log(output);
+      }
+    }
   });
 
 export function cli(args: string[]) {
