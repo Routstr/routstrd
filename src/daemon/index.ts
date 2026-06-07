@@ -65,6 +65,8 @@ async function main(): Promise<void> {
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
+    routstrPubkey: config.routstrPubkey,
+    nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(providerRegistry, store, daemonSdkLogger);
