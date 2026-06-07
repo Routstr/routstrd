@@ -129,19 +129,19 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     // Reset the bootstrap promise so we don't reuse cached results
     providerBootstrapPromise = null;
 
-    logger.log("Force-refreshing providers from Nostr...");
+    console.log("Force-refreshing providers from Nostr...");
 
     // Force-refresh provider discovery from Nostr (kind 38421)
     const providers = await modelManager.bootstrapProviders(false, true);
-    logger.log(`Discovered ${providers.length} providers from Nostr`);
+    console.log(`Discovered ${providers.length} providers from Nostr`);
 
     // Force-refresh routstr21 models from Nostr (kind 38423)
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
-    logger.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
+    console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
     // Force-refresh models from all providers
     const models = await modelManager.fetchModels(providers, true);
-    logger.log(`Fetched ${models.length} models from ${providers.length} providers`);
+    console.log(`Fetched ${models.length} models from ${providers.length} providers`);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status
     const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
@@ -150,7 +150,7 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
       true,
     );
     if (reviewedDisabled.length > 0) {
-      logger.log(
+      console.log(
         `Review sync disabled ${reviewedDisabled.length} provider(s): ${reviewedDisabled.join(", ")}`,
       );
     }
@@ -169,7 +169,7 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     }
     setDisabledProviders([...existingDisabled]);
 
-    logger.log(
+    console.log(
       `Provider refresh complete: ${providers.length} total, ${existingDisabled.size} disabled`,
     );
   };

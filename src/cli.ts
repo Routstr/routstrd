@@ -748,10 +748,6 @@ providersCmd
     await ensureDaemonRunning();
 
     const query = options.refresh ? "/providers?refresh=true" : "/providers";
-    if (options.refresh) {
-      console.log("Force-refreshing providers from Nostr and fetching models...\n");
-    }
-
     const result = await callDaemon(query);
     if (result.error) {
       console.log(result.error);
