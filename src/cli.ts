@@ -743,10 +743,16 @@ const providersCmd = program
 providersCmd
   .command("list")
   .description("List all providers with their enabled/disabled status")
-  .action(async () => {
+  .option("--refresh", "Force re-fetch all Nostr events and refresh models from all enabled providers", false)
+  .action(async (options: { refresh: boolean }) => {
     await ensureDaemonRunning();
 
-    const result = await callDaemon("/providers");
+    const query = options.refresh ? "/providers?refresh=true" : "/providers";
+    if (options.refresh) {
+      console.log("Force-refreshing providers from Nostr and fetching models...\n");
+    }
+
+    const result = await callDaemon(query);
     if (result.error) {
       console.log(result.error);
       process.exit(1);
