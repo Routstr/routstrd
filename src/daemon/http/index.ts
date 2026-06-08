@@ -817,6 +817,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -873,6 +874,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
