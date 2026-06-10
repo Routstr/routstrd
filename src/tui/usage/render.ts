@@ -664,20 +664,35 @@ export function renderRecent(stats: UsageStats, width: number): string {
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
   const clientCol = 14;
+  const tokensCol = 18;
+  const costCol = 18;
+  const providerCol = Math.max(16, width - 4 - 10 - 18 - tokensCol - costCol - clientCol - 5);
+  const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"TOKENS".padEnd(10)} ${"COST".padEnd(12)} ${"PROVIDER".padEnd(16)} ${"CLIENT".slice(0, clientCol)}${COLORS.reset}`);
+  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"I/CR/CW/O".padEnd(tokensCol)} ${"I/O/T in sats".padEnd(costCol)} ${"BASE:PROVIDER".padEnd(providerCol)} ${"CLIENT".slice(0, clientCol)}${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
   for (const entry of recentEntries) {
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, 18).padEnd(18);
-    const tokens = `${formatNumber(entry.totalTokens).padEnd(6)} (${formatNumber(entry.promptTokens)}+${formatNumber(entry.completionTokens)})`;
-    const cost = `${formatCost(entry.satsCost).padEnd(8)} sats`;
-    const provider = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "").slice(0, 16).padEnd(16);
+    const tokens = [
+      entry.promptTokens,
+      entry.cacheReadInputTokens || 0,
+      entry.cacheCreationInputTokens || 0,
+      entry.completionTokens,
+    ].map(formatNumber).join("/");
+    const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
+    const cost = [
+      formatCost(msatsToSats(entry.inputMsats)),
+      formatCost(msatsToSats(entry.outputMsats)),
+      formatCost(totalSats),
+    ].join("/");
+    const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
+    const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
     const clientName = (entry.client || "unknown").slice(0, clientCol - 1);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
-    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(10)} ${COLORS.green}${cost}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset}`);
+    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(tokensCol)} ${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset}`);
   }
 
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);

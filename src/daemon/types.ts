@@ -11,6 +11,12 @@ export type UsageData = {
   totalTokens: number;
   cost: number;
   satsCost: number;
+  provider?: string;
+  inputMsats?: number;
+  outputMsats?: number;
+  totalMsats?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 };
 
 export type UsageTrackingEntry = UsageData & {

@@ -42,6 +42,7 @@ type DaemonDeps = {
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
@@ -295,6 +296,7 @@ export function createDaemonRequestHandler(deps: {
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
@@ -816,6 +818,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -872,6 +875,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1080,6 +1084,14 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/providers") {
       try {
+        const forceRefresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+
+        if (forceRefresh) {
+          logger.log("Force-refreshing providers from Nostr and fetching models...");
+          await deps.refreshProvidersAndModels();
+        }
+
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
         const disabledProviders: string[] = state.disabledProviders || [];

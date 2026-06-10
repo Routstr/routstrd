@@ -32,11 +32,9 @@ import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } 
 import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
-} from "@routstr/sdk/storage/bun";
-import {
   createShardedDiscoveryAdapter,
   createProviderRegistryFromDiscoveryAdapter,
-} from "@routstr/sdk/storage";
+} from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
@@ -71,10 +69,12 @@ async function main(): Promise<void> {
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
+    routstrPubkey: config.routstrPubkey,
+    nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(providerRegistry, store, daemonSdkLogger);
-  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders } =
+  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, store);
 
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
@@ -127,6 +127,7 @@ async function main(): Promise<void> {
       ensureProvidersBootstrapped,
       getRoutstr21Models,
       getModelProviders,
+      refreshProvidersAndModels,
       mode: config.mode || "apikeys",
       routstrPubkey: config.routstrPubkey,
       usageTrackingDriver,
