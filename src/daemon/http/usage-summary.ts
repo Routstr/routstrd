@@ -99,9 +99,36 @@ function emptyBucket(): SizeBucket {
   return { count: 0, cost: 0 };
 }
 
-function bucketFromRow(r: UsageAggregateRow | undefined): SizeBucket {
-  if (!r) return emptyBucket();
-  return { count: r.requests, cost: r.satsCost };
+/** [minInclusive, maxExclusive) token bounds for each size bucket. */
+const SIZE_BUCKET_BOUNDS = {
+  tiny: [0, 1000],
+  small: [1000, 10000],
+  medium: [10000, 50000],
+  large: [50000, 100000],
+  huge: [100000, Infinity],
+} as const;
+
+function computeSizeBuckets(
+  entries: UsageTrackingEntry[],
+): UsageSummary["sizeBuckets"] {
+  const buckets = {
+    tiny: emptyBucket(),
+    small: emptyBucket(),
+    medium: emptyBucket(),
+    large: emptyBucket(),
+    huge: emptyBucket(),
+  };
+  for (const entry of entries) {
+    for (const [name, [min, max]] of Object.entries(SIZE_BUCKET_BOUNDS)) {
+      if (entry.totalTokens >= min && entry.totalTokens < max) {
+        const bucket = buckets[name as keyof typeof buckets];
+        bucket.count++;
+        bucket.cost += entry.satsCost;
+        break;
+      }
+    }
+  }
+  return buckets;
 }
 
 /** Returns the UTC ms for the start of the local day containing `now`. */
@@ -275,19 +302,11 @@ export async function getUsageSummary(
   }));
 
   // ── Size buckets ───────────────────────────────────────────────────────────
-  const [tinyRow] = await driver.aggregate({ minTotalTokens: 0, maxTotalTokens: 1000 });
-  const [smallRow] = await driver.aggregate({ minTotalTokens: 1000, maxTotalTokens: 10000 });
-  const [mediumRow] = await driver.aggregate({ minTotalTokens: 10000, maxTotalTokens: 50000 });
-  const [largeRow] = await driver.aggregate({ minTotalTokens: 50000, maxTotalTokens: 100000 });
-  const [hugeRow] = await driver.aggregate({ minTotalTokens: 100000 });
-
-  const sizeBuckets = {
-    tiny: bucketFromRow(tinyRow),
-    small: bucketFromRow(smallRow),
-    medium: bucketFromRow(mediumRow),
-    large: bucketFromRow(largeRow),
-    huge: bucketFromRow(hugeRow),
-  };
+  // The SDK's aggregate() no longer supports token-range filters
+  // (minTotalTokens/maxTotalTokens were removed in SDK pr-8), so bucket in
+  // JS from a single list() call instead of five aggregate() queries.
+  const allEntries = await driver.list();
+  const sizeBuckets = computeSizeBuckets(allEntries);
 
   // ── Recent entries ─────────────────────────────────────────────────────────
   const recent = await driver.list({ limit: 50 });
