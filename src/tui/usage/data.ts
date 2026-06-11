@@ -1,6 +1,6 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
-import type { ClientStats, DayStats, ModelStats, NpubStats, ProviderStats, UsageStats, UsageSummary } from "./types.ts";
+import type { UsageStats, UsageSummary } from "./types.ts";
 
 export { isDaemonRunning };
 
@@ -101,17 +101,6 @@ export async function fetchUsageSummary(): Promise<UsageStats | null> {
   }
 }
 
-export function getTodayStart(): number {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-}
-
-export function formatDate(timestamp: number): string {
-  const d = new Date(timestamp);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
 export function formatTime(timestamp: number): string {
   const d = new Date(timestamp);
   const p = (n: number) => String(n).padStart(2, "0");
@@ -122,100 +111,6 @@ export function formatNumber(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return n.toString();
-}
-
-export function getDayStats(entries: UsageTrackingEntry[]): Map<string, DayStats> {
-  const days = new Map<string, DayStats>();
-  for (const entry of entries) {
-    const date = formatDate(entry.timestamp);
-    const existing = days.get(date) || { date, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    days.set(date, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-  return days;
-}
-
-export function getHourlyToday(entries: UsageTrackingEntry[]): Map<number, DayStats> {
-  const todayStart = getTodayStart();
-  const hours = new Map<number, DayStats>();
-  for (const entry of entries) {
-    if (entry.timestamp < todayStart) continue;
-    const hour = new Date(entry.timestamp).getHours();
-    const existing = hours.get(hour) || {
-      date: formatDate(entry.timestamp), requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
-    };
-    hours.set(hour, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-  return hours;
-}
-
-export function getModelStats(entries: UsageTrackingEntry[]): ModelStats[] {
-  const models = new Map<string, ModelStats>();
-  for (const entry of entries) {
-    const existing = models.get(entry.modelId) || {
-      modelId: entry.modelId, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
-    };
-    models.set(entry.modelId, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-  return Array.from(models.values()).sort((a, b) => b.satsCost - a.satsCost);
-}
-
-export function getProviderStats(entries: UsageTrackingEntry[]): ProviderStats[] {
-  const providers = new Map<string, ProviderStats>();
-  for (const entry of entries) {
-    const url = entry.baseUrl || "unknown";
-    const existing = providers.get(url) || {
-      baseUrl: url, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
-    };
-    providers.set(url, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-  return Array.from(providers.values()).sort((a, b) => b.satsCost - a.satsCost);
-}
-
-export function getClientStats(entries: UsageTrackingEntry[]): ClientStats[] {
-  const clients = new Map<string, ClientStats>();
-  for (const entry of entries) {
-    const client = entry.client || "unknown";
-    const existing = clients.get(client) || {
-      client, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0,
-    };
-    clients.set(client, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-  return Array.from(clients.values()).sort((a, b) => b.satsCost - a.satsCost);
 }
 
 // ─── Client / Npub helpers ────────────────────────────────────────────
@@ -250,57 +145,4 @@ export async function fetchClients(): Promise<ClientInfo[]> {
 
 export function hasAnyNpubs(clients: ClientInfo[]): boolean {
   return clients.some((c) => !!c.ownerNpub);
-}
-
-export function getNpubStats(entries: UsageTrackingEntry[], clients: ClientInfo[]): NpubStats[] {
-  // Build client-id → ownerNpub lookup
-  const clientNpubMap = new Map<string, string>();
-  for (const c of clients) {
-    if (c.ownerNpub) {
-      clientNpubMap.set(c.clientId, c.ownerNpub);
-    }
-  }
-
-  // Aggregate usage per npub
-  const npubs = new Map<string, NpubStats>();
-  for (const entry of entries) {
-    const npub = clientNpubMap.get(entry.client || "");
-    if (!npub) continue; // skip entries whose client has no ownerNpub
-
-    const existing = npubs.get(npub) || {
-      npub,
-      requests: 0,
-      satsCost: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-    };
-    npubs.set(npub, {
-      ...existing,
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      promptTokens: existing.promptTokens + entry.promptTokens,
-      completionTokens: existing.completionTokens + entry.completionTokens,
-      totalTokens: existing.totalTokens + entry.totalTokens,
-    });
-  }
-
-  return Array.from(npubs.values()).sort((a, b) => b.satsCost - a.satsCost);
-}
-
-// ─── Totals ───────────────────────────────────────────────────────────
-
-export function getTotals(entries: UsageTrackingEntry[] | undefined) {
-  if (!entries || !Array.isArray(entries)) {
-    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, satsCost: 0 };
-  }
-  return entries.reduce(
-    (acc, entry) => ({
-      promptTokens: acc.promptTokens + entry.promptTokens,
-      completionTokens: acc.completionTokens + entry.completionTokens,
-      totalTokens: acc.totalTokens + entry.totalTokens,
-      satsCost: acc.satsCost + entry.satsCost,
-    }),
-    { promptTokens: 0, completionTokens: 0, totalTokens: 0, satsCost: 0 }
-  );
 }
