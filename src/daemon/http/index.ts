@@ -16,6 +16,7 @@ import {
 } from "../wallet/cocod-client";
 import { decodeCashuTokenAmount } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
+import { getUsageSummary } from "./usage-summary";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -1124,11 +1125,37 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
+        const npubFilter = url.searchParams.get("npub")?.trim();
+        const clients = npubFilter ? getClientsFromStore(deps.store) : undefined;
+        const clientFilter = npubFilter
+          ? clients!
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
         const output = await deps.usageTrackingDriver.list({
           limit: parseLimit(url.searchParams.get("limit")),
+          ...(clientFilter ? { clients: clientFilter } : {}),
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/usage/summary") {
+      try {
+        const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const npubFilter = url.searchParams.get("npub")?.trim();
+        const clients = getClientsFromStore(deps.store);
+        const clientFilter = npubFilter
+          ? clients
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter);
+        sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }
