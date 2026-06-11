@@ -15,7 +15,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import {
   CONFIG_DIR,
@@ -31,10 +31,8 @@ import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
-import {
-  isCocodInstalled,
-  resolveCocodExecutable,
-} from "./daemon/wallet/cocod-client";
+import { generateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
 import packageJson from "../package.json" with { type: "json" };
 
 type RoutstrModel = {
@@ -81,26 +79,26 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
-async function installCocodOrExit(): Promise<void> {
-  console.log("cocod not found. Installing globally with bun...");
-
-  const installProc = Bun.spawn(
-    ["bun", "install", "--global", "@routstr/cocod"],
-    {
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  );
-
-  const installCode = await installProc.exited;
-  if (installCode !== 0 || !(await isCocodInstalled())) {
-    console.error(
-      "Failed to install cocod. Please run 'bun install --global @routstr/cocod' manually.",
-    );
-    throw new Error("cocod installation failed");
+function initializeWallet(): void {
+  const walletDir =
+    process.env.COCOD_DIR ||
+    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
+  const walletConfig = `${walletDir}/config.json`;
+  if (existsSync(walletConfig)) {
+    console.log("Wallet already initialized.");
+    return;
   }
-
-  console.log("cocod installed successfully.");
+  mkdirSync(walletDir, { recursive: true });
+  const mnemonic = generateMnemonic(wordlist);
+  const config = {
+    version: 1,
+    mnemonic,
+    encrypted: false,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(walletConfig, JSON.stringify(config, null, 2));
+  console.log("Initialized. Mnemonic:", mnemonic);
+  console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -145,74 +143,8 @@ async function initDaemon(): Promise<void> {
     console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
   }
 
-  if (!(await isCocodInstalled(config.cocodPath))) {
-    if (config.cocodPath) {
-      logger.error(
-        `Configured cocod executable was not found: ${config.cocodPath}`,
-      );
-      return;
-    }
-
-    await installCocodOrExit();
-  }
-
-  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
-
   console.log(`Database will be stored at: ${DB_PATH}`);
-  console.log("\nInitializing cocod...");
-
-  const initProc = Bun.spawn([cocodExecutable, "init"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  let initStdout = "";
-  let initStderr = "";
-
-  const stdoutDone = initProc.stdout
-    ? initProc.stdout.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStdout += text;
-            process.stdout.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const stderrDone = initProc.stderr
-    ? initProc.stderr.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStderr += text;
-            process.stderr.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const [initCode] = await Promise.all([
-    initProc.exited,
-    stdoutDone,
-    stderrDone,
-  ]);
-  const combinedOutput = `${initStdout}\n${initStderr}`.toLowerCase();
-  const alreadyInitialized = combinedOutput.includes("already initialized");
-
-  if (initCode !== 0 && !alreadyInitialized) {
-    console.error(
-      "Failed to initialize cocod. Please run 'cocod init' manually.",
-    );
-    return;
-  }
-
-  if (alreadyInitialized) {
-    console.log("cocod is already initialized.");
-  } else {
-    console.log("cocod initialized successfully.");
-  }
+  initializeWallet();
 
   await startDaemon({ port: String(config.port || 8008) });
 
@@ -425,13 +357,6 @@ program
   .action(async (options: { port?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
-    if (!(await isCocodInstalled(config.cocodPath))) {
-      const installHint = config.cocodPath
-        ? `Configured cocod executable was not found: ${config.cocodPath}`
-        : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
-      logger.error(installHint);
-      process.exit(1);
-    }
     await startDaemon({
       port: options.port || String(config.port || 8008),
       provider: options.provider,
