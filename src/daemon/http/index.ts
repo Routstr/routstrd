@@ -1125,8 +1125,16 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
+        const npubFilter = url.searchParams.get("npub")?.trim();
+        const clients = npubFilter ? getClientsFromStore(deps.store) : undefined;
+        const clientFilter = npubFilter
+          ? clients!
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
         const output = await deps.usageTrackingDriver.list({
           limit: parseLimit(url.searchParams.get("limit")),
+          ...(clientFilter ? { clients: clientFilter } : {}),
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
