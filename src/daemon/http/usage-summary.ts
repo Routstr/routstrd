@@ -160,13 +160,14 @@ export async function getUsageSummary(
   driver: UsageTrackingDriver,
   clients: ClientEntry[],
   tzOffsetMinutes: number,
+  /** If set, only include usage for these client IDs (e.g. from `?npub=` filtering). */
+  clientFilter?: string[],
 ): Promise<UsageSummary> {
-  // Cache key: total row count + per-client identity (id + ownerNpub) + tz.
-  // Including ownerNpub ensures a client assignment change invalidates the cache
-  // even though the row count doesn't change.
-  const count = await driver.count();
+  // Cache key: total row count + per-client identity + filter + tz.
+  const count = await driver.count(clientFilter ? { clients: clientFilter } : {});
   const clientIdentity = clients.map((c) => `${c.clientId}:${c.ownerNpub ?? ""}`).join(",");
-  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}`;
+  const filterKey = clientFilter ? `:f:${clientFilter.sort().join(",")}` : "";
+  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}${filterKey}`;
   const now = Date.now();
 
   if (
@@ -177,29 +178,57 @@ export async function getUsageSummary(
     return _cache.summary;
   }
 
+  // Base filter applied to every aggregate/list/count call
+  const baseFilter = clientFilter ? { clients: clientFilter } as const : {};
+
+  // Short-circuit: if the filter yields no rows, return zeroed summary
+  if (count === 0) {
+    const zeroStat: StatRow = {
+      requests: 0, promptTokens: 0, completionTokens: 0,
+      totalTokens: 0, cost: 0, satsCost: 0,
+    };
+    const zeroSummary: UsageSummary = {
+      generatedAt: now,
+      totals: zeroStat,
+      models: [],
+      providers: [],
+      clients: [],
+      npubs: [],
+      days: [],
+      hoursToday: [],
+      sizeBuckets: {
+        tiny: emptyBucket(), small: emptyBucket(), medium: emptyBucket(),
+        large: emptyBucket(), huge: emptyBucket(),
+      },
+      recent: [],
+    };
+    _cache = { key: cacheKey, summary: zeroSummary };
+    return zeroSummary;
+  }
+
   // ── Totals ─────────────────────────────────────────────────────────────────
-  const [totalsRow] = await driver.aggregate({});
+  const [totalsRow] = await driver.aggregate({ ...baseFilter });
   const totals: StatRow = totalsRow ? rowToStat(totalsRow) : {
     requests: 0, promptTokens: 0, completionTokens: 0,
     totalTokens: 0, cost: 0, satsCost: 0,
   };
 
   // ── Models ─────────────────────────────────────────────────────────────────
-  const modelRows = await driver.aggregate({ groupBy: "modelId" });
+  const modelRows = await driver.aggregate({ ...baseFilter, groupBy: "modelId" });
   const models: ModelSummary[] = modelRows.map((r) => ({
     modelId: r.group ?? "unknown",
     ...rowToStat(r),
   }));
 
   // ── Providers ──────────────────────────────────────────────────────────────
-  const providerRows = await driver.aggregate({ groupBy: "baseUrl" });
+  const providerRows = await driver.aggregate({ ...baseFilter, groupBy: "baseUrl" });
   const providers: ProviderSummary[] = providerRows.map((r) => ({
     baseUrl: r.group ?? "unknown",
     ...rowToStat(r),
   }));
 
   // ── Clients ────────────────────────────────────────────────────────────────
-  const clientRows = await driver.aggregate({ groupBy: "client" });
+  const clientRows = await driver.aggregate({ ...baseFilter, groupBy: "client" });
   const clientSummaries: ClientSummary[] = clientRows.map((r) => ({
     client: r.group ?? "unknown",
     ...rowToStat(r),
@@ -213,6 +242,7 @@ export async function getUsageSummary(
   for (let i = 0; i < topClientRows.length; i++) {
     const clientId = topClientRows[i]!.group!;
     const topModelRows = await driver.aggregate({
+      ...baseFilter,
       groupBy: "modelId",
       client: clientId,
     });
@@ -281,6 +311,7 @@ export async function getUsageSummary(
 
   // ── Days (last 30, most-recent-first) ─────────────────────────────────────
   const dayRows = await driver.aggregate({
+    ...baseFilter,
     groupBy: "day",
     tzOffsetMinutes,
     after: now - 30 * 86400000,
@@ -292,6 +323,7 @@ export async function getUsageSummary(
   // ── Hours today ────────────────────────────────────────────────────────────
   const todayStartUtc = startOfLocalDayUtc(now, tzOffsetMinutes);
   const hourRows = await driver.aggregate({
+    ...baseFilter,
     groupBy: "hour",
     tzOffsetMinutes,
     after: todayStartUtc - 1,
@@ -305,11 +337,11 @@ export async function getUsageSummary(
   // The SDK's aggregate() no longer supports token-range filters
   // (minTotalTokens/maxTotalTokens were removed in SDK pr-8), so bucket in
   // JS from a single list() call instead of five aggregate() queries.
-  const allEntries = await driver.list();
+  const allEntries = await driver.list(baseFilter);
   const sizeBuckets = computeSizeBuckets(allEntries);
 
   // ── Recent entries ─────────────────────────────────────────────────────────
-  const recent = await driver.list({ limit: 50 });
+  const recent = await driver.list({ ...baseFilter, limit: 50 });
 
   const summary: UsageSummary = {
     generatedAt: now,

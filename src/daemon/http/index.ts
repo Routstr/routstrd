@@ -1139,8 +1139,14 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/usage/summary") {
       try {
         const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const npubFilter = url.searchParams.get("npub")?.trim();
         const clients = getClientsFromStore(deps.store);
-        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz);
+        const clientFilter = npubFilter
+          ? clients
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter);
         sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
