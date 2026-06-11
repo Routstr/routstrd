@@ -76,42 +76,6 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
   }
 }
 
-export async function fetchUsage(limit = 10000): Promise<UsageStats | null> {
-  try {
-    const running = await isDaemonRunning();
-    if (!running) return null;
-
-    const result = await callDaemon(`/usage?limit=${limit}`);
-    if (result.error) return null;
-
-    // The auth proxy filters usage to the authenticated npub's clients and
-    // returns client IDs without the owner suffix.
-    const entries = result.output as UsageTrackingEntry[] | undefined;
-    const visibleEntries = Array.isArray(entries) ? entries : [];
-
-    // Calculate totals from visible entries
-    const totals = visibleEntries.reduce(
-      (acc, entry) => ({
-        promptTokens: acc.promptTokens + entry.promptTokens,
-        completionTokens: acc.completionTokens + entry.completionTokens,
-        totalTokens: acc.totalTokens + entry.totalTokens,
-        satsCost: acc.satsCost + entry.satsCost,
-      }),
-      { promptTokens: 0, completionTokens: 0, totalTokens: 0, satsCost: 0 },
-    );
-
-    return {
-      entries: visibleEntries,
-      totalEntries: visibleEntries.length,
-      totalSatsCost: totals.satsCost,
-      recentSatsCost: totals.satsCost, // For now, recent = total since we don't have time window
-      limit,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export async function fetchUsageSummary(): Promise<UsageStats | null> {
   try {
     const running = await isDaemonRunning();

@@ -10,7 +10,7 @@ export interface UsageStats {
   recentSatsCost: number;
   limit: number;
   /** Present when data was fetched via /usage/summary (server-aggregated path). */
-  summary?: UsageSummary;
+  summary: UsageSummary;
 }
 
 export interface DayStats {
