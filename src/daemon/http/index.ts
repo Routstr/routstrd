@@ -8,6 +8,8 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
+import { getEncodedToken } from "@cashu/coco-core";
+import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
@@ -433,6 +435,31 @@ export function createDaemonRequestHandler(deps: {
         const mintUrl = getRequiredStringField(body, "url");
         const info = await deps.walletClient.getMintInfo(mintUrl);
         return { output: { url: mintUrl, info } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/history") {
+      await respond(res, async () => {
+        const offsetParam = url.searchParams.get("offset");
+        const limitParam = url.searchParams.get("limit");
+        const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
+        const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
+        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        // Encode tokens for send/receive entries
+        const encoded = entries.map((entry: HistoryEntry) => {
+          const base = { ...entry } as Record<string, unknown>;
+          if (
+            (entry.type === "send" || entry.type === "receive") &&
+            entry.token
+          ) {
+            base.encodedToken = getEncodedToken(entry.token);
+          }
+          return base;
+        });
+
+        return { output: { entries: encoded, offset, limit } };
       });
       return;
     }

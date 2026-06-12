@@ -1113,6 +1113,108 @@ npubsCmd
     );
   });
 
+// History - show transaction history
+program
+  .command("history")
+  .description("Show wallet transaction history")
+  .option("-n, --limit <number>", "Number of entries to show", "50")
+  .option("--offset <number>", "Number of entries to skip", "0")
+  .option("-v, --verbose", "Show full details including encoded Cashu tokens")
+  .option("--json", "Output raw JSON with token objects (no encoding)")
+  .action(async (options: { limit: string; offset: string; verbose: boolean; json: boolean }) => {
+    await ensureDaemonRunning();
+
+    const limit = Math.min(parseInt(options.limit, 10) || 50, 1000);
+    const offset = parseInt(options.offset, 10) || 0;
+
+    const result = await callDaemon(
+      `/wallet/history?offset=${offset}&limit=${limit}`,
+    );
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const data = result.output as
+      | { entries?: Record<string, unknown>[]; offset?: number; limit?: number }
+      | undefined;
+    const entries = data?.entries || [];
+
+    if (entries.length === 0) {
+      console.log("No transaction history yet.");
+      return;
+    }
+
+    if (options.json) {
+      // Raw JSON output with token as JSON object
+      const jsonOutput = entries.map((e: Record<string, unknown>) => {
+        const entry = { ...e };
+        delete entry.encodedToken;
+        return entry;
+      });
+      console.log(JSON.stringify(jsonOutput, null, 2));
+      return;
+    }
+
+    if (options.verbose) {
+      // Verbose: JSON-like with encoded token
+      for (const entry of entries) {
+        const e = entry as Record<string, unknown>;
+        const display: Record<string, unknown> = {};
+        for (const key of Object.keys(e).sort()) {
+          display[key] = e[key];
+        }
+        // Replace raw token with encoded one if present
+        if (e.encodedToken && e.token) {
+          display.token = e.encodedToken;
+          delete display.encodedToken;
+        }
+        console.log(JSON.stringify(display, null, 2));
+      }
+      return;
+    }
+
+    // Default: table format
+    const idCol = "ID";
+    const timeCol = "Date/Time";
+    const typeCol = "Type";
+    const mintCol = "Mint";
+    const amtCol = "Amount";
+
+    const rows = entries.map((entry: Record<string, unknown>) => {
+      const id = String(entry.id ?? "");
+      const time = new Date(Number(entry.createdAt)).toISOString().replace("T", " ").slice(0, 19);
+      const type = String(entry.type ?? "").toUpperCase();
+      const mint = String(entry.mintUrl ?? "");
+      const unit = String(entry.unit ?? "sat");
+      const amount = `${entry.amount} ${unit}`;
+      return { id, time, type, mint, amount };
+    });
+
+    const widths = {
+      id: Math.max(idCol.length, ...rows.map((r) => r.id.length)),
+      time: Math.max(timeCol.length, ...rows.map((r) => r.time.length)),
+      type: Math.max(typeCol.length, ...rows.map((r) => r.type.length)),
+      mint: Math.max(mintCol.length, ...rows.map((r) => r.mint.length)),
+      amount: Math.max(amtCol.length, ...rows.map((r) => r.amount.length)),
+    };
+
+    const pad = (s: string, w: number) => s.padEnd(w);
+    const sep = Object.values(widths).map((w) => "-".repeat(w)).join(" | ");
+
+    console.log(
+      `${pad(idCol, widths.id)} | ${pad(timeCol, widths.time)} | ${pad(typeCol, widths.type)} | ${pad(mintCol, widths.mint)} | ${pad(amtCol, widths.amount)}`,
+    );
+    console.log(sep);
+
+    for (const row of rows) {
+      console.log(
+        `${pad(row.id, widths.id)} | ${pad(row.time, widths.time)} | ${pad(row.type, widths.type)} | ${pad(row.mint, widths.mint)} | ${pad(row.amount, widths.amount)}`,
+      );
+    }
+  });
+
 // Monitor - interactive TUI
 program
   .command("monitor")
