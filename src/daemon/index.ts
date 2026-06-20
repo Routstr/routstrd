@@ -11,7 +11,13 @@ import {
 // (SDK 0.3.7+ browser-safe entrypoint split).
 import { ModelManager } from "@routstr/sdk/bun";
 import type { SdkLogger } from "@routstr/sdk";
-import { CONFIG_DIR, DB_PATH, SOCKET_PATH, PID_FILE } from "../utils/config";
+import {
+  CONFIG_DIR,
+  DB_PATH,
+  SOCKET_PATH,
+  PID_FILE,
+  REQUEST_RESPONSE_LOGS_DIR,
+} from "../utils/config";
 import { logger } from "../utils/logger";
 
 
@@ -40,6 +46,7 @@ import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
+import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
@@ -49,6 +56,17 @@ async function main(): Promise<void> {
 
   const port = args.port;
   const provider = args.provider || config.provider;
+  const requestResponseLogDir =
+    process.env.ROUTSTRD_REQUEST_RESPONSE_LOG_DIR ||
+    (config.requestResponseLogging?.enabled
+      ? config.requestResponseLogging.dir || REQUEST_RESPONSE_LOGS_DIR
+      : undefined);
+  const requestResponseLogSink = requestResponseLogDir
+    ? new FileRequestResponseLogSink({
+        dir: requestResponseLogDir,
+        logger: daemonSdkLogger.child("request-response-log"),
+      })
+    : undefined;
 
   await ensureDirs();
 
@@ -133,6 +151,7 @@ async function main(): Promise<void> {
       usageTrackingDriver,
       providerManager,
       refundClient,
+      requestResponseLogSink,
     }),
   );
 
@@ -242,6 +261,9 @@ async function main(): Promise<void> {
 
   server.listen(port, async () => {
     logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);
+    if (requestResponseLogDir) {
+      logger.log(`Raw request/response logs: ${requestResponseLogDir}`);
+    }
 
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
