@@ -7,6 +7,7 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
@@ -48,7 +49,7 @@ type DaemonDeps = {
   routstrPubkey?: string;
   providerManager: ProviderManager;
   refundClient: any;
-  requestResponseLogDir?: string;
+  requestResponseLogSink?: RequestResponseLogSink;
 };
 
 /**
@@ -304,7 +305,7 @@ export function createDaemonRequestHandler(deps: {
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
   refundClient: any;
-  requestResponseLogDir?: string;
+  requestResponseLogSink?: RequestResponseLogSink;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -1276,8 +1277,8 @@ export function createDaemonRequestHandler(deps: {
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,
-        ...(deps.requestResponseLogDir
-          ? { requestResponseLogDir: deps.requestResponseLogDir }
+        ...(deps.requestResponseLogSink
+          ? { requestResponseLogSink: deps.requestResponseLogSink }
           : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });

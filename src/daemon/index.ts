@@ -46,6 +46,7 @@ import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
+import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
@@ -60,6 +61,12 @@ async function main(): Promise<void> {
     (config.requestResponseLogging?.enabled
       ? config.requestResponseLogging.dir || REQUEST_RESPONSE_LOGS_DIR
       : undefined);
+  const requestResponseLogSink = requestResponseLogDir
+    ? new FileRequestResponseLogSink({
+        dir: requestResponseLogDir,
+        logger: daemonSdkLogger.child("request-response-log"),
+      })
+    : undefined;
 
   await ensureDirs();
 
@@ -144,7 +151,7 @@ async function main(): Promise<void> {
       usageTrackingDriver,
       providerManager,
       refundClient,
-      requestResponseLogDir,
+      requestResponseLogSink,
     }),
   );
 
