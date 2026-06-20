@@ -48,6 +48,7 @@ type DaemonDeps = {
   routstrPubkey?: string;
   providerManager: ProviderManager;
   refundClient: any;
+  requestResponseLogDir?: string;
 };
 
 /**
@@ -303,6 +304,7 @@ export function createDaemonRequestHandler(deps: {
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
   refundClient: any;
+  requestResponseLogDir?: string;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -1274,6 +1276,9 @@ export function createDaemonRequestHandler(deps: {
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,
+        ...(deps.requestResponseLogDir
+          ? { requestResponseLogDir: deps.requestResponseLogDir }
+          : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });
 
