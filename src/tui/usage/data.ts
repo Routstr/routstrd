@@ -26,9 +26,6 @@ export interface StatusInfo {
 
 export async function fetchStatus(): Promise<StatusInfo | null> {
   try {
-    const running = await isDaemonRunning();
-    if (!running) return null;
-
     const result = await callDaemon("/status");
     if (result.error) return null;
 
@@ -52,9 +49,6 @@ export async function fetchStatus(): Promise<StatusInfo | null> {
 
 export async function fetchBalance(): Promise<BalanceInfo | null> {
   try {
-    const running = await isDaemonRunning();
-    if (!running) return null;
-
     const result = await callDaemon("/keys/balance");
     if (result.error) return null;
 
@@ -78,9 +72,6 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
 
 export async function fetchUsageSummary(): Promise<UsageStats | null> {
   try {
-    const running = await isDaemonRunning();
-    if (!running) return null;
-
     const tz = new Date().getTimezoneOffset();
     const result = await callDaemon(`/usage/summary?tz=${tz}`);
     if (result.error) return null;
@@ -123,9 +114,6 @@ export interface ClientInfo {
 
 export async function fetchClients(): Promise<ClientInfo[]> {
   try {
-    const running = await isDaemonRunning();
-    if (!running) return [];
-
     const result = await callDaemon("/clients");
     if (result.error) return [];
 

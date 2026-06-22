@@ -49,10 +49,9 @@ export async function runUsageTui(): Promise<void> {
   let clients: ClientInfo[] = [];
   let visibleTabs: Tab[] = getVisibleTabs(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
-  let shouldUpdate = true;
   let autoRefresh = true;
   let cleanedUp = false;
-  let rendering = false;
+  let fetching = false;
 
   if (isInteractive) {
     stdout.write(enterAlternateScreen() + hideCursor());
@@ -80,123 +79,141 @@ export async function runUsageTui(): Promise<void> {
   process.on("SIGINT", () => cleanup(0));
   process.on("SIGTERM", () => cleanup(0));
 
-  async function render(forceFetch = false) {
-    if (rendering) return;
-    rendering = true;
-
+  /**
+   * Background fetch — async, never blocks rendering. Updates the state
+   * variables only on success, then triggers a repaint. Overlapping calls
+   * are skipped via the `fetching` guard so we don't race stale results.
+   */
+  async function fetchData(): Promise<void> {
+    if (fetching) return;
+    fetching = true;
     try {
-      const width = getWidth();
-      const height = getHeight();
+      const running = await isDaemonRunning();
+      if (!running) {
+        stats = null;
+      } else {
+        // Fire all 4 fetches concurrently — cuts the blocked window significantly.
+        const [newStats, newBalance, newStatus, newClients] = await Promise.all([
+          fetchUsageSummary(),
+          fetchBalance(),
+          fetchStatus(),
+          fetchClients(),
+        ]);
+        if (newStats) stats = newStats;
+        if (newBalance) balance = newBalance;
+        if (newStatus) status = newStatus;
+        if (newClients && newClients.length > 0) clients = newClients;
 
-      if (forceFetch || shouldUpdate) {
-        stats = await fetchUsageSummary();
-        balance = await fetchBalance();
-        status = await fetchStatus();
-        clients = await fetchClients();
         const npubsVisible = hasAnyNpubs(clients);
         visibleTabs = getVisibleTabs(npubsVisible);
-        // If current tab is npubs but it's no longer visible, fall back to clients
         if (currentTab === "npubs" && !npubsVisible) {
           currentTab = "clients";
           vimState.scrollPos = 0;
         }
-        shouldUpdate = false;
       }
-
-      if (!stats) {
-        stdout.write(
-          moveCursor(1, 1) +
-          eraseDown() +
-          `${COLORS.red}Error: Could not fetch usage data.${COLORS.reset}\n` +
-          `Make sure routstrd is running.\n` +
-          `\nPress Q to quit.`
-        );
-        return;
-      }
-
-      const content = renderTabContent(currentTab, stats, balance, status, width, clients);
-      const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-      const chrome = renderHeader(currentTab, width, visibleTabs) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
-      const chromeLines = chrome.split("\n").length - 1;
-      const footerSeparator = renderSeparator(width);
-      const footerLines = footerSeparator.split("\n").length - 1;
-      const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
-      const visibleContent = applyScrollToContent(content, contentViewportHeight);
-      const footerBlock = (visibleContent ? "\n" : "") + footerSeparator + footer;
-
-      stdout.write(moveCursor(1, 1) + eraseDown() + chrome + visibleContent + footerBlock);
+      render();
     } finally {
-      rendering = false;
+      fetching = false;
     }
+  }
+
+  /**
+   * Synchronous paint — never awaits I/O. Reads the current state variables
+   * and writes to stdout. Safe to call from key handlers without blocking.
+   */
+  function render(): void {
+    const width = getWidth();
+    const height = getHeight();
+
+    if (!stats) {
+      stdout.write(
+        moveCursor(1, 1) +
+        eraseDown() +
+        `${COLORS.red}Error: Could not fetch usage data.${COLORS.reset}\n` +
+        `Make sure routstrd is running.\n` +
+        `\nPress Q to quit.`
+      );
+      return;
+    }
+
+    const content = renderTabContent(currentTab, stats, balance, status, width, clients);
+    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
+    const chrome = renderHeader(currentTab, width, visibleTabs) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
+    const chromeLines = chrome.split("\n").length - 1;
+    const footerSeparator = renderSeparator(width);
+    const footerLines = footerSeparator.split("\n").length - 1;
+    const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
+    const visibleContent = applyScrollToContent(content, contentViewportHeight);
+    const footerBlock = (visibleContent ? "\n" : "") + footerSeparator + footer;
+
+    stdout.write(moveCursor(1, 1) + eraseDown() + chrome + visibleContent + footerBlock);
   }
 
   const handleKey = (key: string) => {
     if (vimState.isSearching) {
       if (key === "\x1b" || key === "\x1b[3~") {
         exitSearchMode();
-        void render(false);
+        render();
         return;
       }
       if (key === "\r" || key === "\n") {
         if (stats?.entries) performSearch(vimState.searchQuery, stats.entries);
         exitSearchMode();
-        void render(false);
+        render();
         return;
       }
       if (key === "\x7f" || key === "\x08") {
         vimState.searchQuery = vimState.searchQuery.slice(0, -1);
         if (stats?.entries) performSearch(vimState.searchQuery, stats.entries);
-        void render(false);
+        render();
         return;
       }
       if (key === "\x03") {
         exitSearchMode();
-        void render(false);
+        render();
         return;
       }
       if (key.length === 1 && key.charCodeAt(0) >= 32 && key.charCodeAt(0) < 127) {
         vimState.searchQuery += key;
         if (stats?.entries) performSearch(vimState.searchQuery, stats.entries);
-        void render(false);
+        render();
       }
       return;
     }
 
     if (key === "q" || key === "Q" || key === "\u0003") return cleanup(0);
     if (key === "r" || key === "R") {
-      shouldUpdate = true;
-      void render(true);
+      void fetchData();
       return;
     }
     if (key === "a" || key === "A") {
       autoRefresh = !autoRefresh;
-      shouldUpdate = true;
-      void render(false);
+      render();
       return;
     }
 
     if (key === "j" || key === "\x1b[B" || key === "\x1bOB") {
       scrollDown();
-      void render(false);
+      render();
       return;
     }
     if (key === "k" || key === "\x1b[A" || key === "\x1bOA") {
       scrollUp();
-      void render(false);
+      render();
       return;
     }
     if (key === "l" || key === "\x1b[C" || key === "\x1bOC") {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
       currentTab = visibleTabs[(currentIdx + 1) % visibleTabs.length]!.id;
       vimState.scrollPos = 0;
-      void render(false);
+      render();
       return;
     }
     if (key === "h" || key === "\x1b[D" || key === "\x1bOD") {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
       currentTab = visibleTabs[(currentIdx - 1 + visibleTabs.length) % visibleTabs.length]!.id;
       vimState.scrollPos = 0;
-      void render(false);
+      render();
       return;
     }
 
@@ -204,54 +221,53 @@ export async function runUsageTui(): Promise<void> {
       if (vimState.lastKey === "g" && Date.now() - vimState.lastKeyTime < 300) {
         scrollToBottom();
         vimState.lastKey = "";
-        void render(false);
+        render();
         return;
       }
       vimState.lastKey = "g";
       vimState.lastKeyTime = Date.now();
       scrollToTop();
-      void render(false);
+      render();
       return;
     }
 
-    if (key === "\x02") { pageUp(); void render(false); return; }
-    if (key === "\x06") { pageDown(); void render(false); return; }
-    if (key === "\x15") { scrollUp(10); void render(false); return; }
-    if (key === "\x04") { scrollDown(10); void render(false); return; }
-    if (key === "\x1b[H" || key === "\x1b[1~" || key === "\x1bOH") { scrollToTop(); void render(false); return; }
-    if (key === "\x1b[F" || key === "\x1b[4~" || key === "\x1bOF") { scrollToBottom(); void render(false); return; }
-    if (key === "/") { startSearch(false); void render(false); return; }
-    if (key === "?") { startSearch(true); void render(false); return; }
+    if (key === "\x02") { pageUp(); render(); return; }
+    if (key === "\x06") { pageDown(); render(); return; }
+    if (key === "\x15") { scrollUp(10); render(); return; }
+    if (key === "\x04") { scrollDown(10); render(); return; }
+    if (key === "\x1b[H" || key === "\x1b[1~" || key === "\x1bOH") { scrollToTop(); render(); return; }
+    if (key === "\x1b[F" || key === "\x1b[4~" || key === "\x1bOF") { scrollToBottom(); render(); return; }
+    if (key === "/") { startSearch(false); render(); return; }
+    if (key === "?") { startSearch(true); render(); return; }
     if (key === "n") {
       if (vimState.searchReverse) prevSearchResult(stats?.entries.length || 0);
       else nextSearchResult(stats?.entries.length || 0);
-      void render(false);
+      render();
       return;
     }
     if (key === "N") {
       if (vimState.searchReverse) nextSearchResult(stats?.entries.length || 0);
       else prevSearchResult(stats?.entries.length || 0);
-      void render(false);
+      render();
       return;
     }
-    if (key === "\x1b") { scrollToTop(); void render(false); return; }
+    if (key === "\x1b") { scrollToTop(); render(); return; }
 
     const tab = visibleTabs.find((t) => t.key === key);
     if (tab) {
       currentTab = tab.id;
       vimState.scrollPos = 0;
-      void render(false);
+      render();
     }
   };
 
   if (isInteractive) stdin.on("data", handleKey);
 
-  await render(true);
+  await fetchData();
 
   refreshInterval = setInterval(() => {
     if (autoRefresh) {
-      shouldUpdate = true;
-      void render(true);
+      void fetchData();
     }
   }, 2000);
 }
