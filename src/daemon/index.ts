@@ -176,6 +176,13 @@ async function main(): Promise<void> {
     );
 
     refreshInterval = setInterval(async () => {
+      logger.log("Running scheduled Nostr event refresh...");
+      try {
+        await modelManager.refreshNostrEvents();
+      } catch (error) {
+        logger.error("Scheduled Nostr event refresh failed:", error);
+      }
+
       logger.log("Running scheduled model refresh...");
       try {
         await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
@@ -268,6 +275,10 @@ async function main(): Promise<void> {
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
       .then(async () => {
+        // Catch up on any Nostr events published since last run
+        logger.log("Running initial Nostr event refresh...");
+        await modelManager.refreshNostrEvents();
+
         startModelRefreshJob();
         startRefundJob();
         // Run an immediate refresh to populate models right away
