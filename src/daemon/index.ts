@@ -39,7 +39,6 @@ import {
   createBunSqliteDriver,
   createBunSqliteUsageTrackingDriver,
   createShardedDiscoveryAdapter,
-  createProviderRegistryFromDiscoveryAdapter,
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
@@ -82,7 +81,6 @@ async function main(): Promise<void> {
   });
 
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
-  const providerRegistry = createProviderRegistryFromDiscoveryAdapter(discoveryAdapter, daemonSdkLogger);
   const storageAdapter = createStorageAdapterFromStore(store);
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
@@ -91,7 +89,7 @@ async function main(): Promise<void> {
     nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
-  const providerManager = new ProviderManager(providerRegistry, store, daemonSdkLogger);
+  const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, store);
 
@@ -123,7 +121,7 @@ async function main(): Promise<void> {
   const refundClient = new RoutstrClient(
     walletAdapter,
     storageAdapter,
-    providerRegistry,
+    discoveryAdapter,
     "min",
     "apikeys",
     { logger: daemonSdkLogger },
@@ -139,7 +137,6 @@ async function main(): Promise<void> {
       walletClient,
       walletAdapter,
       storageAdapter,
-      providerRegistry,
       discoveryAdapter,
       modelManager,
       ensureProvidersBootstrapped,

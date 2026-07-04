@@ -37,7 +37,6 @@ type DaemonDeps = {
   walletClient: CocodClient;
   walletAdapter: any;
   storageAdapter: any;
-  providerRegistry: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
@@ -292,7 +291,6 @@ export function createDaemonRequestHandler(deps: {
   walletClient: CocodClient;
   walletAdapter: any;
   storageAdapter: any;
-  providerRegistry: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
@@ -1268,7 +1266,6 @@ export function createDaemonRequestHandler(deps: {
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
-        providerRegistry: deps.providerRegistry,
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
