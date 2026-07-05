@@ -6,15 +6,27 @@ import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summar
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 //
-// All timestamps fall within 30 days of 2026-06-02 (today as of this writing).
+// All timestamps are computed relative to "now" so the fixtures never age
+// out of getUsageSummary's 30-day rolling window. We anchor to a recent UTC
+// midnight ~10 days ago and keep the same hour-of-day structure the
+// tz-bucketing assertions depend on.
+//
 // tz = 300 (UTC-5 / EST). After shifting by -300min, UTC dates become:
-//   d1: 2026-05-20T10:00Z → shifted 2026-05-20T05:00Z → local day "2026-05-20", hour 05
-//   d2: 2026-05-21T03:00Z → shifted 2026-05-20T22:00Z → local day "2026-05-20", hour 22
-//   d3: 2026-05-21T06:00Z → shifted 2026-05-21T01:00Z → local day "2026-05-21", hour 01
+//   d1: <anchor> 10:00Z → local <anchor> 05:00 → local day "<anchor>"
+//   d2: <anchor+1d> 03:00Z → local <anchor> 22:00 → local day "<anchor>"
+//   d3: <anchor+1d> 06:00Z → local <anchor+1d> 01:00 → local day "<anchor+1d>"
 
-const D1 = new Date("2026-05-20T10:00:00Z").getTime(); // local 2026-05-20, hour 05
-const D2 = new Date("2026-05-21T03:00:00Z").getTime(); // local 2026-05-20, hour 22
-const D3 = new Date("2026-05-21T06:00:00Z").getTime(); // local 2026-05-21, hour 01
+const _BASE_UTC_MIDNIGHT = Math.floor(Date.now() / 86_400_000) * 86_400_000;
+const _ANCHOR_MS = _BASE_UTC_MIDNIGHT - 10 * 86_400_000; // 10 days ago UTC
+const D1 = _ANCHOR_MS + 10 * 3_600_000; // 10:00Z → local day <anchor>
+const D2 = _ANCHOR_MS + 1 * 86_400_000 + 3 * 3_600_000; // 03:00Z next day → local day <anchor>
+const D3 = _ANCHOR_MS + 1 * 86_400_000 + 6 * 3_600_000; // 06:00Z next day → local day <anchor+1d>
+
+/** Compute the local-day date string the same way the SDK's day grouping does. */
+function localDayDateStr(ts: number, tzOffsetMinutes: number): string {
+  const d = new Date(ts - tzOffsetMinutes * 60_000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
 
 const BASE_ENTRY: Omit<UsageTrackingEntry, "id" | "timestamp" | "modelId" | "client" | "totalTokens"> = {
   baseUrl: "https://api.openai.com/",
@@ -152,23 +164,24 @@ describe("getUsageSummary", () => {
     const summary = await getUsageSummary(driver, CLIENTS, TZ);
     const { days } = summary;
 
-    // D1 (10:00Z) → local 2026-05-20, D2 (03:00Z) → local 2026-05-20, D3 (06:00Z) → local 2026-05-21
-    // So: day 2026-05-20 has e1+e2, day 2026-05-21 has e3+e4
+    // D1 (10:00Z) and D2 (next day 03:00Z) both bucket to local day <anchor>;
+    // D3 (next day 06:00Z) buckets to local day <anchor+1d>.
+    // So: day <anchor> has e1+e2, day <anchor+1d> has e3+e4
     expect(days.length).toBeGreaterThanOrEqual(2);
 
-    // Most-recent-first: 2026-05-21 first
-    expect(days[0]!.date).toBe("2026-05-21");
+    // Most-recent-first: <anchor+1d> first
+    expect(days[0]!.date).toBe(localDayDateStr(D3, TZ));
     expect(days[0]!.requests).toBe(2); // e3, e4
     expect(days[0]!.satsCost).toBe(8 + 50);
 
-    expect(days[1]!.date).toBe("2026-05-20");
+    expect(days[1]!.date).toBe(localDayDateStr(D1, TZ));
     expect(days[1]!.requests).toBe(2); // e1, e2
     expect(days[1]!.satsCost).toBe(10 + 20);
   });
 
   it("returns empty hoursToday (test entries are not today)", async () => {
     const summary = await getUsageSummary(driver, CLIENTS, TZ);
-    // Test entries are in May 2026, not today (June 2026)
+    // Test entries are ~10 days ago, not today
     expect(summary.hoursToday).toHaveLength(0);
   });
 
