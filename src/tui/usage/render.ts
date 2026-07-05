@@ -278,18 +278,25 @@ export function renderToday(stats: UsageStats, width: number): string {
   const _now = new Date();
   const todayDateStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
 
-  let todayStats: { date: string; requests: number; satsCost: number; promptTokens: number; completionTokens: number; totalTokens: number };
-  let recentDays: Array<{ date: string; requests: number; satsCost: number; totalTokens: number; promptTokens: number; completionTokens: number }>;
-  let hourlyMap: Map<number, { requests: number; satsCost: number }>;
+  let todayStats: { date: string; requests: number; satsCost: number; promptTokens: number; completionTokens: number; totalTokens: number } = {
+    date: todayDateStr,
+    requests: 0,
+    satsCost: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  };
+  let recentDays: Array<{ date: string; requests: number; satsCost: number; totalTokens: number; promptTokens: number; completionTokens: number }> = [];
+  let hourlyMap: Map<number, { requests: number; satsCost: number }> = new Map();
 
   if (stats.summary) {
     // Use server-aggregated data
     const { days, hoursToday } = stats.summary;
     // days[0] is most-recent-first; check if it's today
     const todayDayStat = days[0]?.date === todayDateStr ? days[0] : undefined;
-    todayStats = todayDayStat
-      ? { date: todayDayStat.date, requests: todayDayStat.requests, satsCost: todayDayStat.satsCost, promptTokens: todayDayStat.promptTokens, completionTokens: todayDayStat.completionTokens, totalTokens: todayDayStat.totalTokens }
-      : { date: todayDateStr, requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    if (todayDayStat) {
+      todayStats = { date: todayDayStat.date, requests: todayDayStat.requests, satsCost: todayDayStat.satsCost, promptTokens: todayDayStat.promptTokens, completionTokens: todayDayStat.completionTokens, totalTokens: todayDayStat.totalTokens };
+    }
     // Exclude today by date (it has its own box) rather than by position —
     // days[0] is only today when there was activity today.
     recentDays = days.filter((d) => d.date !== todayDateStr).slice(0, 6);
