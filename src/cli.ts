@@ -236,6 +236,37 @@ program
   .version(packageJson.version, "--version", "output the version number");
 
 program
+  .command("update")
+  .description("Update routstrd and cocod to the latest versions")
+  .action(async () => {
+    console.log("Updating routstrd...");
+    const routstrdProc = Bun.spawn(["bun", "install", "-g", "routstrd"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const routstrdCode = await routstrdProc.exited;
+    if (routstrdCode !== 0) {
+      console.error("Failed to update routstrd.");
+      process.exit(1);
+    }
+    console.log("routstrd updated successfully.\n");
+
+    console.log("Updating cocod...");
+    const cocodProc = Bun.spawn(["bun", "install", "-g", "@routstr/cocod"], {
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const cocodCode = await cocodProc.exited;
+    if (cocodCode !== 0) {
+      console.error("Failed to update cocod.");
+      process.exit(1);
+    }
+    console.log("cocod updated successfully.\n");
+
+    console.log("Both routstrd and cocod have been updated!");
+  });
+
+program
   .command("refund")
   .description("Refund pending tokens and API keys to a specified mint")
   .option(
