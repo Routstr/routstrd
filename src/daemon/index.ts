@@ -49,6 +49,17 @@ import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
+// Global error handlers — the daemon is spawned detached with stdout/stderr
+// redirected to a file, so without these, uncaught async errors would kill
+// the process silently. Log to the file logger before exiting.
+process.on("uncaughtException", (error) => {
+  logger.error("UNCAUGHT EXCEPTION:", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  logger.error("UNHANDLED REJECTION:", reason);
+});
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
@@ -172,20 +183,22 @@ async function main(): Promise<void> {
       `Starting recurring model refresh job (every ${REFRESH_INTERVAL_MS / 1000 / 60 / 60} hours)`,
     );
 
-    refreshInterval = setInterval(async () => {
-      logger.log("Running scheduled Nostr event refresh...");
-      try {
-        await modelManager.refreshNostrEvents();
-      } catch (error) {
-        logger.error("Scheduled Nostr event refresh failed:", error);
-      }
+    refreshInterval = setInterval(() => {
+      (async () => {
+        logger.log("Running scheduled Nostr event refresh...");
+        try {
+          await modelManager.refreshNostrEvents();
+        } catch (error) {
+          logger.error("Scheduled Nostr event refresh failed:", error);
+        }
 
-      logger.log("Running scheduled model refresh...");
-      try {
-        await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
-      } catch (error) {
-        logger.error("Scheduled model refresh failed:", error);
-      }
+        logger.log("Running scheduled model refresh...");
+        try {
+          await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
+        } catch (error) {
+          logger.error("Scheduled model refresh failed:", error);
+        }
+      })().catch((error) => logger.error("Model refresh interval escaped:", error));
     }, REFRESH_INTERVAL_MS);
   };
 
@@ -206,46 +219,48 @@ async function main(): Promise<void> {
       `Starting recurring refund job (every ${REFUND_INTERVAL_MS / 1000 / 60} minutes)`,
     );
 
-    refundInterval = setInterval(async () => {
-      logger.log("Running scheduled refund...");
-      try {
-        const state = store.getState() as any;
-        const pendingDistribution = (state.cachedTokens || []).map(
-          (t: { baseUrl: string; balance?: number }) => ({
-            baseUrl: t.baseUrl,
-            amount: t.balance || 0,
-          }),
-        );
-        const apiKeysStored = (state.apiKeys || []).map(
-          (k: { baseUrl: string; balance?: number }) => ({
-            baseUrl: k.baseUrl,
-            amount: k.balance || 0,
-          }),
-        );
+    refundInterval = setInterval(() => {
+      (async () => {
+        logger.log("Running scheduled refund...");
+        try {
+          const state = store.getState() as any;
+          const pendingDistribution = (state.cachedTokens || []).map(
+            (t: { baseUrl: string; balance?: number }) => ({
+              baseUrl: t.baseUrl,
+              amount: t.balance || 0,
+            }),
+          );
+          const apiKeysStored = (state.apiKeys || []).map(
+            (k: { baseUrl: string; balance?: number }) => ({
+              baseUrl: k.baseUrl,
+              amount: k.balance || 0,
+            }),
+          );
 
-        if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
-          logger.log("No pending tokens to refund.");
-          return;
+          if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+            logger.log("No pending tokens to refund.");
+            return;
+          }
+
+          const mintUrl = walletAdapter.getActiveMintUrl();
+          if (!mintUrl) {
+            logger.log("No active mint URL for refund.");
+            return;
+          }
+
+          const spender = refundClient.getCashuSpender();
+          const results = await spender.refundProviders(mintUrl);
+
+          const successCount = results.filter(
+            (r: { success: boolean }) => r.success,
+          ).length;
+          logger.log(
+            `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
+          );
+        } catch (error) {
+          logger.error("Scheduled refund failed:", error);
         }
-
-        const mintUrl = walletAdapter.getActiveMintUrl();
-        if (!mintUrl) {
-          logger.log("No active mint URL for refund.");
-          return;
-        }
-
-        const spender = refundClient.getCashuSpender();
-        const results = await spender.refundProviders(mintUrl);
-
-        const successCount = results.filter(
-          (r: { success: boolean }) => r.success,
-        ).length;
-        logger.log(
-          `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
-        );
-      } catch (error) {
-        logger.error("Scheduled refund failed:", error);
-      }
+      })().catch((error) => logger.error("Refund interval escaped:", error));
     }, REFUND_INTERVAL_MS);
   };
 
