@@ -1,6 +1,6 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
-import type { UsageStats, UsageSummary } from "./types.ts";
+import type { ErrorLogEntry, UsageStats, UsageSummary } from "./types.ts";
 
 export { isDaemonRunning };
 
@@ -87,6 +87,15 @@ export async function fetchUsageSummary(): Promise<UsageStats | null> {
       limit: 50,
       summary,
     };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchRecentErrors(): Promise<ErrorLogEntry[] | null> {
+  try {
+    const result = await callDaemon("/errors/recent?limit=50");
+    return result.error ? null : (result.output as ErrorLogEntry[] || []);
   } catch {
     return null;
   }

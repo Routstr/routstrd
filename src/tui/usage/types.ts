@@ -1,6 +1,7 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
 
+export type { ErrorLogEntry } from "../../utils/logger.ts";
 export type { UsageSummary };
 
 export interface UsageStats {
@@ -12,7 +13,7 @@ export interface UsageStats {
   summary: UsageSummary;
 }
 
-export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
+export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent" | "errors";
 
 export interface Tab {
   id: TabId;

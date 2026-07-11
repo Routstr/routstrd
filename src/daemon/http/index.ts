@@ -8,7 +8,7 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
-import { logger } from "../../utils/logger";
+import { getRecentErrors, logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
   CocodHttpError,
@@ -1139,6 +1139,16 @@ export function createDaemonRequestHandler(deps: {
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/errors/recent") {
+      try {
+        const output = await getRecentErrors(parseLimit(url.searchParams.get("limit"), 50));
+        sendJson(res, 200, { output });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }

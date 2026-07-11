@@ -8,7 +8,7 @@ import {
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
-import type { TabId, UsageStats } from "./types.ts";
+import type { ErrorLogEntry, TabId, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
 function formatCost(value: number): string {
@@ -600,7 +600,42 @@ export function renderRecent(stats: UsageStats, width: number): string {
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, clients: ClientInfo[] = []): string {
+export function renderErrors(errors: ErrorLogEntry[], width: number, selectedIndex = 0): string {
+  if (errors.length === 0) return renderBox(["No recent errors"], width, "Recent Errors");
+
+  const innerWidth = Math.max(1, width - 4);
+  const timeCol = innerWidth >= 30 ? 19 : 8;
+  const messageCol = Math.max(1, innerWidth - timeCol - 1);
+  const lines = [
+    `${COLORS.bold}${"TIME".padEnd(timeCol)} ${"ERROR".slice(0, messageCol)}${COLORS.reset}`,
+    COLORS.dim + "─".repeat(innerWidth) + COLORS.reset,
+  ];
+
+  for (const [errorIndex, error] of errors.entries()) {
+    const fullTimestamp = error.timestamp.replace("T", " ").replace("Z", "");
+    const timestamp = timeCol === 8 ? fullTimestamp.slice(11, 19) : fullTimestamp.slice(0, timeCol);
+    let firstLine = true;
+
+    for (const rawLine of error.message.split("\n")) {
+      const message = rawLine.replace(/\t/g, "  ").replace(/[\x00-\x08\x0B-\x1F\x7F]/g, "");
+      const chunks = message.match(new RegExp(`.{1,${messageCol}}`, "g")) || [""];
+      for (const chunk of chunks) {
+        const time = firstLine ? timestamp : "";
+        const selected = errorIndex === selectedIndex;
+        const row = selected
+          ? `${COLORS.bgBlue}${COLORS.bright}${time.padEnd(timeCol)} ${chunk.padEnd(messageCol)}${COLORS.reset}`
+          : `${COLORS.dim}${time.padEnd(timeCol)}${COLORS.reset} ${COLORS.red}${chunk}${COLORS.reset}`;
+        lines.push(row);
+        firstLine = false;
+      }
+    }
+  }
+
+  const title = width < 30 ? "Recent Errors" : `Recent Errors (${errors.length} shown)`;
+  return renderBox(lines, width, title);
+}
+
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, clients: ClientInfo[] = [], errors: ErrorLogEntry[] = [], selectedErrorIndex = 0): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width);
     case "today": return renderToday(stats, width);
@@ -610,6 +645,7 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "clients": return renderClients(stats, width);
     case "npubs": return renderNpubs(stats, clients, width);
     case "recent": return renderRecent(stats, width);
+    case "errors": return renderErrors(errors, width, selectedErrorIndex);
     default: return "Unknown tab";
   }
 }

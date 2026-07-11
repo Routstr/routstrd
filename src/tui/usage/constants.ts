@@ -9,6 +9,7 @@ export const ALL_TABS: Tab[] = [
   { id: "clients", name: "Clients", key: "6" },
   { id: "npubs", name: "Npubs", key: "7" },
   { id: "recent", name: "Recent", key: "8" },
+  { id: "errors", name: "Errors", key: "9" },
 ];
 
 /**
