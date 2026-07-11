@@ -1,9 +1,64 @@
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
+import { parseDocument } from "yaml";
 import type { RoutstrdConfig } from "../utils/config";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
+
+interface HermesRoutstrConfig {
+  baseUrl: string;
+  apiKey: string;
+  defaultModel: string;
+}
+
+interface HermesCustomProvider {
+  name?: string;
+  [key: string]: unknown;
+}
+
+export function mergeHermesConfig(
+  content: string,
+  routstr: HermesRoutstrConfig,
+): string {
+  const document = parseDocument(content || "{}", { prettyErrors: true });
+  if (document.errors.length > 0) {
+    throw document.errors[0];
+  }
+
+  const urlDisplay = routstr.baseUrl
+    .replace(/\/v1$/, "")
+    .replace(/^https?:\/\//, "");
+  const provider = {
+    name: `Routstr (${urlDisplay})`,
+    base_url: routstr.baseUrl,
+    api_key: routstr.apiKey,
+    model: routstr.defaultModel,
+  };
+
+  const isNewConfig = content.trim() === "";
+  if (isNewConfig) {
+    document.set("model", {
+      default: routstr.defaultModel,
+      provider: "custom",
+      base_url: routstr.baseUrl,
+      api_key: routstr.apiKey,
+    });
+  }
+
+  const existingConfig = document.toJS() as {
+    custom_providers?: HermesCustomProvider[];
+  };
+  const existingProviders = existingConfig.custom_providers;
+  const providers = Array.isArray(existingProviders) ? existingProviders : [];
+  if (providers.some((item) => item.name?.startsWith("Routstr ("))) {
+    return content;
+  }
+  providers.push(provider);
+  document.set("custom_providers", providers);
+
+  return document.toString();
+}
 
 export async function installHermesIntegration(
   config: RoutstrdConfig,
@@ -26,10 +81,10 @@ export async function installHermesIntegration(
 
     if (models.length >= 3) {
       defaultModel = models[2]!.id;
-      console.log(`Set default model to 3rd available model: ${defaultModel}`);
+      console.log(`Using 3rd available model for new Hermes configurations: ${defaultModel}`);
     } else if (models.length > 0) {
       defaultModel = models[0]!.id;
-      console.log(`Only ${models.length} models available, using ${defaultModel} as default.`);
+      console.log(`Only ${models.length} models available, using ${defaultModel} for new Hermes configurations.`);
     } else {
       console.log("No models available from routstr daemon, using fallback default.");
     }
@@ -47,36 +102,24 @@ export async function installHermesIntegration(
     console.error(`Error reading ${configPath}, creating new one.`);
   }
 
-  // Remove existing model block
-  content = content.replace(/^model:\n(?:  .*\n)*/gm, "");
-  // Remove existing custom_providers block
-  content = content.replace(/^custom_providers:\n(?:- .*\n(?:  .*\n)*)*/gm, "");
-  // Clean up extra blank lines
-  content = content.replace(/\n{3,}/g, "\n\n").trim();
-
-  const urlDisplay = baseUrl.replace(/^https?:\/\//, "");
-
-  const modelBlock = `model:
-  default: ${defaultModel}
-  provider: custom
-  base_url: ${baseUrlV1}
-  api_key: ${apiKey}`;
-
-  const providerBlock = `custom_providers:
-- name: Routstr (${urlDisplay})
-  base_url: ${baseUrlV1}
-  api_key: ${apiKey}
-  model: ${defaultModel}`;
-
-  const parts: string[] = [modelBlock];
-  if (content) {
-    parts.push(content);
+  let newContent: string;
+  try {
+    newContent = mergeHermesConfig(content, {
+      baseUrl: baseUrlV1,
+      apiKey,
+      defaultModel,
+    });
+  } catch (error) {
+    console.error(`Failed to parse ${configPath} as YAML; leaving it unchanged:`, error);
+    return;
   }
-  parts.push(providerBlock);
-
-  const newContent = parts.join("\n\n") + "\n";
 
   try {
+    if (newContent === content) {
+      console.log(`${configPath} already contains current routstr settings.`);
+      return;
+    }
+
     mkdirSync(dirname(configPath), { recursive: true });
     await writeFile(configPath, newContent);
     console.log(`Successfully updated ${configPath} with routstr settings.`);
