@@ -25,6 +25,7 @@ import {
   leaveAlternateScreen,
   moveCursor,
   showCursor,
+  stripAnsi,
 } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
@@ -171,10 +172,14 @@ export async function runUsageTui(): Promise<void> {
     const errorHelp = currentTab === "errors" ? ", [j/k or ↑/↓] select, [y] copy" : "";
     const footer = `${COLORS.dim}Press [q] to quit, [r] to refresh, [a] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}${errorHelp}  scroll:${vimState.scrollPos}${COLORS.reset}${clipboardStatus ? `  ${COLORS.green}${clipboardStatus}${COLORS.reset}` : ""}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
     const chrome = renderHeader(currentTab, width, visibleTabs) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
-    const chromeLines = chrome.split("\n").length - 1;
+    const visualLines = (text: string) => text
+      .replace(/\n$/, "")
+      .split("\n")
+      .reduce((total, line) => total + Math.max(1, Math.ceil(stripAnsi(line).length / width)), 0);
+    const chromeLines = visualLines(chrome);
     const footerSeparator = renderSeparator(width);
-    const footerLines = footerSeparator.split("\n").length - 1;
-    const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
+    const footerLines = visualLines(footerSeparator + footer);
+    const contentViewportHeight = Math.max(1, height - chromeLines - footerLines);
     if (currentTab === "errors") {
       const contentLines = content.split("\n");
       const selectedLines = contentLines
@@ -219,6 +224,20 @@ export async function runUsageTui(): Promise<void> {
 
     clipboardStatus = "Clipboard unavailable";
     render();
+  }
+
+  function activateTab(nextTab: TabId): void {
+    if (nextTab === "errors" && currentTab !== "errors") {
+      selectedErrorIndex = 0;
+    }
+
+    currentTab = nextTab;
+    vimState.scrollPos = 0;
+    render();
+
+    if (currentTab === "errors") {
+      void refreshErrors();
+    }
   }
 
   const handleKey = (key: string) => {
@@ -284,18 +303,12 @@ export async function runUsageTui(): Promise<void> {
     }
     if (key === "l" || key === "\x1b[C" || key === "\x1bOC") {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
-      currentTab = visibleTabs[(currentIdx + 1) % visibleTabs.length]!.id;
-      vimState.scrollPos = 0;
-      render();
-      if (currentTab === "errors") void refreshErrors();
+      activateTab(visibleTabs[(currentIdx + 1) % visibleTabs.length]!.id);
       return;
     }
     if (key === "h" || key === "\x1b[D" || key === "\x1bOD") {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
-      currentTab = visibleTabs[(currentIdx - 1 + visibleTabs.length) % visibleTabs.length]!.id;
-      vimState.scrollPos = 0;
-      render();
-      if (currentTab === "errors") void refreshErrors();
+      activateTab(visibleTabs[(currentIdx - 1 + visibleTabs.length) % visibleTabs.length]!.id);
       return;
     }
 
@@ -337,10 +350,7 @@ export async function runUsageTui(): Promise<void> {
 
     const tab = visibleTabs.find((t) => t.key === key);
     if (tab) {
-      currentTab = tab.id;
-      vimState.scrollPos = 0;
-      render();
-      if (currentTab === "errors") void refreshErrors();
+      activateTab(tab.id);
     }
   };
 
