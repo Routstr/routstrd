@@ -1,5 +1,8 @@
 import { describe, expect, it, mock } from "bun:test";
-import { assertLegacyCocodNotRunning } from "./coco-client";
+import {
+  assertLegacyCocodNotRunning,
+  claimLegacyCocodPidFile,
+} from "./coco-client";
 
 type GuardOptions = NonNullable<
   Parameters<typeof assertLegacyCocodNotRunning>[0]
@@ -127,5 +130,99 @@ describe("assertLegacyCocodNotRunning", () => {
         fetchImpl,
       }),
     ).rejects.toThrow("Cannot verify whether the legacy cocod daemon has stopped");
+  });
+});
+
+describe("claimLegacyCocodPidFile", () => {
+  it("claims the PID file exclusively and releases its own claim", () => {
+    let storedPid: string | undefined;
+    let removed = false;
+    const opened: Array<{ path: string; fd: number }> = [];
+
+    const release = claimLegacyCocodPidFile({
+      pidFilePath: PID_FILE_PATH,
+      pid: 4242,
+      openExclusive: (path) => {
+        opened.push({ path, fd: 7 });
+        return 7;
+      },
+      writePid: (fd, pid) => {
+        expect(fd).toBe(7);
+        storedPid = String(pid);
+      },
+      closeFile: (fd) => expect(fd).toBe(7),
+      readFile: () => storedPid || "",
+      removeFile: () => {
+        removed = true;
+      },
+    });
+
+    expect(opened).toEqual([{ path: PID_FILE_PATH, fd: 7 }]);
+    expect(storedPid).toBe("4242");
+    release();
+    expect(removed).toBe(true);
+  });
+
+  it("refuses startup when another process wins the atomic claim", () => {
+    expect(() =>
+      claimLegacyCocodPidFile({
+        pidFilePath: PID_FILE_PATH,
+        openExclusive: () => {
+          throw Object.assign(new Error("exists"), { code: "EEXIST" });
+        },
+        readFile: () => "4242",
+        isProcessRunning: () => true,
+      }),
+    ).toThrow("Another cocod or routstrd process may be starting");
+  });
+
+  it("replaces a confirmed stale PID file before claiming it", () => {
+    let openAttempts = 0;
+    let removed = false;
+    let storedPid = "4242";
+
+    const release = claimLegacyCocodPidFile({
+      pidFilePath: PID_FILE_PATH,
+      pid: 9001,
+      openExclusive: () => {
+        openAttempts++;
+        if (openAttempts === 1) {
+          throw Object.assign(new Error("exists"), { code: "EEXIST" });
+        }
+        return 7;
+      },
+      readFile: () => storedPid,
+      isProcessRunning: () => false,
+      removeFile: () => {
+        removed = true;
+      },
+      writePid: (_fd, pid) => {
+        storedPid = String(pid);
+      },
+      closeFile: () => {},
+    });
+
+    expect(openAttempts).toBe(2);
+    expect(removed).toBe(true);
+    expect(storedPid).toBe("9001");
+    release();
+  });
+
+  it("does not remove a PID file that no longer belongs to this process", () => {
+    let removed = false;
+    const release = claimLegacyCocodPidFile({
+      pidFilePath: PID_FILE_PATH,
+      pid: 4242,
+      openExclusive: () => 7,
+      writePid: () => {},
+      closeFile: () => {},
+      readFile: () => "9001",
+      removeFile: () => {
+        removed = true;
+      },
+    });
+
+    release();
+    expect(removed).toBe(false);
   });
 });

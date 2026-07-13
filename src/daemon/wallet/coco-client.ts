@@ -1,7 +1,14 @@
 import { initializeCoco, getEncodedToken } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
-import { existsSync, readFileSync } from "fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { join } from "path";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import type { CocodClient, CocodState } from "./cocod-client";
@@ -15,7 +22,8 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const DB_PATH = join(CONFIG_DIR, "coco.db");
 const LEGACY_COCOD_SOCKET =
   process.env.COCOD_SOCKET || join(CONFIG_DIR, "cocod.sock");
-const LEGACY_COCOD_PID_FILE = join(CONFIG_DIR, "cocod.pid");
+const LEGACY_COCOD_PID_FILE =
+  process.env.COCOD_PID || join(CONFIG_DIR, "cocod.pid");
 
 const STALE_SOCKET_ERROR_CODES = new Set([
   "ECONNREFUSED",
@@ -38,6 +46,17 @@ export interface LegacyCocodGuardOptions {
   isProcessRunning?: (pid: number) => boolean;
   fetchImpl?: LegacyCocodFetch;
   timeoutMs?: number;
+}
+
+export interface LegacyCocodPidClaimOptions {
+  pidFilePath?: string;
+  pid?: number;
+  openExclusive?: (path: string) => number;
+  writePid?: (fd: number, pid: number) => void;
+  closeFile?: (fd: number) => void;
+  readFile?: (path: string) => string;
+  removeFile?: (path: string) => void;
+  isProcessRunning?: (pid: number) => boolean;
 }
 
 interface CocodConfig {
@@ -174,18 +193,118 @@ export async function assertLegacyCocodNotRunning(
   );
 }
 
+/**
+ * Atomically claim cocod's PID file for the lifetime of the in-process wallet.
+ * Legacy cocod checks this same file before opening coco.db, so a live routstrd
+ * owner prevents cocod from starting after the initial socket/PID probe.
+ */
+export function claimLegacyCocodPidFile(
+  options: LegacyCocodPidClaimOptions = {},
+): () => void {
+  const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  const pid = options.pid ?? process.pid;
+  const openExclusive =
+    options.openExclusive || ((path: string) => openSync(path, "wx", 0o600));
+  const writePid =
+    options.writePid || ((fd: number, ownerPid: number) => writeFileSync(fd, String(ownerPid)));
+  const closeFile = options.closeFile || closeSync;
+  const readFile = options.readFile || ((path: string) => readFileSync(path, "utf-8"));
+  const removeFile = options.removeFile || unlinkSync;
+  const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
+
+  let fd: number;
+  try {
+    fd = openExclusive(pidFilePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+
+    // The earlier guard permits a dead PID file. Remove only a parseable,
+    // confirmed-dead owner; an empty/malformed file may belong to a process
+    // that has created the file but has not written its PID yet.
+    let stalePid: number;
+    try {
+      stalePid = Number.parseInt(readFile(pidFilePath).trim(), 10);
+    } catch {
+      throw new Error(
+        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
+          "Another cocod or routstrd process may be starting. Stop it and try again.",
+        { cause: error },
+      );
+    }
+
+    if (!Number.isInteger(stalePid) || stalePid <= 0 || isProcessRunning(stalePid)) {
+      throw new Error(
+        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
+          "Another cocod or routstrd process may be starting. Stop it and try again.",
+        { cause: error },
+      );
+    }
+
+    try {
+      removeFile(pidFilePath);
+      fd = openExclusive(pidFilePath);
+    } catch (retryError) {
+      throw new Error(
+        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
+          "Another cocod or routstrd process may be starting. Stop it and try again.",
+        { cause: retryError },
+      );
+    }
+  }
+
+  try {
+    writePid(fd, pid);
+  } catch (error) {
+    try {
+      removeFile(pidFilePath);
+    } catch {
+      // Preserve the original write failure.
+    }
+    throw error;
+  } finally {
+    closeFile(fd);
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+
+    try {
+      if (readFile(pidFilePath).trim() === String(pid)) {
+        removeFile(pidFilePath);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        logger.warn(`Failed to release wallet process lock at ${pidFilePath}:`, error);
+      }
+    }
+  };
+}
+
 export async function createCocoClient(): Promise<CocodClient> {
   await assertLegacyCocodNotRunning();
+  const releaseLegacyPidClaim = claimLegacyCocodPidFile();
 
-  const database = new Database(DB_PATH);
-  const repo = new SqliteRepositories({ database });
-  await repo.init();
+  let database: Database | undefined;
+  let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
 
-  const coco = await initializeCoco({
-    repo,
-    seedGetter,
-  });
+  try {
+    database = new Database(DB_PATH);
+    const repo = new SqliteRepositories({ database });
+    await repo.init();
 
+    coco = await initializeCoco({
+      repo,
+      seedGetter,
+    });
+  } catch (error) {
+    database?.close();
+    releaseLegacyPidClaim();
+    throw error;
+  }
+
+  let disposed = false;
   return {
     async ping(): Promise<boolean> {
       try {
@@ -294,6 +413,20 @@ export async function createCocoClient(): Promise<CocodClient> {
 
     async getMintInfo(url: string): Promise<unknown> {
       return coco.mint.getMintInfo(url);
+    },
+
+    async dispose(): Promise<void> {
+      if (disposed) return;
+      disposed = true;
+      try {
+        await coco.dispose();
+      } finally {
+        try {
+          database.close();
+        } finally {
+          releaseLegacyPidClaim();
+        }
+      }
     },
   };
 }

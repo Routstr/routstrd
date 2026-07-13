@@ -139,11 +139,15 @@ async function main(): Promise<void> {
   );
 
   const server = createServer();
+  let shutdownDaemon: () => void = () => {
+    server.close(() => process.exit(0));
+  };
   server.on(
     "request",
     createDaemonRequestHandler({
       provider,
       server,
+      shutdown: () => shutdownDaemon(),
       store,
       walletClient,
       walletAdapter,
@@ -272,11 +276,33 @@ async function main(): Promise<void> {
     }
   };
 
+  let walletDisposePromise: Promise<void> | undefined;
+  const disposeWallet = (): Promise<void> => {
+    walletDisposePromise ??= walletClient.dispose?.() || Promise.resolve();
+    return walletDisposePromise;
+  };
+
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
-
+    void disposeWallet().catch((error) => {
+      logger.error("Failed to dispose wallet:", error);
+    });
   });
+
+  shutdownDaemon = () => {
+    server.close(() => {
+      void disposeWallet().finally(() => process.exit(0));
+    });
+  };
+
+  const shutdownForSignal = (signal: NodeJS.Signals) => {
+    logger.log(`Received ${signal}; shutting down...`);
+    shutdownDaemon();
+  };
+
+  process.once("SIGINT", shutdownForSignal);
+  process.once("SIGTERM", shutdownForSignal);
 
   server.listen(port, async () => {
     logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);

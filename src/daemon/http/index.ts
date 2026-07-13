@@ -33,6 +33,7 @@ type WalletStatusOutput = {
 type DaemonDeps = {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -287,6 +288,7 @@ const sdkLogger: SdkLogger = makeSdkLogger();
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -627,9 +629,11 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/stop") {
       sendJson(res, 200, { output: "stopping" });
       setTimeout(() => {
-        deps.server.close(() => {
-          process.exit(0);
-        });
+        if (deps.shutdown) {
+          deps.shutdown();
+        } else {
+          deps.server.close(() => process.exit(0));
+        }
       }, 50);
       return;
     }

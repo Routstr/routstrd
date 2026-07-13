@@ -56,6 +56,8 @@ export interface CocodClient {
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;
   getMintInfo(url: string): Promise<unknown>;
+  /** Release resources held by in-process wallet implementations. */
+  dispose?(): Promise<void>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {
