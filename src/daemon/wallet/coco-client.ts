@@ -64,24 +64,19 @@ interface CocodConfig {
   encrypted: boolean;
 }
 
-function loadMnemonic(): string {
-  if (!existsSync(CONFIG_FILE)) {
+function loadMnemonic(configFile: string = CONFIG_FILE): string {
+  if (!existsSync(configFile)) {
     throw new Error(
-      `Config file not found at ${CONFIG_FILE}. Run 'routstrd onboard' first.`,
+      `Config file not found at ${configFile}. Run 'routstrd onboard' first.`,
     );
   }
-  const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8")) as CocodConfig;
+  const config = JSON.parse(readFileSync(configFile, "utf-8")) as CocodConfig;
   if (config.encrypted) {
     throw new Error(
       "Encrypted wallets are not supported yet. Please use an unencrypted wallet.",
     );
   }
   return config.mnemonic;
-}
-
-async function seedGetter(): Promise<Uint8Array> {
-  const mnemonic = loadMnemonic();
-  return mnemonicToSeedSync(mnemonic);
 }
 
 function defaultIsProcessRunning(pid: number): boolean {
@@ -282,21 +277,41 @@ export function claimLegacyCocodPidFile(
   };
 }
 
-export async function createCocoClient(): Promise<CocodClient> {
-  await assertLegacyCocodNotRunning();
-  const releaseLegacyPidClaim = claimLegacyCocodPidFile();
+export interface CreateCocoClientOptions {
+  /** Override the wallet directory, primarily for migration tests and tooling. */
+  configDir?: string;
+  socketPath?: string;
+  pidFilePath?: string;
+}
+
+export async function createCocoClient(
+  options: CreateCocoClientOptions = {},
+): Promise<CocodClient> {
+  const configDir = options.configDir || CONFIG_DIR;
+  const configFile = join(configDir, "config.json");
+  const dbPath = join(configDir, "coco.db");
+  const socketPath = options.socketPath ||
+    (options.configDir ? join(configDir, "cocod.sock") : LEGACY_COCOD_SOCKET);
+  const pidFilePath = options.pidFilePath ||
+    (options.configDir ? join(configDir, "cocod.pid") : LEGACY_COCOD_PID_FILE);
+
+  await assertLegacyCocodNotRunning({ socketPath, pidFilePath });
+  const releaseLegacyPidClaim = claimLegacyCocodPidFile({ pidFilePath });
 
   let database: Database | undefined;
   let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
 
   try {
-    database = new Database(DB_PATH);
+    // Read and validate the existing cocod config during startup rather than
+    // deferring failure until coco-core first needs wallet key material.
+    const seed = mnemonicToSeedSync(loadMnemonic(configFile));
+    database = new Database(dbPath);
     const repo = new SqliteRepositories({ database });
     await repo.init();
 
     coco = await initializeCoco({
       repo,
-      seedGetter,
+      seedGetter: async () => seed,
     });
   } catch (error) {
     database?.close();

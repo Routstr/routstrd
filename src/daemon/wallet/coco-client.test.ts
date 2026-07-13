@@ -1,7 +1,12 @@
-import { describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
+import { gunzipSync } from "bun";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
+  createCocoClient,
 } from "./coco-client";
 
 type GuardOptions = NonNullable<
@@ -11,10 +16,66 @@ type LegacyFetch = NonNullable<GuardOptions["fetchImpl"]>;
 
 const SOCKET_PATH = "/tmp/routstrd-test/cocod.sock";
 const PID_FILE_PATH = "/tmp/routstrd-test/cocod.pid";
+const tempDirs: string[] = [];
+
+function makeTempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "routstrd-coco-migration-test-"));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function socketOnly(path: string): boolean {
   return path === SOCKET_PATH;
 }
+
+describe("legacy cocod wallet migration", () => {
+  it("opens an existing unencrypted config and preserves database balances", async () => {
+    const walletDir = join(makeTempDir(), ".cocod");
+    const mintUrl = "https://mint.example.com";
+    mkdirSync(walletDir, { recursive: true });
+    writeFileSync(
+      join(walletDir, "config.json"),
+      JSON.stringify({
+        version: 1,
+        mnemonic:
+          "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        encrypted: false,
+      }),
+    );
+
+    // This fixture was generated with @routstr/cocod 0.0.24 using its
+    // coco-cashu-sqlite-bun 1.1.2-rc.50 adapter. Keeping it frozen prevents
+    // this test from accidentally creating its "legacy" database with the
+    // same current adapter that createCocoClient uses to read it.
+    const fixture = readFileSync(
+      join(import.meta.dir, "fixtures", "cocod-0.0.24-wallet.db.gz"),
+    );
+    writeFileSync(join(walletDir, "coco.db"), gunzipSync(fixture));
+
+    const client = await createCocoClient({ configDir: walletDir });
+    try {
+      expect(await client.getStatus()).toBe("UNLOCKED");
+      expect(await client.getBalances()).toEqual({ [mintUrl]: 10 });
+    } finally {
+      await client.dispose?.();
+    }
+
+    // Prove the migrated schema remains reopenable and the pre-existing
+    // proofs survive a complete in-process wallet restart.
+    const reopenedClient = await createCocoClient({ configDir: walletDir });
+    try {
+      expect(await reopenedClient.getBalances()).toEqual({ [mintUrl]: 10 });
+    } finally {
+      await reopenedClient.dispose?.();
+    }
+  });
+});
 
 describe("assertLegacyCocodNotRunning", () => {
   it("does not probe when the legacy socket and PID file do not exist", async () => {
