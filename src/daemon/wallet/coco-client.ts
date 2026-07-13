@@ -387,13 +387,8 @@ export async function createCocoClient(
         mintUrl: targetMint,
         amount,
       });
-      try {
-        const { token } = await coco.ops.send.execute(prepared.id);
-        return getEncodedToken(token);
-      } catch (error) {
-        await coco.ops.send.cancel(prepared.id);
-        throw error;
-      }
+      const { token } = await coco.ops.send.execute(prepared.id);
+      return getEncodedToken(token);
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
@@ -407,13 +402,8 @@ export async function createCocoClient(
         method: "bolt11",
         methodData: { invoice },
       });
-      try {
-        await coco.ops.melt.execute(prepared.id);
-        return "Payment sent successfully";
-      } catch (error) {
-        await coco.ops.melt.cancel(prepared.id);
-        throw error;
-      }
+      await coco.ops.melt.execute(prepared.id);
+      return "Payment sent successfully";
     },
 
     async listMints(): Promise<string[]> {
