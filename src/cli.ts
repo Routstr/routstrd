@@ -15,7 +15,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import {
   CONFIG_DIR,
@@ -79,16 +79,24 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
-function initializeWallet(): void {
-  const walletDir =
+export function initializeWallet(
+  walletDir =
     process.env.COCOD_DIR ||
-    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
+    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`,
+): void {
   const walletConfig = `${walletDir}/config.json`;
+
+  // The wallet directory and config contain the plaintext seed phrase. Correct
+  // permissions on existing installations as well as newly created ones.
+  mkdirSync(walletDir, { recursive: true, mode: 0o700 });
+  chmodSync(walletDir, 0o700);
+
   if (existsSync(walletConfig)) {
+    chmodSync(walletConfig, 0o600);
     console.log("Wallet already initialized.");
     return;
   }
-  mkdirSync(walletDir, { recursive: true });
+
   const mnemonic = generateMnemonic(wordlist);
   const config = {
     version: 1,
@@ -96,7 +104,10 @@ function initializeWallet(): void {
     encrypted: false,
     createdAt: new Date().toISOString(),
   };
-  writeFileSync(walletConfig, JSON.stringify(config, null, 2));
+  writeFileSync(walletConfig, JSON.stringify(config, null, 2), {
+    mode: 0o600,
+    flag: "wx",
+  });
   console.log("Initialized. Mnemonic:", mnemonic);
   console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
