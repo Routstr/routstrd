@@ -43,6 +43,7 @@ import {
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createCocodClient } from "./wallet/cocod-client";
+import { installMintFallbackTopUp } from "./wallet/sdk-mint-fallback";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
@@ -129,6 +130,22 @@ async function main(): Promise<void> {
     nwcConnectionString: config.nwc?.connectionString,
   });
 
+  const routeClient = new RoutstrClient(
+    walletAdapter,
+    storageAdapter,
+    discoveryAdapter,
+    "min",
+    config.mode || "apikeys",
+    {
+      usageTrackingDriver,
+      sdkStore: store,
+      providerManager,
+      logger: daemonSdkLogger,
+      requestResponseLogSink,
+    },
+  );
+  installMintFallbackTopUp(routeClient, walletClient, walletAdapter, daemonSdkLogger);
+
   const refundClient = new RoutstrClient(
     walletAdapter,
     storageAdapter,
@@ -158,6 +175,7 @@ async function main(): Promise<void> {
       routstrPubkey: config.routstrPubkey,
       usageTrackingDriver,
       providerManager,
+      routeClient,
       refundClient,
       requestResponseLogSink,
     }),

@@ -5,6 +5,7 @@ import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
+import { receiveBolt11WithMintFallback } from "./mint-fallback";
 
 export function decodeCashuTokenAmount(token: string): {
   amount: number;
@@ -151,16 +152,33 @@ export async function createWalletAdapter(
         return { success: false, invoice: "", error: "NWC not connected" };
       }
 
-      // Ensure we have an active mint
+      // Ensure we have configured mints. If the active mint is unreachable,
+      // invoice creation will fall back to later configured mints.
       await syncMintState();
-      const mintUrl = activeMintUrl;
-      if (!mintUrl) {
+      const configuredMints = await client.listMints();
+      const mintCandidates = [activeMintUrl, ...configuredMints].filter(
+        (mintUrl): mintUrl is string => typeof mintUrl === "string" && mintUrl.length > 0,
+      );
+      if (mintCandidates.length === 0) {
         logger.error("[nwc] No active mint configured");
         return { success: false, invoice: "", error: "No active mint configured" };
       }
 
       try {
-        // Step 1: Check initial balance
+        // Step 1: Create a BOLT-11 invoice via cocod
+        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
+        const { invoice, mintUrl } = await receiveBolt11WithMintFallback(
+          client,
+          amount,
+          mintCandidates,
+          "[nwc]",
+        );
+        logger.log(`[nwc]   Invoice: ${invoice}`);
+        if (mintUrl !== activeMintUrl) {
+          logger.log(`[nwc]   Using fallback mint: ${mintUrl}`);
+        }
+
+        // Step 2: Check initial balance
         logger.log(`[nwc] Checking initial cocod balance on mint ${mintUrl}...`);
         let initialBalance: number | null = null;
         try {
@@ -170,11 +188,6 @@ export async function createWalletAdapter(
         } catch {
           logger.log("[nwc]   Could not retrieve initial balance");
         }
-
-        // Step 2: Create a BOLT-11 invoice via cocod
-        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
-        const invoice = await client.receiveBolt11(amount, mintUrl);
-        logger.log(`[nwc]   Invoice: ${invoice}`);
 
         // Step 3: Pay it via NWC
         logger.log("[nwc] Paying invoice via NWC...");
