@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { CocodClient } from "../src/daemon/wallet/cocod-client";
-import { installMintFallbackTopUp } from "../src/daemon/wallet/sdk-mint-fallback";
+import {
+  installMintFallbackTopUp,
+  installMintUnreachableErrorRetry,
+} from "../src/daemon/wallet/sdk-mint-fallback";
 
 function createCocodClient(mints: string[]): CocodClient {
   return {
@@ -54,6 +57,78 @@ describe("SDK top-up mint fallback", () => {
 
     expect(result.success).toBe(true);
     expect(attempts).toEqual(["https://mint-a.example", "https://mint-b.example"]);
+  });
+
+  test("replaces an API key from a fallback mint before provider failover on mint_unreachable", async () => {
+    const removedApiKeys: string[] = [];
+    const spendAttempts: string[] = [];
+    const retryRequests: Array<{ baseUrl: string; mintUrl: string; token: string; mintFallbackAttempted?: boolean }> = [];
+    const client = {
+      mode: "apikeys",
+      getBalanceManager: () => ({ topUp: async () => ({ success: true }) }),
+      storageAdapter: {
+        removeApiKey: (baseUrl: string) => removedApiKeys.push(baseUrl),
+      },
+      _spendToken: async (options: { mintUrl: string; baseUrl: string }) => {
+        spendAttempts.push(options.mintUrl);
+        return {
+          token: `token-from-${options.mintUrl}`,
+          tokenBalance: 42,
+          tokenBalanceUnit: "sat",
+          tokenBalanceUnknown: false,
+        };
+      },
+      _withAuthAndTinfoilHeaders: (_headers: unknown, token: string) => ({ authorization: token }),
+      _makeRequest: async (options: { baseUrl: string; mintUrl: string; token: string }) => {
+        retryRequests.push(options);
+        return { ok: true };
+      },
+      _handleErrorResponse: async () => {
+        throw new Error("provider failover should not run");
+      },
+    };
+    const walletAdapter = {
+      getBalances: async () => ({ "https://mint-b.example": 100 }),
+    };
+
+    installMintUnreachableErrorRetry(
+      client,
+      createCocodClient(["https://mint-a.example", "https://mint-b.example"]),
+      walletAdapter,
+      { log: () => undefined, warn: () => undefined },
+    );
+
+    const result = await client._handleErrorResponse(
+      {
+        baseUrl: "https://provider.example",
+        mintUrl: "https://mint-a.example",
+        requiredSats: 21,
+        baseHeaders: {},
+        tinfoilEnabled: false,
+        selectedModel: { id: "glm-5.2" },
+      },
+      "old-token",
+      503,
+      "request-id",
+      undefined,
+      JSON.stringify({ detail: { error: { type: "mint_unreachable" } } }),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      initialTokenBalanceInSats: 42,
+      initialTokenBalanceUnknown: false,
+    });
+    expect(removedApiKeys).toEqual(["https://provider.example"]);
+    expect(spendAttempts).toEqual(["https://mint-b.example"]);
+    expect(retryRequests).toMatchObject([
+      {
+        baseUrl: "https://provider.example",
+        mintUrl: "https://mint-b.example",
+        token: "token-from-https://mint-b.example",
+        mintFallbackAttempted: true,
+      },
+    ]);
   });
 
   test("does not retry provider top-up on unrelated failure", async () => {

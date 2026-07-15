@@ -1,5 +1,4 @@
 import { getDecodedToken, Amount } from "@cashu/cashu-ts";
-import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
@@ -16,6 +15,100 @@ export function decodeCashuTokenAmount(token: string): {
     decoded?.proofs?.reduce((sum, proof) => sum + proof.amount.toNumber(), 0) ?? 0;
   const unit = decoded?.unit === "msat" ? "msat" : "sat";
   return { amount, unit };
+}
+
+type SendCashuOptions = {
+  maxRetries?: number;
+  retryDelayMs?: number;
+  minimumAmountSats?: number;
+  fallbackAmounts?: number[];
+};
+
+const MIN_PROVIDER_TOKEN_AMOUNT_SATS = 2;
+
+export function getSameMintSendAmounts(
+  amount: number,
+  availableBalance: number,
+): number[] {
+  const requestedAmount = Math.max(
+    Math.ceil(amount),
+    MIN_PROVIDER_TOKEN_AMOUNT_SATS,
+  );
+  const available = Math.floor(availableBalance);
+  const candidates = [requestedAmount];
+
+  if (available <= requestedAmount) return candidates;
+
+  let denomination = 2 ** Math.ceil(Math.log2(requestedAmount));
+  while (denomination <= available) {
+    if (!candidates.includes(denomination)) candidates.push(denomination);
+    denomination *= 2;
+  }
+
+  // The entire ready balance is always worth trying last: even when no single
+  // power-of-two proof exists, all ready proofs together may be selectable.
+  if (!candidates.includes(available)) candidates.push(available);
+  return candidates;
+}
+
+/**
+ * Create a token from exactly the requested mint.
+ *
+ * The SDK associates the returned token with `mintUrl`. Falling back to another
+ * mint here makes that association false and can send providers a token from a
+ * mint they cannot reach. Cross-mint fallback belongs above this adapter, where
+ * the actual mint URL remains part of the request state.
+ */
+export async function sendCashuFromMint(
+  client: Pick<CocodClient, "sendCashu">,
+  mintUrl: string,
+  amount: number,
+  options: SendCashuOptions = {},
+): Promise<string> {
+  const maxRetries = options.maxRetries ?? 3;
+  const retryDelayMs = options.retryDelayMs ?? 5000;
+  const minimumAmountSats = options.minimumAmountSats ?? MIN_PROVIDER_TOKEN_AMOUNT_SATS;
+  const sendAmounts = [
+    Math.max(amount, minimumAmountSats),
+    ...(options.fallbackAmounts ?? []),
+  ].filter((candidate, index, all) => candidate > 0 && all.indexOf(candidate) === index);
+  const retryErrorPattern = "Proof already reserved by operation";
+  let lastInsufficientProofsError: unknown;
+
+  for (const [amountIndex, sendAmount] of sendAmounts.entries()) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await client.sendCashu(sendAmount, mintUrl);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const shouldRetry =
+          attempt < maxRetries && errorMessage.includes(retryErrorPattern);
+
+        if (shouldRetry) {
+          logger.log(
+            `sendToken attempt ${attempt + 1} failed with reserved proof error for ${mintUrl}, retrying in ${retryDelayMs / 1000}s...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+
+        if (
+          errorMessage.includes("Not enough proofs") &&
+          amountIndex + 1 < sendAmounts.length
+        ) {
+          lastInsufficientProofsError = error;
+          logger.warn(
+            `sendToken: ${mintUrl} cannot compose ${sendAmount} sats; trying ${sendAmounts[amountIndex + 1]} sats from the same mint`,
+          );
+          break;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  throw lastInsufficientProofsError ?? new Error("sendToken failed after max retries");
 }
 
 export interface WalletAdapterOptions {
@@ -268,38 +361,21 @@ export async function createWalletAdapter(
       return options.getAutoRefillConfig?.() ?? options.autoRefill;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
-      const maxRetries = 3;
-      const retryDelayMs = 5000;
-      const retryErrorPattern = "Proof already reserved by operation";
-
-      for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          return await client.sendCashu(amount, mintUrl);
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-
-          const shouldRetry =
-            attempt < maxRetries && errorMessage.includes(retryErrorPattern);
-
-          if (shouldRetry) {
-            logger.log(
-              `sendToken attempt ${attempt + 1} failed with reserved proof error, retrying in ${retryDelayMs / 1000}s...`,
-            );
-            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-            continue;
-          }
-
-          if (errorMessage.includes("Not enough proofs")) {
-            throw new InsufficientBalanceError(amount, 0);
-          }
-
-          logger.error("Error in walletAdapter sendToken:", error);
-          throw error;
-        }
+      try {
+        const balances: Record<string, number> = await syncMintState().catch(
+          () => ({}),
+        );
+        const sendAmounts = getSameMintSendAmounts(
+          amount,
+          balances[mintUrl] ?? amount,
+        );
+        return await sendCashuFromMint(client, mintUrl, sendAmounts[0]!, {
+          fallbackAmounts: sendAmounts.slice(1),
+        });
+      } catch (error) {
+        logger.error("Error in walletAdapter sendToken:", error);
+        throw error;
       }
-
-      throw new Error("sendToken failed after max retries");
     },
     async receiveToken(token: string): Promise<{
       success: boolean;
