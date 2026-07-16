@@ -6,6 +6,10 @@ Routstr daemon - A CLI tool for managing routstr processes, similar to `cocod` (
 
 routstrd is a Bun-based CLI tool that provides a background daemon for the Routstr protocol. It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
 
+## Router for Teams
+
+For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-auth).
+
 ## Features
 
 - **Daemon Mode**: Run routstrd as a background HTTP server
