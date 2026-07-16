@@ -177,6 +177,7 @@ export function installMintUnreachableErrorRetry(
             mintUrl,
             amount: params.requiredSats,
             baseUrl,
+            excludeMints: [initialMintUrl],
           });
 
           const retryToken = spendResult.token;
