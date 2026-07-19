@@ -1,10 +1,56 @@
-import { openSync } from "fs";
+import { openSync, statSync, renameSync, existsSync, unlinkSync } from "fs";
 import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
-const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;
+const STDOUT_LOG_PATH = `${CONFIG_DIR}/stdout.log`;
+const STDERR_LOG_PATH = `${CONFIG_DIR}/stderr.log`;
+
+// Rotate the stdout/stderr capture files before attaching so they don't grow
+// without bound (the old single debug.log hit 195 MB and contributed to an
+// OOM crash). Keep a handful of archives. Set ROUTSTRD_CAPTURE_MAX_BYTES=0 to
+// disable. 50 MB default matches the structured log rotation.
+const CAPTURE_MAX_BYTES = (() => {
+  const raw = process.env.ROUTSTRD_CAPTURE_MAX_BYTES;
+  if (!raw) return 50 * 1024 * 1024;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 50 * 1024 * 1024;
+})();
+const CAPTURE_MAX_ARCHIVES = 3;
+
+function rotateCaptureFile(path: string): void {
+  if (CAPTURE_MAX_BYTES <= 0) return;
+  let size = 0;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return; // doesn't exist yet
+  }
+  if (size < CAPTURE_MAX_BYTES) return;
+
+  // Drop oldest, shift the rest down: .2 → .3, .1 → .2, current → .1
+  for (let i = CAPTURE_MAX_ARCHIVES - 1; i >= 1; i--) {
+    const older = `${path}.${i}`;
+    const newer = `${path}.${i + 1}`;
+    try {
+      if (existsSync(older)) {
+        if (i + 1 > CAPTURE_MAX_ARCHIVES) {
+          unlinkSync(older);
+        } else {
+          renameSync(older, newer);
+        }
+      }
+    } catch {
+      // best-effort
+    }
+  }
+  try {
+    renameSync(path, `${path}.1`);
+  } catch {
+    // best-effort
+  }
+}
 
 async function isDaemonHealthy(port: string): Promise<boolean> {
   const controller = new AbortController();
@@ -44,11 +90,16 @@ async function startDaemonUnlocked(
   const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
   const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")}`;
 
-  const debugLogFd = openSync(DEBUG_LOG_PATH, "a");
+  // Rotate capture files before attaching so they never grow unbounded.
+  rotateCaptureFile(STDOUT_LOG_PATH);
+  rotateCaptureFile(STDERR_LOG_PATH);
+
+  const stdoutFd = openSync(STDOUT_LOG_PATH, "a");
+  const stderrFd = openSync(STDERR_LOG_PATH, "a");
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
-    stdout: debugLogFd,
-    stderr: debugLogFd,
+    stdout: stdoutFd,
+    stderr: stderrFd,
     stdin: "ignore",
     detached: true,
   });
@@ -66,18 +117,21 @@ async function startDaemonUnlocked(
 
     if (exitCode !== null) {
       throw new Error(
-        `Daemon process exited early with code ${exitCode}. Check logs in ${LOGS_DIR}`,
+        `Daemon process exited early with code ${exitCode}. Check stderr log: ${STDERR_LOG_PATH} and structured logs: ${LOGS_DIR}`,
       );
     }
 
     if (await isDaemonHealthy(port)) {
       console.log(`Routstr daemon started (PID: ${proc.pid}).`);
+      console.log(`  stdout → ${STDOUT_LOG_PATH}`);
+      console.log(`  stderr → ${STDERR_LOG_PATH}`);
+      console.log(`  logs   → ${LOGS_DIR}`);
       return;
     }
   }
 
   throw new Error(
-    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs in ${LOGS_DIR}`,
+    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check stderr log: ${STDERR_LOG_PATH} and structured logs: ${LOGS_DIR}`,
   );
 }
 

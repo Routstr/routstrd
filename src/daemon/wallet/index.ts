@@ -356,6 +356,28 @@ export async function createWalletAdapter(
       }
     },
 
+    /** Pay an externally-created BOLT-11 invoice via NWC. */
+    async payBolt11(bolt11: string): Promise<{
+      success: boolean;
+      preimage?: string;
+      error?: string;
+    }> {
+      if (!wallet || !wallet.service) {
+        return { success: false, error: "NWC not connected" };
+      }
+      if (!bolt11 || typeof bolt11 !== "string" || !bolt11.startsWith("lnbc")) {
+        return { success: false, error: "Invalid bolt11 invoice (must start with 'lnbc')" };
+      }
+      try {
+        const { preimage } = await wallet.payInvoice(bolt11);
+        return { success: true, preimage };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error(`[nwc] payBolt11 failed: ${message}`);
+        return { success: false, error: message };
+      }
+    },
+
     /** Get the current auto-refill config, re-reading from the getter if available */
     getAutoRefillConfig(): AutoRefillConfig | undefined {
       return options.getAutoRefillConfig?.() ?? options.autoRefill;

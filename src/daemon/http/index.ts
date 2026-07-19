@@ -1287,7 +1287,7 @@ export function createDaemonRequestHandler(deps: {
         storageAdapter: deps.storageAdapter,
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
-        debugLevel: "DEBUG",
+        debugLevel: "WARN",
         mode: deps.mode,
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,

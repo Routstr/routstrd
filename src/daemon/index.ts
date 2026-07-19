@@ -20,6 +20,31 @@ import {
 } from "../utils/config";
 import { logger } from "../utils/logger";
 
+// ── Console noise filter ─────────────────────────────────────────
+// The @routstr/sdk's SSE inspector does unconditional console.log("[routstr:sse]
+// chunk:", ...) for every single streaming token. This produced a 195 MB log
+// file that filled swap and caused silent OOM crashes. The SDK's own
+// debugLevel flag only governs its _logger_ calls, not these raw console.log
+// statements, so we intercept console.log here and drop the per-token SSE
+// spam while preserving everything else (including real errors and the
+// crash/shutdown markers written via process.stderr).
+//
+// Set ROUTSTRD_VERBOSE_SSE=1 to restore the full per-token logging (useful for
+// deep SDK debugging, but it will grow the log file fast).
+const _origConsoleLog = console.log.bind(console);
+const _verboseSse = process.env.ROUTSTRD_VERBOSE_SSE === "1";
+console.log = (...args: unknown[]) => {
+  if (_verboseSse) {
+    _origConsoleLog(...args);
+    return;
+  }
+  const first = args[0];
+  if (typeof first === "string" && first.startsWith("[routstr:sse]")) {
+    return; // suppress per-token SSE spam
+  }
+  _origConsoleLog(...args);
+};
+
 
 function makeSdkLogger(prefix?: string): SdkLogger {
   const tag = prefix ? `[${prefix}]` : undefined;
@@ -50,15 +75,78 @@ import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 
-// Global error handlers — the daemon is spawned detached with stdout/stderr
-// redirected to a file, so without these, uncaught async errors would kill
-// the process silently. Log to the file logger before exiting.
+// ── Global error & shutdown handlers ─────────────────────────────
+// The daemon is spawned detached with stdout/stderr redirected to a file,
+// so without these handlers, uncaught async errors and external signals
+// (SIGTERM/OOM-killer) would kill the process silently — leaving no trace
+// in the structured logs. These handlers write a clear crash/shutdown marker
+// (with timestamp + stack trace) to the file logger AND to stderr, so the
+// cause is visible in both ~/.routstrd/logs/YYYY-MM-DD.log and the
+// stdout/stderr capture file (debug.log).
+//
+// The daemon is a long-lived server: we do NOT exit on uncaughtException /
+// unhandledRejection (a single broken request should not take down the whole
+// process). We log loudly and keep running. External kill signals (SIGTERM,
+// SIGINT) and process.exit() are logged as a final marker so you can always
+// see exactly when and why the process stopped.
+
+const SHUTDOWN_MARKER =
+  "══════════════════════════════════════════════════";
+
+function logToStderr(msg: string): void {
+  try {
+    process.stderr.write(`${msg}\n`);
+  } catch {
+    // stderr may be closed during final shutdown — ignore.
+  }
+}
+
 process.on("uncaughtException", (error) => {
-  logger.error("UNCAUGHT EXCEPTION:", error);
+  const msg = `${SHUTDOWN_MARKER}\n[CRASH] uncaughtException at ${new Date().toISOString()}\n${error.stack || error.message || String(error)}\n${SHUTDOWN_MARKER}`;
+  logger.error(msg);
+  logToStderr(msg);
+  // Do NOT exit — the daemon is a server; one bad request should not kill it.
+  // The error is logged prominently so it can be diagnosed.
 });
 
 process.on("unhandledRejection", (reason) => {
-  logger.error("UNHANDLED REJECTION:", reason);
+  const detail =
+    reason instanceof Error
+      ? `${reason.stack || reason.message}`
+      : String(reason);
+  const msg = `[CRASH] unhandledRejection at ${new Date().toISOString()}\n${detail}`;
+  logger.error(msg);
+  logToStderr(msg);
+  // Do NOT exit — same rationale as uncaughtException.
+});
+
+// Graceful shutdown signal handlers. These fire when the process is killed
+// externally (systemctl stop, OOM-killer, kill <pid>, Ctrl+C). Without them
+// the process just vanishes and the logs show nothing after the last request.
+const shutdown = (signal: string) => {
+  const msg = `[SHUTDOWN] received ${signal} at ${new Date().toISOString()}, pid=${process.pid}`;
+  logger.log(msg);
+  logToStderr(msg);
+  // Give the file logger a moment to flush, then exit.
+  setTimeout(() => process.exit(0), 200);
+};
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Final marker on exit — records the exit code so you can distinguish a
+// clean shutdown (code 0) from a crash (code 1) when reading logs.
+process.on("exit", (code) => {
+  const msg = `[EXIT] code=${code} at ${new Date().toISOString()}, pid=${process.pid}`;
+  // The file logger uses async fs/promises — it may not flush during exit,
+  // so also write to stderr (which is sync) as a guaranteed record.
+  logToStderr(msg);
+  try {
+    // Best-effort sync write to stderr is already done above; the async logger
+    // may or may not flush, but the stderr capture file will have it.
+  } catch {
+    // ignore
+  }
 });
 
 async function main(): Promise<void> {
@@ -144,7 +232,7 @@ async function main(): Promise<void> {
       requestResponseLogSink,
     },
   );
-  installMintFallbackTopUp(routeClient, walletClient, walletAdapter, daemonSdkLogger);
+  installMintFallbackTopUp(routeClient, walletClient, walletAdapter, daemonSdkLogger, provider);
 
   const refundClient = new RoutstrClient(
     walletAdapter,

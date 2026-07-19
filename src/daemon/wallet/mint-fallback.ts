@@ -21,7 +21,11 @@ function uniqueMintUrls(mints: Array<string | undefined | null>): string[] {
 function inspectForMintUnreachable(value: unknown): boolean {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    if (/mint[_-]unreachable/i.test(trimmed) || /mint\b.*\bunreachable/i.test(trimmed)) return true;
+    if (/mint[_-]unreachable/i.test(trimmed) || /mint[_-]rate[_-]limited/i.test(trimmed) || /mint\b.*\bunreachable/i.test(trimmed)) return true;
+    // Wallet-empty fallback: when the local wallet has no proofs, sendToken
+    // throws "Not enough proofs to send" — treat this like an unreachable
+    // mint so the fallback to the next configured mint kicks in.
+    if (/not enough proofs/i.test(trimmed)) return true;
 
     if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
       (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
