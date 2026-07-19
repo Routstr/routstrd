@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { createHash } from "crypto";
 import { logger } from "../../utils/logger";
 import { withCrossProcessLock } from "../../utils/process-lock";
+import type { HistoryEntry } from "@cashu/coco-core";
 
 const DEFAULT_CONFIG_DIR =
   process.env.COCOD_DIR || `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
@@ -58,6 +59,7 @@ export interface CocodClient {
   getMintInfo(url: string): Promise<unknown>;
   /** Release resources held by in-process wallet implementations. */
   dispose?(): Promise<void>;
+  getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {
@@ -354,6 +356,9 @@ export function createCocodClient(
     },
     async getMintInfo(url: string): Promise<unknown> {
       return post<unknown>("/mints/info", { url });
+    },
+    async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
+      return [];
     },
   };
 }

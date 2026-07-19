@@ -1,4 +1,5 @@
 import { initializeCoco, getEncodedToken } from "@cashu/coco-core";
+import type { HistoryEntry } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
 import {
@@ -432,6 +433,10 @@ export async function createCocoClient(
           releaseLegacyPidClaim();
         }
       }
+    },
+
+    async getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]> {
+      return coco.history.getPaginatedHistory(offset, limit);
     },
   };
 }
