@@ -65,8 +65,8 @@ async function createInvoiceViaRoutstrCore(
   amountSats: number,
   apiKey?: string,
 ): Promise<{ invoice_id: string; bolt11: string } | null> {
-  // ── Input validation ──────────────────────────────────────
-  // Prevent SSRF: only allow HTTPS URLs (or localhost for dev)
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3_000);
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(upstreamProviderUrl);
@@ -86,8 +86,6 @@ async function createInvoiceViaRoutstrCore(
     throw new Error(`Amount ${amountSats} exceeds routstr-core max (1_000_000 sats)`);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const body: Record<string, unknown> = { amount_sats: amountSats, purpose: "create" };
