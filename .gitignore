@@ -28,6 +28,12 @@ coverage/
 tmp/
 temp/
 .pi/
+.pi-subagents/
+
+# Local debug/state artifacts
+data/
+ROUTSTRD_OTRTA_FIX.md
+kill-orphan-cocod.sh
 
 .worktrees/
 .routstrd/
