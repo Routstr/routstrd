@@ -28,7 +28,8 @@ import {
 } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
-import type { TabId, UsageStats } from "./types.ts";
+import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
+import { checkForUpdates } from "../../utils/update-checker.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();
@@ -52,6 +53,39 @@ export async function runUsageTui(): Promise<void> {
   let autoRefresh = true;
   let cleanedUp = false;
   let fetching = false;
+
+  // Update-check state — re-checked at most every 210 minutes to avoid
+  // spamming the npm registry. The first check happens shortly after
+  // startup so the TUI doesn't block on a network call.
+  const UPDATE_CHECK_INTERVAL_MS = 210 * 60 * 1000;
+  const UPDATE_CHECK_DELAY_MS = 3000;
+  let updateInfo: UpdateInfo | null = null;
+  let lastUpdateCheck = 0;
+  let updateCheckInProgress = false;
+
+  async function maybeCheckForUpdates(): Promise<void> {
+    if (updateCheckInProgress) return;
+    const now = Date.now();
+    if (updateInfo && now - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
+
+    updateCheckInProgress = true;
+    lastUpdateCheck = now;
+    try {
+      const result = await checkForUpdates();
+      const outdated = result.packages.filter((p) => p.hasUpdate);
+      updateInfo = {
+        hasUpdate: result.hasUpdate,
+        text: outdated.length > 0
+          ? `Update available: ${outdated.map((p) => p.label).join(", ")} ${outdated.map((p) => p.latest).join(", ")}`
+          : "",
+      };
+      render();
+    } catch {
+      // Silently ignore — update checks are best-effort
+    } finally {
+      updateCheckInProgress = false;
+    }
+  }
 
   if (isInteractive) {
     stdout.write(enterAlternateScreen() + hideCursor());
@@ -138,7 +172,7 @@ export async function runUsageTui(): Promise<void> {
 
     const content = renderTabContent(currentTab, stats, balance, status, width, clients);
     const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-    const chrome = renderHeader(currentTab, width, visibleTabs) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
+    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
@@ -265,9 +299,14 @@ export async function runUsageTui(): Promise<void> {
 
   await fetchData();
 
+  // Kick off the first update check after a short delay so the initial
+  // data fetch isn't blocked by a network round-trip to npm.
+  setTimeout(() => void maybeCheckForUpdates(), UPDATE_CHECK_DELAY_MS);
+
   refreshInterval = setInterval(() => {
     if (autoRefresh) {
       void fetchData();
     }
+    void maybeCheckForUpdates();
   }, 2000);
 }

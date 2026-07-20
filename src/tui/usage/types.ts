@@ -1,7 +1,13 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
+import type { UpdateCheckResult } from "../../utils/update-checker.ts";
 
 export type { UsageSummary };
+
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  text: string;
+}
 
 export interface UsageStats {
   entries: UsageTrackingEntry[];
