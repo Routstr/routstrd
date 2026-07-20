@@ -1,5 +1,4 @@
-import { appendFile, mkdir } from "fs/promises";
-import { existsSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
@@ -13,14 +12,17 @@ function getLogFileForDate(date: Date = new Date()): string {
   return join(LOGS_DIR, `${year}-${month}-${day}.log`);
 }
 
-async function ensureLogDir() {
+function ensureLogDir() {
   if (!existsSync(LOGS_DIR)) {
-    await mkdir(LOGS_DIR, { recursive: true });
+    mkdirSync(LOGS_DIR, { recursive: true });
   }
 }
 
-async function writeLog(level: string, ...args: unknown[]) {
-  await ensureLogDir();
+// NOTE: writes are synchronous on purpose — the daemon calls process.exit()
+// right after logger.error(...) on fatal paths, and async writes were being
+// silently dropped, making startup failures invisible.
+function writeLog(level: string, ...args: unknown[]) {
+  ensureLogDir();
   const timestamp = new Date().toISOString();
   const message = args
     .map((a) => {
@@ -40,7 +42,7 @@ async function writeLog(level: string, ...args: unknown[]) {
   const line = `[${timestamp}] [${level}] ${message}\n`;
   const logFile = getLogFileForDate(new Date(timestamp));
   try {
-    await appendFile(logFile, line);
+    appendFileSync(logFile, line);
   } catch (error) {
     console.error("Failed to write log:", error);
   }
