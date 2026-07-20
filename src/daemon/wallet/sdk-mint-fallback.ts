@@ -82,6 +82,8 @@ async function createInvoiceViaRoutstrCore(
   if (!amountSats || amountSats <= 0) {
     throw new Error(`Invalid amount: ${amountSats} (must be > 0)`);
   }
+  // routstr-core requires integer sats — floor any fractional amount
+  amountSats = Math.ceil(amountSats);
   if (amountSats > 1_000_000) {
     throw new Error(`Amount ${amountSats} exceeds routstr-core max (1_000_000 sats)`);
   }
@@ -291,7 +293,7 @@ export function installCreateProviderTokenFallback(
         `Attempting Lightning invoice top-up as final fallback...`,
     );
 
-    const topUpAmount = Math.max(1, Math.min(options.amount || 21, 1_000_000));
+    const topUpAmount = Math.max(1, Math.min(Math.ceil(options.amount || 21), 1_000_000));
 
     try {
       let handled = false;
@@ -446,7 +448,7 @@ export function installMintFallbackTopUp(
         `Attempting Lightning invoice top-up as final fallback...`,
     );
 
-    const topUpAmount = Math.max(1, Math.min(options.amount || 21, 1_000_000)); // default to minimum
+    const topUpAmount = Math.max(1, Math.min(Math.ceil(options.amount || 21), 1_000_000)); // default to minimum
 
     try {
       let handled = false;
