@@ -335,6 +335,12 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   main().catch((error) => {
     logger.error("Failed to start Routstr daemon:", error);
+    // Also write to stderr so the spawning CLI can surface the real error
+    // (stdout/stderr are redirected to debug.log by start-daemon.ts).
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
     process.exit(1);
   });
 }

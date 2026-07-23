@@ -142,7 +142,7 @@ export async function assertLegacyCocodNotRunning(
     throw new Error(
       `Legacy cocod daemon is still running with PID ${runningPid}. ` +
         "Refusing to open the wallet database because cocod and coco-core cannot safely use it at the same time. " +
-        "Run 'cocod stop' and try again.",
+        `Run 'cocod stop' or 'kill ${runningPid}' and try again.`,
     );
   }
 
@@ -169,7 +169,7 @@ export async function assertLegacyCocodNotRunning(
       throw new Error(
         `Legacy cocod daemon is still running with PID ${newlyRunningPid}. ` +
           "Refusing to open the wallet database because cocod and coco-core cannot safely use it at the same time. " +
-          "Run 'cocod stop' and try again.",
+          `Run 'cocod stop' or 'kill ${newlyRunningPid}' and try again.`,
         { cause: error },
       );
     }

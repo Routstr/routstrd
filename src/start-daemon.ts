@@ -1,10 +1,31 @@
-import { openSync } from "fs";
+import { openSync, existsSync, readFileSync } from "fs";
 import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
 const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;
+
+/**
+ * The spawned daemon's stdout/stderr is redirected to DEBUG_LOG_PATH, so when
+ * it exits early we can surface its actual error from there instead of just
+ * telling the user to go read logs.
+ */
+function readDaemonOutput(offset: number): string {
+  try {
+    if (!existsSync(DEBUG_LOG_PATH)) return "";
+    const content = readFileSync(DEBUG_LOG_PATH, "utf-8");
+    return content
+      .slice(offset)
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-30)
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
 
 async function isDaemonHealthy(port: string): Promise<boolean> {
   const controller = new AbortController();
@@ -44,6 +65,9 @@ async function startDaemonUnlocked(
   const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
   const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")}`;
 
+  const debugLogOffset = existsSync(DEBUG_LOG_PATH)
+    ? readFileSync(DEBUG_LOG_PATH, "utf-8").length
+    : 0;
   const debugLogFd = openSync(DEBUG_LOG_PATH, "a");
 
   const proc = Bun.spawn(["sh", "-c", shellCmd], {
@@ -65,8 +89,12 @@ async function startDaemonUnlocked(
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
 
     if (exitCode !== null) {
+      const daemonOutput = readDaemonOutput(debugLogOffset);
       throw new Error(
-        `Daemon process exited early with code ${exitCode}. Check logs in ${LOGS_DIR}`,
+        `Daemon process exited early with code ${exitCode}.` +
+          (daemonOutput
+            ? `\n\nDaemon output:\n${daemonOutput}`
+            : ` Check logs in ${LOGS_DIR}`),
       );
     }
 
