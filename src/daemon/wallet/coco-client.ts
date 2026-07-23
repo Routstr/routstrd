@@ -190,6 +190,67 @@ export async function assertLegacyCocodNotRunning(
 }
 
 /**
+ * Gracefully stop a legacy cocod daemon that is still running, so the new
+ * in-process coco wallet can safely open the shared database.
+ *
+ * Sends SIGTERM to the PID recorded in cocod's PID file, then polls until the
+ * process exits and the PID file is removed (cocod cleans up both on graceful
+ * shutdown). On timeout it refuses rather than escalating to SIGKILL, because
+ * killing a wallet engine mid-proof-recovery risks corrupting coco.db — the
+ * exact failure the guard exists to prevent.
+ */
+export async function stopLegacyCocod(
+  options: {
+    pidFilePath?: string;
+    isProcessRunning?: (pid: number) => boolean;
+    /** Total time to wait for cocod to exit after SIGTERM. */
+    timeoutMs?: number;
+    /** Interval between exit checks. */
+    pollIntervalMs?: number;
+  } = {},
+): Promise<void> {
+  const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 500;
+
+  const readPid = (): number | null => {
+    if (!existsSync(pidFilePath)) return null;
+    try {
+      const pid = Number.parseInt(readFileSync(pidFilePath, "utf-8").trim(), 10);
+      return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid) ? pid : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const pid = readPid();
+  if (pid === null) {
+    logger.debug("stopLegacyCocod: no running legacy cocod found, nothing to stop.");
+    return;
+  }
+
+  logger.log(`Stopping legacy cocod daemon (PID ${pid})…`);
+  process.kill(pid, "SIGTERM");
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    if (readPid() === null) {
+      logger.log(`Legacy cocod daemon (PID ${pid}) stopped.`);
+      return;
+    }
+  }
+
+  throw new Error(
+    `Legacy cocod daemon (PID ${pid}) did not stop within ${Math.round(
+      timeoutMs / 1000,
+    )}s of SIGTERM. ` +
+      `Run 'kill ${pid}' and try again.`,
+  );
+}
+
+/**
  * Atomically claim cocod's PID file for the lifetime of the in-process wallet.
  * Legacy cocod checks this same file before opening coco.db, so a live routstrd
  * owner prevents cocod from starting after the initial socket/PID probe.

@@ -27,6 +27,7 @@ import {
 } from "./utils/config";
 import { logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { stopLegacyCocod } from "./daemon/wallet/coco-client";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
@@ -456,6 +457,9 @@ program
   .action(async (options: { port?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
+    // Stop a legacy cocod daemon (from older routstrd versions) before
+    // starting the new in-process coco wallet — both cannot share coco.db.
+    await stopLegacyCocod();
     await startDaemon({
       port: options.port || String(config.port || 8008),
       provider: options.provider,
