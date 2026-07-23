@@ -35,6 +35,11 @@ import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import packageJson from "../package.json" with { type: "json" };
+import {
+  compareVersions,
+  getGlobalPackageVersion,
+  getLatestNpmVersion,
+} from "./utils/update-checker.ts";
 
 type RoutstrModel = {
   id: string;
@@ -249,22 +254,52 @@ program
   .command("update")
   .description("Update routstrd to the latest version")
   .action(async () => {
-    console.log("Updating routstrd...");
-    const routstrdProc = Bun.spawn(["bun", "install", "-g", "routstrd"], {
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const routstrdCode = await routstrdProc.exited;
-    if (routstrdCode !== 0) {
-      console.error("Failed to update routstrd.");
-      process.exit(1);
+    const packages = [
+      { name: "routstrd", label: "routstrd" },
+      { name: "@routstr/cocod", label: "cocod" },
+    ];
+
+    let updatedAny = false;
+
+    for (const { name, label } of packages) {
+      const installed = await getGlobalPackageVersion(name);
+      const latest = await getLatestNpmVersion(name);
+
+      // Only skip when we're confident the installed version is current.
+      // If we can't determine either version we fall through to installing.
+      if (
+        installed &&
+        latest &&
+        (compareVersions(installed, latest) ?? -1) >= 0
+      ) {
+        console.log(`${label} is already up to date (v${installed}).`);
+        continue;
+      }
+
+      const fromPart = installed ? ` from v${installed}` : "";
+      const toPart = latest ? ` to v${latest}` : "";
+      console.log(`Updating ${label}${fromPart}${toPart}...`);
+
+      const proc = Bun.spawn(["bun", "install", "-g", name], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const code = await proc.exited;
+      if (code !== 0) {
+        console.error(`Failed to update ${label}.`);
+        process.exit(1);
+      }
+      console.log(`${label} updated successfully.\n`);
+      updatedAny = true;
     }
-    console.log("routstrd updated successfully.\n");
 
-    console.log("routstrd has been updated!");
-
-    // Restart daemon so the new binary takes effect immediately.
-    await restartDaemonsAfterUpdate();
+    if (updatedAny) {
+      console.log("All requested updates have been applied!");
+      // Restart daemons so the new binaries take effect immediately.
+      await restartDaemonsAfterUpdate();
+    } else {
+      console.log("\nAll packages are already up to date — nothing to do.");
+    }
   });
 
 program

@@ -8,7 +8,7 @@ import {
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
-import type { TabId, UsageStats } from "./types.ts";
+import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
 function formatCost(value: number): string {
@@ -24,13 +24,20 @@ function formatReqs(value: number): string {
   return value.toString();
 }
 
-export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[]): string {
+export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[], updateInfo?: UpdateInfo): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
   const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
   const maxKey = visibleTabs.length;
   const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-${maxKey}] Tabs  [R] Refresh${COLORS.reset}`;
   const fill = width - title.length - help.length - vimIndicator.length - 6;
-  return `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}\n`;
+  const headerLine = `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}`;
+
+  if (updateInfo?.hasUpdate) {
+    const banner = `${COLORS.bold}${COLORS.yellow}  ↻ UPDATE AVAILABLE — run ${COLORS.green}routstrd update${COLORS.yellow} to update${COLORS.reset}`;
+    return `${headerLine}\n${banner}\n`;
+  }
+
+  return `${headerLine}\n`;
 }
 
 export function renderSearchBar(): string {
