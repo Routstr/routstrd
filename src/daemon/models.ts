@@ -19,13 +19,47 @@ export type ModelWithProviders = ExposedModel & {
 export function createModelService(modelManager: ModelManager, store: SdkStore) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
+  /**
+   * Returns the set of disabled provider base URLs (normalized with trailing
+   * slash, matching the SDK's convention) so callers can skip them before
+   * passing a provider list to `fetchModels`.
+   */
+  const getDisabledProviderSet = (): Set<string> => {
+    const raw: string[] = store.getState().disabledProviders || [];
+    return new Set(
+      raw.map((url) => (url.endsWith("/") ? url : `${url}/`)),
+    );
+  };
+
+  /**
+   * Filter a list of provider base URLs, removing any that are currently
+   * disabled in the store. This prevents wasteful HTTP requests to providers
+   * the user has explicitly disabled.
+   */
+  const filterDisabled = (providers: string[]): string[] => {
+    const disabled = getDisabledProviderSet();
+    if (disabled.size === 0) return providers;
+    const filtered = providers.filter(
+      (url) => {
+        const base = url.endsWith("/") ? url : `${url}/`;
+        return !disabled.has(base);
+      },
+    );
+    if (filtered.length < providers.length) {
+      logger.log(
+        `Skipped ${providers.length - filtered.length} disabled provider(s) before model fetch`,
+      );
+    }
+    return filtered;
+  };
+
   const ensureProvidersBootstrapped = (): Promise<void> => {
     if (!providerBootstrapPromise) {
       providerBootstrapPromise = (async () => {
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
-        await modelManager.fetchModels(providers);
+        await modelManager.fetchModels(filterDisabled(providers));
 
         // Sync discovered providers into the store so `providers list` reflects
         // the same set that the model manager knows about.
@@ -61,7 +95,7 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     ).slice(0, 21);
     const baseUrls = modelManager.getBaseUrls();
     const discoveredModels = await modelManager.fetchModels(
-      baseUrls,
+      filterDisabled(baseUrls),
       forceRefresh,
     );
     const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
@@ -139,8 +173,8 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
     console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
-    // Force-refresh models from all providers
-    const models = await modelManager.fetchModels(providers, true);
+    // Force-refresh models from all enabled providers
+    const models = await modelManager.fetchModels(filterDisabled(providers), true);
     console.log(`Fetched ${models.length} models from ${providers.length} providers`);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status

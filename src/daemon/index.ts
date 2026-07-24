@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
 
-  const port = args.port;
+  const port = args.port ?? config.port ?? 8008;
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
     process.env.ROUTSTRD_REQUEST_RESPONSE_LOG_DIR ||
