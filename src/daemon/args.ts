@@ -1,5 +1,5 @@
 export function parseArgs(argv: string[]): {
-  port: number;
+  port: number | null;
   provider: string | null;
 } {
   const portFlagIndex = argv.findIndex((arg) => arg === "--port");
@@ -7,10 +7,12 @@ export function parseArgs(argv: string[]): {
     (arg) => arg === "--provider" || arg === "-p",
   );
 
+  // Only use the CLI flag port if explicitly passed; otherwise fall back to
+  // the persisted config so a restart doesn't clobber the user's setting.
   const port =
     portFlagIndex !== -1
       ? Number.parseInt(argv[portFlagIndex + 1] || "8008", 10)
-      : 8008;
+      : null;
   const providerValue =
     providerFlagIndex !== -1 ? argv[providerFlagIndex + 1] : undefined;
   const provider = providerValue ? providerValue.trim() : null;
