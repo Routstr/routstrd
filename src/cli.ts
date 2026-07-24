@@ -1757,7 +1757,7 @@ program
       "  1) lazyrefund/apikeys    - Pseudonymous accounts are kept with the Routstr nodes and are refunded after 5 mins if not used.",
     );
     console.log(
-      "  2) xcashu (coming soon)   - Balances are never kept with the nodes, all balances are refunded in response.",
+      "  2) xcashu                 - Balances are never kept with the nodes, all balances are refunded in response.",
     );
     console.log(`\nCurrent mode: ${currentMode}`);
 
@@ -1776,13 +1776,6 @@ program
     });
 
     const selectedMode = modes[selectedIndex];
-
-    if (selectedMode === "xcashu") {
-      console.log(
-        "\nxcashu mode is coming soon! Only lazyrefund/apikeys is available at this time.",
-      );
-      return;
-    }
 
     if (selectedMode === currentMode) {
       console.log(`Mode is already set to '${selectedMode}'. No changes made.`);
