@@ -27,6 +27,8 @@ type BalanceManagerLike = {
 
 type RoutstrClientLike = {
   getBalanceManager(): unknown;
+  getMode?(): string;
+  mode?: string;
 };
 
 type WalletAdapterLike = {
@@ -218,6 +220,12 @@ function isMintUnreachableResponse(status: number, responseBody: unknown): boole
   return status >= 500 && isMintUnreachableError(responseBody);
 }
 
+/** Returns true if the client is operating in xcashu mode. */
+function isXcashuMode(client: RoutstrClientLike): boolean {
+  const mode = client.getMode?.() ?? client.mode;
+  return mode === "xcashu";
+}
+
 async function getTopUpMintCandidates(
   initialMintUrl: string,
   walletClient: CocodClient,
@@ -285,9 +293,17 @@ export function installCreateProviderTokenFallback(
     }
 
     // ── Lightning invoice fallback ──────────────────────────────
-    // All configured mints are empty or unreachable. As a last resort,
-    // create a Lightning invoice to fund the wallet. If NWC is connected,
-    // auto-pay it; otherwise log prominently so the operator can pay.
+    // All configured mints are empty or unreachable. In apikeys mode, fall
+    // back to a Lightning invoice to fund the wallet. In xcashu mode this
+    // makes no sense — tokens are per-request and refunded in the response,
+    // so just let the error propagate to the next provider.
+    if (isXcashuMode(client)) {
+      logger.warn(
+        `[wallet] createProviderToken: all ${candidates.length} mint(s) failed in xcashu mode — skipping Lightning fallback, letting provider failover handle it.`,
+      );
+      return lastResult ?? originalCreateProviderToken(options);
+    }
+
     logger.warn(
       `[wallet] createProviderToken: all ${candidates.length} mint(s) unreachable or out of proofs. ` +
         `Attempting Lightning invoice top-up as final fallback...`,
@@ -440,9 +456,17 @@ export function installMintFallbackTopUp(
     }
 
     // ── Lightning invoice fallback ──────────────────────────────
-    // All configured mints are empty or unreachable. As a last resort,
-    // create a Lightning invoice to fund the wallet. If NWC is connected,
-    // auto-pay it; otherwise log prominently so the operator can pay.
+    // All configured mints are empty or unreachable. In apikeys mode, fall
+    // back to a Lightning invoice to fund the wallet. In xcashu mode this
+    // makes no sense — tokens are per-request and refunded in the response,
+    // so just let the error propagate to the next provider.
+    if (isXcashuMode(client)) {
+      logger.warn(
+        `[wallet] All ${candidates.length} mint(s) failed in xcashu mode — skipping Lightning fallback, letting provider failover handle it.`,
+      );
+      return lastMintUnreachableResult ?? originalTopUp(options);
+    }
+
     logger.warn(
       `[wallet] All ${candidates.length} mint(s) unreachable or out of proofs. ` +
         `Attempting Lightning invoice top-up as final fallback...`,
