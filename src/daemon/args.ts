@@ -14,10 +14,9 @@ export function parseArgs(argv: string[]): {
       ? Number.parseInt(argv[portFlagIndex + 1] || "8008", 10)
       : 8008;
 
-  // --host flag takes precedence, then ROUTSTRD_HOST env var
   const hostValue =
     hostFlagIndex !== -1 ? argv[hostFlagIndex + 1] : undefined;
-  const host = hostValue ? hostValue.trim() : (process.env.ROUTSTRD_HOST || null);
+  const host = hostValue?.trim() || null;
 
   const providerValue =
     providerFlagIndex !== -1 ? argv[providerFlagIndex + 1] : undefined;

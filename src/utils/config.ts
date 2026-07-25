@@ -32,8 +32,6 @@ export interface NwcConfig {
 
 export interface RoutstrdConfig {
   port: number;
-  /** Bind address for the HTTP server. Defaults to 127.0.0.1 (localhost only)
-   * for security — set to 0.0.0.0 to listen on all interfaces. */
   host: string;
   provider: string | null;
   cocodPath: string | null;

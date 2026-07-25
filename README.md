@@ -74,15 +74,12 @@ With custom port:
 routstrd start --port 9000
 ```
 
-With a specific bind address (default is `127.0.0.1` for security):
+The daemon binds to `127.0.0.1` by default. To expose it on another interface:
 ```sh
 routstrd start --host 0.0.0.0
 ```
 
-> ⚠️ **Security note:** By default, routstrd binds to `127.0.0.1` (localhost only).
-> Several endpoints (e.g. `/balance`, `/status`, `/providers`) do not require
-> authentication and will leak sensitive information if exposed. Only bind to
-> `0.0.0.0` if you have a firewall or reverse proxy in place.
+Only expose the daemon behind appropriate network controls.
 
 With specific provider:
 ```sh
@@ -160,7 +157,6 @@ Configuration is stored in `~/.routstrd/config.json`:
 - `ROUTSTRD_DIR` - Config directory (default: `~/.routstrd`)
 - `ROUTSTRD_SOCKET` - Socket path (default: `~/.routstrd/routstrd.sock`)
 - `ROUTSTRD_PID` - PID file path (default: `~/.routstrd/routstrd.pid`)
-- `ROUTSTRD_HOST` - Bind address override (default: `127.0.0.1`)
 
 ## Development
 

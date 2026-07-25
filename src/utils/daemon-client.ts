@@ -33,12 +33,7 @@ export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
     return config.daemonUrl.replace(/\/$/, "");
   }
-  // When bound to 0.0.0.0, connect via localhost since 0.0.0.0 is not
-  // a connectable address from a client perspective.
-  const host =
-    !config.host || config.host === "0.0.0.0"
-      ? "localhost"
-      : config.host;
+  const host = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
   return `http://${host}:${config.port}`;
 }
 

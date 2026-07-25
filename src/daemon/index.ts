@@ -305,19 +305,6 @@ async function main(): Promise<void> {
   process.once("SIGINT", shutdownForSignal);
   process.once("SIGTERM", shutdownForSignal);
 
-  // Warn when binding to all interfaces — unauthenticated endpoints expose
-  // balance info, provider lists, and internal state to anyone who can reach
-  // the port.
-  if (host === "0.0.0.0") {
-    logger.warn(
-      "⚠️  WARNING: Daemon is bound to 0.0.0.0 (all network interfaces). " +
-        "Several endpoints (e.g. /balance, /status, /providers) do not require " +
-        "authentication and will leak sensitive information to anyone on the " +
-        "network. Consider binding to 127.0.0.1 unless you have a firewall or " +
-        "reverse proxy in place.",
-    );
-  }
-
   server.listen(port, host, async () => {
     logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
     if (requestResponseLogDir) {

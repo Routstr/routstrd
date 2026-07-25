@@ -27,7 +27,7 @@ function readDaemonOutput(offset: number): string {
   }
 }
 
-async function isDaemonHealthy(port: string, host: string = "localhost"): Promise<boolean> {
+async function isDaemonHealthy(port: string, host = "127.0.0.1"): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
@@ -42,11 +42,8 @@ async function isDaemonHealthy(port: string, host: string = "localhost"): Promis
   }
 }
 
-/** When the daemon binds to 0.0.0.0, the CLI must still connect via
- * localhost (or 127.0.0.1) since 0.0.0.0 is not a connectable address. */
-function clientHost(host: string | undefined): string {
-  if (!host || host === "0.0.0.0") return "localhost";
-  return host;
+function clientHost(host?: string): string {
+  return !host || host === "0.0.0.0" ? "127.0.0.1" : host;
 }
 
 async function startDaemonUnlocked(
