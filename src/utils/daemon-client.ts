@@ -30,9 +30,16 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
 }
 
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
-  return (
-    config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`
-  );
+  if (config.daemonUrl) {
+    return config.daemonUrl.replace(/\/$/, "");
+  }
+  // When bound to 0.0.0.0, connect via localhost since 0.0.0.0 is not
+  // a connectable address from a client perspective.
+  const host =
+    !config.host || config.host === "0.0.0.0"
+      ? "localhost"
+      : config.host;
+  return `http://${host}:${config.port}`;
 }
 
 export function getAuthBaseUrl(config: RoutstrdConfig): string {
@@ -145,6 +152,7 @@ export async function startDaemonProcess(): Promise<void> {
   const config = await loadConfig();
   await startDaemon({
     port: String(config.port || 8008),
+    host: config.host || undefined,
     provider: config.provider || undefined,
   });
 }

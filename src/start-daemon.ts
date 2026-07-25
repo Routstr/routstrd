@@ -27,11 +27,11 @@ function readDaemonOutput(offset: number): string {
   }
 }
 
-async function isDaemonHealthy(port: string): Promise<boolean> {
+async function isDaemonHealthy(port: string, host: string = "localhost"): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
-    const existing = await fetch(`http://localhost:${port}/health`, {
+    const existing = await fetch(`http://${host}:${port}/health`, {
       signal: controller.signal,
     });
     return existing.ok;
@@ -42,21 +42,33 @@ async function isDaemonHealthy(port: string): Promise<boolean> {
   }
 }
 
+/** When the daemon binds to 0.0.0.0, the CLI must still connect via
+ * localhost (or 127.0.0.1) since 0.0.0.0 is not a connectable address. */
+function clientHost(host: string | undefined): string {
+  if (!host || host === "0.0.0.0") return "localhost";
+  return host;
+}
+
 async function startDaemonUnlocked(
-  options: { port?: string; provider?: string },
+  options: { port?: string; host?: string; provider?: string },
 ): Promise<void> {
   const args: string[] = [];
   const port = options.port || "8008";
+  const host = options.host || "127.0.0.1";
+  const ch = clientHost(host);
   const pollIntervalMs = 250;
   const startupTimeoutMs = 10 * 60 * 1000;
 
-  if (await isDaemonHealthy(port)) {
-    console.log(`Routstr daemon already running on http://localhost:${port}/v1`);
+  if (await isDaemonHealthy(port, ch)) {
+    console.log(`Routstr daemon already running on http://${ch}:${port}/v1`);
     return;
   }
 
   if (options.port) {
     args.push("--port", options.port);
+  }
+  if (options.host) {
+    args.push("--host", options.host);
   }
   if (options.provider) {
     args.push("--provider", options.provider);
@@ -98,7 +110,7 @@ async function startDaemonUnlocked(
       );
     }
 
-    if (await isDaemonHealthy(port)) {
+    if (await isDaemonHealthy(port, ch)) {
       console.log(`Routstr daemon started (PID: ${proc.pid}).`);
       return;
     }
@@ -110,13 +122,15 @@ async function startDaemonUnlocked(
 }
 
 export async function startDaemon(
-  options: { port?: string; provider?: string } = {},
+  options: { port?: string; host?: string; provider?: string } = {},
 ): Promise<void> {
   const port = options.port || "8008";
+  const host = options.host || "127.0.0.1";
+  const ch = clientHost(host);
   const startupTimeoutMs = 10 * 60 * 1000;
 
-  if (await isDaemonHealthy(port)) {
-    console.log(`Routstr daemon already running on http://localhost:${port}/v1`);
+  if (await isDaemonHealthy(port, ch)) {
+    console.log(`Routstr daemon already running on http://${ch}:${port}/v1`);
     return;
   }
 

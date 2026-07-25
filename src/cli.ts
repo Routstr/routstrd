@@ -168,6 +168,7 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
         console.log("Starting routstrd daemon...");
         await startDaemon({
           port: String(config.port || 8008),
+          host: config.host || undefined,
           provider: config.provider || undefined,
         });
         console.log("routstrd daemon restarted.");
@@ -238,7 +239,7 @@ async function initDaemon(): Promise<void> {
   console.log(`Database will be stored at: ${DB_PATH}`);
   initializeWallet();
 
-  await startDaemon({ port: String(config.port || 8008) });
+  await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
 
   await setupIntegration(config);
 
@@ -497,8 +498,9 @@ program
   .command("start")
   .description("Start the background daemon")
   .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address (default: 127.0.0.1)")
   .option("-p, --provider <provider>", "Default provider to use")
-  .action(async (options: { port?: string; provider?: string }) => {
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
     // Stop a legacy cocod daemon (from older routstrd versions) before
@@ -506,6 +508,7 @@ program
     await stopLegacyCocod();
     await startDaemon({
       port: options.port || String(config.port || 8008),
+      host: options.host || config.host || undefined,
       provider: options.provider,
     });
   });
@@ -1793,8 +1796,9 @@ program
   .command("restart")
   .description("Restart the background daemon")
   .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address (default: 127.0.0.1)")
   .option("-p, --provider <provider>", "Default provider to use")
-  .action(async (options: { port?: string; provider?: string }) => {
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
     const wasRunning = await isDaemonRunning();
@@ -1832,6 +1836,7 @@ program
     console.log("Starting daemon...");
     await startDaemon({
       port: options.port || String(config.port || 8008),
+      host: options.host || config.host || undefined,
       provider: options.provider,
     });
     console.log("Daemon restarted.");
@@ -1914,6 +1919,7 @@ program
     console.log("Starting daemon...");
     await startDaemon({
       port: String(config.port || 8008),
+      host: config.host || undefined,
       provider: config.provider || undefined,
     });
     console.log(`Daemon restarted with mode '${selectedMode}'.`);
