@@ -363,6 +363,27 @@ async function main(): Promise<void> {
           logger.log(
             `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
           );
+
+          // Also sweep pending xcashu tokens that failed inline refund
+          // (e.g. "proofs already spent" — token stays in storage, needs retry)
+          const xcashuTokens = (state.xcashuTokens || {}) as Record<
+            string,
+            unknown[]
+          >;
+          const xcashuCount = Object.values(xcashuTokens).reduce(
+            (sum, tokens) => sum + (tokens?.length || 0),
+            0,
+          );
+          if (xcashuCount > 0) {
+            logger.log(`Sweeping ${xcashuCount} pending xcashu token(s)...`);
+            const xcashuResults = await spender.refundXcashuTokens(mintUrl);
+            const xcashuSuccess = xcashuResults.filter(
+              (r: { success: boolean }) => r.success,
+            ).length;
+            logger.log(
+              `xcashu sweep completed: ${xcashuSuccess}/${xcashuResults.length} tokens refunded.`,
+            );
+          }
         } catch (error) {
           logger.error("Scheduled refund failed:", error);
         }

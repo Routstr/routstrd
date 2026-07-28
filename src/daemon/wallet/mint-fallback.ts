@@ -26,6 +26,12 @@ function inspectForMintUnreachable(value: unknown): boolean {
     // throws "Not enough proofs to send" — treat this like an unreachable
     // mint so the fallback to the next configured mint kicks in.
     if (/not enough proofs/i.test(trimmed)) return true;
+    // Network-level failures: "Failed to fetch mint <url>" (connection refused,
+    // DNS failure, TLS error) — the mint is effectively unreachable.
+    if (/failed to fetch/i.test(trimmed) || /failed to fetch mint/i.test(trimmed)) return true;
+    // Generic fetch failures from the SDK's isNetworkErrorMessage set
+    if (/networkerror when attempting to fetch resource/i.test(trimmed)) return true;
+    if (/load failed/i.test(trimmed)) return true;
 
     if ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||
       (trimmed.startsWith("[") && trimmed.endsWith("]"))) {

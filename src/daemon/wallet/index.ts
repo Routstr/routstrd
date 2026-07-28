@@ -134,6 +134,60 @@ export async function createWalletAdapter(
   let activeMintUrl: string | null = null;
   let mintUnits: Record<string, "sat" | "msat"> = {};
 
+  // ── Mint health cache ──────────────────────────────────────────
+  // Track mints that are temporarily unreachable (connection refused,
+  // DNS failure, etc.). Unhealthy mints are skipped by getActiveMintUrl()
+  // and sendToken() so we don't waste a round-trip on every request.
+  const MINT_HEALTH_COOLDOWN_MS = 60_000; // 1 minute
+  const unhealthyMints = new Map<string, number>(); // mintUrl → timestamp marked unhealthy
+
+  function markMintUnhealthy(mintUrl: string): void {
+    const now = Date.now();
+    if (!unhealthyMints.has(mintUrl)) {
+      logger.warn(`[wallet] Marking mint ${mintUrl} as unhealthy (will skip for ${MINT_HEALTH_COOLDOWN_MS / 1000}s)`);
+    }
+    unhealthyMints.set(mintUrl, now);
+    // If the active mint just went unhealthy, switch to a healthy one
+    if (activeMintUrl === mintUrl) {
+      const healthy = getFirstHealthyMint();
+      if (healthy) {
+        activeMintUrl = healthy;
+        logger.log(`[wallet] Active mint switched to ${healthy}`);
+      }
+    }
+  }
+
+  function isMintHealthy(mintUrl: string): boolean {
+    const markedAt = unhealthyMints.get(mintUrl);
+    if (!markedAt) return true;
+    if (Date.now() - markedAt >= MINT_HEALTH_COOLDOWN_MS) {
+      unhealthyMints.delete(mintUrl);
+      logger.log(`[wallet] Mint ${mintUrl} health cooldown expired — will retry`);
+      return true;
+    }
+    return false;
+  }
+
+  // Cache of known mints (updated by syncMintState)
+  let knownMints: string[] = [];
+
+  function getFirstHealthyMint(): string | null {
+    // Try known mints in order, return first healthy one
+    for (const mint of knownMints) {
+      if (isMintHealthy(mint)) return mint;
+    }
+    // Fallback: any configured mint even if not in knownMints yet
+    return activeMintUrl && isMintHealthy(activeMintUrl) ? activeMintUrl : null;
+  }
+
+  function isNetworkFetchError(error: unknown): boolean {
+    const msg = error instanceof Error ? error.message : String(error);
+    return /failed to fetch/i.test(msg) ||
+      /networkerror when attempting to fetch resource/i.test(msg) ||
+      /load failed/i.test(msg) ||
+      /unable to connect/i.test(msg);
+  }
+
   async function syncMintState(
     balances?: Record<string, number>,
   ): Promise<Record<string, number>> {
@@ -143,9 +197,20 @@ export async function createWalletAdapter(
       Object.keys(nextBalances).map((mintUrl) => [mintUrl, "sat"]),
     );
 
+    // Update known mints list
+    knownMints = [...new Set([
+      ...Object.keys(nextBalances),
+      ...(activeMintUrl ? [activeMintUrl] : []),
+    ])];
+
     try {
       const mints = await client.listMints();
-      activeMintUrl = mints[0] || Object.keys(nextBalances)[0] || null;
+      // Add configured mints to knownMints
+      knownMints = [...new Set([...knownMints, ...mints])];
+      // Pick first healthy mint — prefer the first configured one,
+      // but skip mints currently in the unhealthy cooldown
+      const healthyMint = mints.find(m => isMintHealthy(m));
+      activeMintUrl = healthyMint || mints[0] || Object.keys(nextBalances)[0] || null;
     } catch (error) {
       logger.error("Failed to list cocod mints:", error);
       if (!activeMintUrl) {
@@ -224,7 +289,9 @@ export async function createWalletAdapter(
       return mintUnits;
     },
     getActiveMintUrl(): string | null {
-      return activeMintUrl;
+      // Return the first healthy mint, falling back to activeMintUrl
+      const healthy = getFirstHealthyMint();
+      return healthy || activeMintUrl;
     },
 
     // ── NWC funding methods ────────────────────────────────────
@@ -384,17 +451,33 @@ export async function createWalletAdapter(
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
       try {
+        // If the requested mint is unhealthy, skip it immediately and
+        // try a healthy mint instead. This prevents the wasted round-trip
+        // of attempting an unreachable mint on every single request.
+        let effectiveMint = mintUrl;
+        if (!isMintHealthy(mintUrl)) {
+          const healthy = getFirstHealthyMint();
+          if (healthy && healthy !== mintUrl) {
+            logger.log(`[wallet] sendToken: skipping unhealthy mint ${mintUrl}, using ${healthy}`);
+            effectiveMint = healthy;
+          }
+        }
+
         const balances: Record<string, number> = await syncMintState().catch(
           () => ({}),
         );
         const sendAmounts = getSameMintSendAmounts(
           amount,
-          balances[mintUrl] ?? amount,
+          balances[effectiveMint] ?? amount,
         );
-        return await sendCashuFromMint(client, mintUrl, sendAmounts[0]!, {
+        return await sendCashuFromMint(client, effectiveMint, sendAmounts[0]!, {
           fallbackAmounts: sendAmounts.slice(1),
         });
       } catch (error) {
+        // Mark the mint as unhealthy so future requests skip it
+        if (isNetworkFetchError(error)) {
+          markMintUnhealthy(mintUrl);
+        }
         logger.error("Error in walletAdapter sendToken:", error);
         throw error;
       }
@@ -412,6 +495,14 @@ export async function createWalletAdapter(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
+        // Mark the mint as unhealthy if it's a network error
+        // (receiveCashu errors include the mint URL in the message)
+        if (isNetworkFetchError(error)) {
+          // Try to extract mint URL from error message or use activeMintUrl
+          const mintMatch = errorMessage.match(/https?:\/\/[^\s/]+\/[^\s]*/);
+          const failedMint = mintMatch?.[0] || activeMintUrl;
+          if (failedMint) markMintUnhealthy(failedMint);
+        }
         logger.error("Error in walletAdapter receiveToken:", errorMessage);
         return { success: false, amount: 0, unit: "sat", message: errorMessage };
       }
@@ -447,7 +538,9 @@ export async function createWalletAdapter(
     mintUnits = Object.fromEntries(
       Object.keys(balances).map((mintUrl) => [mintUrl, "sat"]),
     );
-    activeMintUrl = mints[0] || Object.keys(balances)[0] || null;
+    knownMints = [...new Set([...Object.keys(balances), ...mints])];
+    const healthyMint = mints.find(m => isMintHealthy(m));
+    activeMintUrl = healthyMint || mints[0] || Object.keys(balances)[0] || null;
   } catch (error) {
     logger.error("Failed to initialize wallet adapter state:", error);
   }
