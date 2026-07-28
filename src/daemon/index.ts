@@ -33,6 +33,13 @@ function makeSdkLogger(prefix?: string): SdkLogger {
   };
 }
 const daemonSdkLogger: SdkLogger = makeSdkLogger();
+const STARTUP_LOG_PREFIX = "[routstrd:start]";
+
+function startupProgress(message: string): void {
+  logger.info(message);
+  console.log(`${STARTUP_LOG_PREFIX} ${message}`);
+}
+
 import { parseArgs } from "./args";
 import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
 import {
@@ -61,6 +68,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main(): Promise<void> {
+  startupProgress("Loading configuration...");
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
 
@@ -84,6 +92,7 @@ async function main(): Promise<void> {
   const updatedConfig = { ...config, port, host, provider };
   saveDaemonConfig(updatedConfig);
 
+  startupProgress("Opening Routstr databases...");
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
@@ -94,6 +103,7 @@ async function main(): Promise<void> {
 
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
+  startupProgress("Routstr databases ready.");
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
@@ -305,6 +315,7 @@ async function main(): Promise<void> {
   process.once("SIGINT", shutdownForSignal);
   process.once("SIGTERM", shutdownForSignal);
 
+  startupProgress("Starting HTTP server...");
   server.listen(port, host, async () => {
     logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
     if (requestResponseLogDir) {

@@ -1,5 +1,5 @@
 import { initializeCoco, getEncodedToken } from "@cashu/coco-core";
-import type { HistoryEntry } from "@cashu/coco-core";
+import type { HistoryEntry, Logger as CocoLogger } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
 import {
@@ -79,6 +79,71 @@ export interface LegacyCocodStopOptions {
 interface CocodConfig {
   mnemonic: string;
   encrypted: boolean;
+}
+
+const STARTUP_LOG_PREFIX = "[routstrd:start]";
+
+function startupProgress(message: string): void {
+  logger.info(message);
+  // The daemon is detached and stdout is captured by start-daemon.ts. The
+  // prefix lets the CLI surface only safe, user-facing startup progress while
+  // the full diagnostic stream remains in the normal log file.
+  console.log(`${STARTUP_LOG_PREFIX} ${message}`);
+}
+
+const SAFE_COCO_LOG_FIELDS = new Set([
+  "module",
+  "mintUrl",
+  "operationId",
+  "quoteId",
+  "state",
+  "count",
+  "total",
+  "filterCount",
+  "subId",
+  "initOperations",
+  "executingOperations",
+  "pendingOperations",
+  "rollingBackOperations",
+  "orphanedReservations",
+]);
+
+function safeCocoMetadata(values: unknown[]): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const value of values) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    for (const [key, fieldValue] of Object.entries(value)) {
+      if (SAFE_COCO_LOG_FIELDS.has(key)) safe[key] = fieldValue;
+    }
+  }
+  return safe;
+}
+
+function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
+  const write = (
+    level: "error" | "warn" | "info" | "debug",
+    message: string,
+    meta: unknown[],
+  ) => {
+    // Coco diagnostics may contain proof secrets or encoded tokens. Keep only
+    // an explicit metadata allowlist; startup counts and operation IDs remain
+    // useful without copying wallet material into routstrd's logs.
+    const metadata = safeCocoMetadata([bindings, ...meta]);
+    logger[level](
+      `[coco] ${message}`,
+      ...(Object.keys(metadata).length > 0 ? [metadata] : []),
+    );
+  };
+
+  return {
+    error: (message, ...meta) => write("error", message, meta),
+    warn: (message, ...meta) => write("warn", message, meta),
+    info: (message, ...meta) => write("info", message, meta),
+    debug: (message, ...meta) => write("debug", message, meta),
+    log: (level, message, ...meta) => write(level, message, meta),
+    child: (childBindings) =>
+      createCocoLogger({ ...bindings, ...childBindings }),
+  };
 }
 
 function loadMnemonic(configFile: string = CONFIG_FILE): string {
@@ -410,6 +475,8 @@ export async function createCocoClient(
   let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
 
   try {
+    startupProgress("Opening Cashu wallet database...");
+
     // Read and validate the existing cocod config during startup rather than
     // deferring failure until coco-core first needs wallet key material.
     const seed = mnemonicToSeedSync(loadMnemonic(configFile));
@@ -417,10 +484,29 @@ export async function createCocoClient(
     const repo = new SqliteRepositories({ database });
     await repo.init();
 
+    const [pendingSends, inflightProofs, pendingMints] = await Promise.all([
+      repo.sendOperationRepository.getPending(),
+      repo.proofRepository.getInflightProofs(),
+      repo.mintOperationRepository.getPending(),
+    ]);
+    const recoveryCount =
+      pendingSends.length + inflightProofs.length + pendingMints.length;
+    if (recoveryCount > 0) {
+      startupProgress(
+        `Recovering wallet state: ${pendingSends.length} pending sends, ` +
+          `${inflightProofs.length} in-flight proofs, ${pendingMints.length} pending mints. ` +
+          "This may take a few minutes while Cashu mints are contacted.",
+      );
+    } else {
+      startupProgress("Initializing Cashu wallet...");
+    }
+
     coco = await initializeCoco({
       repo,
       seedGetter: async () => seed,
+      logger: createCocoLogger(),
     });
+    startupProgress("Cashu wallet ready.");
   } catch (error) {
     database?.close();
     releaseLegacyPidClaim();
