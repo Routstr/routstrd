@@ -142,12 +142,9 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
       } else {
         console.log("\nRestarting routstrd daemon...");
 
-        // Graceful stop — the /stop endpoint closes the HTTP server
-        // (draining active connections) then exits.
         await callDaemon("/stop", { method: "POST" });
 
-        // Wait for daemon to fully stop — both the HTTP health check to fail
-        // AND the legacy cocod pidfile to be released.
+        // Wait for HTTP health check to fail AND pidfile to be released.
         const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
         for (let i = 0; i < 100; i++) {
           await new Promise((resolve) => setTimeout(resolve, 100));
@@ -161,8 +158,6 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
         }
         console.log("routstrd daemon stopped.");
 
-        // Stop a legacy cocod daemon (from older routstrd versions) before
-        // starting the new in-process coco wallet.
         await stopLegacyCocod();
 
         console.log("Starting routstrd daemon...");
@@ -503,8 +498,6 @@ program
   .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
-    // Stop a legacy cocod daemon (from older routstrd versions) before
-    // starting the new in-process coco wallet — both cannot share coco.db.
     await stopLegacyCocod();
     await startDaemon({
       port: options.port || String(config.port || 8008),
@@ -560,8 +553,6 @@ program
   .action(async (options: { apiKeys: boolean; deleteApiKeys?: string; mintUrl?: string }) => {
     await ensureDaemonRunning();
 
-    // --delete-api-keys <baseUrl>: refund then remove the API key for a
-    // single provider.
     if (options.deleteApiKeys) {
       const baseUrl = options.deleteApiKeys;
       const queryParts = [`baseUrl=${encodeURIComponent(baseUrl)}`];
@@ -597,7 +588,6 @@ program
       return;
     }
 
-    // --api-keys: list every stored API key with full details.
     if (options.apiKeys) {
       const result = await callDaemon("/keys/api");
       if (result.error) {
@@ -638,7 +628,6 @@ program
       return;
     }
 
-    // Default: show the full wallet + API key balance summary.
     const [walletResult, keysResult] = await Promise.all([
       callDaemon("/balance"),
       callDaemon("/keys/balance"),
@@ -1252,7 +1241,6 @@ npubsCmd
     );
   });
 
-// History - show transaction history
 program
   .command("history")
   .description("Show wallet transaction history")
@@ -1286,7 +1274,6 @@ program
     }
 
     if (options.json) {
-      // Raw JSON output with token as JSON object
       const jsonOutput = entries.map((e: Record<string, unknown>) => {
         const entry = { ...e };
         delete entry.encodedToken;
@@ -1297,14 +1284,12 @@ program
     }
 
     if (options.verbose) {
-      // Verbose: JSON-like with encoded token
       for (const entry of entries) {
         const e = entry as Record<string, unknown>;
         const display: Record<string, unknown> = {};
         for (const key of Object.keys(e).sort()) {
           display[key] = e[key];
         }
-        // Replace raw token with encoded one if present
         if (e.encodedToken && e.token) {
           display.token = e.encodedToken;
           delete display.encodedToken;
@@ -1314,7 +1299,6 @@ program
       return;
     }
 
-    // Default: table format
     const idCol = "ID";
     const timeCol = "Date/Time";
     const typeCol = "Type";
@@ -1745,8 +1729,6 @@ serviceCmd
 
     console.log("Starting routstrd via PM2...");
     try {
-      // Stop a legacy cocod daemon (from older routstrd versions) before
-      // starting the new in-process coco wallet.
       await stopLegacyCocod();
 
       // Use --interpreter bun to ensure it runs with bun
@@ -1807,9 +1789,7 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      // Wait for daemon to fully stop — both the HTTP health check to fail
-      // AND the legacy cocod pidfile to be released (the daemon releases
-      // it during wallet disposal, which happens after server.close()).
+      // Wait for HTTP health check to fail AND pidfile to be released.
       const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1829,8 +1809,6 @@ program
       console.log("Daemon was not running.");
     }
 
-    // Stop a legacy cocod daemon (from older routstrd versions) before
-    // starting the new in-process coco wallet — both cannot share coco.db.
     await stopLegacyCocod();
 
     console.log("Starting daemon...");

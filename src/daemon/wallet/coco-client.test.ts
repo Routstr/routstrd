@@ -7,6 +7,7 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  stopLegacyCocod,
 } from "./coco-client";
 
 type GuardOptions = NonNullable<
@@ -191,6 +192,75 @@ describe("assertLegacyCocodNotRunning", () => {
         fetchImpl,
       }),
     ).rejects.toThrow("Cannot verify whether the legacy cocod daemon has stopped");
+  });
+});
+
+describe("stopLegacyCocod", () => {
+  it("stops a live PID only when legacy cocod responds on its socket", async () => {
+    let running = true;
+    const killProcess = mock((_pid: number, _signal: NodeJS.Signals) => {
+      running = false;
+    });
+    const fetchImpl = mock<LegacyFetch>(async () =>
+      Response.json({ output: "pong" }),
+    );
+
+    await stopLegacyCocod({
+      socketPath: SOCKET_PATH,
+      pidFilePath: PID_FILE_PATH,
+      pathExists: () => true,
+      readFile: () => "4242\n",
+      isProcessRunning: () => running,
+      fetchImpl,
+      killProcess,
+      pollIntervalMs: 1,
+      timeoutMs: 50,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(killProcess).toHaveBeenCalledWith(4242, "SIGTERM");
+  });
+
+  it("does not kill a routstrd PID that owns the shared pidfile with a stale socket", async () => {
+    const killProcess = mock((_pid: number, _signal: NodeJS.Signals) => {});
+    const fetchImpl = mock<LegacyFetch>(async () => {
+      throw Object.assign(new Error("socket unavailable"), {
+        code: "ECONNREFUSED",
+      });
+    });
+
+    await stopLegacyCocod({
+      socketPath: SOCKET_PATH,
+      pidFilePath: PID_FILE_PATH,
+      pathExists: () => true,
+      readFile: () => "4242\n",
+      isProcessRunning: () => true,
+      fetchImpl,
+      killProcess,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(killProcess).not.toHaveBeenCalled();
+  });
+
+  it("does not kill a live pidfile owner when no legacy socket exists", async () => {
+    const killProcess = mock((_pid: number, _signal: NodeJS.Signals) => {});
+    const fetchImpl = mock<LegacyFetch>(async () =>
+      Response.json({ output: "pong" }),
+    );
+
+    await stopLegacyCocod({
+      socketPath: SOCKET_PATH,
+      pidFilePath: PID_FILE_PATH,
+      pathExists: (path) => path === PID_FILE_PATH,
+      readFile: () => "4242\n",
+      isProcessRunning: () => true,
+      fetchImpl,
+      killProcess,
+    });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(killProcess).not.toHaveBeenCalled();
   });
 });
 

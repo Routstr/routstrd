@@ -60,6 +60,22 @@ export interface LegacyCocodPidClaimOptions {
   isProcessRunning?: (pid: number) => boolean;
 }
 
+export interface LegacyCocodStopOptions {
+  socketPath?: string;
+  pidFilePath?: string;
+  pathExists?: (path: string) => boolean;
+  readFile?: (path: string) => string;
+  isProcessRunning?: (pid: number) => boolean;
+  fetchImpl?: LegacyCocodFetch;
+  killProcess?: (pid: number, signal: NodeJS.Signals) => void;
+  /** Total time to wait for cocod to exit after SIGTERM. */
+  timeoutMs?: number;
+  /** Interval between exit checks. */
+  pollIntervalMs?: number;
+  /** Timeout for identifying cocod through its Unix socket. */
+  socketTimeoutMs?: number;
+}
+
 interface CocodConfig {
   mnemonic: string;
   encrypted: boolean;
@@ -200,24 +216,23 @@ export async function assertLegacyCocodNotRunning(
  * exact failure the guard exists to prevent.
  */
 export async function stopLegacyCocod(
-  options: {
-    pidFilePath?: string;
-    isProcessRunning?: (pid: number) => boolean;
-    /** Total time to wait for cocod to exit after SIGTERM. */
-    timeoutMs?: number;
-    /** Interval between exit checks. */
-    pollIntervalMs?: number;
-  } = {},
+  options: LegacyCocodStopOptions = {},
 ): Promise<void> {
+  const socketPath = options.socketPath || LEGACY_COCOD_SOCKET;
   const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  const pathExists = options.pathExists || existsSync;
+  const readFile = options.readFile || ((path: string) => readFileSync(path, "utf-8"));
   const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
+  const fetchImpl = options.fetchImpl || (fetch as LegacyCocodFetch);
+  const killProcess = options.killProcess || ((pid, signal) => process.kill(pid, signal));
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
+  const socketTimeoutMs = options.socketTimeoutMs ?? 1_000;
 
   const readPid = (): number | null => {
-    if (!existsSync(pidFilePath)) return null;
+    if (!pathExists(pidFilePath)) return null;
     try {
-      const pid = Number.parseInt(readFileSync(pidFilePath, "utf-8").trim(), 10);
+      const pid = Number.parseInt(readFile(pidFilePath).trim(), 10);
       return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid) ? pid : null;
     } catch {
       return null;
@@ -230,13 +245,44 @@ export async function stopLegacyCocod(
     return;
   }
 
+  // routstrd intentionally writes its own PID to cocod.pid while the in-process
+  // wallet is open. Never identify the owner from the shared PID file alone:
+  // only a process responding through cocod's Unix socket is safe to terminate.
+  if (!pathExists(socketPath)) {
+    logger.debug(
+      `PID ${pid} owns ${pidFilePath}, but no legacy cocod socket exists; leaving it running.`,
+    );
+    return;
+  }
+
+  try {
+    const response = await fetchImpl("http://localhost/ping", {
+      unix: socketPath,
+      signal: AbortSignal.timeout(socketTimeoutMs),
+    });
+    await response.body?.cancel();
+  } catch (error) {
+    if (hasErrorCode(error, STALE_SOCKET_ERROR_CODES)) {
+      logger.debug(
+        `PID ${pid} owns ${pidFilePath}, but the legacy cocod socket is stale; leaving it running.`,
+      );
+      return;
+    }
+
+    throw new Error(
+      `Cannot verify whether PID ${pid} is the legacy cocod daemon at ${socketPath}. ` +
+        "Refusing to stop an unidentified process.",
+      { cause: error },
+    );
+  }
+
   logger.log(`Stopping legacy cocod daemon (PID ${pid})…`);
-  process.kill(pid, "SIGTERM");
+  killProcess(pid, "SIGTERM");
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    if (readPid() === null) {
+    if (!isProcessRunning(pid) || readPid() !== pid) {
       logger.log(`Legacy cocod daemon (PID ${pid}) stopped.`);
       return;
     }
