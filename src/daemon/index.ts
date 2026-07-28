@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   const config = await loadDaemonConfig();
 
   const port = args.port;
+  const host = args.host || config.host || "127.0.0.1";
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
     process.env.ROUTSTRD_REQUEST_RESPONSE_LOG_DIR ||
@@ -80,7 +81,7 @@ async function main(): Promise<void> {
 
   await ensureDirs();
 
-  const updatedConfig = { ...config, port, provider };
+  const updatedConfig = { ...config, port, host, provider };
   saveDaemonConfig(updatedConfig);
 
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
@@ -304,8 +305,8 @@ async function main(): Promise<void> {
   process.once("SIGINT", shutdownForSignal);
   process.once("SIGTERM", shutdownForSignal);
 
-  server.listen(port, async () => {
-    logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);
+  server.listen(port, host, async () => {
+    logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
     if (requestResponseLogDir) {
       logger.log(`Raw request/response logs: ${requestResponseLogDir}`);
     }

@@ -74,6 +74,13 @@ With custom port:
 routstrd start --port 9000
 ```
 
+The daemon binds to `127.0.0.1` by default. To expose it on another interface:
+```sh
+routstrd start --host 0.0.0.0
+```
+
+Only expose the daemon behind appropriate network controls.
+
 With specific provider:
 ```sh
 routstrd start --provider https://your-provider.com
@@ -139,6 +146,7 @@ Configuration is stored in `~/.routstrd/config.json`:
 ```json
 {
   "port": 8008,
+  "host": "127.0.0.1",
   "provider": null,
   "cocodPath": null
 }
