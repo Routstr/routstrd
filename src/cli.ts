@@ -429,7 +429,6 @@ program
       const installHint = config.cocodPath
         ? `Configured cocod executable was not found: ${config.cocodPath}`
         : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
-      console.error(installHint);
       logger.error(installHint);
       process.exit(1);
     }
@@ -1710,7 +1709,11 @@ program
     });
 
     if (options.follow) {
-      await followLogFile(todayFile, lines);
+      if (existsSync(todayFile)) {
+        await followLogFile(todayFile, lines);
+      } else {
+        console.log("No log file for today to follow.");
+      }
       return;
     }
 
