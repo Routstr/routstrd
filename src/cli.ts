@@ -751,6 +751,7 @@ program
             context_length?: number;
             providers: Array<{
               baseUrl: string;
+              disabled?: boolean;
               pricing: {
                 prompt: number;
                 completion: number;
@@ -777,7 +778,9 @@ program
       }
       console.log(`\n  Providers (${modelData.providers.length}):`);
       for (const provider of modelData.providers) {
-        console.log(`\n    ${provider.baseUrl}`);
+        console.log(
+          `\n    ${provider.baseUrl}${provider.disabled ? "  [Disabled]" : ""}`,
+        );
         console.log(
           `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
         );

@@ -32,5 +32,8 @@ temp/
 .worktrees/
 .routstrd/
 
+# Graphify output
+graphify-out/
+
 # Standalone prototype scripts
 index.ts
