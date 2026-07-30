@@ -12,7 +12,7 @@
     "monitor": "bun src/index.ts monitor",
     "lint": "tsc --noEmit",
     "test": "bun test",
-    "build": "mkdir -p dist/daemon && bun build src/index.ts --target=bun --outfile=dist/index.js && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js",
+    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
