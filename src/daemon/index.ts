@@ -1,5 +1,5 @@
 import { createServer } from "http";
-import { existsSync } from "fs";
+import { existsSync, unlinkSync } from "fs";
 import {
   ProviderManager,
   createStorageAdapterFromStore,
@@ -167,7 +167,7 @@ async function main(): Promise<void> {
 
   try {
     if (existsSync(SOCKET_PATH)) {
-      Bun.spawn(["rm", SOCKET_PATH]);
+      unlinkSync(SOCKET_PATH);
     }
   } catch {
     // Ignore
