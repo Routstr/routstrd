@@ -7,6 +7,7 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../wallet/cocod-client";
 import { decodeCashuTokenAmount } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
+import { getUsageSummary } from "./usage-summary";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -35,17 +37,18 @@ type DaemonDeps = {
   walletClient: CocodClient;
   walletAdapter: any;
   storageAdapter: any;
-  providerRegistry: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
   providerManager: ProviderManager;
   refundClient: any;
+  requestResponseLogSink?: RequestResponseLogSink;
 };
 
 /**
@@ -288,18 +291,19 @@ export function createDaemonRequestHandler(deps: {
   walletClient: CocodClient;
   walletAdapter: any;
   storageAdapter: any;
-  providerRegistry: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
   refundClient: any;
+  requestResponseLogSink?: RequestResponseLogSink;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -815,6 +819,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -871,6 +876,7 @@ export function createDaemonRequestHandler(deps: {
         }
 
         deps.store.getState().setDisabledProviders(disabledProviders);
+        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1079,6 +1085,14 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/providers") {
       try {
+        const forceRefresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+
+        if (forceRefresh) {
+          logger.log("Force-refreshing providers from Nostr and fetching models...");
+          await deps.refreshProvidersAndModels();
+        }
+
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
         const disabledProviders: string[] = state.disabledProviders || [];
@@ -1112,11 +1126,37 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/usage") {
       try {
+        const npubFilter = url.searchParams.get("npub")?.trim();
+        const clients = npubFilter ? getClientsFromStore(deps.store) : undefined;
+        const clientFilter = npubFilter
+          ? clients!
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
         const output = await deps.usageTrackingDriver.list({
           limit: parseLimit(url.searchParams.get("limit")),
+          ...(clientFilter ? { clients: clientFilter } : {}),
         });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/usage/summary") {
+      try {
+        const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const npubFilter = url.searchParams.get("npub")?.trim();
+        const clients = getClientsFromStore(deps.store);
+        const clientFilter = npubFilter
+          ? clients
+              .filter((c) => c.ownerNpub === npubFilter)
+              .map((c) => c.clientId)
+          : undefined;
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter);
+        sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }
@@ -1226,7 +1266,6 @@ export function createDaemonRequestHandler(deps: {
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
-        providerRegistry: deps.providerRegistry,
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
@@ -1235,6 +1274,9 @@ export function createDaemonRequestHandler(deps: {
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,
+        ...(deps.requestResponseLogSink
+          ? { requestResponseLogSink: deps.requestResponseLogSink }
+          : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });
 

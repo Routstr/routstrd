@@ -1,3 +1,4 @@
+import { openSync } from "fs";
 import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
@@ -5,6 +6,7 @@ import { fileURLToPath } from "url";
 import { existsSync } from "fs";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
+const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;
 
 async function isDaemonHealthy(port: string): Promise<boolean> {
   const controller = new AbortController();
@@ -45,9 +47,12 @@ async function startDaemonUnlocked(
   if (!existsSync(daemonScript)) {
     daemonScript = fileURLToPath(new URL("./daemon/index.ts", import.meta.url));
   }
+
+  const debugLogFd = openSync(DEBUG_LOG_PATH, "a");
+
   const proc = Bun.spawn(["bun", daemonScript, ...args], {
-    stdout: "ignore",
-    stderr: "ignore",
+    stdout: debugLogFd,
+    stderr: debugLogFd,
     stdin: "ignore",
     detached: true,
   });

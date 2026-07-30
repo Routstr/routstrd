@@ -36,6 +36,11 @@ import {
   resolveCocodExecutable,
 } from "./daemon/wallet/cocod-client";
 import packageJson from "../package.json" with { type: "json" };
+import {
+  compareVersions,
+  getGlobalPackageVersion,
+  getLatestNpmVersion,
+} from "./utils/update-checker.ts";
 
 type RoutstrModel = {
   id: string;
@@ -101,6 +106,130 @@ async function installCocodOrExit(): Promise<void> {
   }
 
   console.log("cocod installed successfully.");
+}
+
+/**
+ * Restart the routstrd and cocod daemons after an update so the new
+ * binaries take effect immediately.  Failures are collected and reported
+ * but never roll back the update itself.
+ */
+async function restartDaemonsAfterUpdate(): Promise<void> {
+  const config = await loadConfig();
+  const isRemote = !!config.daemonUrl;
+  const failures: string[] = [];
+
+  // --- routstrd daemon ---
+  if (isRemote) {
+    console.log("\nUsing remote daemon — skipping routstrd daemon restart.");
+  } else {
+    try {
+      const wasRunning = await isDaemonRunning();
+      if (!wasRunning) {
+        console.log("\nroutstrd daemon was not running — skipping restart.");
+      } else {
+        console.log("\nRestarting routstrd daemon...");
+
+        // Graceful stop — the /stop endpoint closes the HTTP server
+        // (draining active connections) then exits.
+        await callDaemon("/stop", { method: "POST" });
+
+        for (let i = 0; i < 50; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (!(await isDaemonRunning())) break;
+        }
+
+        if (await isDaemonRunning()) {
+          throw new Error("routstrd did not stop within 5 seconds");
+        }
+        console.log("routstrd daemon stopped.");
+
+        console.log("Starting routstrd daemon...");
+        await startDaemon({
+          port: String(config.port || 8008),
+          provider: config.provider || undefined,
+        });
+        console.log("routstrd daemon restarted.");
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      failures.push(`routstrd daemon: ${msg}`);
+    }
+  }
+
+  // --- cocod daemon ---
+  try {
+    const cocodExecutable = resolveCocodExecutable(config.cocodPath);
+
+    // Check whether cocod is currently running.
+    const pingProc = Bun.spawn([cocodExecutable, "ping"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    const cocodWasRunning = (await pingProc.exited) === 0;
+
+    if (!cocodWasRunning) {
+      console.log("\ncocod daemon was not running — skipping restart.");
+    } else {
+      console.log("\nRestarting cocod daemon...");
+
+      const stopProc = Bun.spawn([cocodExecutable, "stop"], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const stopCode = await stopProc.exited;
+      if (stopCode !== 0) {
+        throw new Error(`cocod stop exited with code ${stopCode}`);
+      }
+      console.log("cocod daemon stopped.");
+
+      // Start cocod in the background (detached, like the wallet client does).
+      const env = { ...process.env };
+      const startProc = Bun.spawn([cocodExecutable, "daemon"], {
+        stdout: "ignore",
+        stderr: "ignore",
+        stdin: "ignore",
+        detached: true,
+        env,
+      });
+      startProc.unref?.();
+
+      // Poll until cocod responds to ping (max ~10 s).
+      let started = false;
+      for (let i = 0; i < 100; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const poll = Bun.spawn([cocodExecutable, "ping"], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        if ((await poll.exited) === 0) {
+          started = true;
+          break;
+        }
+      }
+
+      if (!started) {
+        throw new Error("cocod did not come back up within 10 seconds");
+      }
+      console.log("cocod daemon restarted.");
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    failures.push(`cocod daemon: ${msg}`);
+  }
+
+  // --- report ---
+  if (failures.length > 0) {
+    console.error("\n⚠ Some daemons failed to restart:");
+    for (const f of failures) {
+      console.error(`  - ${f}`);
+    }
+    console.error(
+      "The update was applied but may not take effect until daemons are manually restarted.",
+    );
+    process.exit(1);
+  }
+
+  console.log("\n✓ All daemons restarted successfully.");
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -234,6 +363,58 @@ program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
   .version(packageJson.version, "--version", "output the version number");
+
+program
+  .command("update")
+  .description("Update routstrd and cocod to the latest versions")
+  .action(async () => {
+    const packages = [
+      { name: "routstrd", label: "routstrd" },
+      { name: "@routstr/cocod", label: "cocod" },
+    ];
+
+    let updatedAny = false;
+
+    for (const { name, label } of packages) {
+      const installed = await getGlobalPackageVersion(name);
+      const latest = await getLatestNpmVersion(name);
+
+      // Only skip when we're confident the installed version is current.
+      // If we can't determine either version we fall through to installing.
+      if (
+        installed &&
+        latest &&
+        (compareVersions(installed, latest) ?? -1) >= 0
+      ) {
+        console.log(`${label} is already up to date (v${installed}).`);
+        continue;
+      }
+
+      const fromPart = installed ? ` from v${installed}` : "";
+      const toPart = latest ? ` to v${latest}` : "";
+      console.log(`Updating ${label}${fromPart}${toPart}...`);
+
+      const proc = Bun.spawn(["bun", "install", "-g", name], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const code = await proc.exited;
+      if (code !== 0) {
+        console.error(`Failed to update ${label}.`);
+        process.exit(1);
+      }
+      console.log(`${label} updated successfully.\n`);
+      updatedAny = true;
+    }
+
+    if (updatedAny) {
+      console.log("All requested updates have been applied!");
+      // Restart daemons so the new binaries take effect immediately.
+      await restartDaemonsAfterUpdate();
+    } else {
+      console.log("\nAll packages are already up to date — nothing to do.");
+    }
+  });
 
 program
   .command("refund")
@@ -743,10 +924,12 @@ const providersCmd = program
 providersCmd
   .command("list")
   .description("List all providers with their enabled/disabled status")
-  .action(async () => {
+  .option("--refresh", "Force re-fetch all Nostr events and refresh models from all enabled providers", false)
+  .action(async (options: { refresh: boolean }) => {
     await ensureDaemonRunning();
 
-    const result = await callDaemon("/providers");
+    const query = options.refresh ? "/providers?refresh=true" : "/providers";
+    const result = await callDaemon(query);
     if (result.error) {
       console.log(result.error);
       process.exit(1);

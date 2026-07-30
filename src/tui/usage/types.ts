@@ -1,4 +1,13 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
+import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
+import type { UpdateCheckResult } from "../../utils/update-checker.ts";
+
+export type { UsageSummary };
+
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  text: string;
+}
 
 export interface UsageStats {
   entries: UsageTrackingEntry[];
@@ -6,42 +15,7 @@ export interface UsageStats {
   totalSatsCost: number;
   recentSatsCost: number;
   limit: number;
-}
-
-export interface DayStats {
-  date: string;
-  requests: number;
-  satsCost: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-
-export interface ModelStats {
-  modelId: string;
-  requests: number;
-  satsCost: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-
-export interface ProviderStats {
-  baseUrl: string;
-  requests: number;
-  satsCost: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-
-export interface ClientStats {
-  client: string;
-  requests: number;
-  satsCost: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
+  summary: UsageSummary;
 }
 
 export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
@@ -50,15 +24,6 @@ export interface Tab {
   id: TabId;
   name: string;
   key: string;
-}
-
-export interface NpubStats {
-  npub: string;
-  requests: number;
-  satsCost: number;
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
 }
 
 export interface VimState {

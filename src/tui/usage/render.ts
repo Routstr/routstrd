@@ -1,23 +1,14 @@
 import { CLIENT_COLORS, COLORS, MODEL_COLORS } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import {
-  formatDate,
   formatNumber,
   formatTime,
-  getClientStats,
-  getDayStats,
-  getHourlyToday,
-  getModelStats,
-  getNpubStats,
-  getProviderStats,
-  getTodayStart,
-  getTotals,
   type ClientInfo,
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
-import type { TabId, UsageStats } from "./types.ts";
+import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
 function formatCost(value: number): string {
@@ -33,13 +24,20 @@ function formatReqs(value: number): string {
   return value.toString();
 }
 
-export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[]): string {
+export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[], updateInfo?: UpdateInfo): string {
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
   const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
   const maxKey = visibleTabs.length;
   const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-${maxKey}] Tabs  [R] Refresh${COLORS.reset}`;
   const fill = width - title.length - help.length - vimIndicator.length - 6;
-  return `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}\n`;
+  const headerLine = `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}`;
+
+  if (updateInfo?.hasUpdate) {
+    const banner = `${COLORS.bold}${COLORS.yellow}  ↻ UPDATE AVAILABLE — run ${COLORS.green}routstrd update${COLORS.yellow} to update${COLORS.reset}`;
+    return `${headerLine}\n${banner}\n`;
+  }
+
+  return `${headerLine}\n`;
 }
 
 export function renderSearchBar(): string {
@@ -120,8 +118,7 @@ export function renderBarChart(
 
 
 export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
-  // Use the server-calculated totals (all entries) instead of summing limited entries
-  const totals = getTotals(stats.entries);
+  const totals = stats.summary.totals;
   const totalRequests = stats.totalEntries; // Use server's total count, not entries.length
   const totalVisibleCost = stats.totalSatsCost; // <-- Use server's total, not client-side sum of limited entries
   const avgCost = totalRequests > 0 ? totalVisibleCost / totalRequests : 0;
@@ -240,7 +237,7 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
     output = renderBox(statusLines, width, "System Status") + "\n" + output;
   }
 
-  const modelStats = getModelStats(stats.entries);
+  const modelStats = stats.summary.models;
   if (modelStats.length > 0) {
     const maxCost = modelStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
@@ -259,7 +256,7 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
     output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
   }
 
-  const clientStats = getClientStats(stats.entries);
+  const clientStats = stats.summary.clients;
   if (clientStats.length > 0) {
     const maxCost = clientStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
@@ -282,19 +279,35 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
 }
 
 export function renderToday(stats: UsageStats, width: number): string {
-  const hourly = getHourlyToday(stats.entries);
-  const todayStart = getTodayStart();
   const currentHour = new Date().getHours();
-  const todayStats = { date: formatDate(Date.now()), requests: 0, satsCost: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  // Build today's date string from LOCAL date components so it matches the
+  // server's tz-bucketed day keys (which use the client's tzOffsetMinutes).
+  const _now = new Date();
+  const todayDateStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
 
-  for (const entry of stats.entries) {
-    if (entry.timestamp >= todayStart) {
-      todayStats.requests++;
-      todayStats.satsCost += entry.satsCost;
-      todayStats.promptTokens += entry.promptTokens;
-      todayStats.completionTokens += entry.completionTokens;
-      todayStats.totalTokens += entry.totalTokens;
+  let todayStats: { date: string; requests: number; satsCost: number; promptTokens: number; completionTokens: number; totalTokens: number } = {
+    date: todayDateStr,
+    requests: 0,
+    satsCost: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  };
+  let recentDays: Array<{ date: string; requests: number; satsCost: number; totalTokens: number; promptTokens: number; completionTokens: number }> = [];
+  let hourlyMap: Map<number, { requests: number; satsCost: number }> = new Map();
+
+  if (stats.summary) {
+    // Use server-aggregated data
+    const { days, hoursToday } = stats.summary;
+    // days[0] is most-recent-first; check if it's today
+    const todayDayStat = days[0]?.date === todayDateStr ? days[0] : undefined;
+    if (todayDayStat) {
+      todayStats = { date: todayDayStat.date, requests: todayDayStat.requests, satsCost: todayDayStat.satsCost, promptTokens: todayDayStat.promptTokens, completionTokens: todayDayStat.completionTokens, totalTokens: todayDayStat.totalTokens };
     }
+    // Exclude today by date (it has its own box) rather than by position —
+    // days[0] is only today when there was activity today.
+    recentDays = days.filter((d) => d.date !== todayDateStr).slice(0, 6);
+    hourlyMap = new Map(hoursToday.map((h) => [h.hour, { requests: h.requests, satsCost: h.satsCost }]));
   }
 
   const summaryLines = [
@@ -306,18 +319,17 @@ export function renderToday(stats: UsageStats, width: number): string {
 
   let output = renderBox(summaryLines, width, "Today");
 
-  const days = Array.from(getDayStats(stats.entries).values()).slice(0, 7);
-  if (days.length > 1) {
-    const dayLines = days.slice(1).map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
+  if (recentDays.length > 0) {
+    const dayLines = recentDays.map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
     output += "\n" + renderBox(dayLines, width, "Recent Days");
   }
 
   const hourLines: string[] = [];
-  const maxHourCost = Math.max(...Array.from(hourly.values()).map((h) => h.satsCost), 1);
+  const maxHourCost = Math.max(...Array.from(hourlyMap.values()).map((h) => h.satsCost), 1);
   const totalTodayCost = Math.max(todayStats.satsCost, 1);
   const hourLabels: string[] = [];
   for (let h = currentHour; h >= 0; h--) {
-    const hStat = hourly.get(h);
+    const hStat = hourlyMap.get(h);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
     hourLabels.push(`${h.toString().padStart(2, "0")}:00 (${formatReqs(reqs)} req, ${formatCost(cost)} sats) `);
@@ -325,7 +337,7 @@ export function renderToday(stats: UsageStats, width: number): string {
   const maxHourLabel = Math.max(...hourLabels.map((l) => l.length));
   startBarSection("hourly", maxHourLabel);
   for (let i = currentHour; i >= 0; i--) {
-    const hStat = hourly.get(i);
+    const hStat = hourlyMap.get(i);
     const reqs = hStat?.requests || 0;
     const cost = hStat?.satsCost || 0;
     hourLines.push(renderBarChart(
@@ -346,7 +358,7 @@ export function renderToday(stats: UsageStats, width: number): string {
 }
 
 export function renderModels(stats: UsageStats, width: number): string {
-  const modelStats = getModelStats(stats.entries);
+  const modelStats = stats.summary.models;
   if (modelStats.length === 0) return renderBox(["No model data available"], width, "Models");
 
   // Use totalSatsCost (all-time) for percentage calculations to match header
@@ -373,7 +385,7 @@ export function renderModels(stats: UsageStats, width: number): string {
 }
 
 export function renderProviders(stats: UsageStats, width: number): string {
-  const providerStats = getProviderStats(stats.entries);
+  const providerStats = stats.summary.providers;
   if (providerStats.length === 0) return renderBox(["No provider data available"], width, "Providers");
 
   const lines: string[] = [];
@@ -389,8 +401,8 @@ export function renderProviders(stats: UsageStats, width: number): string {
 }
 
 export function renderTokens(stats: UsageStats, width: number): string {
-  const totals = getTotals(stats.entries);
-  const modelStats = getModelStats(stats.entries);
+  const totals = stats.summary.totals;
+  const modelStats = stats.summary.models;
   const summaryLines = [
     `${COLORS.bold}Total Prompt Tokens:${COLORS.reset} ${formatNumber(totals.promptTokens)}`,
     `${COLORS.bold}Total Completion Tokens:${COLORS.reset} ${formatNumber(totals.completionTokens)}`,
@@ -410,23 +422,7 @@ export function renderTokens(stats: UsageStats, width: number): string {
     output += "\n" + renderBox(tokenLines, width, "Tokens by Model");
   }
 
-  const sizeBuckets = {
-    tiny: { min: 0, max: 1000, count: 0, cost: 0 },
-    small: { min: 1000, max: 10000, count: 0, cost: 0 },
-    medium: { min: 10000, max: 50000, count: 0, cost: 0 },
-    large: { min: 50000, max: 100000, count: 0, cost: 0 },
-    huge: { min: 100000, max: Infinity, count: 0, cost: 0 },
-  };
-
-  for (const entry of stats.entries) {
-    for (const bucket of Object.values(sizeBuckets)) {
-      if (entry.totalTokens >= bucket.min && entry.totalTokens < bucket.max) {
-        bucket.count++;
-        bucket.cost += entry.satsCost;
-        break;
-      }
-    }
-  }
+  const sizeBuckets = stats.summary.sizeBuckets;
 
   const sizeLines = Object.entries(sizeBuckets).map(([name, bucket]) => `${name.padEnd(6)}: ${formatReqs(bucket.count).padStart(5)} reqs, ${formatCost(bucket.cost)} sats`);
   output += "\n" + renderBox(sizeLines, width, "Request Size Distribution");
@@ -434,7 +430,7 @@ export function renderTokens(stats: UsageStats, width: number): string {
 }
 
 export function renderClients(stats: UsageStats, width: number): string {
-  const clientStats = getClientStats(stats.entries);
+  const clientStats = stats.summary.clients;
   if (clientStats.length === 0) return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
 
   // Use totalSatsCost (all-time) for percentage calculations to match header
@@ -478,31 +474,19 @@ export function renderClients(stats: UsageStats, width: number): string {
   endBarSection("client-detail");
 
   let output = renderBox(lines, width, "Client Breakdown");
-  const clientModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
-
-  for (const entry of stats.entries) {
-    const client = entry.client || "unknown";
-    const model = entry.modelId;
-    if (!clientModelMap.has(client)) clientModelMap.set(client, new Map());
-    const modelMap = clientModelMap.get(client)!;
-    const existing = modelMap.get(model) || { requests: 0, satsCost: 0, tokens: 0 };
-    modelMap.set(model, {
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      tokens: existing.tokens + entry.totalTokens,
-    });
-  }
-
   const clientModelLines: string[] = [];
-  for (const topClient of clientStats.slice(0, 3)) {
-    const modelMap = clientModelMap.get(topClient.client);
-    if (!modelMap) continue;
-    const models = Array.from(modelMap.entries()).sort((a, b) => b[1].satsCost - a[1].satsCost).slice(0, 5);
-    clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${formatReqs(topClient.requests)} reqs, ${formatCost(topClient.satsCost)} sats)`);
-    for (const [model, data] of models) {
-      clientModelLines.push(`  ${(MODEL_COLORS[model] || MODEL_COLORS.default)}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${formatCost(data.satsCost)} sats`);
+
+  if (stats.summary) {
+    // Use pre-aggregated topModels from summary; exclude the "unknown" bucket
+    // (null client rows have no meaningful model attribution to display here).
+    for (const topClient of stats.summary.clients.filter((c) => c.client !== "unknown").slice(0, 3)) {
+      if (topClient.topModels.length === 0) continue;
+      clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${formatReqs(topClient.requests)} reqs, ${formatCost(topClient.satsCost)} sats)`);
+      for (const m of topClient.topModels) {
+        clientModelLines.push(`  ${(MODEL_COLORS[m.modelId] || MODEL_COLORS.default)}${m.modelId.padEnd(18)}${COLORS.reset} ${formatNumber(m.totalTokens).padEnd(8)} tokens  ${formatCost(m.satsCost)} sats`);
+      }
+      clientModelLines.push("");
     }
-    clientModelLines.push("");
   }
 
   if (clientModelLines.length > 0) {
@@ -512,7 +496,7 @@ export function renderClients(stats: UsageStats, width: number): string {
 }
 
 export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: number): string {
-  const npubStats = getNpubStats(stats.entries, clients);
+  const npubStats = stats.summary.npubs;
   if (npubStats.length === 0) return renderBox(["No npub data available"], width, "Npub Breakdown");
 
   const totalCost = stats.totalSatsCost;
@@ -557,38 +541,18 @@ export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: num
   endBarSection("npub-detail");
 
   let output = renderBox(lines, width, "Npub Breakdown");
-
-  // Top models per npub (same pattern as clients tab)
-  const npubModelMap = new Map<string, Map<string, { requests: number; satsCost: number; tokens: number }>>();
-  const clientNpubMap = new Map<string, string>();
-  for (const c of clients) {
-    if (c.ownerNpub) clientNpubMap.set(c.clientId, c.ownerNpub);
-  }
-
-  for (const entry of stats.entries) {
-    const npub = clientNpubMap.get(entry.client || "");
-    if (!npub) continue;
-    const model = entry.modelId;
-    if (!npubModelMap.has(npub)) npubModelMap.set(npub, new Map());
-    const modelMap = npubModelMap.get(npub)!;
-    const existing = modelMap.get(model) || { requests: 0, satsCost: 0, tokens: 0 };
-    modelMap.set(model, {
-      requests: existing.requests + 1,
-      satsCost: existing.satsCost + entry.satsCost,
-      tokens: existing.tokens + entry.totalTokens,
-    });
-  }
-
   const npubModelLines: string[] = [];
-  for (const topNpub of npubStats.slice(0, 5)) {
-    const modelMap = npubModelMap.get(topNpub.npub);
-    if (!modelMap) continue;
-    const models = Array.from(modelMap.entries()).sort((a, b) => b[1].satsCost - a[1].satsCost).slice(0, 5);
-    npubModelLines.push(`${COLORS.bold}${truncateNpub(topNpub.npub)}${COLORS.reset} (${formatReqs(topNpub.requests)} reqs, ${formatCost(topNpub.satsCost)} sats)`);
-    for (const [model, data] of models) {
-      npubModelLines.push(`  ${(MODEL_COLORS[model] || MODEL_COLORS.default)}${model.padEnd(18)}${COLORS.reset} ${formatNumber(data.tokens).padEnd(8)} tokens  ${formatCost(data.satsCost)} sats`);
+
+  if (stats.summary) {
+    // Use pre-aggregated topModels from summary
+    for (const topNpub of stats.summary.npubs.slice(0, 5)) {
+      if (topNpub.topModels.length === 0) continue;
+      npubModelLines.push(`${COLORS.bold}${truncateNpub(topNpub.npub)}${COLORS.reset} (${formatReqs(topNpub.requests)} reqs, ${formatCost(topNpub.satsCost)} sats)`);
+      for (const m of topNpub.topModels) {
+        npubModelLines.push(`  ${(MODEL_COLORS[m.modelId] || MODEL_COLORS.default)}${m.modelId.padEnd(18)}${COLORS.reset} ${formatNumber(m.totalTokens).padEnd(8)} tokens  ${formatCost(m.satsCost)} sats`);
+      }
+      npubModelLines.push("");
     }
-    npubModelLines.push("");
   }
 
   if (npubModelLines.length > 0) {
@@ -609,20 +573,35 @@ export function renderRecent(stats: UsageStats, width: number): string {
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
   const clientCol = 14;
+  const tokensCol = 18;
+  const costCol = 18;
+  const providerCol = Math.max(16, width - 4 - 10 - 18 - tokensCol - costCol - clientCol - 5);
+  const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"TOKENS".padEnd(10)} ${"COST".padEnd(12)} ${"PROVIDER".padEnd(16)} ${"CLIENT".slice(0, clientCol)}${COLORS.reset}`);
+  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"I/CR/CW/O".padEnd(tokensCol)} ${"I/O/T in sats".padEnd(costCol)} ${"BASE:PROVIDER".padEnd(providerCol)} ${"CLIENT".slice(0, clientCol)}${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
   for (const entry of recentEntries) {
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, 18).padEnd(18);
-    const tokens = `${formatNumber(entry.totalTokens).padEnd(6)} (${formatNumber(entry.promptTokens)}+${formatNumber(entry.completionTokens)})`;
-    const cost = `${formatCost(entry.satsCost).padEnd(8)} sats`;
-    const provider = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "").slice(0, 16).padEnd(16);
+    const tokens = [
+      entry.promptTokens,
+      entry.cacheReadInputTokens || 0,
+      entry.cacheCreationInputTokens || 0,
+      entry.completionTokens,
+    ].map(formatNumber).join("/");
+    const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
+    const cost = [
+      formatCost(msatsToSats(entry.inputMsats)),
+      formatCost(msatsToSats(entry.outputMsats)),
+      formatCost(totalSats),
+    ].join("/");
+    const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
+    const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
     const clientName = (entry.client || "unknown").slice(0, clientCol - 1);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
-    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(10)} ${COLORS.green}${cost}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset}`);
+    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(tokensCol)} ${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset}`);
   }
 
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);

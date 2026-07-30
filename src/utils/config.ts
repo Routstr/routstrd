@@ -6,6 +6,7 @@ export const PID_FILE = process.env.ROUTSTRD_PID || `${CONFIG_DIR}/routstrd.pid`
 export const DB_PATH = `${CONFIG_DIR}/routstr.db`;
 export const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
 export const LOGS_DIR = `${CONFIG_DIR}/logs`;
+export const REQUEST_RESPONSE_LOGS_DIR = `${CONFIG_DIR}/request-response-logs`;
 
 /** NWC auto-refill configuration */
 export interface NwcAutoRefillConfig {
@@ -34,6 +35,13 @@ export interface RoutstrdConfig {
   provider: string | null;
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
+  /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
+  requestResponseLogging?: {
+    /** Enable raw request/response file logging. */
+    enabled?: boolean;
+    /** Root log directory. SDK writes requests/*.json and responses/*.jsonl below this directory. Defaults to ~/.routstrd/request-response-logs. */
+    dir?: string;
+  };
   daemonUrl?: string;
   /** URL of the auth proxy (routstrd-auth) for management endpoints (npubs, clients, usage).
    * Defaults to daemonUrl or localhost:{port} if not set. */
@@ -41,6 +49,9 @@ export interface RoutstrdConfig {
   nsec?: string;
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
+  /** Nostr relay URLs for provider/model discovery (kinds 38421/38423/38425).
+   * When unset, each method uses its own built-in defaults. */
+  relays?: string[];
   /** NWC integration configuration */
   nwc?: NwcConfig;
 }
