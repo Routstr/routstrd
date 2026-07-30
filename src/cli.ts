@@ -1576,6 +1576,37 @@ walletMintsCmd
     });
   });
 
+const walletNpcCmd = walletCmd
+  .command("npc")
+  .description("NPC (npubx.cash) Lightning address operations");
+
+walletNpcCmd
+  .command("address")
+  .description("Show this wallet's NPC Lightning address")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/npc/address");
+  });
+
+walletNpcCmd
+  .command("username <name>")
+  .description(
+    "Claim an NPC username (pays the claim fee from the wallet with --confirm)",
+  )
+  .option("--confirm", "Confirm payment of the username claim fee")
+  .action(async (name: string, options: { confirm?: boolean }) => {
+    await handleDaemonCommand("/wallet/npc/username", {
+      method: "POST",
+      body: { username: name, confirm: options.confirm === true },
+    });
+  });
+
+walletNpcCmd
+  .command("sync")
+  .description("Manually sync paid NPC quotes into the wallet")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/npc/sync", { method: "POST" });
+  });
+
 // ── NWC (Nostr Wallet Connect) commands ─────────────────────────
 
 const nwcCmd = program

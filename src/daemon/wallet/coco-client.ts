@@ -3,9 +3,16 @@ import {
   getEncodedToken,
   normalizeMintUrl,
 } from "@cashu/coco-core";
-import type { HistoryEntry, Logger as CocoLogger } from "@cashu/coco-core";
+import type {
+  HistoryEntry,
+  Logger as CocoLogger,
+  Plugin as CocoPlugin,
+} from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
+import { NPCPlugin, type PluginApi as NpcPluginApi } from "coco-cashu-plugin-npc";
+import { privateKeyFromSeedWords } from "nostr-tools/nip06";
+import { finalizeEvent, nip19, type EventTemplate } from "nostr-tools";
 import {
   closeSync,
   existsSync,
@@ -17,8 +24,15 @@ import {
 } from "fs";
 import { join } from "path";
 import { mnemonicToSeedSync } from "@scure/bip39";
-import type { CocodClient, CocodState } from "./cocod-client";
+import type {
+  CocodClient,
+  CocodState,
+  NpcAddress,
+  NpcUsernameResult,
+} from "./cocod-client";
 import { logger } from "../../utils/logger";
+
+const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
 
 const CONFIG_DIR =
   process.env.COCOD_DIR ||
@@ -497,6 +511,10 @@ export interface CreateCocoClientOptions {
   configDir?: string;
   socketPath?: string;
   pidFilePath?: string;
+  /** Set to false to skip NPC (npubx.cash) plugin registration. Default: true. */
+  enableNpc?: boolean;
+  /** NPC server base URL. Default: https://npubx.cash */
+  npcBaseUrl?: string;
 }
 
 export async function createCocoClient(
@@ -511,6 +529,8 @@ export async function createCocoClient(
   const pidFilePath =
     options.pidFilePath ||
     (options.configDir ? join(configDir, "cocod.pid") : LEGACY_COCOD_PID_FILE);
+  const npcBaseUrl = options.npcBaseUrl || NPC_DEFAULT_BASE_URL;
+  const npcAddressDomain = new URL(npcBaseUrl).host;
 
   await assertLegacyCocodNotRunning({ socketPath, pidFilePath });
   const releaseLegacyPidClaim = claimLegacyCocodPidFile({ pidFilePath });
@@ -524,7 +544,8 @@ export async function createCocoClient(
 
     // Read and validate the existing cocod config during startup rather than
     // deferring failure until coco-core first needs wallet key material.
-    const seed = mnemonicToSeedSync(walletConfig.mnemonic);
+    const mnemonic = walletConfig.mnemonic;
+    const seed = mnemonicToSeedSync(mnemonic);
     database = new Database(dbPath);
     const repo = new SqliteRepositories({ database });
     await repo.init();
@@ -570,12 +591,45 @@ export async function createCocoClient(
       saveConfig(walletConfig, configFile);
     }
 
+    if (options.enableNpc !== false) {
+      startupProgress("Registering NPC (npubx.cash) plugin...");
+      // NPC authenticates with a Nostr key derived from the same wallet seed
+      // (NIP-06). The signer only produces JWT auth events for the NPC
+      // server; it never signs anything that moves funds by itself.
+      const npcSecretKey = privateKeyFromSeedWords(mnemonic);
+      const npcSigner = async (template: EventTemplate) =>
+        finalizeEvent(template, npcSecretKey);
+      const npcPlugin = new NPCPlugin(npcBaseUrl, npcSigner, {
+        useWebsocket: true,
+        logger: createCocoLogger({ module: "npc" }),
+      });
+      // coco-cashu-plugin-npc implements the plugin contract from the
+      // coco-cashu-core package while routstrd runs the equivalent
+      // @cashu/coco-core build. The plugin host API is structurally identical
+      // in both (verified: mintService.addMintByUrl,
+      // mintOperationService.importQuote/getOperationByQuote), so this cast
+      // only bridges the duplicate package names, not a real API gap.
+      coco.use(npcPlugin as unknown as CocoPlugin);
+    }
+
     startupProgress("Cashu wallet ready.");
   } catch (error) {
     database?.close();
     releaseLegacyPidClaim();
     throw error;
   }
+
+  const npcApi = (): NpcPluginApi => {
+    // The plugin augments coco-cashu-core's PluginExtensions; the equivalent
+    // registration lives on manager.ext here. Guard for enableNpc=false.
+    const api = coco
+      ? (coco.ext as { npc?: NpcPluginApi }).npc
+      : undefined;
+    if (!api) {
+      throw new Error("NPC plugin is not enabled for this wallet.");
+    }
+    return api;
+  };
 
   let disposed = false;
   return {
@@ -708,6 +762,39 @@ export async function createCocoClient(
 
     async getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]> {
       return coco.history.getPaginatedHistory(offset, limit);
+    },
+
+    async getNpcAddress(): Promise<NpcAddress> {
+      const info = await npcApi().getInfo();
+      const name =
+        typeof info?.name === "string" && info.name.trim()
+          ? info.name.trim()
+          : undefined;
+      const localPart = name ?? nip19.npubEncode(info.pubkey);
+      return {
+        address: `${localPart}@${npcAddressDomain}`,
+        ...(name ? { name } : {}),
+        pubkey: info.pubkey,
+      };
+    },
+
+    async setNpcUsername(
+      username: string,
+      confirm?: boolean,
+    ): Promise<NpcUsernameResult> {
+      const result = await npcApi().setUsername(username, confirm === true);
+      if (result.success) {
+        return { success: true };
+      }
+      return {
+        success: false,
+        paymentRequest:
+          result.pr as NpcUsernameResult["paymentRequest"],
+      };
+    },
+
+    async syncNpc(): Promise<void> {
+      await npcApi().sync();
     },
   };
 }
