@@ -108,6 +108,28 @@ Stop the daemon:
 routstrd stop
 ```
 
+### NPC (Lightning Address)
+
+The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
+daemon a persistent Lightning address backed by the wallet's Cashu mints.
+Payments to the address are imported into the wallet automatically (websocket
+push, plus manual sync on demand).
+
+```sh
+# Show your NPC Lightning address (username@npubx.cash, or npub fallback)
+routstrd wallet npc address
+
+# Claim a username (quote first, then confirm to pay the claim fee from the wallet)
+routstrd wallet npc username myname
+routstrd wallet npc username myname --confirm
+
+# Manually sync paid NPC quotes into the wallet
+routstrd wallet npc sync
+```
+
+Equivalent daemon endpoints: `GET /wallet/npc/address`,
+`POST /wallet/npc/username`, `POST /wallet/npc/sync`.
+
 ### Daemon API
 
 The daemon exposes an HTTP server (default port 8008) with the following endpoints:
