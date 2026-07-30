@@ -57,6 +57,8 @@ export interface CocodClient {
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;
   getMintInfo(url: string): Promise<unknown>;
+  getDefaultMint(): Promise<string | null>;
+  setDefaultMint(url: string): Promise<string>;
   /** Release resources held by in-process wallet implementations. */
   dispose?(): Promise<void>;
   getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
@@ -356,6 +358,12 @@ export function createCocodClient(
     },
     async getMintInfo(url: string): Promise<unknown> {
       return post<unknown>("/mints/info", { url });
+    },
+    async getDefaultMint(): Promise<string | null> {
+      return callDaemon<string | null>("/mints/default");
+    },
+    async setDefaultMint(url: string): Promise<string> {
+      return post<string>("/mints/default", { url });
     },
     async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
       return [];

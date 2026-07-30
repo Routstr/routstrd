@@ -7,6 +7,7 @@ import {
   existsSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -79,9 +80,11 @@ export interface LegacyCocodStopOptions {
 interface CocodConfig {
   mnemonic: string;
   encrypted: boolean;
+  defaultMintUrl?: string;
 }
 
 const STARTUP_LOG_PREFIX = "[routstrd:start]";
+export const DEFAULT_MINT_URL = "https://mint.cubabitcoin.org";
 
 function startupProgress(message: string): void {
   logger.info(message);
@@ -146,7 +149,7 @@ function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
   };
 }
 
-function loadMnemonic(configFile: string = CONFIG_FILE): string {
+function loadConfig(configFile: string = CONFIG_FILE): CocodConfig {
   if (!existsSync(configFile)) {
     throw new Error(
       `Config file not found at ${configFile}. Run 'routstrd onboard' first.`,
@@ -158,7 +161,44 @@ function loadMnemonic(configFile: string = CONFIG_FILE): string {
       "Encrypted wallets are not supported yet. Please use an unencrypted wallet.",
     );
   }
-  return config.mnemonic;
+  return config;
+}
+
+function normalizeMintUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid mint URL: ${url}`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`Mint URL must use HTTP or HTTPS: ${url}`);
+  }
+  parsed.hash = "";
+  parsed.search = "";
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function saveConfig(
+  config: CocodConfig,
+  configFile: string = CONFIG_FILE,
+): void {
+  const temporaryFile = `${configFile}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporaryFile, JSON.stringify(config, null, 2), {
+      mode: 0o600,
+      flag: "wx",
+    });
+    renameSync(temporaryFile, configFile);
+  } catch (error) {
+    try {
+      unlinkSync(temporaryFile);
+    } catch {
+      // The temporary file may not have been created.
+    }
+    throw error;
+  }
 }
 
 function defaultIsProcessRunning(pid: number): boolean {
@@ -286,10 +326,12 @@ export async function stopLegacyCocod(
   const socketPath = options.socketPath || LEGACY_COCOD_SOCKET;
   const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
   const pathExists = options.pathExists || existsSync;
-  const readFile = options.readFile || ((path: string) => readFileSync(path, "utf-8"));
+  const readFile =
+    options.readFile || ((path: string) => readFileSync(path, "utf-8"));
   const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
   const fetchImpl = options.fetchImpl || (fetch as LegacyCocodFetch);
-  const killProcess = options.killProcess || ((pid, signal) => process.kill(pid, signal));
+  const killProcess =
+    options.killProcess || ((pid, signal) => process.kill(pid, signal));
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
   const socketTimeoutMs = options.socketTimeoutMs ?? 1_000;
@@ -298,7 +340,9 @@ export async function stopLegacyCocod(
     if (!pathExists(pidFilePath)) return null;
     try {
       const pid = Number.parseInt(readFile(pidFilePath).trim(), 10);
-      return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid) ? pid : null;
+      return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid)
+        ? pid
+        : null;
     } catch {
       return null;
     }
@@ -306,7 +350,9 @@ export async function stopLegacyCocod(
 
   const pid = readPid();
   if (pid === null) {
-    logger.debug("stopLegacyCocod: no running legacy cocod found, nothing to stop.");
+    logger.debug(
+      "stopLegacyCocod: no running legacy cocod found, nothing to stop.",
+    );
     return;
   }
 
@@ -356,8 +402,7 @@ export async function stopLegacyCocod(
   throw new Error(
     `Legacy cocod daemon (PID ${pid}) did not stop within ${Math.round(
       timeoutMs / 1000,
-    )}s of SIGTERM. ` +
-      `Run 'kill ${pid}' and try again.`,
+    )}s of SIGTERM. ` + `Run 'kill ${pid}' and try again.`,
   );
 }
 
@@ -374,9 +419,11 @@ export function claimLegacyCocodPidFile(
   const openExclusive =
     options.openExclusive || ((path: string) => openSync(path, "wx", 0o600));
   const writePid =
-    options.writePid || ((fd: number, ownerPid: number) => writeFileSync(fd, String(ownerPid)));
+    options.writePid ||
+    ((fd: number, ownerPid: number) => writeFileSync(fd, String(ownerPid)));
   const closeFile = options.closeFile || closeSync;
-  const readFile = options.readFile || ((path: string) => readFileSync(path, "utf-8"));
+  const readFile =
+    options.readFile || ((path: string) => readFileSync(path, "utf-8"));
   const removeFile = options.removeFile || unlinkSync;
   const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
 
@@ -400,7 +447,11 @@ export function claimLegacyCocodPidFile(
       );
     }
 
-    if (!Number.isInteger(stalePid) || stalePid <= 0 || isProcessRunning(stalePid)) {
+    if (
+      !Number.isInteger(stalePid) ||
+      stalePid <= 0 ||
+      isProcessRunning(stalePid)
+    ) {
       throw new Error(
         `Cannot claim the wallet process lock at ${pidFilePath}. ` +
           "Another cocod or routstrd process may be starting. Stop it and try again.",
@@ -444,7 +495,10 @@ export function claimLegacyCocodPidFile(
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        logger.warn(`Failed to release wallet process lock at ${pidFilePath}:`, error);
+        logger.warn(
+          `Failed to release wallet process lock at ${pidFilePath}:`,
+          error,
+        );
       }
     }
   };
@@ -463,9 +517,11 @@ export async function createCocoClient(
   const configDir = options.configDir || CONFIG_DIR;
   const configFile = join(configDir, "config.json");
   const dbPath = join(configDir, "coco.db");
-  const socketPath = options.socketPath ||
+  const socketPath =
+    options.socketPath ||
     (options.configDir ? join(configDir, "cocod.sock") : LEGACY_COCOD_SOCKET);
-  const pidFilePath = options.pidFilePath ||
+  const pidFilePath =
+    options.pidFilePath ||
     (options.configDir ? join(configDir, "cocod.pid") : LEGACY_COCOD_PID_FILE);
 
   await assertLegacyCocodNotRunning({ socketPath, pidFilePath });
@@ -473,13 +529,14 @@ export async function createCocoClient(
 
   let database: Database | undefined;
   let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
+  let walletConfig = loadConfig(configFile);
 
   try {
     startupProgress("Opening Cashu wallet database...");
 
     // Read and validate the existing cocod config during startup rather than
     // deferring failure until coco-core first needs wallet key material.
-    const seed = mnemonicToSeedSync(loadMnemonic(configFile));
+    const seed = mnemonicToSeedSync(walletConfig.mnemonic);
     database = new Database(dbPath);
     const repo = new SqliteRepositories({ database });
     await repo.init();
@@ -506,6 +563,25 @@ export async function createCocoClient(
       seedGetter: async () => seed,
       logger: createCocoLogger(),
     });
+
+    const trustedMints = await coco.mint.getAllTrustedMints();
+    const configuredDefault = walletConfig.defaultMintUrl;
+    const defaultMintUrl = normalizeMintUrl(
+      configuredDefault || trustedMints[0]?.mintUrl || DEFAULT_MINT_URL,
+    );
+
+    if (!trustedMints.some((mint) => mint.mintUrl === defaultMintUrl)) {
+      startupProgress(`Adding default mint: ${defaultMintUrl}`);
+      await coco.mint.addMint(defaultMintUrl, { trusted: true });
+    }
+
+    // Persist only after the mint was successfully fetched and trusted. A failed
+    // network request must not leave config pointing at an unusable default.
+    walletConfig.defaultMintUrl = defaultMintUrl;
+    if (configuredDefault !== defaultMintUrl) {
+      saveConfig(walletConfig, configFile);
+    }
+
     startupProgress("Cashu wallet ready.");
   } catch (error) {
     database?.close();
@@ -555,8 +631,7 @@ export async function createCocoClient(
     },
 
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
-      const mints = await coco.mint.getAllTrustedMints();
-      const targetMint = mintUrl || mints[0]?.mintUrl;
+      const targetMint = mintUrl || walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning invoice");
       }
@@ -572,8 +647,7 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      const mints = await coco.mint.getAllTrustedMints();
-      const targetMint = mintUrl || mints[0]?.mintUrl;
+      const targetMint = mintUrl || walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for sending");
       }
@@ -586,8 +660,7 @@ export async function createCocoClient(
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
-      const mints = await coco.mint.getAllTrustedMints();
-      const targetMint = mintUrl || mints[0]?.mintUrl;
+      const targetMint = mintUrl || walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning payment");
       }
@@ -606,12 +679,29 @@ export async function createCocoClient(
     },
 
     async addMint(url: string): Promise<string> {
-      await coco.mint.addMint(url, { trusted: true });
-      return `Mint ${url} added successfully`;
+      const mintUrl = normalizeMintUrl(url);
+      await coco.mint.addMint(mintUrl, { trusted: true });
+      return `Mint ${mintUrl} added successfully`;
     },
 
     async getMintInfo(url: string): Promise<unknown> {
-      return coco.mint.getMintInfo(url);
+      return coco.mint.getMintInfo(normalizeMintUrl(url));
+    },
+
+    async getDefaultMint(): Promise<string | null> {
+      return walletConfig.defaultMintUrl || null;
+    },
+
+    async setDefaultMint(url: string): Promise<string> {
+      const mintUrl = normalizeMintUrl(url);
+      const trustedMints = await coco.mint.getAllTrustedMints();
+      if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
+        await coco.mint.addMint(mintUrl, { trusted: true });
+      }
+
+      walletConfig.defaultMintUrl = mintUrl;
+      saveConfig(walletConfig, configFile);
+      return `Default mint set to ${mintUrl}`;
     },
 
     async dispose(): Promise<void> {
