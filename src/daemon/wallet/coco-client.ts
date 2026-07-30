@@ -1,4 +1,8 @@
-import { initializeCoco, getEncodedToken } from "@cashu/coco-core";
+import {
+  initializeCoco,
+  getEncodedToken,
+  normalizeMintUrl,
+} from "@cashu/coco-core";
 import type { HistoryEntry, Logger as CocoLogger } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
@@ -162,22 +166,6 @@ function loadConfig(configFile: string = CONFIG_FILE): CocodConfig {
     );
   }
   return config;
-}
-
-function normalizeMintUrl(url: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error(`Invalid mint URL: ${url}`);
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`Mint URL must use HTTP or HTTPS: ${url}`);
-  }
-  parsed.hash = "";
-  parsed.search = "";
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "");
-  return parsed.toString().replace(/\/$/, "");
 }
 
 function saveConfig(
