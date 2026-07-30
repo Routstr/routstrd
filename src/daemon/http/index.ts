@@ -463,6 +463,51 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // ── NPC (npubx.cash) Lightning address endpoints ──────────────
+
+    if (req.method === "GET" && url.pathname === "/wallet/npc/address") {
+      await respond(res, async () => {
+        const info = await deps.walletClient.getNpcAddress();
+        return { output: info };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/username") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const username = getRequiredStringField(body, "username");
+        const confirm = body.confirm === true;
+        const result = await deps.walletClient.setNpcUsername(username, confirm);
+        if (!result.success) {
+          const pr = result.paymentRequest ?? {};
+          const amount = typeof pr.amount === "number" ? pr.amount : 0;
+          const mints = Array.isArray(pr.mints) ? pr.mints.join(", ") : "";
+          if (confirm) {
+            throw new CocodHttpError(
+              402,
+              `Failed to set username. Required amount: ${amount} SATS. Required mints: ${mints}`,
+            );
+          }
+          throw new CocodHttpError(
+            402,
+            `Payment required to set username: ${amount} SATS. ` +
+              `Use 'routstrd wallet npc username ${username} --confirm' to proceed`,
+          );
+        }
+        return { output: { success: true, username } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/sync") {
+      await respond(res, async () => {
+        await deps.walletClient.syncNpc();
+        return { output: { message: "NPC sync completed" } };
+      });
+      return;
+    }
+
     // ── NWC endpoints ─────────────────────────────────────────────
 
     if (req.method === "GET" && url.pathname === "/nwc/status") {

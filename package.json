@@ -31,6 +31,8 @@
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
     "applesauce-wallet-connect": "^6.0.0",
+    "coco-cashu-core": "1.1.2-rc.50",
+    "coco-cashu-plugin-npc": "2.4.1",
     "commander": "^14.0.2",
     "nostr-tools": "^2.12.0",
     "qrcode": "^1.5.4",

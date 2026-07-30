@@ -59,7 +59,12 @@ describe("legacy cocod wallet migration", () => {
     );
     writeFileSync(join(walletDir, "coco.db"), gunzipSync(fixture));
 
-    const client = await createCocoClient({ configDir: walletDir });
+    // NPC is disabled here: this test verifies database migration, and the
+    // real plugin would otherwise open a websocket to npubx.cash.
+    const client = await createCocoClient({
+      configDir: walletDir,
+      enableNpc: false,
+    });
     try {
       expect(await client.getStatus()).toBe("UNLOCKED");
       expect(await client.getBalances()).toEqual({ [mintUrl]: 10 });
@@ -69,7 +74,10 @@ describe("legacy cocod wallet migration", () => {
 
     // Prove the migrated schema remains reopenable and the pre-existing
     // proofs survive a complete in-process wallet restart.
-    const reopenedClient = await createCocoClient({ configDir: walletDir });
+    const reopenedClient = await createCocoClient({
+      configDir: walletDir,
+      enableNpc: false,
+    });
     try {
       expect(await reopenedClient.getBalances()).toEqual({ [mintUrl]: 10 });
     } finally {
