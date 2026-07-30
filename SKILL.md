@@ -197,6 +197,8 @@ Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`.
 
 ## Wallet Commands
 
+New wallets automatically trust `https://mint.cubabitcoin.org` as their default mint. The default is used when a wallet command does not include `--mint-url`.
+
 ### `routstrd wallet status`
 
 Check wallet status.
@@ -244,6 +246,10 @@ List configured wallet mints.
 ### `routstrd wallet mints add <url>`
 
 Add a new mint by URL.
+
+### `routstrd wallet mints set-default <url>`
+
+Set the persistent default mint. If necessary, the mint is added as trusted first.
 
 ### `routstrd wallet mints info <url>`
 

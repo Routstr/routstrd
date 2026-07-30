@@ -1566,6 +1566,16 @@ walletMintsCmd
     });
   });
 
+walletMintsCmd
+  .command("set-default <url>")
+  .description("Set the default mint for wallet operations")
+  .action(async (url: string) => {
+    await handleDaemonCommand("/wallet/mints/default", {
+      method: "POST",
+      body: { url },
+    });
+  });
+
 // ── NWC (Nostr Wallet Connect) commands ─────────────────────────
 
 const nwcCmd = program

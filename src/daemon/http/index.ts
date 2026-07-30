@@ -258,19 +258,24 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
   balances?: Record<string, number>;
   unit?: "sat";
   activeMint?: string | null;
+  defaultMint?: string | null;
 }> {
   const state = await deps.walletClient.getStatus();
   if (state !== "UNLOCKED") {
     return { state, ready: false };
   }
 
-  const balances = await deps.walletAdapter.getBalances();
+  const [balances, defaultMint] = await Promise.all([
+    deps.walletAdapter.getBalances(),
+    deps.walletClient.getDefaultMint(),
+  ]);
   return {
     state,
     ready: true,
     balances,
     unit: "sat",
     activeMint: deps.walletAdapter.getActiveMintUrl(),
+    defaultMint,
   };
 }
 
@@ -408,11 +413,15 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/wallet/mints") {
       await respond(res, async () => {
-        const mints = await deps.walletClient.listMints();
+        const [mints, defaultMint] = await Promise.all([
+          deps.walletClient.listMints(),
+          deps.walletClient.getDefaultMint(),
+        ]);
         return {
           output: {
             mints,
-            activeMint: mints[0] || null,
+            activeMint: defaultMint,
+            defaultMint,
           },
         };
       });
@@ -435,6 +444,24 @@ export function createDaemonRequestHandler(deps: {
         const mintUrl = getRequiredStringField(body, "url");
         const info = await deps.walletClient.getMintInfo(mintUrl);
         return { output: { url: mintUrl, info } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const defaultMint = await deps.walletClient.getDefaultMint();
+        return { output: { defaultMint } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        const message = await deps.walletClient.setDefaultMint(mintUrl);
+        return { output: { message, url: mintUrl } };
       });
       return;
     }
