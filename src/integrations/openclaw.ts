@@ -67,8 +67,9 @@ export async function installOpenClawIntegration(
       const content = await readFile(configPath, "utf-8");
       openclawConfig = JSON.parse(content) as OpenClawConfig;
     }
-  } catch {
-    openclawConfig = {};
+  } catch (error) {
+    console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   if (!openclawConfig.models) {
