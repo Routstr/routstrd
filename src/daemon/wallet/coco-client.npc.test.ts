@@ -49,13 +49,21 @@ const tempDirs: string[] = [];
 function makeWalletDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "routstrd-coco-npc-test-"));
   tempDirs.push(dir);
-  const walletDir = join(dir, ".cocod");
+  const walletDir = join(dir, "wallet");
   mkdirSync(walletDir, { recursive: true });
   writeFileSync(
     join(walletDir, "config.json"),
     JSON.stringify({ version: 1, mnemonic: TEST_MNEMONIC, encrypted: false }),
   );
   return walletDir;
+}
+
+function testClientOptions(walletDir = makeWalletDir()) {
+  return {
+    walletDir,
+    legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+    legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+  };
 }
 
 function resetNpcState(): void {
@@ -74,7 +82,7 @@ afterEach(() => {
 
 describe("in-process coco client NPC integration", () => {
   it("registers the plugin and exposes the wallet's NPC lightning address", async () => {
-    const client = await createCocoClient({ configDir: makeWalletDir() });
+    const client = await createCocoClient(testClientOptions());
     try {
       const info = await client.getNpcAddress();
       expect(info).toEqual({
@@ -89,7 +97,7 @@ describe("in-process coco client NPC integration", () => {
 
   it("falls back to the npub address when no username is set", async () => {
     npcState.info = { name: null, pubkey: "ab".repeat(32) };
-    const client = await createCocoClient({ configDir: makeWalletDir() });
+    const client = await createCocoClient(testClientOptions());
     try {
       const info = await client.getNpcAddress();
       expect(info.address).toStartWith("npub1");
@@ -106,7 +114,7 @@ describe("in-process coco client NPC integration", () => {
       success: false,
       pr: { amount: 21, mints: ["https://mint.example.com"] },
     };
-    const client = await createCocoClient({ configDir: makeWalletDir() });
+    const client = await createCocoClient(testClientOptions());
     try {
       const result = await client.setNpcUsername("bob");
       expect(result).toEqual({
@@ -122,7 +130,7 @@ describe("in-process coco client NPC integration", () => {
   });
 
   it("confirms the claim fee payment when requested", async () => {
-    const client = await createCocoClient({ configDir: makeWalletDir() });
+    const client = await createCocoClient(testClientOptions());
     try {
       const result = await client.setNpcUsername("bob", true);
       expect(result).toEqual({ success: true });
@@ -135,7 +143,7 @@ describe("in-process coco client NPC integration", () => {
   });
 
   it("triggers a manual quote sync", async () => {
-    const client = await createCocoClient({ configDir: makeWalletDir() });
+    const client = await createCocoClient(testClientOptions());
     try {
       await client.syncNpc();
       expect(npcState.syncCalls).toBe(1);
@@ -146,7 +154,7 @@ describe("in-process coco client NPC integration", () => {
 
   it("rejects NPC calls with a clear error when the plugin is disabled", async () => {
     const client = await createCocoClient({
-      configDir: makeWalletDir(),
+      ...testClientOptions(),
       enableNpc: false,
     });
     try {

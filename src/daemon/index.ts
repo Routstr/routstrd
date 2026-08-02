@@ -54,7 +54,18 @@ import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
-import { createCocoClient } from "./wallet/coco-client";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
+import {
+  assertLegacyCocodNotRunning,
+  claimLegacyCocodPidFile,
+  createCocoClient,
+} from "./wallet/coco-client";
+import { migrateLegacyWallet } from "./wallet/migration";
+import {
+  legacyCocodPidPath,
+  legacyCocodSocketPath,
+} from "./wallet/paths";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -114,6 +125,25 @@ async function main(): Promise<void> {
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, providerManager, store);
+
+  const migration = await migrateLegacyWallet({
+    assertLegacyStopped: () =>
+      assertLegacyCocodNotRunning({
+        socketPath: legacyCocodSocketPath(),
+        pidFilePath: legacyCocodPidPath(),
+      }),
+    acquireLegacyLock: () => {
+      mkdirSync(dirname(legacyCocodPidPath()), {
+        recursive: true,
+        mode: 0o700,
+      });
+      return claimLegacyCocodPidFile({ pidFilePath: legacyCocodPidPath() });
+    },
+  });
+  if (migration.status === "migrated") {
+    startupProgress(`Wallet migrated from ${migration.from} to ${migration.to}.`);
+    for (const warning of migration.cleanupWarnings) logger.warn(warning);
+  }
 
   const walletClient = await createCocoClient();
 

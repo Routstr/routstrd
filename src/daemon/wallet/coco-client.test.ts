@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { gunzipSync } from "bun";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -43,7 +44,7 @@ function socketOnly(path: string): boolean {
 
 describe("default mint functionality", () => {
   it("automatically adds default mint when no mints exist", async () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
     mkdirSync(walletDir, { recursive: true });
     writeFileSync(
       join(walletDir, "config.json"),
@@ -55,8 +56,19 @@ describe("default mint functionality", () => {
       }),
     );
 
-    const client = await createCocoClient({ configDir: walletDir });
+    const client = await createCocoClient({
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+    });
     try {
+      expect(readFileSync(join(walletDir, "wallet.pid"), "utf8")).toBe(
+        String(process.pid),
+      );
+      expect(readFileSync(join(walletDir, "legacy-cocod.pid"), "utf8")).toBe(
+        String(process.pid),
+      );
+
       const mints = await client.listMints();
       expect(mints).toContain("https://mint.cubabitcoin.org");
 
@@ -65,10 +77,12 @@ describe("default mint functionality", () => {
     } finally {
       await client.dispose?.();
     }
+    expect(existsSync(join(walletDir, "wallet.pid"))).toBe(false);
+    expect(existsSync(join(walletDir, "legacy-cocod.pid"))).toBe(false);
   });
 
   it("respects existing default mint in config", async () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
     const configuredDefault = "https://mint.cubabitcoin.org";
     mkdirSync(walletDir, { recursive: true });
 
@@ -84,7 +98,11 @@ describe("default mint functionality", () => {
       }),
     );
 
-    const client = await createCocoClient({ configDir: walletDir });
+    const client = await createCocoClient({
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+    });
     try {
       // Should respect the configured default mint
       const defaultMint = await client.getDefaultMint();
@@ -99,7 +117,7 @@ describe("default mint functionality", () => {
   });
 
   it("allows setting default mint to an already trusted mint", async () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
     mkdirSync(walletDir, { recursive: true });
     writeFileSync(
       join(walletDir, "config.json"),
@@ -111,7 +129,11 @@ describe("default mint functionality", () => {
       }),
     );
 
-    const client = await createCocoClient({ configDir: walletDir });
+    const client = await createCocoClient({
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+    });
     try {
       // The initial default should be the auto-added Cuba mint
       const initialDefault = await client.getDefaultMint();
@@ -133,7 +155,7 @@ describe("default mint functionality", () => {
 
 describe("legacy cocod wallet migration", () => {
   it("opens an existing unencrypted config and preserves database balances", async () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
     const mintUrl = "https://mint.example.com";
     mkdirSync(walletDir, { recursive: true });
 
@@ -164,7 +186,9 @@ describe("legacy cocod wallet migration", () => {
     // NPC is disabled here: this test verifies database migration, and the
     // real plugin would otherwise open a websocket to npubx.cash.
     const client = await createCocoClient({
-      configDir: walletDir,
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
       enableNpc: false,
     });
     try {
@@ -177,7 +201,9 @@ describe("legacy cocod wallet migration", () => {
     // Prove the migrated schema remains reopenable and the pre-existing
     // proofs survive a complete in-process wallet restart.
     const reopenedClient = await createCocoClient({
-      configDir: walletDir,
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
       enableNpc: false,
     });
     try {

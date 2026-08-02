@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe("initializeWallet", () => {
   test("creates the wallet directory and config with restrictive permissions", () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
 
     initializeWallet(walletDir);
 
@@ -39,7 +39,7 @@ describe("initializeWallet", () => {
   });
 
   test("repairs permissions without replacing an existing wallet", () => {
-    const walletDir = join(makeTempDir(), ".cocod");
+    const walletDir = join(makeTempDir(), "wallet");
     const walletConfig = join(walletDir, "config.json");
     const existingConfig = JSON.stringify({ mnemonic: "existing seed" });
 
