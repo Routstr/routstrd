@@ -315,6 +315,19 @@ describe("assertLegacyCocodNotRunning", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("ignores the caller's own migration lock PID", async () => {
+    await expect(
+      assertLegacyCocodNotRunning({
+        socketPath: SOCKET_PATH,
+        pidFilePath: PID_FILE_PATH,
+        pathExists: (path) => path === PID_FILE_PATH,
+        readFile: () => "4242\n",
+        isProcessRunning: () => true,
+        ignorePid: 4242,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("fails closed when the socket cannot be probed safely", async () => {
     const fetchImpl = mock<LegacyFetch>(async () => {
       throw Object.assign(new Error("permission denied"), { code: "EACCES" });

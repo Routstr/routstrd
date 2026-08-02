@@ -60,6 +60,7 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  stopLegacyCocod,
 } from "./wallet/coco-client";
 import { migrateLegacyWallet } from "./wallet/migration";
 import {
@@ -126,18 +127,34 @@ async function main(): Promise<void> {
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, providerManager, store);
 
+  // The daemon may be launched directly (or by an older/global CLI), so do
+  // not rely on the parent command having stopped the external wallet first.
+  await stopLegacyCocod({
+    socketPath: legacyCocodSocketPath(),
+    pidFilePath: legacyCocodPidPath(),
+  });
+
+  let migrationLockOwner: number | undefined;
   const migration = await migrateLegacyWallet({
     assertLegacyStopped: () =>
       assertLegacyCocodNotRunning({
         socketPath: legacyCocodSocketPath(),
         pidFilePath: legacyCocodPidPath(),
+        ignorePid: migrationLockOwner,
       }),
     acquireLegacyLock: () => {
       mkdirSync(dirname(legacyCocodPidPath()), {
         recursive: true,
         mode: 0o700,
       });
-      return claimLegacyCocodPidFile({ pidFilePath: legacyCocodPidPath() });
+      const release = claimLegacyCocodPidFile({
+        pidFilePath: legacyCocodPidPath(),
+      });
+      migrationLockOwner = process.pid;
+      return () => {
+        migrationLockOwner = undefined;
+        release();
+      };
     },
   });
   if (migration.status === "migrated") {

@@ -60,6 +60,8 @@ export interface LegacyCocodGuardOptions {
   pathExists?: (path: string) => boolean;
   readFile?: (path: string) => string;
   isProcessRunning?: (pid: number) => boolean;
+  /** PID owned by the caller's already-acquired legacy exclusion lock. */
+  ignorePid?: number;
   fetchImpl?: LegacyCocodFetch;
   timeoutMs?: number;
 }
@@ -243,7 +245,10 @@ export async function assertLegacyCocodNotRunning(
 
     try {
       const pid = Number.parseInt(readFile(pidFilePath).trim(), 10);
-      return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid)
+      return Number.isInteger(pid) &&
+        pid > 0 &&
+        pid !== options.ignorePid &&
+        isProcessRunning(pid)
         ? pid
         : null;
     } catch {
