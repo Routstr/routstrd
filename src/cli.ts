@@ -1,8 +1,10 @@
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
+import { consumeRecoveryStream } from "./utils/recovery-stream";
 import {
   handleDaemonCommand,
   callDaemon,
+  callDaemonRaw,
   callAuth,
   ensureDaemonRunning,
   isDaemonRunning,
@@ -1338,6 +1340,55 @@ program
       console.log(
         `${pad(row.id, widths.id)} | ${pad(row.time, widths.time)} | ${pad(row.type, widths.type)} | ${pad(row.mint, widths.mint)} | ${pad(row.amount, widths.amount)}`,
       );
+    }
+  });
+
+// Recover - re-derive proofs from a mint's restore endpoint
+program
+  .command("recover")
+  .description("Recover wallet proofs from a mint's restore endpoint")
+  .requiredOption(
+    "-m, --mint-url <url>",
+    "Mint URL to recover proofs from",
+  )
+  .action(async (options: { mintUrl: string }) => {
+    await ensureDaemonRunning();
+    try {
+      const response = await callDaemonRaw("/wallet/recover", {
+        method: "POST",
+        body: { url: options.mintUrl },
+      });
+
+      // Validation errors (e.g. missing field) come back as JSON before any
+      // streaming begins.
+      if (!response.ok) {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const data = (await response
+            .json()
+            .catch(() => ({}))) as { error?: string };
+          console.error(data.error || `HTTP ${response.status}`);
+        } else {
+          console.error(`HTTP ${response.status}`);
+        }
+        process.exit(1);
+      }
+
+      const message = await consumeRecoveryStream(response.body, (progress) => {
+        console.log(progress);
+      });
+      console.log(`\u2713 ${message}`);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running and failed to auto-start");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
     }
   });
 

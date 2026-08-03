@@ -81,6 +81,15 @@ export interface CocodClient {
   getMintInfo(url: string): Promise<unknown>;
   getDefaultMint(): Promise<string | null>;
   setDefaultMint(url: string): Promise<string>;
+  /**
+   * Recover deterministic proofs using the mint's NUT-09 restore endpoint.
+   * Recovered proofs are checked using NUT-07 before being persisted.
+   * `onProgress` receives human-readable status messages.
+   */
+  recoverMint(
+    mintUrl: string,
+    onProgress?: (message: string) => void,
+  ): Promise<string>;
   /** Release resources held by in-process wallet implementations. */
   dispose?(): Promise<void>;
   getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
@@ -397,6 +406,15 @@ export function createCocodClient(
     },
     async setDefaultMint(url: string): Promise<string> {
       return post<string>("/mints/default", { url });
+    },
+    async recoverMint(
+      _mintUrl: string,
+      _onProgress?: (message: string) => void,
+    ): Promise<string> {
+      throw new CocodHttpError(
+        501,
+        "Mint recovery is not supported by the legacy cocod client.",
+      );
     },
     async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
       return [];

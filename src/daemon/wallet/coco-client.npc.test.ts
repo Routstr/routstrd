@@ -162,6 +162,22 @@ describe("in-process coco client NPC integration", () => {
   });
 });
 
+describe("legacy cocod mint recovery", () => {
+  it("reports mint recovery as unsupported", async () => {
+    const client = createCocodClient({
+      socketPath: "/tmp/unused-cocod-recovery-test.sock",
+    });
+
+    try {
+      await client.recoverMint("https://mint.example.com");
+      throw new Error("expected recovery to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CocodHttpError);
+      expect((error as InstanceType<typeof CocodHttpError>).status).toBe(501);
+    }
+  });
+});
+
 describe("legacy cocod client NPC passthroughs", () => {
   type FetchImpl = (
     input: string | URL | Request,

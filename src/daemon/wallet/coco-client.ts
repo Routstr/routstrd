@@ -31,6 +31,7 @@ import type {
   NpcUsernameResult,
 } from "./cocod-client";
 import { logger } from "../../utils/logger";
+import { RecoveryGate } from "./recovery-gate";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
 
@@ -517,6 +518,53 @@ export interface CreateCocoClientOptions {
   npcBaseUrl?: string;
 }
 
+type CocoManager = Awaited<ReturnType<typeof initializeCoco>>;
+
+export async function recoverMintProofs(
+  coco: CocoManager,
+  mintUrl: string,
+  onProgress?: (message: string) => void,
+): Promise<string> {
+  const normalized = normalizeMintUrl(mintUrl);
+  onProgress?.(`Fetching mint info for ${normalized}…`);
+  const { keysets } = await coco.mint.addMint(normalized, { trusted: true });
+  onProgress?.(
+    `Recovery started for ${keysets.length} keyset(s) from ${normalized}; this may take several minutes…`,
+  );
+
+  // Background services can mutate proofs and counters independently of
+  // public client calls, so stop them while restore overwrites counters.
+  let subscriptionsPaused = false;
+  let mintWatcherStopped = false;
+  let proofWatcherStopped = false;
+  let mintProcessorStopped = false;
+  try {
+    await coco.pauseSubscriptions();
+    subscriptionsPaused = true;
+    await coco.disableMintOperationWatcher();
+    mintWatcherStopped = true;
+    await coco.disableProofStateWatcher();
+    proofWatcherStopped = true;
+    await coco.disableMintOperationProcessor();
+    mintProcessorStopped = true;
+    await coco.wallet.restore(normalized);
+  } finally {
+    const restarts: Promise<unknown>[] = [];
+    if (mintWatcherStopped) restarts.push(coco.enableMintOperationWatcher());
+    if (proofWatcherStopped) restarts.push(coco.enableProofStateWatcher());
+    if (mintProcessorStopped) restarts.push(coco.enableMintOperationProcessor());
+    if (subscriptionsPaused) restarts.push(coco.resumeSubscriptions());
+    const results = await Promise.allSettled(restarts);
+    const failedRestart = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failedRestart) throw failedRestart.reason;
+  }
+
+  onProgress?.(`Recovery complete for ${normalized}`);
+  return `Mint ${normalized} recovery completed successfully`;
+}
+
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<CocodClient> {
@@ -632,6 +680,7 @@ export async function createCocoClient(
   };
 
   let disposed = false;
+  const recoveryGate = new RecoveryGate();
   return {
     async ping(): Promise<boolean> {
       try {
@@ -668,51 +717,59 @@ export async function createCocoClient(
     },
 
     async receiveCashu(token: string): Promise<string> {
-      await coco.wallet.receive(token);
-      return "Token received successfully";
+      return recoveryGate.runMutation(async () => {
+        await coco.wallet.receive(token);
+        return "Token received successfully";
+      });
     },
 
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for Lightning invoice");
-      }
-      const op = await coco.ops.mint.prepare({
-        mintUrl: targetMint,
-        amount,
-        method: "bolt11",
+      return recoveryGate.runMutation(async () => {
+        const targetMint = mintUrl || walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for Lightning invoice");
+        }
+        const op = await coco.ops.mint.prepare({
+          mintUrl: targetMint,
+          amount,
+          method: "bolt11",
+        });
+        if (!("request" in op)) {
+          throw new Error("mint prepare did not return a payment request");
+        }
+        return op.request as string;
       });
-      if (!("request" in op)) {
-        throw new Error("mint prepare did not return a payment request");
-      }
-      return op.request as string;
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for sending");
-      }
-      const prepared = await coco.ops.send.prepare({
-        mintUrl: targetMint,
-        amount,
+      return recoveryGate.runMutation(async () => {
+        const targetMint = mintUrl || walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for sending");
+        }
+        const prepared = await coco.ops.send.prepare({
+          mintUrl: targetMint,
+          amount,
+        });
+        const { token } = await coco.ops.send.execute(prepared.id);
+        return getEncodedToken(token);
       });
-      const { token } = await coco.ops.send.execute(prepared.id);
-      return getEncodedToken(token);
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for Lightning payment");
-      }
-      const prepared = await coco.ops.melt.prepare({
-        mintUrl: targetMint,
-        method: "bolt11",
-        methodData: { invoice },
+      return recoveryGate.runMutation(async () => {
+        const targetMint = mintUrl || walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for Lightning payment");
+        }
+        const prepared = await coco.ops.melt.prepare({
+          mintUrl: targetMint,
+          method: "bolt11",
+          methodData: { invoice },
+        });
+        await coco.ops.melt.execute(prepared.id);
+        return "Payment sent successfully";
       });
-      await coco.ops.melt.execute(prepared.id);
-      return "Payment sent successfully";
     },
 
     async listMints(): Promise<string[]> {
@@ -744,6 +801,15 @@ export async function createCocoClient(
       walletConfig.defaultMintUrl = mintUrl;
       saveConfig(walletConfig, configFile);
       return `Default mint set to ${mintUrl}`;
+    },
+
+    async recoverMint(
+      mintUrl: string,
+      onProgress?: (message: string) => void,
+    ): Promise<string> {
+      return recoveryGate.runRecovery(() =>
+        recoverMintProofs(coco, mintUrl, onProgress),
+      );
     },
 
     async dispose(): Promise<void> {
@@ -782,19 +848,21 @@ export async function createCocoClient(
       username: string,
       confirm?: boolean,
     ): Promise<NpcUsernameResult> {
-      const result = await npcApi().setUsername(username, confirm === true);
-      if (result.success) {
-        return { success: true };
-      }
-      return {
-        success: false,
-        paymentRequest:
-          result.pr as NpcUsernameResult["paymentRequest"],
-      };
+      return recoveryGate.runMutation(async () => {
+        const result = await npcApi().setUsername(username, confirm === true);
+        if (result.success) {
+          return { success: true };
+        }
+        return {
+          success: false,
+          paymentRequest:
+            result.pr as NpcUsernameResult["paymentRequest"],
+        };
+      });
     },
 
     async syncNpc(): Promise<void> {
-      await npcApi().sync();
+      await recoveryGate.runMutation(() => npcApi().sync());
     },
   };
 }

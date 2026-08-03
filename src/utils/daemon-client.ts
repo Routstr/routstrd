@@ -95,6 +95,46 @@ export async function callDaemon(
   return _callUrl(baseUrl, path, options, config);
 }
 
+/**
+ * Performs an authenticated daemon request and returns the raw fetch
+ * `Response` so callers can stream the body (e.g. for live progress output).
+ * Handles NIP-98 auth for remote daemons exactly like `callDaemon`.
+ */
+export async function callDaemonRaw(
+  path: string,
+  options: { method?: HttpMethod; body?: object } = {},
+): Promise<Response> {
+  const config = await loadConfig();
+  const baseUrl = getDaemonBaseUrl(config);
+  const { method = "POST", body } = options;
+  const url = `${baseUrl}${path}`;
+
+  const bodyString = body ? JSON.stringify(body) : undefined;
+  const bodyBytes = bodyString
+    ? new TextEncoder().encode(bodyString)
+    : undefined;
+
+  let authorization: string | undefined;
+  if ((config.daemonUrl || config.authUrl) && config.nsec) {
+    const secretKey = parseSecretKey(config.nsec);
+    authorization = await createNIP98Authorization(
+      secretKey,
+      url,
+      method,
+      bodyBytes,
+    );
+  }
+
+  return fetch(url, {
+    method,
+    headers: {
+      ...(authorization ? { Authorization: authorization } : {}),
+      ...(bodyString ? { "Content-Type": "application/json" } : {}),
+    },
+    body: bodyString,
+  });
+}
+
 /** Like callDaemon but sends requests to the auth proxy URL instead.
  *  Falls back to the daemon URL if no authUrl is configured. */
 export async function callAuth(

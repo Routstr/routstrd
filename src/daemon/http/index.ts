@@ -20,6 +20,7 @@ import {
 import { decodeCashuTokenAmount } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
+import { encodeRecoveryEvent } from "../../utils/recovery-stream";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -164,6 +165,31 @@ async function respond(
     sendJson(res, 200, await getPayload());
   } catch (error) {
     respondWithError(res, error);
+  }
+}
+
+export async function streamMintRecovery(
+  res: ServerResponse,
+  walletClient: CocodClient,
+  mintUrl: string,
+): Promise<void> {
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  try {
+    const message = await walletClient.recoverMint(mintUrl, (line) => {
+      res.write(encodeRecoveryEvent({ type: "progress", message: line }));
+    });
+    res.end(encodeRecoveryEvent({ type: "result", ok: true, message }));
+  } catch (error) {
+    res.end(
+      encodeRecoveryEvent({
+        type: "result",
+        ok: false,
+        error: toErrorMessage(error),
+      }),
+    );
   }
 }
 
@@ -463,6 +489,19 @@ export function createDaemonRequestHandler(deps: {
         const message = await deps.walletClient.setDefaultMint(mintUrl);
         return { output: { message, url: mintUrl } };
       });
+      return;
+    }
+
+    // Recover proofs from a mint's restore endpoint. Progress and the required
+    // terminal result are sent as NDJSON so clients can detect truncated runs.
+    if (req.method === "POST" && url.pathname === "/wallet/recover") {
+      try {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        await streamMintRecovery(res, deps.walletClient, mintUrl);
+      } catch (error) {
+        respondWithError(res, error);
+      }
       return;
     }
 
