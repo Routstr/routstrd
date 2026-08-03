@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import { Database } from "bun:sqlite";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -23,7 +25,7 @@ afterEach(() => {
 });
 
 describe("migrateLegacyWallet", () => {
-  it("copies wallet data byte-for-byte and leaves process files behind", async () => {
+  it("snapshots committed WAL data and leaves process files behind", async () => {
     const base = root();
     const legacyDir = join(base, ".cocod");
     const walletDir = join(base, ".routstrd", "wallet");
@@ -34,28 +36,51 @@ describe("migrateLegacyWallet", () => {
       defaultMintUrl: "https://mint.example",
       unknown: { preserved: true },
     });
-    const database = new Uint8Array([0, 1, 2, 3, 255]);
     writeFileSync(join(legacyDir, "config.json"), config);
-    writeFileSync(join(legacyDir, "coco.db"), database);
     writeFileSync(join(legacyDir, "cocod.pid"), "123");
     writeFileSync(join(legacyDir, "cocod.sock"), "not-a-real-socket");
+
+    const source = new Database(join(legacyDir, "coco.db"));
+    source.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0");
+    source.exec(`
+      CREATE TABLE coco_cashu_proofs (mintUrl TEXT, state TEXT, amount INTEGER);
+      CREATE TABLE coco_cashu_counters (mintUrl TEXT, keysetId TEXT, counter INTEGER);
+      CREATE TABLE coco_cashu_mint_operations (state TEXT);
+      CREATE TABLE coco_cashu_send_operations (state TEXT);
+      CREATE TABLE coco_cashu_melt_operations (state TEXT);
+      CREATE TABLE coco_cashu_mints (mintUrl TEXT, trusted INTEGER);
+      INSERT INTO coco_cashu_proofs VALUES ('https://mint.example', 'ready', 21);
+      INSERT INTO coco_cashu_counters VALUES ('https://mint.example', 'keyset', 3);
+      INSERT INTO coco_cashu_mints VALUES ('https://mint.example', 1);
+    `);
+    expect(existsSync(join(legacyDir, "coco.db-wal"))).toBe(true);
+
     const assertStopped = mock(async () => {});
     const releaseLock = mock(() => {});
     const acquireLock = mock(() => releaseLock);
-
     const result = await migrateLegacyWallet({
       walletDir,
       legacyDir,
       assertLegacyStopped: assertStopped,
       acquireLegacyLock: acquireLock,
     });
+    source.close();
 
     expect(result.status).toBe("migrated");
     expect(assertStopped).toHaveBeenCalledTimes(2);
     expect(acquireLock).toHaveBeenCalledTimes(1);
     expect(releaseLock).toHaveBeenCalledTimes(1);
     expect(readFileSync(join(walletDir, "config.json"), "utf8")).toBe(config);
-    expect(readFileSync(join(walletDir, "coco.db"))).toEqual(Buffer.from(database));
+    const migrated = new Database(join(walletDir, "coco.db"), { readonly: true });
+    expect(migrated.query("PRAGMA quick_check").values()).toEqual([["ok"]]);
+    expect(migrated.query("SELECT state, amount FROM coco_cashu_proofs").values()).toEqual([
+      ["ready", 21],
+    ]);
+    expect(migrated.query("SELECT counter FROM coco_cashu_counters").get()).toEqual({
+      counter: 3,
+    });
+    migrated.close();
+    expect(existsSync(join(walletDir, "coco.db-wal"))).toBe(false);
     expect(statSync(walletDir).mode & 0o777).toBe(0o700);
     expect(statSync(join(walletDir, "config.json")).mode & 0o777).toBe(0o600);
     expect(existsSync(join(walletDir, "cocod.pid"))).toBe(false);
@@ -64,6 +89,10 @@ describe("migrateLegacyWallet", () => {
     expect(existsSync(join(legacyDir, "coco.db"))).toBe(false);
     expect(existsSync(join(legacyDir, "cocod.pid"))).toBe(true);
     expect(existsSync(join(legacyDir, "cocod.sock"))).toBe(true);
+    const archive = readdirSync(legacyDir).find((name) => name.startsWith("wallet-migrated-"));
+    expect(archive).toBeDefined();
+    expect(existsSync(join(legacyDir, archive!, "config.json"))).toBe(true);
+    expect(existsSync(join(legacyDir, archive!, "coco.db"))).toBe(true);
   });
 
   it("treats a config-only initialized wallet as migratable", async () => {
@@ -86,6 +115,17 @@ describe("migrateLegacyWallet", () => {
 
     await expect(migrateLegacyWallet({ walletDir: join(base, "wallet"), legacyDir })).rejects.toThrow(
       "without config.json",
+    );
+  });
+
+  it("refuses orphaned SQLite sidecars", async () => {
+    const base = root();
+    const legacyDir = join(base, ".cocod");
+    mkdirSync(legacyDir);
+    writeFileSync(join(legacyDir, "coco.db-wal"), "orphaned WAL");
+
+    await expect(migrateLegacyWallet({ walletDir: join(base, "wallet"), legacyDir })).rejects.toThrow(
+      "sidecar files without coco.db",
     );
   });
 

@@ -7,9 +7,9 @@ import {
   renameSync,
   rmSync,
   statSync,
-  unlinkSync,
 } from "fs";
-import { dirname, join } from "path";
+import { Database } from "bun:sqlite";
+import { basename, dirname, join } from "path";
 import { legacyCocodDir, walletDir } from "./paths";
 
 export type WalletMigrationResult =
@@ -42,6 +42,68 @@ function filesEqual(left: string, right: string): boolean {
   return readFileSync(left).equals(readFileSync(right));
 }
 
+function sqlString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+type WalletSummary = Record<string, unknown[]>;
+const SUMMARY_QUERIES: Record<string, string> = {
+  proofs:
+    "SELECT mintUrl, state, COUNT(*) count, COALESCE(SUM(amount), 0) amount FROM coco_cashu_proofs GROUP BY mintUrl, state ORDER BY mintUrl, state",
+  counters:
+    "SELECT mintUrl, keysetId, counter FROM coco_cashu_counters ORDER BY mintUrl, keysetId",
+  mintOperations:
+    "SELECT state, COUNT(*) count FROM coco_cashu_mint_operations GROUP BY state ORDER BY state",
+  sendOperations:
+    "SELECT state, COUNT(*) count FROM coco_cashu_send_operations GROUP BY state ORDER BY state",
+  meltOperations:
+    "SELECT state, COUNT(*) count FROM coco_cashu_melt_operations GROUP BY state ORDER BY state",
+  mints: "SELECT mintUrl, trusted FROM coco_cashu_mints ORDER BY mintUrl",
+};
+
+function verifyDatabase(database: Database, label: string): WalletSummary {
+  const checks = database.query("PRAGMA quick_check").values() as unknown[][];
+  if (checks.length !== 1 || checks[0]?.[0] !== "ok") {
+    throw new Error(`${label} failed PRAGMA quick_check: ${JSON.stringify(checks)}`);
+  }
+
+  const tables = new Set(
+    (database
+      .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .values() as string[][]).map(([name]) => name),
+  );
+  const summary: WalletSummary = {};
+  for (const [name, query] of Object.entries(SUMMARY_QUERIES)) {
+    const table = query.match(/FROM\s+(coco_cashu_\w+)/i)?.[1];
+    summary[name] = table && tables.has(table) ? database.query(query).all() : [];
+  }
+  return summary;
+}
+
+/** Write a standalone SQLite snapshot containing committed WAL frames. */
+function snapshotDatabase(sourcePath: string, destinationPath: string): void {
+  const source = new Database(sourcePath);
+  let sourceSummary: WalletSummary;
+  try {
+    sourceSummary = verifyDatabase(source, "Legacy wallet database");
+    source.exec(`VACUUM INTO ${sqlString(destinationPath)}`);
+  } finally {
+    source.close();
+  }
+
+  const destination = new Database(destinationPath, { readonly: true });
+  try {
+    const destinationSummary = verifyDatabase(destination, "Staged wallet database");
+    if (JSON.stringify(sourceSummary) !== JSON.stringify(destinationSummary)) {
+      throw new Error(
+        "Staged wallet database does not contain the same proofs, counters, operations, and mints as the legacy database.",
+      );
+    }
+  } finally {
+    destination.close();
+  }
+}
+
 /**
  * Copy a legacy cocod wallet into the canonical routstrd wallet directory.
  * The staging directory is renamed atomically, so the canonical path is never
@@ -56,6 +118,8 @@ export async function migrateLegacyWallet(
   const targetDb = join(targetDir, "coco.db");
   const sourceConfig = join(sourceDir, "config.json");
   const sourceDb = join(sourceDir, "coco.db");
+  const sourceWal = `${sourceDb}-wal`;
+  const sourceShm = `${sourceDb}-shm`;
   const targetState = state(targetConfig, targetDb);
   const sourceState = state(sourceConfig, sourceDb);
 
@@ -76,6 +140,12 @@ export async function migrateLegacyWallet(
     );
   }
   if (targetState === "initialized") return { status: "already-current" };
+  if (!existsSync(sourceDb) && (existsSync(sourceWal) || existsSync(sourceShm))) {
+    throw new Error(
+      `Cannot migrate wallet: ${sourceDir} contains SQLite sidecar files without coco.db. ` +
+        "Restore the matching main database before migration.",
+    );
+  }
   if (targetState === "database-only" || sourceState === "database-only") {
     throw new Error(
       `Cannot migrate wallet: ${targetDir} is ${targetState} and ${sourceDir} is ${sourceState}. ` +
@@ -102,15 +172,14 @@ export async function migrateLegacyWallet(
     chmodSync(stagedConfig, 0o600);
     const hasSourceDb = existsSync(sourceDb);
     if (hasSourceDb) {
-      copyFileSync(sourceDb, stagedDb);
+      // A SQLite WAL is part of the logical database. Raw-copying coco.db can
+      // silently omit proofs and counters that have not yet been checkpointed.
+      snapshotDatabase(sourceDb, stagedDb);
       chmodSync(stagedDb, 0o600);
     }
 
-    if (
-      statSync(stagedConfig).size !== statSync(sourceConfig).size ||
-      (hasSourceDb && statSync(stagedDb).size !== statSync(sourceDb).size)
-    ) {
-      throw new Error("Cannot migrate wallet: staged files failed size validation.");
+    if (statSync(stagedConfig).size !== statSync(sourceConfig).size) {
+      throw new Error("Cannot migrate wallet: staged config failed size validation.");
     }
 
     renameSync(stagingDir, targetDir);
@@ -121,14 +190,18 @@ export async function migrateLegacyWallet(
     releaseLegacyLock?.();
   }
 
+  // Preserve the complete legacy SQLite file set for manual recovery instead
+  // of deleting the only rollback copy immediately after migration.
   const cleanupWarnings: string[] = [];
-  for (const path of [sourceConfig, sourceDb]) {
-    if (!existsSync(path)) continue;
+  const sourceFiles = [sourceConfig, sourceDb, sourceWal, sourceShm].filter(existsSync);
+  if (sourceFiles.length > 0) {
+    const archiveDir = join(sourceDir, `wallet-migrated-${Date.now()}`);
     try {
-      unlinkSync(path);
+      mkdirSync(archiveDir, { mode: 0o700 });
+      for (const path of sourceFiles) renameSync(path, join(archiveDir, basename(path)));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      cleanupWarnings.push(`Could not remove legacy wallet file ${path}: ${message}`);
+      cleanupWarnings.push(`Could not archive legacy wallet files: ${message}`);
     }
   }
 
