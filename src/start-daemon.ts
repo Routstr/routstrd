@@ -1,4 +1,5 @@
 import { openSync, statSync, renameSync, existsSync, unlinkSync } from "fs";
+import { fileURLToPath } from "url";
 import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
@@ -87,8 +88,10 @@ async function startDaemonUnlocked(
     args.push("--provider", options.provider);
   }
 
-  const daemonScript = new URL("./daemon/index.js", import.meta.url).pathname;
-  const shellCmd = `bun run "${daemonScript}" ${args.map((a) => `'${a}'`).join(" ")}`;
+  let daemonScript = fileURLToPath(new URL("./daemon/index.js", import.meta.url));
+  if (!existsSync(daemonScript)) {
+    daemonScript = fileURLToPath(new URL("./daemon/index.ts", import.meta.url));
+  }
 
   // Rotate capture files before attaching so they never grow unbounded.
   rotateCaptureFile(STDOUT_LOG_PATH);
@@ -97,7 +100,7 @@ async function startDaemonUnlocked(
   const stdoutFd = openSync(STDOUT_LOG_PATH, "a");
   const stderrFd = openSync(STDERR_LOG_PATH, "a");
 
-  const proc = Bun.spawn(["sh", "-c", shellCmd], {
+  const proc = Bun.spawn(["bun", daemonScript, ...args], {
     stdout: stdoutFd,
     stderr: stderrFd,
     stdin: "ignore",
