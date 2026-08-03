@@ -473,3 +473,116 @@ describe("SDK top-up mint fallback", () => {
     expect(nwcCalled).toBe(true);
   });
 });
+
+describe("provider-side 402 top-up refusal", () => {
+  const PROVIDER_SIDE_402 = JSON.stringify({
+    error: {
+      message: "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+      code: 402,
+      metadata: { limit_source: "openrouter_credits" },
+    },
+  });
+
+  function createPatchedClient() {
+    const toppedUp: number[] = [];
+    const balanceManager = {
+      topUp: async (options: { amount: number }) => {
+        toppedUp.push(options.amount);
+        return { success: true, toppedUpAmount: options.amount };
+      },
+    };
+    // Minimal stand-in for the SDK's _handleErrorResponse signature:
+    // (params, token, status, requestId, xCashuRefundToken, responseBody, retryCount)
+    const client = {
+      getBalanceManager: () => balanceManager,
+      _handleErrorResponse: async (..._args: unknown[]) => "delegated",
+    };
+
+    installMintFallbackTopUp(
+      client,
+      createCocodClient(["https://mint-a.example"]),
+      { getBalances: async () => ({ "https://mint-a.example": 50_000 }) },
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+
+    return { client, balanceManager, toppedUp };
+  }
+
+  test("mints nothing once the provider reports its own credit exhaustion", async () => {
+    const { client, balanceManager, toppedUp } = createPatchedClient();
+
+    // The SDK hands the 402 body through _handleErrorResponse before topping up.
+    await client._handleErrorResponse(
+      { baseUrl: "http://localhost:8011/" },
+      "sk-test",
+      402,
+      "req-1",
+      undefined,
+      PROVIDER_SIDE_402,
+      0,
+    );
+
+    const result = await balanceManager.topUp({
+      mintUrl: "https://mint-a.example",
+      baseUrl: "http://localhost:8011/",
+      amount: 32480,
+      token: "sk-test",
+    });
+
+    expect(result.success).toBe(false);
+    expect(toppedUp).toEqual([]); // no proofs spent at all
+  });
+
+  test("refusal message must not contain 'Insufficient balance'", async () => {
+    // This is the load-bearing contract with the SDK: on a failed top-up it
+    // throws InsufficientBalanceError when the message contains "Insufficient
+    // balance", and only otherwise sets tryNextProvider. Getting this wrong
+    // turns a clean failover into a hard request failure.
+    const { client, balanceManager } = createPatchedClient();
+
+    await client._handleErrorResponse(
+      { baseUrl: "http://localhost:8011/" },
+      "sk-test",
+      402,
+      "req-1",
+      undefined,
+      PROVIDER_SIDE_402,
+      0,
+    );
+
+    const result = await balanceManager.topUp({
+      mintUrl: "https://mint-a.example",
+      baseUrl: "http://localhost:8011/",
+      amount: 32480,
+      token: "sk-test",
+    });
+
+    expect(String(result.message)).not.toContain("Insufficient balance");
+  });
+
+  test("a genuine balance 402 still funds normally", async () => {
+    const { client, balanceManager, toppedUp } = createPatchedClient();
+
+    await client._handleErrorResponse(
+      { baseUrl: "https://routstr.otrta.me/" },
+      "sk-test",
+      402,
+      "req-1",
+      undefined,
+      JSON.stringify({
+        detail: { error: { code: "insufficient_balance", message: "Insufficient balance: 100 sats required" } },
+      }),
+      0,
+    );
+
+    const result = await balanceManager.topUp({
+      mintUrl: "https://mint-a.example",
+      baseUrl: "https://routstr.otrta.me/",
+      amount: 210,
+      token: "sk-test",
+    });
+
+    expect(result.success).toBe(true);
+    expect(toppedUp).toEqual([210]);
+  });
+});

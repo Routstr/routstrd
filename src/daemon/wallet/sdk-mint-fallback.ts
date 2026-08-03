@@ -1,5 +1,6 @@
 import type { CocodClient } from "./cocod-client";
 import { isMintUnreachableError, receiveBolt11WithMintFallback } from "./mint-fallback";
+import { createProvider402Guard, type Provider402Guard } from "./provider-402-guard";
 
 type LoggerLike = {
   log: (...args: unknown[]) => void;
@@ -28,7 +29,6 @@ type BalanceManagerLike = {
 type RoutstrClientLike = {
   getBalanceManager(): unknown;
   getMode?(): string;
-  mode?: string;
 };
 
 type WalletAdapterLike = {
@@ -57,6 +57,45 @@ type WalletAdapterLike = {
 const PATCH_MARKER = Symbol.for("routstrd.mintFallbackTopUpPatched");
 const ERROR_RETRY_PATCH_MARKER = Symbol.for("routstrd.mintFallbackErrorRetryPatched");
 const CREATE_TOKEN_PATCH_MARKER = Symbol.for("routstrd.mintCreateTokenFallbackPatched");
+const ERROR_BODY_PATCH_MARKER = Symbol.for("routstrd.provider402BodyPatched");
+
+/**
+ * Capture the body of every 402 the SDK handles, keyed by provider.
+ *
+ * `_handleErrorResponse(params, token, status, requestId, xCashuRefundToken,
+ * responseBody, retryCount)` is where the SDK decides to top up, and it is the
+ * only place the response body is still in hand — `BalanceManager.topUp()`
+ * receives just {mintUrl, baseUrl, amount, token}. Recording the body here is
+ * what lets the top-up patch tell "we are short" from "the provider is short".
+ */
+export function installProvider402BodyCapture(
+  client: RoutstrClientLike,
+  guard: Provider402Guard,
+): void {
+  const target = client as RoutstrClientLike & {
+    [ERROR_BODY_PATCH_MARKER]?: boolean;
+    _handleErrorResponse?: (...args: unknown[]) => Promise<unknown>;
+  };
+  if (target[ERROR_BODY_PATCH_MARKER] || typeof target._handleErrorResponse !== "function") {
+    return;
+  }
+
+  const original = target._handleErrorResponse.bind(target);
+  target._handleErrorResponse = async (...args: unknown[]): Promise<unknown> => {
+    const params = args[0] as { baseUrl?: string } | undefined;
+    const status = args[2] as number | undefined;
+    const responseBody = args[5];
+    const baseUrl = params?.baseUrl;
+
+    if (status === 402 && baseUrl) {
+      guard.record402(baseUrl, responseBody);
+    }
+
+    return original(...args);
+  };
+
+  target[ERROR_BODY_PATCH_MARKER] = true;
+}
 
 // ── Routstr-core Lightning invoice integration ──────────────────
 const ROUTSTR_CORE_INVOICE_POLL_MS = 5000;
@@ -222,7 +261,7 @@ function isMintUnreachableResponse(status: number, responseBody: unknown): boole
 
 /** Returns true if the client is operating in xcashu mode. */
 function isXcashuMode(client: RoutstrClientLike): boolean {
-  const mode = client.getMode?.() ?? client.mode;
+  const mode = client.getMode?.() ?? (client as { mode?: string }).mode;
   return mode === "xcashu";
 }
 
@@ -418,9 +457,13 @@ export function installMintFallbackTopUp(
   walletAdapter: WalletAdapterLike,
   logger: LoggerLike,
   upstreamProviderUrl?: string,
+  provider402Guard?: Provider402Guard,
 ): void {
   installMintUnreachableErrorRetry(client, walletClient, walletAdapter, logger);
   installCreateProviderTokenFallback(client, walletClient, walletAdapter, logger, upstreamProviderUrl);
+
+  const guard = provider402Guard ?? createProvider402Guard();
+  installProvider402BodyCapture(client, guard);
 
   const balanceManager = client.getBalanceManager() as BalanceManagerLike & {
     [PATCH_MARKER]?: boolean;
@@ -429,6 +472,30 @@ export function installMintFallbackTopUp(
 
   const originalTopUp = balanceManager.topUp.bind(balanceManager);
   balanceManager.topUp = async (options: TopUpOptions): Promise<TopUpResult> => {
+    // Refuse before a single proof is spent. Returning success:false with a
+    // message that does NOT contain "Insufficient balance" is what makes the
+    // SDK set tryNextProvider and fail over instead of throwing
+    // InsufficientBalanceError — see _handleErrorResponse in the SDK.
+    const decision = guard.evaluate(options.baseUrl, Math.ceil(options.amount || 0));
+    if (!decision.allow) {
+      logger.warn(
+        `[wallet] Refusing provider top-up: ${decision.reason}. Failing over to the next provider.`,
+      );
+      return {
+        success: false,
+        message: `Top-up refused: ${decision.reason}`,
+        error: `Top-up refused: ${decision.reason}`,
+      };
+    }
+
+    const result = await topUpWithMintFallback(options);
+    if (result.success) {
+      guard.recordTopUp(options.baseUrl, Math.ceil(options.amount || 0));
+    }
+    return result;
+  };
+
+  const topUpWithMintFallback = async (options: TopUpOptions): Promise<TopUpResult> => {
     const candidates = await getTopUpMintCandidates(
       options.mintUrl,
       walletClient,

@@ -16,7 +16,11 @@ export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
 };
 
-export function createModelService(modelManager: ModelManager, store: SdkStore) {
+export function createModelService(
+  modelManager: ModelManager,
+  store: SdkStore,
+  forcedProvider?: string,
+) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
   /**
@@ -59,7 +63,37 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
-        await modelManager.fetchModels(filterDisabled(providers));
+
+        // Ensure the forced provider is always included in the model fetch,
+        // even if it wasn't discovered via Nostr (e.g. localhost:8011).
+        // The forced provider is explicitly configured by the operator and
+        // should NEVER be filtered out by filterDisabled() — the Nostr
+        // review/disable system may mark localhost providers as disabled,
+        // but the operator's --provider flag overrides that.
+        let fetchList = providers;
+        if (forcedProvider) {
+          const normalized = forcedProvider.endsWith("/")
+            ? forcedProvider
+            : `${forcedProvider}/`;
+          if (!providers.includes(normalized)) {
+            fetchList = [normalized, ...providers];
+            logger.log(
+              `Adding forced provider ${normalized} to model fetch list`,
+            );
+          }
+          // Remove forced provider from the disabled set so filterDisabled
+          // doesn't strip it. Re-enable locally regardless of Nostr reviews.
+          const disabled = store.getState().disabledProviders || [];
+          if (disabled.includes(normalized)) {
+            const updated = disabled.filter((u: string) => u !== normalized);
+            store.getState().setDisabledProviders(updated);
+            logger.log(
+              `Re-enabling forced provider ${normalized} (was disabled by Nostr reviews)`,
+            );
+          }
+        }
+
+        await modelManager.fetchModels(filterDisabled(fetchList));
 
         // Sync discovered providers into the store so `providers list` reflects
         // the same set that the model manager knows about.
@@ -173,8 +207,18 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
     console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
-    // Force-refresh models from all enabled providers
-    const models = await modelManager.fetchModels(filterDisabled(providers), true);
+    // Force-refresh models from all enabled providers.
+    // Ensure the forced provider is always included even if not on Nostr.
+    let refreshList = providers;
+    if (forcedProvider) {
+      const normalized = forcedProvider.endsWith("/")
+        ? forcedProvider
+        : `${forcedProvider}/`;
+      if (!providers.includes(normalized)) {
+        refreshList = [normalized, ...providers];
+      }
+    }
+    const models = await modelManager.fetchModels(filterDisabled(refreshList), true);
     console.log(`Fetched ${models.length} models from ${providers.length} providers`);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status

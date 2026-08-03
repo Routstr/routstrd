@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { getDecodedToken, Amount } from "@cashu/cashu-ts";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
@@ -111,6 +112,42 @@ export async function sendCashuFromMint(
   throw lastInsufficientProofsError ?? new Error("sendToken failed after max retries");
 }
 
+/**
+ * Thrown when a mint is skipped because it is in the health cooldown.
+ *
+ * The message deliberately mimics a real fetch failure: the SDK's mint
+ * rotation only advances to its next candidate when the error matches its
+ * network-error patterns ("Failed to fetch", "Unable to connect", ...).
+ * Anything else aborts the rotation after the first candidate. Since the
+ * cooldown exists precisely because fetching this mint just failed, reporting
+ * it as a fetch failure is both accurate and the signal that makes the caller
+ * move on to the next mint.
+ */
+class MintInCooldownError extends Error {
+  constructor(mintUrl: string) {
+    super(`Failed to fetch mint ${mintUrl} (in health cooldown after a recent network failure)`);
+    this.name = "MintInCooldownError";
+  }
+}
+
+/**
+ * Errors that mean a token can never be received, no matter how often we try.
+ *
+ * Once a mint has recorded proofs as spent, that is final — unlike a network
+ * failure or an unreachable mint, retrying cannot change the outcome. The SDK
+ * re-attempts the stored token on every 402, so without this distinction a
+ * single dead token costs a mint round-trip on every subsequent request.
+ */
+const TERMINAL_RECEIVE_ERROR = /already spent|token not found|unknown proof/i;
+
+export function isTerminalReceiveError(message: string): boolean {
+  return TERMINAL_RECEIVE_ERROR.test(message);
+}
+
+function fingerprintToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 12);
+}
+
 export interface WalletAdapterOptions {
   cocodPath?: string | null;
   walletClient?: CocodClient;
@@ -166,6 +203,21 @@ export async function createWalletAdapter(
       return true;
     }
     return false;
+  }
+
+  // ── Dead-token cache ───────────────────────────────────────────
+  // Tokens the mint has confirmed as spent. Bounded and FIFO-evicted: this is
+  // a latency optimisation, not a correctness store, so forgetting the oldest
+  // entry only costs one wasted round-trip if that token resurfaces.
+  const MAX_SPENT_TOKEN_CACHE = 512;
+  const spentTokens = new Set<string>();
+
+  function rememberSpentToken(tokenKey: string): void {
+    if (spentTokens.size >= MAX_SPENT_TOKEN_CACHE) {
+      const oldest = spentTokens.values().next().value;
+      if (oldest !== undefined) spentTokens.delete(oldest);
+    }
+    spentTokens.add(tokenKey);
   }
 
   // Cache of known mints (updated by syncMintState)
@@ -451,16 +503,22 @@ export async function createWalletAdapter(
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
       try {
-        // If the requested mint is unhealthy, skip it immediately and
-        // try a healthy mint instead. This prevents the wasted round-trip
-        // of attempting an unreachable mint on every single request.
-        let effectiveMint = mintUrl;
+        // The health cache may skip a mint in cooldown, but it must never
+        // substitute a different one: callers label the returned token with
+        // `mintUrl`, so swapping mints here makes that label a lie and
+        // collapses the cross-mint rotation above us onto a single mint.
+        // Reporting the mint as unreachable instead keeps the round-trip
+        // savings while letting the caller advance to its next candidate.
         if (!isMintHealthy(mintUrl)) {
-          const healthy = getFirstHealthyMint();
-          if (healthy && healthy !== mintUrl) {
-            logger.log(`[wallet] sendToken: skipping unhealthy mint ${mintUrl}, using ${healthy}`);
-            effectiveMint = healthy;
+          const alternative = getFirstHealthyMint();
+          if (alternative && alternative !== mintUrl) {
+            logger.log(
+              `[wallet] sendToken: mint ${mintUrl} is in health cooldown — reporting it unreachable so the caller rotates to the next mint (${alternative})`,
+            );
+            throw new MintInCooldownError(mintUrl);
           }
+          // No healthy alternative to rotate to, so attempt the requested mint
+          // anyway rather than failing a request we might still be able to serve.
         }
 
         const balances: Record<string, number> = await syncMintState().catch(
@@ -468,14 +526,17 @@ export async function createWalletAdapter(
         );
         const sendAmounts = getSameMintSendAmounts(
           amount,
-          balances[effectiveMint] ?? amount,
+          balances[mintUrl] ?? amount,
         );
-        return await sendCashuFromMint(client, effectiveMint, sendAmounts[0]!, {
+        return await sendCashuFromMint(client, mintUrl, sendAmounts[0]!, {
           fallbackAmounts: sendAmounts.slice(1),
         });
       } catch (error) {
-        // Mark the mint as unhealthy so future requests skip it
-        if (isNetworkFetchError(error)) {
+        // Mark the mint as unhealthy so future requests skip it. A cooldown
+        // skip is not a fresh failure — re-marking would keep pushing the
+        // cooldown timestamp forward on every request and the mint would
+        // never be retried.
+        if (!(error instanceof MintInCooldownError) && isNetworkFetchError(error)) {
           markMintUnhealthy(mintUrl);
         }
         logger.error("Error in walletAdapter sendToken:", error);
@@ -488,6 +549,16 @@ export async function createWalletAdapter(
       unit: "sat" | "msat";
       message?: string;
     }> {
+      // A token the mint has already burned will never come back. The SDK
+      // retries the stored token on every 402, so short-circuit here rather
+      // than paying a mint round-trip per request forever.
+      const tokenKey = fingerprintToken(token);
+      if (spentTokens.has(tokenKey)) {
+        const message = "proofs already spent (known dead token, not retried)";
+        logger.debug(`[wallet] receiveToken: skipping known-spent token ${tokenKey}`);
+        return { success: false, amount: 0, unit: "sat", message };
+      }
+
       try {
         const message = await client.receiveCashu(token);
         const { amount, unit } = decodeCashuTokenAmount(token);
@@ -495,6 +566,14 @@ export async function createWalletAdapter(
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
+        // Remember terminally-dead tokens, but never transient ones: a mint
+        // that is merely unreachable now may accept the same token later.
+        if (isTerminalReceiveError(errorMessage)) {
+          rememberSpentToken(tokenKey);
+          logger.warn(
+            `[wallet] receiveToken: token ${tokenKey} is permanently unspendable (${errorMessage}); it will not be retried`,
+          );
+        }
         // Mark the mint as unhealthy if it's a network error
         // (receiveCashu errors include the mint URL in the message)
         if (isNetworkFetchError(error)) {

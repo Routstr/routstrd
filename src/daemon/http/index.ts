@@ -19,6 +19,7 @@ import { decodeCashuTokenAmount } from "../wallet";
 import { receiveBolt11WithMintFallback } from "../wallet/mint-fallback";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
+import { applyDefaultMaxTokens } from "./default-max-tokens";
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -1247,8 +1248,20 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    const bodyObj = requestBody as Record<string, unknown>;
+    let bodyObj = requestBody as Record<string, unknown>;
     const modelId = typeof bodyObj.model === "string" ? bodyObj.model : "";
+
+    // Without a max_tokens the provider has to reserve the model's whole
+    // context window at its completion rate, which can exceed the wallet
+    // balance and fail the request before it is ever sent.
+    const { body: cappedBody, injected: injectedMaxTokens } = applyDefaultMaxTokens(
+      bodyObj,
+      url.pathname,
+    );
+    if (injectedMaxTokens !== null) {
+      bodyObj = cappedBody;
+      requestBody = cappedBody;
+    }
 
     if (!modelId) {
       sendJson(res, 400, { error: "Missing required 'model' field." });
@@ -1276,6 +1289,13 @@ export function createDaemonRequestHandler(deps: {
       const reqId = randomBytes(4).toString("hex");
       const reqLogger = sdkLogger.child(`req:${reqId}`);
       logger.log(`[req:${reqId}] Routing request with path: `, url.pathname);
+      if (injectedMaxTokens !== null) {
+        logger.log(
+          `[req:${reqId}] No max_tokens supplied — defaulting to ${injectedMaxTokens} so the ` +
+            `provider reserves a bounded amount instead of the model's full context ` +
+            `(set max_tokens explicitly, or ROUTSTRD_DEFAULT_MAX_TOKENS=off to disable)`,
+        );
+      }
 
       const response = await routeRequests({
         modelId,

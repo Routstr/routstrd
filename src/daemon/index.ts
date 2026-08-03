@@ -191,7 +191,7 @@ async function main(): Promise<void> {
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
-    createModelService(modelManager, store);
+    createModelService(modelManager, store, provider ?? undefined);
 
   const walletClient = createCocodClient({ cocodPath: config.cocodPath });
 
@@ -232,7 +232,13 @@ async function main(): Promise<void> {
       requestResponseLogSink,
     },
   );
-  installMintFallbackTopUp(routeClient, walletClient, walletAdapter, daemonSdkLogger, provider);
+  installMintFallbackTopUp(
+    routeClient,
+    walletClient,
+    walletAdapter,
+    daemonSdkLogger,
+    provider ?? undefined,
+  );
 
   const refundClient = new RoutstrClient(
     walletAdapter,
