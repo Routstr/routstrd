@@ -1,9 +1,11 @@
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
+import { consumeRecoveryStream } from "./utils/recovery-stream";
 import {
   handleDaemonCommand,
   callDaemon,
+  callDaemonRaw,
   callAuth,
   ensureDaemonRunning,
   isDaemonRunning,
@@ -2765,6 +2767,55 @@ walletCmd
       }
     },
   );
+
+walletCmd
+  .command("recover-mint")
+  .description(
+    "Re-derive this wallet's proofs for a mint from its NUT-09 restore endpoint",
+  )
+  .requiredOption("-m, --mint-url <url>", "Mint URL to recover proofs from")
+  .action(async (options: { mintUrl: string }) => {
+    await warnIfWalletRecovering();
+    await ensureDaemonRunning();
+
+    try {
+      const response = await callDaemonRaw("/wallet/recover/mint", {
+        method: "POST",
+        body: { url: options.mintUrl },
+      });
+
+      // Request validation fails before streaming starts, so those errors
+      // still arrive as a normal JSON response.
+      if (!response.ok) {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const data = (await response.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          console.error(data.error || `HTTP ${response.status}`);
+        } else {
+          console.error(`HTTP ${response.status}`);
+        }
+        process.exit(1);
+      }
+
+      const message = await consumeRecoveryStream(response.body, (progress) => {
+        console.log(progress);
+      });
+      console.log(`\u2713 ${message}`);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running and failed to auto-start");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
 
 const walletReceiveCmd = walletCmd
   .command("receive")
