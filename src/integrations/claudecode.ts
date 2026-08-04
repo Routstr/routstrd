@@ -27,7 +27,8 @@ export async function installClaudeCodeIntegration(
       settings = JSON.parse(content);
     }
   } catch (error) {
-    console.error(`Error reading ${configPath}, creating new one.`);
+    console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   if (!settings.env) {

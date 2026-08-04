@@ -40,8 +40,9 @@ export async function installPiIntegration(
       const content = await readFile(configPath, "utf-8");
       piConfig = JSON.parse(content) as PiConfig;
     }
-  } catch {
-    piConfig = {};
+  } catch (error) {
+    console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   if (!piConfig.providers) {
