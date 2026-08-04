@@ -6,6 +6,8 @@ import { installOpenClawIntegration } from "./openclaw";
 import { installClaudeCodeIntegration } from "./claudecode";
 import { installHermesIntegration } from "./hermes";
 
+const HOME = process.env.HOME || process.env.USERPROFILE || "";
+
 export interface IntegrationConfig {
   clientId: string;
   name: string;
@@ -28,27 +30,27 @@ export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
   opencode: {
     clientId: "opencode",
     name: "OpenCode",
-    configPath: join(process.env.HOME || "", ".config/opencode/opencode.json"),
+    configPath: join(HOME, ".config/opencode/opencode.json"),
   },
   "pi-agent": {
     clientId: "pi-agent",
     name: "Pi Agent",
-    configPath: join(process.env.HOME || "", ".pi/agent/models.json"),
+    configPath: join(HOME, ".pi/agent/models.json"),
   },
   openclaw: {
     clientId: "openclaw",
     name: "OpenClaw",
-    configPath: join(process.env.HOME || "", ".openclaw/openclaw.json"),
+    configPath: join(HOME, ".openclaw/openclaw.json"),
   },
   "claude-code": {
     clientId: "claude-code",
     name: "Claude Code",
-    configPath: join(process.env.HOME || "", ".claude/settings.json"),
+    configPath: join(HOME, ".claude/settings.json"),
   },
   hermes: {
     clientId: "hermes",
     name: "Hermes",
-    configPath: join(process.env.HOME || "", ".hermes/config.yaml"),
+    configPath: join(HOME, ".hermes/config.yaml"),
   },
 };
 
