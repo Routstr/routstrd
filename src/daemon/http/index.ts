@@ -21,6 +21,24 @@ import { decodeCashuTokenAmount } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 
+// Hop-by-hop headers describe the *upstream* connection, not this one, and must
+// never be copied onto our response. In particular, copying the upstream's
+// `Transfer-Encoding: chunked` while Node also frames the streamed body as
+// chunked produces a duplicated `Transfer-Encoding: chunked, chunked` header,
+// which strict HTTP/1.x clients (e.g. Go's net/http) reject with
+// "too many transfer encodings". Node derives Content-Length for buffered
+// bodies and Transfer-Encoding: chunked for streams itself.
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
@@ -1512,10 +1530,13 @@ export function createDaemonRequestHandler(deps: {
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });
 
-      // Bridge the Web `Response` to the Node `ServerResponse` with no
-      // transforms: status + headers + pipe(body → res).
+      // Bridge the Web `Response` to the Node `ServerResponse`: status +
+      // headers + pipe(body → res). Hop-by-hop headers are dropped (see
+      // HOP_BY_HOP_HEADERS) so Node computes correct framing for THIS
+      // connection.
       res.statusCode = response.status;
       response.headers.forEach((value, key) => {
+        if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) return;
         res.setHeader(key, value);
       });
 
