@@ -54,7 +54,19 @@ import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
-import { createCocoClient } from "./wallet/coco-client";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
+import {
+  assertLegacyCocodNotRunning,
+  claimLegacyCocodPidFile,
+  createCocoClient,
+  stopLegacyCocod,
+} from "./wallet/coco-client";
+import { migrateLegacyWallet } from "./wallet/migration";
+import {
+  legacyCocodPidPath,
+  legacyCocodSocketPath,
+} from "./wallet/paths";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -114,6 +126,41 @@ async function main(): Promise<void> {
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
     createModelService(modelManager, providerManager, store);
+
+  // The daemon may be launched directly (or by an older/global CLI), so do
+  // not rely on the parent command having stopped the external wallet first.
+  await stopLegacyCocod({
+    socketPath: legacyCocodSocketPath(),
+    pidFilePath: legacyCocodPidPath(),
+  });
+
+  let migrationLockOwner: number | undefined;
+  const migration = await migrateLegacyWallet({
+    assertLegacyStopped: () =>
+      assertLegacyCocodNotRunning({
+        socketPath: legacyCocodSocketPath(),
+        pidFilePath: legacyCocodPidPath(),
+        ignorePid: migrationLockOwner,
+      }),
+    acquireLegacyLock: () => {
+      mkdirSync(dirname(legacyCocodPidPath()), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const release = claimLegacyCocodPidFile({
+        pidFilePath: legacyCocodPidPath(),
+      });
+      migrationLockOwner = process.pid;
+      return () => {
+        migrationLockOwner = undefined;
+        release();
+      };
+    },
+  });
+  if (migration.status === "migrated") {
+    startupProgress(`Wallet migrated from ${migration.from} to ${migration.to}.`);
+    for (const warning of migration.cleanupWarnings) logger.warn(warning);
+  }
 
   const walletClient = await createCocoClient();
 
