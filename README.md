@@ -74,6 +74,13 @@ With custom port:
 routstrd start --port 9000
 ```
 
+The daemon binds to `127.0.0.1` by default. To expose it on another interface:
+```sh
+routstrd start --host 0.0.0.0
+```
+
+Only expose the daemon behind appropriate network controls.
+
 With specific provider:
 ```sh
 routstrd start --provider https://your-provider.com
@@ -100,6 +107,28 @@ Stop the daemon:
 ```sh
 routstrd stop
 ```
+
+### NPC (Lightning Address)
+
+The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
+daemon a persistent Lightning address backed by the wallet's Cashu mints.
+Payments to the address are imported into the wallet automatically (websocket
+push, plus manual sync on demand).
+
+```sh
+# Show your NPC Lightning address (username@npubx.cash, or npub fallback)
+routstrd wallet npc address
+
+# Claim a username (quote first, then confirm to pay the claim fee from the wallet)
+routstrd wallet npc username myname
+routstrd wallet npc username myname --confirm
+
+# Manually sync paid NPC quotes into the wallet
+routstrd wallet npc sync
+```
+
+Equivalent daemon endpoints: `GET /wallet/npc/address`,
+`POST /wallet/npc/username`, `POST /wallet/npc/sync`.
 
 ### Daemon API
 
@@ -139,6 +168,7 @@ Configuration is stored in `~/.routstrd/config.json`:
 ```json
 {
   "port": 8008,
+  "host": "127.0.0.1",
   "provider": null,
   "cocodPath": null
 }

@@ -1,9 +1,10 @@
-import { ModelManager, type SdkStore } from "@routstr/sdk";
+import { ModelManager, ProviderManager, type SdkStore } from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
 
 export type ModelProviderInfo = {
   baseUrl: string;
+  disabled: boolean;
   pricing: {
     prompt: number;
     completion: number;
@@ -16,7 +17,11 @@ export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
 };
 
-export function createModelService(modelManager: ModelManager, store: SdkStore) {
+export function createModelService(
+  modelManager: ModelManager,
+  providerManager: ProviderManager,
+  store: SdkStore,
+) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
   const ensureProvidersBootstrapped = (): Promise<void> => {
@@ -77,33 +82,33 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
   ): Promise<ModelWithProviders | null> => {
     await ensureProvidersBootstrapped();
 
-    const allModels = modelManager.getAllCachedModels();
-    const providers: ModelProviderInfo[] = [];
+    const disabledSet = new Set<string>(store.getState().disabledProviders || []);
 
-    for (const [baseUrl, models] of Object.entries(allModels)) {
-      const model = models.find((m) => m.id === modelId);
-      if (model && model.sats_pricing) {
-        providers.push({
-          baseUrl,
-          pricing: {
-            prompt: model.sats_pricing.prompt,
-            completion: model.sats_pricing.completion,
-            request: model.sats_pricing.request,
-            max_cost: model.sats_pricing.max_cost,
-          },
-        });
-      }
-    }
+    // Use the SDK ranking (sorted by prompt+completion per million tokens)
+    // so the display order matches real routing. includeDisabled keeps
+    // disabled providers visible so we can annotate them.
+    const ranking = providerManager.getProviderPriceRankingForModel(modelId, {
+      includeDisabled: true,
+    });
 
-    // Sort by max_cost (cheapest first)
-    providers.sort((a, b) => a.pricing.max_cost - b.pricing.max_cost);
+    const providers: ModelProviderInfo[] = ranking.map((entry: any) => ({
+      baseUrl: entry.baseUrl,
+      disabled: disabledSet.has(entry.baseUrl),
+      pricing: {
+        prompt: entry.promptPerMillion / 1_000_000,
+        completion: entry.completionPerMillion / 1_000_000,
+        request: entry.model.sats_pricing?.request ?? 0,
+        max_cost: entry.model.sats_pricing?.max_cost ?? 0,
+      },
+    }));
 
     if (providers.length === 0) {
       return null;
     }
 
-    // Get model metadata from first provider that has it
+    // Get model metadata from first (cheapest) provider
     const cheapest = providers[0]!;
+    const allModels = modelManager.getAllCachedModels();
     const firstProvider = allModels[cheapest.baseUrl];
     const modelInfo = firstProvider?.find((m: { id: string }) => m.id === modelId);
 

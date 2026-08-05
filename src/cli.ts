@@ -1,8 +1,10 @@
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
+import { consumeRecoveryStream } from "./utils/recovery-stream";
 import {
   handleDaemonCommand,
   callDaemon,
+  callDaemonRaw,
   callAuth,
   ensureDaemonRunning,
   isDaemonRunning,
@@ -15,7 +17,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import {
   CONFIG_DIR,
@@ -27,14 +29,13 @@ import {
 } from "./utils/config";
 import { logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { stopLegacyCocod } from "./daemon/wallet/coco-client";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
-import {
-  isCocodInstalled,
-  resolveCocodExecutable,
-} from "./daemon/wallet/cocod-client";
+import { generateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
 import packageJson from "../package.json" with { type: "json" };
 import {
   compareVersions,
@@ -86,32 +87,46 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
-async function installCocodOrExit(): Promise<void> {
-  console.log("cocod not found. Installing globally with bun...");
+export function initializeWallet(
+  walletDir =
+    process.env.COCOD_DIR ||
+    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`,
+): void {
+  const walletConfig = `${walletDir}/config.json`;
 
-  const installProc = Bun.spawn(
-    ["bun", "install", "--global", "@routstr/cocod"],
-    {
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  );
+  // The wallet directory and config contain the plaintext seed phrase. Correct
+  // permissions on existing installations as well as newly created ones.
+  mkdirSync(walletDir, { recursive: true, mode: 0o700 });
+  chmodSync(walletDir, 0o700);
 
-  const installCode = await installProc.exited;
-  if (installCode !== 0 || !(await isCocodInstalled())) {
-    console.error(
-      "Failed to install cocod. Please run 'bun install --global @routstr/cocod' manually.",
-    );
-    throw new Error("cocod installation failed");
+  if (existsSync(walletConfig)) {
+    chmodSync(walletConfig, 0o600);
+    console.log("Wallet already initialized.");
+    return;
   }
 
-  console.log("cocod installed successfully.");
+  const mnemonic = generateMnemonic(wordlist);
+  const config = {
+    version: 1,
+    mnemonic,
+    encrypted: false,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(walletConfig, JSON.stringify(config, null, 2), {
+    mode: 0o600,
+    flag: "wx",
+  });
+  console.log("Initialized. Mnemonic:", mnemonic);
+  console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
 /**
- * Restart the routstrd and cocod daemons after an update so the new
- * binaries take effect immediately.  Failures are collected and reported
- * but never roll back the update itself.
+ * Restart the routstrd daemon after an update so the new binary takes
+ * effect immediately.  Failures are collected and reported but never
+ * roll back the update itself.
+ *
+ * Note: cocod is no longer a separate process — the wallet now runs
+ * in-process via coco-core, so there is nothing else to restart.
  */
 async function restartDaemonsAfterUpdate(): Promise<void> {
   const config = await loadConfig();
@@ -129,23 +144,28 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
       } else {
         console.log("\nRestarting routstrd daemon...");
 
-        // Graceful stop — the /stop endpoint closes the HTTP server
-        // (draining active connections) then exits.
         await callDaemon("/stop", { method: "POST" });
 
-        for (let i = 0; i < 50; i++) {
+        // Wait for HTTP health check to fail AND pidfile to be released.
+        const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
+        for (let i = 0; i < 100; i++) {
           await new Promise((resolve) => setTimeout(resolve, 100));
-          if (!(await isDaemonRunning())) break;
+          const healthDown = !(await isDaemonRunning());
+          const pidFileReleased = !existsSync(pidFilePath);
+          if (healthDown && pidFileReleased) break;
         }
 
         if (await isDaemonRunning()) {
-          throw new Error("routstrd did not stop within 5 seconds");
+          throw new Error("routstrd did not stop within 10 seconds");
         }
         console.log("routstrd daemon stopped.");
+
+        await stopLegacyCocod();
 
         console.log("Starting routstrd daemon...");
         await startDaemon({
           port: String(config.port || 8008),
+          host: config.host || undefined,
           provider: config.provider || undefined,
         });
         console.log("routstrd daemon restarted.");
@@ -156,80 +176,19 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
     }
   }
 
-  // --- cocod daemon ---
-  try {
-    const cocodExecutable = resolveCocodExecutable(config.cocodPath);
-
-    // Check whether cocod is currently running.
-    const pingProc = Bun.spawn([cocodExecutable, "ping"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    const cocodWasRunning = (await pingProc.exited) === 0;
-
-    if (!cocodWasRunning) {
-      console.log("\ncocod daemon was not running — skipping restart.");
-    } else {
-      console.log("\nRestarting cocod daemon...");
-
-      const stopProc = Bun.spawn([cocodExecutable, "stop"], {
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const stopCode = await stopProc.exited;
-      if (stopCode !== 0) {
-        throw new Error(`cocod stop exited with code ${stopCode}`);
-      }
-      console.log("cocod daemon stopped.");
-
-      // Start cocod in the background (detached, like the wallet client does).
-      const env = { ...process.env };
-      const startProc = Bun.spawn([cocodExecutable, "daemon"], {
-        stdout: "ignore",
-        stderr: "ignore",
-        stdin: "ignore",
-        detached: true,
-        env,
-      });
-      startProc.unref?.();
-
-      // Poll until cocod responds to ping (max ~10 s).
-      let started = false;
-      for (let i = 0; i < 100; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const poll = Bun.spawn([cocodExecutable, "ping"], {
-          stdout: "ignore",
-          stderr: "ignore",
-        });
-        if ((await poll.exited) === 0) {
-          started = true;
-          break;
-        }
-      }
-
-      if (!started) {
-        throw new Error("cocod did not come back up within 10 seconds");
-      }
-      console.log("cocod daemon restarted.");
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    failures.push(`cocod daemon: ${msg}`);
-  }
-
   // --- report ---
   if (failures.length > 0) {
-    console.error("\n⚠ Some daemons failed to restart:");
+    console.error("\n⚠ Failed to restart daemon:");
     for (const f of failures) {
       console.error(`  - ${f}`);
     }
     console.error(
-      "The update was applied but may not take effect until daemons are manually restarted.",
+      "The update was applied but may not take effect until the daemon is manually restarted.",
     );
     process.exit(1);
   }
 
-  console.log("\n✓ All daemons restarted successfully.");
+  console.log("\n✓ Daemon restarted successfully.");
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -274,76 +233,10 @@ async function initDaemon(): Promise<void> {
     console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
   }
 
-  if (!(await isCocodInstalled(config.cocodPath))) {
-    if (config.cocodPath) {
-      logger.error(
-        `Configured cocod executable was not found: ${config.cocodPath}`,
-      );
-      return;
-    }
-
-    await installCocodOrExit();
-  }
-
-  const cocodExecutable = resolveCocodExecutable(config.cocodPath);
-
   console.log(`Database will be stored at: ${DB_PATH}`);
-  console.log("\nInitializing cocod...");
+  initializeWallet();
 
-  const initProc = Bun.spawn([cocodExecutable, "init"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  let initStdout = "";
-  let initStderr = "";
-
-  const stdoutDone = initProc.stdout
-    ? initProc.stdout.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStdout += text;
-            process.stdout.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const stderrDone = initProc.stderr
-    ? initProc.stderr.pipeTo(
-        new WritableStream<Uint8Array>({
-          write(chunk) {
-            const text = new TextDecoder().decode(chunk);
-            initStderr += text;
-            process.stderr.write(text);
-          },
-        }),
-      )
-    : Promise.resolve();
-
-  const [initCode] = await Promise.all([
-    initProc.exited,
-    stdoutDone,
-    stderrDone,
-  ]);
-  const combinedOutput = `${initStdout}\n${initStderr}`.toLowerCase();
-  const alreadyInitialized = combinedOutput.includes("already initialized");
-
-  if (initCode !== 0 && !alreadyInitialized) {
-    console.error(
-      "Failed to initialize cocod. Please run 'cocod init' manually.",
-    );
-    return;
-  }
-
-  if (alreadyInitialized) {
-    console.log("cocod is already initialized.");
-  } else {
-    console.log("cocod initialized successfully.");
-  }
-
-  await startDaemon({ port: String(config.port || 8008) });
+  await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
 
   await setupIntegration(config);
 
@@ -366,7 +259,7 @@ program
 
 program
   .command("update")
-  .description("Update routstrd and cocod to the latest versions")
+  .description("Update routstrd to the latest version")
   .action(async () => {
     const packages = [
       { name: "routstrd", label: "routstrd" },
@@ -590,7 +483,7 @@ program
 program
   .command("onboard")
   .description(
-    "Initialize routstrd (creates config directory and initializes cocod)",
+    "Initialize routstrd (creates config directory and initializes wallet)",
   )
   .action(async () => {
     await requireLocalDaemon();
@@ -602,19 +495,15 @@ program
   .command("start")
   .description("Start the background daemon")
   .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address (default: 127.0.0.1)")
   .option("-p, --provider <provider>", "Default provider to use")
-  .action(async (options: { port?: string; provider?: string }) => {
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
-    if (!(await isCocodInstalled(config.cocodPath))) {
-      const installHint = config.cocodPath
-        ? `Configured cocod executable was not found: ${config.cocodPath}`
-        : "cocod is not installed. Run 'routstrd onboard' first to install cocod.";
-      logger.error(installHint);
-      process.exit(1);
-    }
+    await stopLegacyCocod();
     await startDaemon({
       port: options.port || String(config.port || 8008),
+      host: options.host || config.host || undefined,
       provider: options.provider,
     });
   });
@@ -654,8 +543,92 @@ program
 program
   .command("balance")
   .description("Get wallet and API key balances")
-  .action(async () => {
+  .option("--api-keys", "List all stored API keys (baseUrl + key + balance)", false)
+  .option(
+    "--delete-api-keys <baseUrl>",
+    "Delete the API key stored for the given provider base URL (refunds balance first)",
+  )
+  .option(
+    "--mint-url <url>",
+    "Mint URL to refund the deleted API key balance to (defaults to first mint in wallet)",
+  )
+  .action(async (options: { apiKeys: boolean; deleteApiKeys?: string; mintUrl?: string }) => {
     await ensureDaemonRunning();
+
+    if (options.deleteApiKeys) {
+      const baseUrl = options.deleteApiKeys;
+      const queryParts = [`baseUrl=${encodeURIComponent(baseUrl)}`];
+      if (options.mintUrl) {
+        queryParts.push(`mintUrl=${encodeURIComponent(options.mintUrl)}`);
+      }
+      const result = await callDaemon(
+        `/keys/api/delete?${queryParts.join("&")}`,
+        { method: "DELETE" },
+      );
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+      const out = result.output as
+        | {
+            baseUrl?: string;
+            removed?: boolean;
+            refunded?: boolean;
+            refundedAmount?: number;
+            refundMessage?: string;
+            message?: string;
+          }
+        | undefined;
+      if (out) {
+        console.log(out.message ?? `Removed API key for ${baseUrl}`);
+        if (out.refunded && out.refundedAmount !== undefined) {
+          console.log(`  Refunded: ${out.refundedAmount} sats`);
+        } else if (out.refundMessage) {
+          console.log(`  Refund: ${out.refundMessage}`);
+        }
+      }
+      return;
+    }
+
+    if (options.apiKeys) {
+      const result = await callDaemon("/keys/api");
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const data = result.output as
+        | {
+            apiKeys: Array<{
+              baseUrl: string;
+              key: string;
+              balance: number;
+              lastUsed: number | null;
+            }>;
+            count: number;
+            total: number;
+            unit: string;
+          }
+        | undefined;
+
+      console.log("=== API Keys ===\n");
+      if (!data || data.apiKeys.length === 0) {
+        console.log("  No API keys stored.");
+        return;
+      }
+      for (const k of data.apiKeys) {
+        const lastUsed = k.lastUsed
+          ? new Date(k.lastUsed).toISOString()
+          : "never";
+        console.log(`  ${k.baseUrl}`);
+        console.log(`    key:      ${k.key}`);
+        console.log(`    balance:  ${k.balance} ${data.unit}`);
+        console.log(`    lastUsed: ${lastUsed}`);
+        console.log("");
+      }
+      console.log(`  Total: ${data.apiKeys.length} key(s), ${data.total} ${data.unit}`);
+      return;
+    }
 
     const [walletResult, keysResult] = await Promise.all([
       callDaemon("/balance"),
@@ -780,6 +753,7 @@ program
             context_length?: number;
             providers: Array<{
               baseUrl: string;
+              disabled?: boolean;
               pricing: {
                 prompt: number;
                 completion: number;
@@ -806,7 +780,9 @@ program
       }
       console.log(`\n  Providers (${modelData.providers.length}):`);
       for (const provider of modelData.providers) {
-        console.log(`\n    ${provider.baseUrl}`);
+        console.log(
+          `\n    ${provider.baseUrl}${provider.disabled ? "  [Disabled]" : ""}`,
+        );
         console.log(
           `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
         );
@@ -1270,6 +1246,152 @@ npubsCmd
     );
   });
 
+program
+  .command("history")
+  .description("Show wallet transaction history")
+  .option("-n, --limit <number>", "Number of entries to show", "50")
+  .option("--offset <number>", "Number of entries to skip", "0")
+  .option("-v, --verbose", "Show full details including encoded Cashu tokens")
+  .option("--json", "Output raw JSON with token objects (no encoding)")
+  .action(async (options: { limit: string; offset: string; verbose: boolean; json: boolean }) => {
+    await ensureDaemonRunning();
+
+    const limit = Math.min(parseInt(options.limit, 10) || 50, 1000);
+    const offset = parseInt(options.offset, 10) || 0;
+
+    const result = await callDaemon(
+      `/wallet/history?offset=${offset}&limit=${limit}`,
+    );
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const data = result.output as
+      | { entries?: Record<string, unknown>[]; offset?: number; limit?: number }
+      | undefined;
+    const entries = data?.entries || [];
+
+    if (entries.length === 0) {
+      console.log("No transaction history yet.");
+      return;
+    }
+
+    if (options.json) {
+      const jsonOutput = entries.map((e: Record<string, unknown>) => {
+        const entry = { ...e };
+        delete entry.encodedToken;
+        return entry;
+      });
+      console.log(JSON.stringify(jsonOutput, null, 2));
+      return;
+    }
+
+    if (options.verbose) {
+      for (const entry of entries) {
+        const e = entry as Record<string, unknown>;
+        const display: Record<string, unknown> = {};
+        for (const key of Object.keys(e).sort()) {
+          display[key] = e[key];
+        }
+        if (e.encodedToken && e.token) {
+          display.token = e.encodedToken;
+          delete display.encodedToken;
+        }
+        console.log(JSON.stringify(display, null, 2));
+      }
+      return;
+    }
+
+    const idCol = "ID";
+    const timeCol = "Date/Time";
+    const typeCol = "Type";
+    const mintCol = "Mint";
+    const amtCol = "Amount";
+
+    const rows = entries.map((entry: Record<string, unknown>) => {
+      const id = String(entry.id ?? "");
+      const time = new Date(Number(entry.createdAt)).toISOString().replace("T", " ").slice(0, 19);
+      const type = String(entry.type ?? "").toUpperCase();
+      const mint = String(entry.mintUrl ?? "");
+      const unit = String(entry.unit ?? "sat");
+      const amount = `${entry.amount} ${unit}`;
+      return { id, time, type, mint, amount };
+    });
+
+    const widths = {
+      id: Math.max(idCol.length, ...rows.map((r) => r.id.length)),
+      time: Math.max(timeCol.length, ...rows.map((r) => r.time.length)),
+      type: Math.max(typeCol.length, ...rows.map((r) => r.type.length)),
+      mint: Math.max(mintCol.length, ...rows.map((r) => r.mint.length)),
+      amount: Math.max(amtCol.length, ...rows.map((r) => r.amount.length)),
+    };
+
+    const pad = (s: string, w: number) => s.padEnd(w);
+    const sep = Object.values(widths).map((w) => "-".repeat(w)).join(" | ");
+
+    console.log(
+      `${pad(idCol, widths.id)} | ${pad(timeCol, widths.time)} | ${pad(typeCol, widths.type)} | ${pad(mintCol, widths.mint)} | ${pad(amtCol, widths.amount)}`,
+    );
+    console.log(sep);
+
+    for (const row of rows) {
+      console.log(
+        `${pad(row.id, widths.id)} | ${pad(row.time, widths.time)} | ${pad(row.type, widths.type)} | ${pad(row.mint, widths.mint)} | ${pad(row.amount, widths.amount)}`,
+      );
+    }
+  });
+
+// Recover - re-derive proofs from a mint's restore endpoint
+program
+  .command("recover")
+  .description("Recover wallet proofs from a mint's restore endpoint")
+  .requiredOption(
+    "-m, --mint-url <url>",
+    "Mint URL to recover proofs from",
+  )
+  .action(async (options: { mintUrl: string }) => {
+    await ensureDaemonRunning();
+    try {
+      const response = await callDaemonRaw("/wallet/recover", {
+        method: "POST",
+        body: { url: options.mintUrl },
+      });
+
+      // Validation errors (e.g. missing field) come back as JSON before any
+      // streaming begins.
+      if (!response.ok) {
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const data = (await response
+            .json()
+            .catch(() => ({}))) as { error?: string };
+          console.error(data.error || `HTTP ${response.status}`);
+        } else {
+          console.error(`HTTP ${response.status}`);
+        }
+        process.exit(1);
+      }
+
+      const message = await consumeRecoveryStream(response.body, (progress) => {
+        console.log(progress);
+      });
+      console.log(`\u2713 ${message}`);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running and failed to auto-start");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
+
 // Monitor - interactive TUI
 program
   .command("monitor")
@@ -1495,6 +1617,47 @@ walletMintsCmd
     });
   });
 
+walletMintsCmd
+  .command("set-default <url>")
+  .description("Set the default mint for wallet operations")
+  .action(async (url: string) => {
+    await handleDaemonCommand("/wallet/mints/default", {
+      method: "POST",
+      body: { url },
+    });
+  });
+
+const walletNpcCmd = walletCmd
+  .command("npc")
+  .description("NPC (npubx.cash) Lightning address operations");
+
+walletNpcCmd
+  .command("address")
+  .description("Show this wallet's NPC Lightning address")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/npc/address");
+  });
+
+walletNpcCmd
+  .command("username <name>")
+  .description(
+    "Claim an NPC username (pays the claim fee from the wallet with --confirm)",
+  )
+  .option("--confirm", "Confirm payment of the username claim fee")
+  .action(async (name: string, options: { confirm?: boolean }) => {
+    await handleDaemonCommand("/wallet/npc/username", {
+      method: "POST",
+      body: { username: name, confirm: options.confirm === true },
+    });
+  });
+
+walletNpcCmd
+  .command("sync")
+  .description("Manually sync paid NPC quotes into the wallet")
+  .action(async () => {
+    await handleDaemonCommand("/wallet/npc/sync", { method: "POST" });
+  });
+
 // ── NWC (Nostr Wallet Connect) commands ─────────────────────────
 
 const nwcCmd = program
@@ -1661,6 +1824,8 @@ serviceCmd
 
     console.log("Starting routstrd via PM2...");
     try {
+      await stopLegacyCocod();
+
       // Use --interpreter bun to ensure it runs with bun
       execSync(`pm2 start "${daemonPath}" --name routstrd --interpreter bun`, {
         stdio: "inherit",
@@ -1708,8 +1873,9 @@ program
   .command("restart")
   .description("Restart the background daemon")
   .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address (default: 127.0.0.1)")
   .option("-p, --provider <provider>", "Default provider to use")
-  .action(async (options: { port?: string; provider?: string }) => {
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
     const wasRunning = await isDaemonRunning();
@@ -1718,16 +1884,19 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      // Wait for daemon to fully stop
-      for (let i = 0; i < 50; i++) {
+      // Wait for HTTP health check to fail AND pidfile to be released.
+      const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
+      for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
-        if (!(await isDaemonRunning())) {
+        const healthDown = !(await isDaemonRunning());
+        const pidFileReleased = !existsSync(pidFilePath);
+        if (healthDown && pidFileReleased) {
           break;
         }
       }
 
       if (await isDaemonRunning()) {
-        logger.error("Daemon failed to stop within 5 seconds");
+        logger.error("Daemon failed to stop within 10 seconds");
         process.exit(1);
       }
       console.log("Daemon stopped.");
@@ -1735,9 +1904,12 @@ program
       console.log("Daemon was not running.");
     }
 
+    await stopLegacyCocod();
+
     console.log("Starting daemon...");
     await startDaemon({
       port: options.port || String(config.port || 8008),
+      host: options.host || config.host || undefined,
       provider: options.provider,
     });
     console.log("Daemon restarted.");
@@ -1820,6 +1992,7 @@ program
     console.log("Starting daemon...");
     await startDaemon({
       port: String(config.port || 8008),
+      host: config.host || undefined,
       provider: config.provider || undefined,
     });
     console.log(`Daemon restarted with mode '${selectedMode}'.`);

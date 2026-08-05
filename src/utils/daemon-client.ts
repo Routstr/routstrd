@@ -30,9 +30,11 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
 }
 
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
-  return (
-    config.daemonUrl?.replace(/\/$/, "") || `http://localhost:${config.port}`
-  );
+  if (config.daemonUrl) {
+    return config.daemonUrl.replace(/\/$/, "");
+  }
+  const host = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
+  return `http://${host}:${config.port}`;
 }
 
 export function getAuthBaseUrl(config: RoutstrdConfig): string {
@@ -93,6 +95,46 @@ export async function callDaemon(
   return _callUrl(baseUrl, path, options, config);
 }
 
+/**
+ * Performs an authenticated daemon request and returns the raw fetch
+ * `Response` so callers can stream the body (e.g. for live progress output).
+ * Handles NIP-98 auth for remote daemons exactly like `callDaemon`.
+ */
+export async function callDaemonRaw(
+  path: string,
+  options: { method?: HttpMethod; body?: object } = {},
+): Promise<Response> {
+  const config = await loadConfig();
+  const baseUrl = getDaemonBaseUrl(config);
+  const { method = "POST", body } = options;
+  const url = `${baseUrl}${path}`;
+
+  const bodyString = body ? JSON.stringify(body) : undefined;
+  const bodyBytes = bodyString
+    ? new TextEncoder().encode(bodyString)
+    : undefined;
+
+  let authorization: string | undefined;
+  if ((config.daemonUrl || config.authUrl) && config.nsec) {
+    const secretKey = parseSecretKey(config.nsec);
+    authorization = await createNIP98Authorization(
+      secretKey,
+      url,
+      method,
+      bodyBytes,
+    );
+  }
+
+  return fetch(url, {
+    method,
+    headers: {
+      ...(authorization ? { Authorization: authorization } : {}),
+      ...(bodyString ? { "Content-Type": "application/json" } : {}),
+    },
+    body: bodyString,
+  });
+}
+
 /** Like callDaemon but sends requests to the auth proxy URL instead.
  *  Falls back to the daemon URL if no authUrl is configured. */
 export async function callAuth(
@@ -145,6 +187,7 @@ export async function startDaemonProcess(): Promise<void> {
   const config = await loadConfig();
   await startDaemon({
     port: String(config.port || 8008),
+    host: config.host || undefined,
     provider: config.provider || undefined,
   });
 }

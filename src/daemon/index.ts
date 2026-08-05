@@ -33,6 +33,13 @@ function makeSdkLogger(prefix?: string): SdkLogger {
   };
 }
 const daemonSdkLogger: SdkLogger = makeSdkLogger();
+const STARTUP_LOG_PREFIX = "[routstrd:start]";
+
+function startupProgress(message: string): void {
+  logger.info(message);
+  console.log(`${STARTUP_LOG_PREFIX} ${message}`);
+}
+
 import { parseArgs } from "./args";
 import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
 import {
@@ -42,12 +49,12 @@ import {
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
-import { createCocodClient } from "./wallet/cocod-client";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
+import { createCocoClient } from "./wallet/coco-client";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -61,10 +68,12 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main(): Promise<void> {
+  startupProgress("Loading configuration...");
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
 
   const port = args.port;
+  const host = args.host || config.host || "127.0.0.1";
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
     process.env.ROUTSTRD_REQUEST_RESPONSE_LOG_DIR ||
@@ -80,9 +89,10 @@ async function main(): Promise<void> {
 
   await ensureDirs();
 
-  const updatedConfig = { ...config, port, provider };
+  const updatedConfig = { ...config, port, host, provider };
   saveDaemonConfig(updatedConfig);
 
+  startupProgress("Opening Routstr databases...");
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
@@ -93,6 +103,7 @@ async function main(): Promise<void> {
 
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
+  startupProgress("Routstr databases ready.");
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
@@ -102,9 +113,9 @@ async function main(): Promise<void> {
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
-    createModelService(modelManager, store);
+    createModelService(modelManager, providerManager, store);
 
-  const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+  const walletClient = await createCocoClient();
 
   // ── Auto-refill configuration ────────────────────────────────
   // Uses a getter that reads config from disk each cycle, so
@@ -139,11 +150,15 @@ async function main(): Promise<void> {
   );
 
   const server = createServer();
+  let shutdownDaemon: () => void = () => {
+    server.close(() => process.exit(0));
+  };
   server.on(
     "request",
     createDaemonRequestHandler({
       provider,
       server,
+      shutdown: () => shutdownDaemon(),
       store,
       walletClient,
       walletAdapter,
@@ -272,14 +287,37 @@ async function main(): Promise<void> {
     }
   };
 
+  let walletDisposePromise: Promise<void> | undefined;
+  const disposeWallet = (): Promise<void> => {
+    walletDisposePromise ??= walletClient.dispose?.() || Promise.resolve();
+    return walletDisposePromise;
+  };
+
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
-
+    void disposeWallet().catch((error) => {
+      logger.error("Failed to dispose wallet:", error);
+    });
   });
 
-  server.listen(port, async () => {
-    logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);
+  shutdownDaemon = () => {
+    server.close(() => {
+      void disposeWallet().finally(() => process.exit(0));
+    });
+  };
+
+  const shutdownForSignal = (signal: NodeJS.Signals) => {
+    logger.log(`Received ${signal}; shutting down...`);
+    shutdownDaemon();
+  };
+
+  process.once("SIGINT", shutdownForSignal);
+  process.once("SIGTERM", shutdownForSignal);
+
+  startupProgress("Starting HTTP server...");
+  server.listen(port, host, async () => {
+    logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
     if (requestResponseLogDir) {
       logger.log(`Raw request/response logs: ${requestResponseLogDir}`);
     }
@@ -309,6 +347,12 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   main().catch((error) => {
     logger.error("Failed to start Routstr daemon:", error);
+    // Also write to stderr so the spawning CLI can surface the real error
+    // (stdout/stderr are redirected to debug.log by start-daemon.ts).
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
     process.exit(1);
   });
 }
