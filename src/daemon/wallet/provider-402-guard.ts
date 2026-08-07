@@ -86,9 +86,20 @@ function safeStringify(value: unknown): string {
   }
 }
 
-/** Recursively find the first string-valued occurrence of `field`. */
-function findStringField(value: unknown, field: string): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
+/**
+ * Recursively find the first string-valued occurrence of `field`.
+ *
+ * Bounded to `maxDepth` levels so an adversarially deep or cyclic-ish 402
+ * body cannot cause runaway recursion. Real 402 bodies nest 3-4 levels deep
+ * at most (`{"detail":{"error":{"message":...,"code":...}}}`), so 10 is
+ * generous while still bounding the worst case.
+ */
+function findStringField(
+  value: unknown,
+  field: string,
+  maxDepth = 10,
+): string | undefined {
+  if (!value || typeof value !== "object" || maxDepth <= 0) return undefined;
 
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (key === field && typeof entry === "string" && entry.trim()) {
@@ -96,7 +107,7 @@ function findStringField(value: unknown, field: string): string | undefined {
     }
   }
   for (const entry of Object.values(value as Record<string, unknown>)) {
-    const nested = findStringField(entry, field);
+    const nested = findStringField(entry, field, maxDepth - 1);
     if (nested) return nested;
   }
   return undefined;

@@ -481,6 +481,62 @@ describe("Hardened fallback — concurrency & idempotency", () => {
   });
 });
 
+describe("Hardened fallback — SDK API drift detection", () => {
+  test("warns when topUp is missing from balance manager", () => {
+    // Simulate an SDK upgrade that renames or removes topUp.
+    const balanceManager = createBalanceManager();
+    delete (balanceManager as { topUp?: unknown }).topUp;
+    const client = { getBalanceManager: () => balanceManager };
+
+    const warnings: string[] = [];
+    installMintFallbackTopUp(
+      client as never,
+      createCocodClient(["https://mint-a.example"]),
+      createWalletAdapter(),
+      { log: () => undefined, warn: (msg: string) => warnings.push(msg), error: () => undefined },
+    );
+
+    // Should have warned, not silently swallowed.
+    expect(warnings.some((w) => w.includes("topUp not found"))).toBe(true);
+  });
+
+  test("warns when createProviderToken is missing from balance manager", () => {
+    const balanceManager = createBalanceManager();
+    delete (balanceManager as { createProviderToken?: unknown }).createProviderToken;
+    const client = { getBalanceManager: () => balanceManager };
+
+    const warnings: string[] = [];
+    installMintFallbackTopUp(
+      client as never,
+      createCocodClient(["https://mint-a.example"]),
+      createWalletAdapter(),
+      { log: () => undefined, warn: (msg: string) => warnings.push(msg), error: () => undefined },
+    );
+
+    expect(warnings.some((w) => w.includes("createProviderToken not found"))).toBe(true);
+  });
+
+  test("warns when _handleErrorResponse is missing from SDK client", () => {
+    // Simulate an SDK upgrade that renames _handleErrorResponse.
+    // createBalanceManager provides topUp + createProviderToken so those patches
+    // install cleanly, but the error-retry and 402-body-capture patches should warn.
+    const balanceManager = createBalanceManager();
+    const client = { getBalanceManager: () => balanceManager };
+
+    const warnings: string[] = [];
+    installMintFallbackTopUp(
+      client as never,
+      createCocodClient(["https://mint-a.example"]),
+      createWalletAdapter(),
+      { log: () => undefined, warn: (msg: string) => warnings.push(msg), error: () => undefined },
+    );
+
+    expect(
+      warnings.some((w) => w.includes("_handleErrorResponse not found")),
+    ).toBe(true);
+  });
+});
+
 describe("Hardened fallback — API key safety", () => {
   test("API key is not logged in error messages", async () => {
     const balanceManager = createBalanceManager();

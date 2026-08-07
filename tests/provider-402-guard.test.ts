@@ -56,6 +56,22 @@ describe("classifyProvider402", () => {
     expect(classifyProvider402("gateway timeout")).toBe("unknown");
     expect(classifyProvider402('{"detail":"something else"}')).toBe("unknown");
   });
+
+  test("finds limit_source at realistic nesting depth (4 levels)", () => {
+    // Real 402 bodies nest 3-4 levels deep.
+    const body = JSON.stringify({
+      detail: { error: { metadata: { limit_source: "openrouter_credits" } } },
+    });
+    expect(classifyProvider402(body)).toBe("provider_side");
+  });
+
+  test("does not crash on adversarially deep nesting", () => {
+    // 50 levels deep — well beyond the depth limit. The field is never found,
+    // so it falls through to "unknown" instead of stack-overflowing.
+    let nested: Record<string, unknown> = { limit_source: "openrouter_credits" };
+    for (let i = 0; i < 50; i++) nested = { nested };
+    expect(classifyProvider402(JSON.stringify(nested))).toBe("unknown");
+  });
 });
 
 describe("provider 402 guard", () => {

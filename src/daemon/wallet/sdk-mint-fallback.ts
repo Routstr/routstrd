@@ -72,12 +72,19 @@ const ERROR_BODY_PATCH_MARKER = Symbol.for("routstrd.provider402BodyPatched");
 export function installProvider402BodyCapture(
   client: RoutstrClientLike,
   guard: Provider402Guard,
+  logger?: LoggerLike,
 ): void {
   const target = client as RoutstrClientLike & {
     [ERROR_BODY_PATCH_MARKER]?: boolean;
     _handleErrorResponse?: (...args: unknown[]) => Promise<unknown>;
   };
-  if (target[ERROR_BODY_PATCH_MARKER] || typeof target._handleErrorResponse !== "function") {
+  if (target[ERROR_BODY_PATCH_MARKER]) return;
+  if (typeof target._handleErrorResponse !== "function") {
+    logger?.warn(
+      "[wallet] _handleErrorResponse not found on SDK client — " +
+        "402 body capture disabled. If the SDK has changed its API, " +
+        "this patch and the 402 guard need updating.",
+    );
     return;
   }
 
@@ -294,7 +301,15 @@ export function installCreateProviderTokenFallback(
     createProviderToken?: (options: TopUpOptions) => Promise<TopUpResult>;
     [CREATE_TOKEN_PATCH_MARKER]?: boolean;
   };
-  if (balanceManager[CREATE_TOKEN_PATCH_MARKER] || typeof balanceManager.createProviderToken !== "function") return;
+  if (balanceManager[CREATE_TOKEN_PATCH_MARKER]) return;
+  if (typeof balanceManager.createProviderToken !== "function") {
+    logger.warn(
+      "[wallet] createProviderToken not found on balance manager — " +
+        "createProviderToken fallback disabled. If the SDK has changed " +
+        "its API, this patch needs updating.",
+    );
+    return;
+  }
 
   const originalCreateProviderToken = balanceManager.createProviderToken.bind(balanceManager);
 
@@ -477,12 +492,20 @@ export function installMintFallbackTopUp(
   installCreateProviderTokenFallback(client, walletClient, walletAdapter, logger, upstreamProviderUrl);
 
   const guard = provider402Guard ?? createProvider402Guard();
-  installProvider402BodyCapture(client, guard);
+  installProvider402BodyCapture(client, guard, logger);
 
   const balanceManager = client.getBalanceManager() as BalanceManagerLike & {
     [PATCH_MARKER]?: boolean;
   };
   if (balanceManager[PATCH_MARKER]) return;
+  if (typeof balanceManager.topUp !== "function") {
+    logger.warn(
+      "[wallet] topUp not found on balance manager — " +
+        "mint fallback top-up disabled. If the SDK has changed " +
+        "its API, this patch needs updating.",
+    );
+    return;
+  }
 
   const originalTopUp = balanceManager.topUp.bind(balanceManager);
   balanceManager.topUp = async (options: TopUpOptions): Promise<TopUpResult> => {
@@ -664,7 +687,14 @@ export function installMintUnreachableErrorRetry(
   if (patchedClient[ERROR_RETRY_PATCH_MARKER]) return;
 
   const originalHandleErrorResponse = patchedClient._handleErrorResponse;
-  if (typeof originalHandleErrorResponse !== "function") return;
+  if (typeof originalHandleErrorResponse !== "function") {
+    logger.warn(
+      "[wallet] _handleErrorResponse not found on SDK client — " +
+        "mint-unreachable retry disabled. If the SDK has changed " +
+        "its API, this patch needs updating.",
+    );
+    return;
+  }
 
   patchedClient._handleErrorResponse = async function patchedHandleErrorResponse(
     this: Record<string, any>,
