@@ -269,6 +269,59 @@ describe("SDK top-up mint fallback", () => {
     expect(attempts).toEqual(["https://mint-a.example", "https://mint-b.example"]);
   });
 
+  test("forces the requested fallback mint by excluding previously failed mints", async () => {
+    const attempts: Array<{ preferred: string; selected: string; excluded: string[] }> = [];
+    const availableMints = ["https://mint-a.example", "https://mint-b.example"];
+    const balanceManager = {
+      topUp: async (_options: { mintUrl: string }) => ({ success: false, message: "not patched" }),
+      // Reproduce the SDK's selection order: its automatic balance choice wins
+      // over preferredMintUrl unless the earlier mint is explicitly excluded.
+      createProviderToken: async (options: { mintUrl: string; excludeMints?: string[] }) => {
+        const excluded = options.excludeMints ?? [];
+        const selected = availableMints.find((mint) => !excluded.includes(mint))!;
+        attempts.push({ preferred: options.mintUrl, selected, excluded });
+        if (selected === "https://mint-a.example") {
+          return { success: false, error: "Send failed: Not enough proofs to send" };
+        }
+        return { success: true, token: "cashu-token", selectedMintUrl: selected, amountSpent: 21 };
+      },
+    };
+    const client = { getBalanceManager: () => balanceManager };
+    const walletAdapter = {
+      getBalances: async () => ({
+        "https://mint-a.example": 2_916,
+        "https://mint-b.example": 30_000,
+      }),
+    };
+
+    installMintFallbackTopUp(
+      client,
+      createCocodClient(availableMints),
+      walletAdapter,
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+
+    const result = await balanceManager.createProviderToken({
+      mintUrl: "https://mint-a.example",
+      baseUrl: "https://provider.example",
+      amount: 389,
+    });
+
+    expect(result.success).toBe(true);
+    expect(attempts).toEqual([
+      {
+        preferred: "https://mint-a.example",
+        selected: "https://mint-a.example",
+        excluded: ["https://mint-b.example"],
+      },
+      {
+        preferred: "https://mint-b.example",
+        selected: "https://mint-b.example",
+        excluded: ["https://mint-a.example"],
+      },
+    ]);
+  });
+
   test("createProviderToken falls back to routstr-core invoice + NWC payment", async () => {
     const createAttempts: string[] = [];
     const balanceManager = {

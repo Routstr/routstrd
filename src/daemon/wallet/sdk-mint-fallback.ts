@@ -13,6 +13,7 @@ type TopUpOptions = {
   baseUrl: string;
   amount: number;
   token?: string;
+  excludeMints?: string[];
 };
 
 type TopUpResult = {
@@ -298,11 +299,12 @@ export function installCreateProviderTokenFallback(
   const originalCreateProviderToken = balanceManager.createProviderToken.bind(balanceManager);
 
   balanceManager.createProviderToken = async (options: TopUpOptions): Promise<TopUpResult> => {
-    const candidates = await getTopUpMintCandidates(
+    const inheritedExclusions = new Set(options.excludeMints ?? []);
+    const candidates = (await getTopUpMintCandidates(
       options.mintUrl,
       walletClient,
       walletAdapter,
-    );
+    )).filter((mintUrl) => !inheritedExclusions.has(mintUrl));
 
     let lastResult: TopUpResult | undefined;
     for (const [index, mintUrl] of candidates.entries()) {
@@ -312,7 +314,19 @@ export function installCreateProviderTokenFallback(
         );
       }
 
-      const result = await originalCreateProviderToken({ ...options, mintUrl });
+      // The SDK treats mintUrl as a preference, not a requirement: its own
+      // balance-based candidate can still win and make every outer retry hit
+      // the same failed mint. Excluding every other known candidate makes this
+      // attempt use the mint selected by this fallback loop.
+      const excludeMints = uniqueMintUrls([
+        ...inheritedExclusions,
+        ...candidates.filter((candidate) => candidate !== mintUrl),
+      ]);
+      const result = await originalCreateProviderToken({
+        ...options,
+        mintUrl,
+        excludeMints,
+      });
       if (result.success) {
         return result;
       }
