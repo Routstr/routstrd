@@ -17,6 +17,7 @@ import {
 } from "./utils/clients";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
+import { dirname, join } from "path";
 import {
   CONFIG_DIR,
   DB_PATH,
@@ -27,7 +28,18 @@ import {
 } from "./utils/config";
 import { COCO_LOGS_DIR, logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
-import { stopLegacyCocod } from "./daemon/wallet/coco-client";
+import {
+  assertLegacyCocodNotRunning,
+  claimLegacyCocodPidFile,
+  stopLegacyCocod,
+} from "./daemon/wallet/coco-client";
+import { migrateLegacyWallet } from "./daemon/wallet/migration";
+import {
+  legacyCocodPidPath,
+  legacyCocodSocketPath,
+  walletDir as defaultWalletDir,
+  walletPidPath,
+} from "./daemon/wallet/paths";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
@@ -85,12 +97,8 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
-export function initializeWallet(
-  walletDir =
-    process.env.COCOD_DIR ||
-    `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`,
-): void {
-  const walletConfig = `${walletDir}/config.json`;
+export function initializeWallet(walletDir = defaultWalletDir()): void {
+  const walletConfig = join(walletDir, "config.json");
 
   // The wallet directory and config contain the plaintext seed phrase. Correct
   // permissions on existing installations as well as newly created ones.
@@ -144,8 +152,8 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
 
         await callDaemon("/stop", { method: "POST" });
 
-        // Wait for HTTP health check to fail AND pidfile to be released.
-        const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
+        // Wait for HTTP health check to fail AND wallet lock to be released.
+        const pidFilePath = walletPidPath();
         for (let i = 0; i < 100; i++) {
           await new Promise((resolve) => setTimeout(resolve, 100));
           const healthDown = !(await isDaemonRunning());
@@ -232,6 +240,35 @@ async function initDaemon(): Promise<void> {
   }
 
   console.log(`Database will be stored at: ${DB_PATH}`);
+  await stopLegacyCocod();
+
+  let migrationLockOwner: number | undefined;
+  const migration = await migrateLegacyWallet({
+    assertLegacyStopped: () =>
+      assertLegacyCocodNotRunning({
+        socketPath: legacyCocodSocketPath(),
+        pidFilePath: legacyCocodPidPath(),
+        ignorePid: migrationLockOwner,
+      }),
+    acquireLegacyLock: () => {
+      mkdirSync(dirname(legacyCocodPidPath()), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const release = claimLegacyCocodPidFile({
+        pidFilePath: legacyCocodPidPath(),
+      });
+      migrationLockOwner = process.pid;
+      return () => {
+        migrationLockOwner = undefined;
+        release();
+      };
+    },
+  });
+  if (migration.status === "migrated") {
+    console.log(`Migrated wallet from ${migration.from} to ${migration.to}.`);
+    for (const warning of migration.cleanupWarnings) console.warn(warning);
+  }
   initializeWallet();
 
   await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
@@ -1833,8 +1870,8 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      // Wait for HTTP health check to fail AND pidfile to be released.
-      const pidFilePath = `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod/cocod.pid`;
+      // Wait for HTTP health check to fail AND wallet lock to be released.
+      const pidFilePath = walletPidPath();
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
         const healthDown = !(await isDaemonRunning());

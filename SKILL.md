@@ -170,7 +170,9 @@ Refresh routstr21 models from Nostr and re-run integrations for all registered c
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ROUTSTRD_DIR` | `~/.routstrd` | Config directory |
-| `COCOD_DIR` | `~/.cocod` | Wallet config directory |
+| `ROUTSTRD_WALLET_DIR` | `~/.routstrd/wallet` | In-process Cashu wallet data directory |
+| `ROUTSTRD_WALLET_PID` | `<wallet>/wallet.pid` | In-process wallet lock path |
+| `COCOD_DIR` | `~/.cocod` | Legacy external cocod compatibility directory |
 
 ### `routstrd mode`
 

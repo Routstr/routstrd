@@ -161,6 +161,17 @@ Response:
 }
 ```
 
+## Wallet storage
+
+The in-process Cashu wallet stores its mnemonic and proof database in
+`~/.routstrd/wallet/`. On first startup, an existing wallet in `~/.cocod/` is
+migrated automatically after routstrd verifies that the legacy cocod daemon is
+not running. Back up your mnemonic before upgrading.
+
+Set `ROUTSTRD_WALLET_DIR` to override the canonical wallet directory. The
+`COCOD_DIR`, `COCOD_SOCKET`, and `COCOD_PID` variables are retained only for
+locating and excluding a legacy external cocod process.
+
 ## Configuration
 
 Configuration is stored in `~/.routstrd/config.json`:

@@ -16,13 +16,14 @@ import { finalizeEvent, nip19, type EventTemplate } from "nostr-tools";
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   openSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import type {
   CocodClient,
@@ -31,19 +32,14 @@ import type {
   NpcUsernameResult,
 } from "./cocod-client";
 import { cocoLogger, logger } from "../../utils/logger";
+import {
+  legacyCocodPidPath,
+  legacyCocodSocketPath,
+  walletDir as defaultWalletDir,
+  walletPidPath as defaultWalletPidPath,
+} from "./paths";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
-
-const CONFIG_DIR =
-  process.env.COCOD_DIR ||
-  `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
-
-const CONFIG_FILE = join(CONFIG_DIR, "config.json");
-const DB_PATH = join(CONFIG_DIR, "coco.db");
-const LEGACY_COCOD_SOCKET =
-  process.env.COCOD_SOCKET || join(CONFIG_DIR, "cocod.sock");
-const LEGACY_COCOD_PID_FILE =
-  process.env.COCOD_PID || join(CONFIG_DIR, "cocod.pid");
 
 const STALE_SOCKET_ERROR_CODES = new Set([
   "ECONNREFUSED",
@@ -64,6 +60,8 @@ export interface LegacyCocodGuardOptions {
   pathExists?: (path: string) => boolean;
   readFile?: (path: string) => string;
   isProcessRunning?: (pid: number) => boolean;
+  /** PID owned by the caller's already-acquired legacy exclusion lock. */
+  ignorePid?: number;
   fetchImpl?: LegacyCocodFetch;
   timeoutMs?: number;
 }
@@ -168,7 +166,7 @@ function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
   };
 }
 
-function loadConfig(configFile: string = CONFIG_FILE): CocodConfig {
+function loadConfig(configFile: string): CocodConfig {
   if (!existsSync(configFile)) {
     throw new Error(
       `Config file not found at ${configFile}. Run 'routstrd onboard' first.`,
@@ -183,10 +181,7 @@ function loadConfig(configFile: string = CONFIG_FILE): CocodConfig {
   return config;
 }
 
-function saveConfig(
-  config: CocodConfig,
-  configFile: string = CONFIG_FILE,
-): void {
+function saveConfig(config: CocodConfig, configFile: string): void {
   const temporaryFile = `${configFile}.${process.pid}.tmp`;
   try {
     writeFileSync(temporaryFile, JSON.stringify(config, null, 2), {
@@ -240,8 +235,8 @@ function hasErrorCode(error: unknown, codes: Set<string>): boolean {
 export async function assertLegacyCocodNotRunning(
   options: LegacyCocodGuardOptions = {},
 ): Promise<void> {
-  const socketPath = options.socketPath || LEGACY_COCOD_SOCKET;
-  const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  const socketPath = options.socketPath || legacyCocodSocketPath();
+  const pidFilePath = options.pidFilePath || legacyCocodPidPath();
   const pathExists = options.pathExists || existsSync;
   const readFile = options.readFile || ((path) => readFileSync(path, "utf-8"));
   const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
@@ -251,7 +246,10 @@ export async function assertLegacyCocodNotRunning(
 
     try {
       const pid = Number.parseInt(readFile(pidFilePath).trim(), 10);
-      return Number.isInteger(pid) && pid > 0 && isProcessRunning(pid)
+      return Number.isInteger(pid) &&
+        pid > 0 &&
+        pid !== options.ignorePid &&
+        isProcessRunning(pid)
         ? pid
         : null;
     } catch {
@@ -326,8 +324,8 @@ export async function assertLegacyCocodNotRunning(
 export async function stopLegacyCocod(
   options: LegacyCocodStopOptions = {},
 ): Promise<void> {
-  const socketPath = options.socketPath || LEGACY_COCOD_SOCKET;
-  const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  const socketPath = options.socketPath || legacyCocodSocketPath();
+  const pidFilePath = options.pidFilePath || legacyCocodPidPath();
   const pathExists = options.pathExists || existsSync;
   const readFile =
     options.readFile || ((path: string) => readFileSync(path, "utf-8"));
@@ -417,7 +415,14 @@ export async function stopLegacyCocod(
 export function claimLegacyCocodPidFile(
   options: LegacyCocodPidClaimOptions = {},
 ): () => void {
-  const pidFilePath = options.pidFilePath || LEGACY_COCOD_PID_FILE;
+  return claimPidFile({
+    ...options,
+    pidFilePath: options.pidFilePath || legacyCocodPidPath(),
+  });
+}
+
+function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: string }): () => void {
+  const pidFilePath = options.pidFilePath;
   const pid = options.pid ?? process.pid;
   const openExclusive =
     options.openExclusive || ((path: string) => openSync(path, "wx", 0o600));
@@ -508,10 +513,15 @@ export function claimLegacyCocodPidFile(
 }
 
 export interface CreateCocoClientOptions {
-  /** Override the wallet directory, primarily for migration tests and tooling. */
+  /** Override the canonical wallet data directory. */
+  walletDir?: string;
+  /** Deprecated alias retained for existing callers during migration. */
   configDir?: string;
-  socketPath?: string;
-  pidFilePath?: string;
+  /** Override the in-process wallet lock path. */
+  walletPidPath?: string;
+  /** Override legacy external-cocod coordination paths. */
+  legacySocketPath?: string;
+  legacyPidPath?: string;
   /** Set to false to skip NPC (npubx.cash) plugin registration. Default: true. */
   enableNpc?: boolean;
   /** NPC server base URL. Default: https://npubx.cash */
@@ -521,20 +531,36 @@ export interface CreateCocoClientOptions {
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<CocodClient> {
-  const configDir = options.configDir || CONFIG_DIR;
+  const configDir = options.walletDir || options.configDir || defaultWalletDir();
   const configFile = join(configDir, "config.json");
   const dbPath = join(configDir, "coco.db");
-  const socketPath =
-    options.socketPath ||
-    (options.configDir ? join(configDir, "cocod.sock") : LEGACY_COCOD_SOCKET);
-  const pidFilePath =
-    options.pidFilePath ||
-    (options.configDir ? join(configDir, "cocod.pid") : LEGACY_COCOD_PID_FILE);
+  const walletPidFile =
+    options.walletPidPath ||
+    (options.walletDir || options.configDir
+      ? join(configDir, "wallet.pid")
+      : defaultWalletPidPath());
+  const legacySocket = options.legacySocketPath || legacyCocodSocketPath();
+  const legacyPidFile = options.legacyPidPath || legacyCocodPidPath();
   const npcBaseUrl = options.npcBaseUrl || NPC_DEFAULT_BASE_URL;
   const npcAddressDomain = new URL(npcBaseUrl).host;
 
-  await assertLegacyCocodNotRunning({ socketPath, pidFilePath });
-  const releaseLegacyPidClaim = claimLegacyCocodPidFile({ pidFilePath });
+  await assertLegacyCocodNotRunning({
+    socketPath: legacySocket,
+    pidFilePath: legacyPidFile,
+  });
+  // The canonical wallet directory is created by initialization/migration.
+  // Keep a legacy PID claim as an exclusion fence for old cocod binaries.
+  mkdirSync(dirname(legacyPidFile), { recursive: true, mode: 0o700 });
+  const releaseWalletPidClaim = claimPidFile({ pidFilePath: walletPidFile });
+  let releaseLegacyPidClaim: () => void;
+  try {
+    releaseLegacyPidClaim = claimLegacyCocodPidFile({
+      pidFilePath: legacyPidFile,
+    });
+  } catch (error) {
+    releaseWalletPidClaim();
+    throw error;
+  }
 
   let database: Database | undefined;
   let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
@@ -617,6 +643,7 @@ export async function createCocoClient(
   } catch (error) {
     database?.close();
     releaseLegacyPidClaim();
+    releaseWalletPidClaim();
     throw error;
   }
 
@@ -654,7 +681,7 @@ export async function createCocoClient(
 
     async unlock(_passphrase: string): Promise<string> {
       // coco-core does not support passphrase locking.
-      // Wallet access is controlled via the mnemonic in ~/.cocod/config.json.
+      // Wallet access is controlled by ~/.routstrd/wallet/config.json.
       return "wallet does not require unlocking";
     },
 
@@ -757,6 +784,7 @@ export async function createCocoClient(
           database.close();
         } finally {
           releaseLegacyPidClaim();
+          releaseWalletPidClaim();
         }
       }
     },
