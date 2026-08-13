@@ -4,25 +4,27 @@ import { join } from "path";
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 const LOG_DIR = process.env.ROUTSTRD_DIR || `${HOME}/.routstrd`;
 const LOGS_DIR = join(LOG_DIR, "logs");
+/** Wallet-engine (coco-core / Cashu) diagnostics land in their own directory. */
+export const COCO_LOGS_DIR = join(LOG_DIR, "coco-logs");
 
-function getLogFileForDate(date: Date = new Date()): string {
+function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-  return join(LOGS_DIR, `${year}-${month}-${day}.log`);
+  return join(logsDir, `${year}-${month}-${day}.log`);
 }
 
-function ensureLogDir() {
-  if (!existsSync(LOGS_DIR)) {
-    mkdirSync(LOGS_DIR, { recursive: true });
+function ensureDir(dir: string) {
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
   }
 }
 
 // NOTE: writes are synchronous on purpose — the daemon calls process.exit()
 // right after logger.error(...) on fatal paths, and async writes were being
 // silently dropped, making startup failures invisible.
-function writeLog(level: string, ...args: unknown[]) {
-  ensureLogDir();
+function writeLog(logsDir: string, level: string, ...args: unknown[]) {
+  ensureDir(logsDir);
   const timestamp = new Date().toISOString();
   const message = args
     .map((a) => {
@@ -40,7 +42,7 @@ function writeLog(level: string, ...args: unknown[]) {
     })
     .join(" ");
   const line = `[${timestamp}] [${level}] ${message}\n`;
-  const logFile = getLogFileForDate(new Date(timestamp));
+  const logFile = getLogFileForDate(logsDir, new Date(timestamp));
   try {
     appendFileSync(logFile, line);
   } catch (error) {
@@ -48,20 +50,23 @@ function writeLog(level: string, ...args: unknown[]) {
   }
 }
 
-export const logger = {
-  log: (...args: unknown[]) => {
-    writeLog("INFO", ...args);
-  },
-  debug: (...args: unknown[]) => {
-    writeLog("DEBUG", ...args);
-  },
-  warn: (...args: unknown[]) => {
-    writeLog("WARN", ...args);
-  },
-  error: (...args: unknown[]) => {
-    writeLog("ERROR", ...args);
-  },
-  info: (...args: unknown[]) => {
-    writeLog("INFO", ...args);
-  },
-};
+export interface FileLogger {
+  log: (...args: unknown[]) => void;
+  debug: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+}
+
+function createLogger(logsDir: string): FileLogger {
+  return {
+    log: (...args) => writeLog(logsDir, "INFO", ...args),
+    debug: (...args) => writeLog(logsDir, "DEBUG", ...args),
+    warn: (...args) => writeLog(logsDir, "WARN", ...args),
+    error: (...args) => writeLog(logsDir, "ERROR", ...args),
+    info: (...args) => writeLog(logsDir, "INFO", ...args),
+  };
+}
+
+export const logger = createLogger(LOGS_DIR);
+export const cocoLogger = createLogger(COCO_LOGS_DIR);

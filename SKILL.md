@@ -191,9 +191,10 @@ View daemon logs.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-f, --follow` | false | Follow log output (like `tail -f`) |
+| `-c, --coco` | false | Show Cashu wallet-engine (coco) logs instead of daemon logs |
 | `-n, --lines <number>` | 50 | Number of lines to show |
 
-Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`.
+Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`. Wallet-engine (Cashu/coco) diagnostics go to a separate `~/.routstrd/coco-logs/YYYY-MM-DD.log` so they don't pollute the main daemon logs.
 
 ## Wallet Commands
 
@@ -317,4 +318,5 @@ When `routstrd onboard` runs, it automatically configures a `routstr` provider i
 | `~/.routstrd/routstr.db` | SQLite database |
 | `~/.routstrd/routstrd.sock` | IPC socket |
 | `~/.routstrd/routstrd.pid` | PID file |
-| `~/.routstrd/logs/YYYY-MM-DD.log` | Daily log files |
+| `~/.routstrd/logs/YYYY-MM-DD.log` | Daily daemon log files |
+| `~/.routstrd/coco-logs/YYYY-MM-DD.log` | Daily Cashu wallet-engine (coco) log files |

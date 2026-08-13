@@ -9,7 +9,6 @@ import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
 import { fileURLToPath } from "url";
-import { existsSync } from "fs";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
 const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;

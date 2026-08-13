@@ -25,7 +25,7 @@ import {
   LOGS_DIR,
   type RoutstrdConfig,
 } from "./utils/config";
-import { logger } from "./utils/logger";
+import { COCO_LOGS_DIR, logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
 import { stopLegacyCocod } from "./daemon/wallet/coco-client";
 import { getClientsList } from "./utils/clients";
@@ -1948,11 +1948,11 @@ program
   });
 
 // Logs
-function getLogFileForDate(date: Date = new Date()): string {
+function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-  return `${LOGS_DIR}/${year}-${month}-${day}.log`;
+  return `${logsDir}/${year}-${month}-${day}.log`;
 }
 
 function readLastLines(file: string, lines: number): string {
@@ -1993,17 +1993,19 @@ program
   .command("logs")
   .description("View daemon logs")
   .option("-f, --follow", "Follow log output", false)
+  .option("-c, --coco", "Show Cashu wallet-engine (coco) logs instead of daemon logs", false)
   .option("-n, --lines <number>", "Number of lines to show", "50")
-  .action(async (options: { follow: boolean; lines: string }) => {
+  .action(async (options: { follow: boolean; lines: string; coco: boolean }) => {
     await requireLocalDaemon();
-    const todayFile = getLogFileForDate();
+    const logsDir = options.coco ? COCO_LOGS_DIR : LOGS_DIR;
+    const todayFile = getLogFileForDate(logsDir);
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayFile = getLogFileForDate(yesterday);
+    const yesterdayFile = getLogFileForDate(logsDir, yesterday);
 
     if (!existsSync(todayFile) && !existsSync(yesterdayFile)) {
       console.log("No log files found. Daemon may not have started yet.");
-      console.log(`Logs directory: ${LOGS_DIR}`);
+      console.log(`Logs directory: ${logsDir}`);
       process.exit(1);
     }
 

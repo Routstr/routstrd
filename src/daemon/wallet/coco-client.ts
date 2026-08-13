@@ -30,7 +30,7 @@ import type {
   NpcAddress,
   NpcUsernameResult,
 } from "./cocod-client";
-import { logger } from "../../utils/logger";
+import { cocoLogger, logger } from "../../utils/logger";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
 
@@ -148,9 +148,10 @@ function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
   ) => {
     // Coco diagnostics may contain proof secrets or encoded tokens. Keep only
     // an explicit metadata allowlist; startup counts and operation IDs remain
-    // useful without copying wallet material into routstrd's logs.
+    // useful without copying wallet material into routstrd's logs. Written to
+    // ~/.routstrd/coco-logs/ so wallet-engine noise stays out of the main logs.
     const metadata = safeCocoMetadata([bindings, ...meta]);
-    logger[level](
+    cocoLogger[level](
       `[coco] ${message}`,
       ...(Object.keys(metadata).length > 0 ? [metadata] : []),
     );
