@@ -17,7 +17,7 @@ import {
   type CocodClient,
   type CocodState,
 } from "../wallet/cocod-client";
-import { decodeCashuTokenAmount } from "../wallet";
+import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 
@@ -389,9 +389,9 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const body = await readJsonBody(req);
         const token = getRequiredStringField(body, "token");
-        const message = await deps.walletClient.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
-        return { output: { message, amount, unit } };
+        return {
+          output: await receiveCashuToken(deps.walletClient, token),
+        };
       });
       return;
     }

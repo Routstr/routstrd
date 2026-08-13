@@ -1,4 +1,4 @@
-import { getDecodedToken, Amount } from "@cashu/cashu-ts";
+import { getTokenMetadata } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
@@ -10,11 +10,26 @@ export function decodeCashuTokenAmount(token: string): {
   amount: number;
   unit: "sat" | "msat";
 } {
-  const decoded = getDecodedToken(token, []);
-  const amount =
-    decoded?.proofs?.reduce((sum, proof) => sum + proof.amount.toNumber(), 0) ?? 0;
-  const unit = decoded?.unit === "msat" ? "msat" : "sat";
+  // TokenV4 may contain an 8-byte short keyset ID. Fully decoding its
+  // proofs requires the mint's full keyset IDs, but amount and unit do not.
+  // getTokenMetadata intentionally extracts those fields without trying to
+  // map short IDs, unlike getDecodedToken(token, []).
+  const metadata = getTokenMetadata(token);
+  const amount = metadata.amount.toNumber();
+  const unit = metadata.unit === "msat" ? "msat" : "sat";
   return { amount, unit };
+}
+
+export async function receiveCashuToken(
+  client: Pick<CocodClient, "receiveCashu">,
+  token: string,
+): Promise<{ message: string; amount: number; unit: "sat" | "msat" }> {
+  // Validate the token before handing it to a state-changing wallet call. This
+  // prevents a successful receive from being reported as a failure if local
+  // metadata parsing ever rejects a future token format.
+  const { amount, unit } = decodeCashuTokenAmount(token);
+  const message = await client.receiveCashu(token);
+  return { message, amount, unit };
 }
 
 export interface WalletAdapterOptions {
@@ -296,8 +311,7 @@ export async function createWalletAdapter(
       message?: string;
     }> {
       try {
-        const message = await client.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
+        const { amount, unit, message } = await receiveCashuToken(client, token);
         return { success: true, amount, unit, message };
       } catch (error) {
         const errorMessage =
