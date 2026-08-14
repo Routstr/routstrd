@@ -614,7 +614,7 @@ program
       console.log(`  Removed auth proxy URL: ${previousAuthUrl}`);
     }
     console.log(
-      `\nUse 'routstrd start' to start the local daemon.`,
+      `\nUse 'routstrd onboard' for first time using local mode or 'routstrd start' to start the local daemon if you already are using it.`,
     );
     console.log(`You can view the config file at: ${CONFIG_FILE}`);
   });
