@@ -593,7 +593,7 @@ program
   .action(async () => {
     const config = await loadConfig();
 
-    if (!config.daemonUrl && !config.authUrl) {
+    if (!config.daemonUrl) {
       console.log("Already in local mode — no remote daemon URL is configured.");
       return;
     }
