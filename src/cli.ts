@@ -586,6 +586,39 @@ program
     }
   });
 
+// Local - switch back to local daemon mode (removes daemonUrl/authUrl)
+program
+  .command("local")
+  .description("Switch back to local daemon mode (removes remote daemon URL)")
+  .action(async () => {
+    const config = await loadConfig();
+
+    if (!config.daemonUrl && !config.authUrl) {
+      console.log("Already in local mode — no remote daemon URL is configured.");
+      return;
+    }
+
+    const previousDaemonUrl = config.daemonUrl;
+    const previousAuthUrl = config.authUrl;
+
+    const { daemonUrl: _daemonUrl, authUrl: _authUrl, ...rest } = config;
+    const updatedConfig: RoutstrdConfig = rest;
+
+    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+
+    console.log("Switched back to local daemon mode.");
+    if (previousDaemonUrl) {
+      console.log(`  Removed remote daemon URL: ${previousDaemonUrl}`);
+    }
+    if (previousAuthUrl) {
+      console.log(`  Removed auth proxy URL: ${previousAuthUrl}`);
+    }
+    console.log(
+      `\nUse 'routstrd start' to start the local daemon.`,
+    );
+    console.log(`You can view the config file at: ${CONFIG_FILE}`);
+  });
+
 // Onboard - initialize the daemon
 program
   .command("onboard")
