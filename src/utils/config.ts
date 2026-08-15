@@ -32,6 +32,7 @@ export interface NwcConfig {
 
 export interface RoutstrdConfig {
   port: number;
+  host: string;
   provider: string | null;
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
@@ -58,6 +59,7 @@ export interface RoutstrdConfig {
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
   port: 8008,
+  host: "127.0.0.1",
   provider: null,
   cocodPath: null,
   mode: "apikeys",

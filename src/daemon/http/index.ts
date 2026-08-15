@@ -8,6 +8,8 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
+import { getEncodedToken } from "@cashu/coco-core";
+import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
@@ -15,9 +17,27 @@ import {
   type CocodClient,
   type CocodState,
 } from "../wallet/cocod-client";
-import { decodeCashuTokenAmount } from "../wallet";
+import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
+
+// Hop-by-hop headers describe the *upstream* connection, not this one, and must
+// never be copied onto our response. In particular, copying the upstream's
+// `Transfer-Encoding: chunked` while Node also frames the streamed body as
+// chunked produces a duplicated `Transfer-Encoding: chunked, chunked` header,
+// which strict HTTP/1.x clients (e.g. Go's net/http) reject with
+// "too many transfer encodings". Node derives Content-Length for buffered
+// bodies and Transfer-Encoding: chunked for streams itself.
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -33,6 +53,7 @@ type WalletStatusOutput = {
 type DaemonDeps = {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -255,19 +276,24 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
   balances?: Record<string, number>;
   unit?: "sat";
   activeMint?: string | null;
+  defaultMint?: string | null;
 }> {
   const state = await deps.walletClient.getStatus();
   if (state !== "UNLOCKED") {
     return { state, ready: false };
   }
 
-  const balances = await deps.walletAdapter.getBalances();
+  const [balances, defaultMint] = await Promise.all([
+    deps.walletAdapter.getBalances(),
+    deps.walletClient.getDefaultMint(),
+  ]);
   return {
     state,
     ready: true,
     balances,
     unit: "sat",
     activeMint: deps.walletAdapter.getActiveMintUrl(),
+    defaultMint,
   };
 }
 
@@ -287,6 +313,7 @@ const sdkLogger: SdkLogger = makeSdkLogger();
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -362,9 +389,9 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const body = await readJsonBody(req);
         const token = getRequiredStringField(body, "token");
-        const message = await deps.walletClient.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
-        return { output: { message, amount, unit } };
+        return {
+          output: await receiveCashuToken(deps.walletClient, token),
+        };
       });
       return;
     }
@@ -404,11 +431,15 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/wallet/mints") {
       await respond(res, async () => {
-        const mints = await deps.walletClient.listMints();
+        const [mints, defaultMint] = await Promise.all([
+          deps.walletClient.listMints(),
+          deps.walletClient.getDefaultMint(),
+        ]);
         return {
           output: {
             mints,
-            activeMint: mints[0] || null,
+            activeMint: defaultMint,
+            defaultMint,
           },
         };
       });
@@ -431,6 +462,93 @@ export function createDaemonRequestHandler(deps: {
         const mintUrl = getRequiredStringField(body, "url");
         const info = await deps.walletClient.getMintInfo(mintUrl);
         return { output: { url: mintUrl, info } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const defaultMint = await deps.walletClient.getDefaultMint();
+        return { output: { defaultMint } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        const message = await deps.walletClient.setDefaultMint(mintUrl);
+        return { output: { message, url: mintUrl } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/history") {
+      await respond(res, async () => {
+        const offsetParam = url.searchParams.get("offset");
+        const limitParam = url.searchParams.get("limit");
+        const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
+        const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
+        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        const encoded = entries.map((entry: HistoryEntry) => {
+          const base = { ...entry } as Record<string, unknown>;
+          if (
+            (entry.type === "send" || entry.type === "receive") &&
+            entry.token
+          ) {
+            base.encodedToken = getEncodedToken(entry.token);
+          }
+          return base;
+        });
+
+        return { output: { entries: encoded, offset, limit } };
+      });
+      return;
+    }
+
+    // ── NPC (npubx.cash) Lightning address endpoints ──────────────
+
+    if (req.method === "GET" && url.pathname === "/wallet/npc/address") {
+      await respond(res, async () => {
+        const info = await deps.walletClient.getNpcAddress();
+        return { output: info };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/username") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const username = getRequiredStringField(body, "username");
+        const confirm = body.confirm === true;
+        const result = await deps.walletClient.setNpcUsername(username, confirm);
+        if (!result.success) {
+          const pr = result.paymentRequest ?? {};
+          const amount = typeof pr.amount === "number" ? pr.amount : 0;
+          const mints = Array.isArray(pr.mints) ? pr.mints.join(", ") : "";
+          if (confirm) {
+            throw new CocodHttpError(
+              402,
+              `Failed to set username. Required amount: ${amount} SATS. Required mints: ${mints}`,
+            );
+          }
+          throw new CocodHttpError(
+            402,
+            `Payment required to set username: ${amount} SATS. ` +
+              `Use 'routstrd wallet npc username ${username} --confirm' to proceed`,
+          );
+        }
+        return { output: { success: true, username } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/sync") {
+      await respond(res, async () => {
+        await deps.walletClient.syncNpc();
+        return { output: { message: "NPC sync completed" } };
       });
       return;
     }
@@ -627,9 +745,11 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/stop") {
       sendJson(res, 200, { output: "stopping" });
       setTimeout(() => {
-        deps.server.close(() => {
-          process.exit(0);
-        });
+        if (deps.shutdown) {
+          deps.shutdown();
+        } else {
+          deps.server.close(() => process.exit(0));
+        }
       }, 50);
       return;
     }
@@ -777,6 +897,133 @@ export function createDaemonRequestHandler(deps: {
       } catch (error) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/keys/api") {
+      try {
+        const apiKeys = deps.storageAdapter.getAllApiKeys() as Array<{
+          baseUrl: string;
+          key: string;
+          balance: number;
+          lastUsed: number | null;
+        }>;
+        const totalApiKeys = apiKeys.reduce(
+          (sum: number, k) => sum + (k.balance || 0),
+          0,
+        );
+        sendJson(res, 200, {
+          output: {
+            apiKeys,
+            count: apiKeys.length,
+            total: totalApiKeys,
+            unit: "sat",
+          },
+        });
+      } catch (error) {
+        respondWithError(res, error);
+      }
+      return;
+    }
+
+    // Refund remaining balance to a mint before removing the key.
+    const apiKeyDeleteMatch =
+      (req.method === "DELETE" || req.method === "POST") &&
+      url.pathname === "/keys/api/delete";
+    if (apiKeyDeleteMatch) {
+      try {
+        let baseUrl: string | undefined;
+        let mintUrl: string | undefined;
+        if (req.method === "DELETE") {
+          baseUrl = url.searchParams.get("baseUrl") || undefined;
+          mintUrl = url.searchParams.get("mintUrl") || undefined;
+        } else {
+          const body = await readJsonBody(req);
+          baseUrl = getRequiredStringField(body, "baseUrl");
+          mintUrl = body.mintUrl as string | undefined;
+        }
+        if (!baseUrl) {
+          sendJson(res, 400, {
+            error: "Missing required 'baseUrl' field.",
+          });
+          return;
+        }
+
+        const existing = deps.storageAdapter.getApiKey(baseUrl);
+        if (!existing) {
+          sendJson(res, 200, {
+            output: {
+              baseUrl,
+              removed: false,
+              refunded: false,
+              message: `No API key found for ${baseUrl}`,
+            },
+          });
+          return;
+        }
+
+        if (!mintUrl) {
+          try {
+            const walletBalances =
+              await deps.walletAdapter.getBalances();
+            const mintUrls = Object.keys(walletBalances);
+            if (mintUrls.length > 0) {
+              mintUrl = mintUrls[0];
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        let refunded = false;
+        let refundMessage: string | undefined;
+        let refundedAmount: number | undefined;
+
+        if (mintUrl) {
+          try {
+            const balanceManager = deps.refundClient.getBalanceManager();
+            if (balanceManager) {
+              const refundResult = await balanceManager.refundApiKey({
+                mintUrl,
+                baseUrl: existing.baseUrl,
+                apiKey: existing.key,
+                forceRefund: true,
+              });
+              refunded = refundResult.success;
+              refundMessage = refundResult.message;
+              if (refundResult.refundedAmount) {
+                refundedAmount = Math.floor(
+                  refundResult.refundedAmount / 1000,
+                );
+              }
+            }
+          } catch (error) {
+            refundMessage = `Refund error: ${toErrorMessage(error)}`;
+          }
+        } else {
+          refundMessage = "No mint available to refund to";
+        }
+
+        // refundApiKey removes the key on success; remove manually on failure.
+        if (!refunded) {
+          deps.storageAdapter.removeApiKey(existing.baseUrl);
+        }
+
+        sendJson(res, 200, {
+          output: {
+            baseUrl: existing.baseUrl,
+            removed: true,
+            refunded,
+            refundedAmount,
+            refundMessage,
+            message: refunded
+              ? `Refunded and removed API key for ${existing.baseUrl}`
+              : `Removed API key for ${existing.baseUrl} (refund failed: ${refundMessage ?? "unknown"})`,
+          },
+        });
+      } catch (error) {
+        respondWithError(res, error);
       }
       return;
     }
@@ -1210,8 +1457,11 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    // Allow client management endpoints through
-    if (req.method !== "POST" && !url.pathname.startsWith("/clients")) {
+    if (
+      req.method !== "POST" &&
+      !url.pathname.startsWith("/clients") &&
+      !url.pathname.startsWith("/keys/api")
+    ) {
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Only POST is supported." }));
       return;
@@ -1280,10 +1530,13 @@ export function createDaemonRequestHandler(deps: {
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
       });
 
-      // Bridge the Web `Response` to the Node `ServerResponse` with no
-      // transforms: status + headers + pipe(body → res).
+      // Bridge the Web `Response` to the Node `ServerResponse`: status +
+      // headers + pipe(body → res). Hop-by-hop headers are dropped (see
+      // HOP_BY_HOP_HEADERS) so Node computes correct framing for THIS
+      // connection.
       res.statusCode = response.status;
       response.headers.forEach((value, key) => {
+        if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) return;
         res.setHeader(key, value);
       });
 

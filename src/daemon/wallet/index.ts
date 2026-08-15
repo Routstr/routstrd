@@ -1,4 +1,4 @@
-import { getDecodedToken, Amount } from "@cashu/cashu-ts";
+import { getTokenMetadata } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
@@ -10,11 +10,26 @@ export function decodeCashuTokenAmount(token: string): {
   amount: number;
   unit: "sat" | "msat";
 } {
-  const decoded = getDecodedToken(token, []);
-  const amount =
-    decoded?.proofs?.reduce((sum, proof) => sum + proof.amount.toNumber(), 0) ?? 0;
-  const unit = decoded?.unit === "msat" ? "msat" : "sat";
+  // TokenV4 may contain an 8-byte short keyset ID. Fully decoding its
+  // proofs requires the mint's full keyset IDs, but amount and unit do not.
+  // getTokenMetadata intentionally extracts those fields without trying to
+  // map short IDs, unlike getDecodedToken(token, []).
+  const metadata = getTokenMetadata(token);
+  const amount = metadata.amount.toNumber();
+  const unit = metadata.unit === "msat" ? "msat" : "sat";
   return { amount, unit };
+}
+
+export async function receiveCashuToken(
+  client: Pick<CocodClient, "receiveCashu">,
+  token: string,
+): Promise<{ message: string; amount: number; unit: "sat" | "msat" }> {
+  // Validate the token before handing it to a state-changing wallet call. This
+  // prevents a successful receive from being reported as a failure if local
+  // metadata parsing ever rejects a future token format.
+  const { amount, unit } = decodeCashuTokenAmount(token);
+  const message = await client.receiveCashu(token);
+  return { message, amount, unit };
 }
 
 export interface WalletAdapterOptions {
@@ -50,10 +65,11 @@ export async function createWalletAdapter(
     );
 
     try {
-      const mints = await client.listMints();
-      activeMintUrl = mints[0] || Object.keys(nextBalances)[0] || null;
+      // Use default mint as active mint, fall back to first mint in list
+      const defaultMint = await client.getDefaultMint();
+      activeMintUrl = defaultMint || Object.keys(nextBalances)[0] || null;
     } catch (error) {
-      logger.error("Failed to list cocod mints:", error);
+      logger.error("Failed to get default mint:", error);
       if (!activeMintUrl) {
         activeMintUrl = Object.keys(nextBalances)[0] || null;
       }
@@ -151,12 +167,12 @@ export async function createWalletAdapter(
         return { success: false, invoice: "", error: "NWC not connected" };
       }
 
-      // Ensure we have an active mint
-      await syncMintState();
-      const mintUrl = activeMintUrl;
+      // Use default mint for NWC funding
+      const defaultMint = await client.getDefaultMint();
+      const mintUrl = defaultMint;
       if (!mintUrl) {
-        logger.error("[nwc] No active mint configured");
-        return { success: false, invoice: "", error: "No active mint configured" };
+        logger.error("[nwc] No default mint configured");
+        return { success: false, invoice: "", error: "No default mint configured" };
       }
 
       try {
@@ -295,8 +311,7 @@ export async function createWalletAdapter(
       message?: string;
     }> {
       try {
-        const message = await client.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
+        const { amount, unit, message } = await receiveCashuToken(client, token);
         return { success: true, amount, unit, message };
       } catch (error) {
         const errorMessage =
@@ -329,14 +344,14 @@ export async function createWalletAdapter(
   }
 
   try {
-    const [balances, mints] = await Promise.all([
+    const [balances, defaultMint] = await Promise.all([
       client.getBalances(),
-      client.listMints().catch(() => []),
+      client.getDefaultMint().catch(() => null),
     ]);
     mintUnits = Object.fromEntries(
       Object.keys(balances).map((mintUrl) => [mintUrl, "sat"]),
     );
-    activeMintUrl = mints[0] || Object.keys(balances)[0] || null;
+    activeMintUrl = defaultMint || Object.keys(balances)[0] || null;
   } catch (error) {
     logger.error("Failed to initialize wallet adapter state:", error);
   }

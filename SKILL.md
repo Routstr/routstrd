@@ -170,7 +170,9 @@ Refresh routstr21 models from Nostr and re-run integrations for all registered c
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ROUTSTRD_DIR` | `~/.routstrd` | Config directory |
-| `COCOD_DIR` | `~/.cocod` | Wallet config directory |
+| `ROUTSTRD_WALLET_DIR` | `~/.routstrd/wallet` | In-process Cashu wallet data directory |
+| `ROUTSTRD_WALLET_PID` | `<wallet>/wallet.pid` | In-process wallet lock path |
+| `COCOD_DIR` | `~/.cocod` | Legacy external cocod compatibility directory |
 
 ### `routstrd mode`
 
@@ -191,11 +193,14 @@ View daemon logs.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-f, --follow` | false | Follow log output (like `tail -f`) |
+| `-c, --coco` | false | Show Cashu wallet-engine (coco) logs instead of daemon logs |
 | `-n, --lines <number>` | 50 | Number of lines to show |
 
-Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`.
+Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`. Wallet-engine (Cashu/coco) diagnostics go to a separate `~/.routstrd/coco-logs/YYYY-MM-DD.log` so they don't pollute the main daemon logs.
 
 ## Wallet Commands
+
+New wallets automatically trust `https://mint.cubabitcoin.org` as their default mint. The default is used when a wallet command does not include `--mint-url`.
 
 ### `routstrd wallet status`
 
@@ -244,6 +249,10 @@ List configured wallet mints.
 ### `routstrd wallet mints add <url>`
 
 Add a new mint by URL.
+
+### `routstrd wallet mints set-default <url>`
+
+Set the persistent default mint. If necessary, the mint is added as trusted first.
 
 ### `routstrd wallet mints info <url>`
 
@@ -311,4 +320,5 @@ When `routstrd onboard` runs, it automatically configures a `routstr` provider i
 | `~/.routstrd/routstr.db` | SQLite database |
 | `~/.routstrd/routstrd.sock` | IPC socket |
 | `~/.routstrd/routstrd.pid` | PID file |
-| `~/.routstrd/logs/YYYY-MM-DD.log` | Daily log files |
+| `~/.routstrd/logs/YYYY-MM-DD.log` | Daily daemon log files |
+| `~/.routstrd/coco-logs/YYYY-MM-DD.log` | Daily Cashu wallet-engine (coco) log files |
