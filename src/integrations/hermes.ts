@@ -99,7 +99,8 @@ export async function installHermesIntegration(
       content = await readFile(configPath, "utf-8");
     }
   } catch (error) {
-    console.error(`Error reading ${configPath}, creating new one.`);
+    console.error(`Failed to read ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   let newContent: string;

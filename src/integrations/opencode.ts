@@ -40,8 +40,9 @@ export async function installOpencodeIntegration(
     } else {
       opencodeConfig = { provider: {} };
     }
-  } catch {
-    opencodeConfig = { provider: {} };
+  } catch (error) {
+    console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   if (!opencodeConfig.provider) {
