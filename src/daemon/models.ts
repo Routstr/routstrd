@@ -24,13 +24,59 @@ export function createModelService(
 ) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
+  const normalizeBaseUrl = (url: string): string =>
+    url.endsWith("/") ? url : `${url}/`;
+
+  /**
+   * Build the same cheapest-per-model view as ModelManager.fetchModels, but
+   * exclusively from the persisted cache. Model-list reads must not wait for
+   * unavailable providers; explicit and scheduled refreshes own network I/O.
+   */
+  const getCachedModels = (): ExposedModel[] => {
+    type PricedModel = ExposedModel & {
+      sats_pricing?: { completion?: number };
+    };
+
+    const cachedByProvider = modelManager.getAllCachedModels();
+    const currentProviders = new Set(
+      modelManager.getBaseUrls().map(normalizeBaseUrl),
+    );
+    const disabledProviders = new Set(
+      (store.getState().disabledProviders || []).map(normalizeBaseUrl),
+    );
+    const bestById = new Map<string, PricedModel>();
+
+    for (const [baseUrl, models] of Object.entries(cachedByProvider)) {
+      const normalized = normalizeBaseUrl(baseUrl);
+      if (
+        disabledProviders.has(normalized) ||
+        (currentProviders.size > 0 && !currentProviders.has(normalized))
+      ) {
+        continue;
+      }
+
+      for (const model of models as PricedModel[]) {
+        if (!model.sats_pricing) continue;
+        const existing = bestById.get(model.id);
+        if (
+          !existing ||
+          (model.sats_pricing.completion ?? 0) <
+            (existing.sats_pricing?.completion ?? 0)
+        ) {
+          bestById.set(model.id, model);
+        }
+      }
+    }
+
+    return [...bestById.values()];
+  };
+
   const ensureProvidersBootstrapped = (): Promise<void> => {
     if (!providerBootstrapPromise) {
       providerBootstrapPromise = (async () => {
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
-        await modelManager.fetchModels(providers);
 
         // Sync discovered providers into the store so `providers list` reflects
         // the same set that the model manager knows about.
@@ -49,6 +95,7 @@ export function createModelService(
 
         logger.log("Provider bootstrap complete.");
       })().catch((error) => {
+        providerBootstrapPromise = null;
         logger.error("Provider bootstrap failed:", error);
         throw error;
       });
@@ -59,16 +106,27 @@ export function createModelService(
   const getRoutstr21Models = async (
     forceRefresh = false,
   ): Promise<ExposedModel[]> => {
-    await ensureProvidersBootstrapped();
-
     const routstr21ModelIds = Array.from(
       new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
     ).slice(0, 21);
-    const baseUrls = modelManager.getBaseUrls();
-    const discoveredModels = await modelManager.fetchModels(
-      baseUrls,
-      forceRefresh,
-    );
+
+    let discoveredModels: ExposedModel[];
+    if (!forceRefresh) {
+      discoveredModels = getCachedModels();
+    } else {
+      discoveredModels = [];
+    }
+
+    // Warm reads are cache-only. A cold start and explicit refresh still
+    // populate models from the provider network.
+    if (forceRefresh || discoveredModels.length === 0) {
+      await ensureProvidersBootstrapped();
+      discoveredModels = await modelManager.fetchModels(
+        modelManager.getBaseUrls(),
+        forceRefresh,
+      );
+    }
+
     const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
 
     return routstr21ModelIds.map((modelId) => {
