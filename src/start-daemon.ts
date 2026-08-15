@@ -8,6 +8,7 @@ import {
 import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
+import { urlHosts } from "./utils/daemon-client";
 import { fileURLToPath } from "url";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
@@ -103,23 +104,26 @@ function fileSize(path: string): number {
   }
 }
 
-async function isDaemonHealthy(port: string, host = "127.0.0.1"): Promise<boolean> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2000);
-  try {
-    const existing = await fetch(`http://${host}:${port}/health`, {
-      signal: controller.signal,
-    });
-    return existing.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeoutId);
+async function healthyDaemonHost(
+  port: string,
+  host = "127.0.0.1",
+): Promise<string | null> {
+  // Return the responding candidate so status output shows a connectable URL.
+  for (const candidate of urlHosts(host)) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    try {
+      const existing = await fetch(`http://${candidate}:${port}/health`, {
+        signal: controller.signal,
+      });
+      if (existing.ok) return candidate;
+    } catch {
+      // Try the next candidate host.
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
-}
-
-function clientHost(host?: string): string {
-  return !host || host === "0.0.0.0" ? "127.0.0.1" : host;
+  return null;
 }
 
 async function startDaemonUnlocked(
@@ -128,12 +132,12 @@ async function startDaemonUnlocked(
   const args: string[] = [];
   const port = options.port || "8008";
   const host = options.host || "127.0.0.1";
-  const ch = clientHost(host);
   const pollIntervalMs = 250;
   const startupTimeoutMs = 10 * 60 * 1000;
 
-  if (await isDaemonHealthy(port, ch)) {
-    console.log(`Routstr daemon already running on http://${ch}:${port}/v1`);
+  const existingHost = await healthyDaemonHost(port, host);
+  if (existingHost) {
+    console.log(`Routstr daemon already running on http://${existingHost}:${port}/v1`);
     return;
   }
 
@@ -207,7 +211,7 @@ async function startDaemonUnlocked(
       );
     }
 
-    if (await isDaemonHealthy(port, ch)) {
+    if (await healthyDaemonHost(port, host)) {
       printStartupProgress(progressLogOffset);
       console.log(
         `Routstr daemon started (PID: ${proc.pid}, ${formatElapsed(Date.now() - startedAt)}).`,
@@ -226,11 +230,11 @@ export async function startDaemon(
 ): Promise<void> {
   const port = options.port || "8008";
   const host = options.host || "127.0.0.1";
-  const ch = clientHost(host);
   const startupTimeoutMs = 10 * 60 * 1000;
 
-  if (await isDaemonHealthy(port, ch)) {
-    console.log(`Routstr daemon already running on http://${ch}:${port}/v1`);
+  const existingHost = await healthyDaemonHost(port, host);
+  if (existingHost) {
+    console.log(`Routstr daemon already running on http://${existingHost}:${port}/v1`);
     return;
   }
 

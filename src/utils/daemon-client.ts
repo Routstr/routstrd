@@ -29,12 +29,38 @@ export async function loadConfig(): Promise<RoutstrdConfig> {
   return DEFAULT_CONFIG;
 }
 
+/** Format a bind address for use as a URL host. */
+export function urlHost(host?: string): string {
+  return urlHosts(host)[0] ?? "127.0.0.1";
+}
+
+/** Return connectable URL hosts for a bind address, in preference order. */
+export function urlHosts(host?: string): string[] {
+  if (!host || host === "0.0.0.0") return ["127.0.0.1", "[::1]"];
+  if (host === "::") return ["[::1]", "127.0.0.1"];
+  if (host.startsWith("[") && host.endsWith("]")) return [host];
+  if (host.includes(":")) return [`[${host.replace(/%/g, "%25")}]`];
+  return [host];
+}
+
+function localDaemonBaseUrls(config: RoutstrdConfig): string[] {
+  return urlHosts(config.host).map(
+    (host) => `http://${host}:${config.port}`,
+  );
+}
+
+class DaemonConnectionError extends Error {
+  constructor(cause: unknown) {
+    super("Failed to connect to daemon", { cause });
+    this.name = "DaemonConnectionError";
+  }
+}
+
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
     return config.daemonUrl.replace(/\/$/, "");
   }
-  const host = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
-  return `http://${host}:${config.port}`;
+  return `http://${urlHost(config.host)}:${config.port}`;
 }
 
 export function getAuthBaseUrl(config: RoutstrdConfig): string {
@@ -69,14 +95,20 @@ async function _callUrl(
     );
   }
 
-  const response = await fetch(url, {
-    method,
-    headers: {
-      ...(authorization ? { Authorization: authorization } : {}),
-      ...(bodyString ? { "Content-Type": "application/json" } : {}),
-    },
-    body: bodyString,
-  });
+  const headers = new Headers();
+  if (authorization) headers.set("Authorization", authorization);
+  if (bodyString) headers.set("Content-Type", "application/json");
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: bodyString,
+    });
+  } catch (error) {
+    throw new DaemonConnectionError(error);
+  }
 
   if (!response.ok) {
     const errorData = (await response.json()) as { error?: string };
@@ -86,13 +118,33 @@ async function _callUrl(
   return response.json() as Promise<CommandResponse>;
 }
 
+async function callLocalDaemon(
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
+): Promise<CommandResponse> {
+  // Retry only connection failures; HTTP errors prove that a server answered.
+  let connectionError: DaemonConnectionError | undefined;
+  for (const baseUrl of localDaemonBaseUrls(config)) {
+    try {
+      return await _callUrl(baseUrl, path, options, config);
+    } catch (error) {
+      if (!(error instanceof DaemonConnectionError)) throw error;
+      connectionError = error;
+    }
+  }
+  throw connectionError ?? new Error("No daemon host candidates available");
+}
+
 export async function callDaemon(
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
 ): Promise<CommandResponse> {
   const config = await loadConfig();
-  const baseUrl = getDaemonBaseUrl(config);
-  return _callUrl(baseUrl, path, options, config);
+  if (config.daemonUrl) {
+    return _callUrl(getDaemonBaseUrl(config), path, options, config);
+  }
+  return callLocalDaemon(path, options, config);
 }
 
 /** Like callDaemon but sends requests to the auth proxy URL instead.
@@ -102,26 +154,50 @@ export async function callAuth(
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
 ): Promise<CommandResponse> {
   const config = await loadConfig();
-  const baseUrl = getAuthBaseUrl(config);
-  return _callUrl(baseUrl, path, options, config);
+  if (!config.authUrl && !config.daemonUrl) {
+    return callLocalDaemon(path, options, config);
+  }
+  return _callUrl(getAuthBaseUrl(config), path, options, config);
 }
 
 export async function isDaemonRunning(): Promise<boolean> {
   try {
     const config = await loadConfig();
-    const baseUrl = getDaemonBaseUrl(config);
-    const url = `${baseUrl}/health`;
 
-    let authorization: string | undefined;
-    if (config.daemonUrl && config.nsec) {
-      const secretKey = parseSecretKey(config.nsec);
-      authorization = await createNIP98Authorization(secretKey, url, "GET");
+    if (config.daemonUrl) {
+      const baseUrl = config.daemonUrl.replace(/\/$/, "");
+      const url = `${baseUrl}/health`;
+      let authorization: string | undefined;
+      if (config.nsec) {
+        const secretKey = parseSecretKey(config.nsec);
+        authorization = await createNIP98Authorization(secretKey, url, "GET");
+      }
+      try {
+        const response = await fetch(url, {
+          headers: authorization ? { Authorization: authorization } : {},
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
     }
 
-    const response = await fetch(url, {
-      headers: authorization ? { Authorization: authorization } : {},
-    });
-    return response.ok;
+    // A wildcard bind may be listening on either loopback family.
+    for (const baseUrl of localDaemonBaseUrls(config)) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      try {
+        const response = await fetch(`${baseUrl}/health`, {
+          signal: controller.signal,
+        });
+        if (response.ok) return true;
+      } catch {
+        // Try the next candidate host.
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+    return false;
   } catch {
     return false;
   }
