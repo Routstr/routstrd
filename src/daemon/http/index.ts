@@ -387,6 +387,29 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/cleanup") {
+      await respond(res, async () => {
+        if (!deps.walletClient.cleanupStuckOperations) {
+          throw new CocodHttpError(
+            501,
+            "Wallet cleanup is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const result = await deps.walletClient.cleanupStuckOperations({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          minAgeMs:
+            typeof body.minAgeMs === "number" && Number.isFinite(body.minAgeMs)
+              ? body.minAgeMs
+              : undefined,
+          dryRun: body.dryRun === true,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/receive/cashu") {
       await respond(res, async () => {
         const body = await readJsonBody(req);

@@ -57,6 +57,30 @@ export interface NpcUsernameResult {
   };
 }
 
+/** Options for the wallet cleanup command. */
+export interface WalletCleanupOptions {
+  /** Only clean up operations for this mint URL. */
+  mintUrl?: string;
+  /** Minimum operation age in milliseconds (defaults to 7 days / 1 week). */
+  minAgeMs?: number;
+  /** Report what would be cleaned without applying changes. */
+  dryRun?: boolean;
+}
+
+/** Summary of a wallet cleanup run. */
+export interface WalletCleanupResult {
+  dryRun: boolean;
+  /** Number of expired pending mint quotes marked as failed. */
+  failedMintQuotes: number;
+  /** Number of stale pending send operations reclaimed. */
+  reclaimedSends: number;
+  /** Number of stale prepared melt operations cancelled. */
+  cancelledMelts: number;
+  /** Number of in-flight operations that were left untouched. */
+  skipped: number;
+  errors: Array<{ operationId: string; error: string }>;
+}
+
 export class CocodHttpError extends Error {
   status: number;
 
@@ -90,6 +114,10 @@ export interface CocodClient {
   setNpcUsername(username: string, confirm?: boolean): Promise<NpcUsernameResult>;
   /** Manually trigger an NPC quote sync into the wallet. */
   syncNpc(): Promise<void>;
+  /** Clear stuck pending/in-flight wallet operations that are safe to resolve. */
+  cleanupStuckOperations?(
+    options?: WalletCleanupOptions,
+  ): Promise<WalletCleanupResult>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {
