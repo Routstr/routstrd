@@ -172,6 +172,11 @@ Set `ROUTSTRD_WALLET_DIR` to override the canonical wallet directory. The
 `COCOD_DIR`, `COCOD_SOCKET`, and `COCOD_PID` variables are retained only for
 locating and excluding a legacy external cocod process.
 
+The operator Nostr identity (nsec/npub) used for NIP-98 authentication is also
+derived from this mnemonic (NIP-06, account index 0), so it matches the NPC
+(npubx.cash) npub. Back up the mnemonic to recover both the wallet and the auth
+identity.
+
 ## Configuration
 
 Configuration is stored in `~/.routstrd/config.json`:

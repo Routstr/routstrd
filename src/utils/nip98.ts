@@ -1,4 +1,5 @@
 import { finalizeEvent, getPublicKey, nip19, type EventTemplate } from "nostr-tools";
+import { privateKeyFromSeedWords } from "nostr-tools/nip06";
 
 const NIP98_KIND = 27235;
 
@@ -73,6 +74,26 @@ export function npubFromPubkey(pubkey: string): string {
 
 export function npubFromSecretKey(secretKey: Uint8Array): string {
   return npubFromPubkey(getPublicKey(secretKey));
+}
+
+/**
+ * The operator Nostr identity is derived from the wallet mnemonic using NIP-06
+ * (BIP-32) at account index 0 — the same key the NPC (npubx.cash) plugin
+ * derives, so the operator has a single npub across authentication and the
+ * NPC address service.
+ */
+export const AUTH_NOSTR_ACCOUNT_INDEX = 0;
+
+export function nsecFromMnemonic(
+  mnemonic: string,
+  accountIndex = AUTH_NOSTR_ACCOUNT_INDEX,
+): { secretKey: Uint8Array; nsec: string; npub: string } {
+  const secretKey = privateKeyFromSeedWords(mnemonic, undefined, accountIndex);
+  return {
+    secretKey,
+    nsec: nip19.nsecEncode(secretKey),
+    npub: npubFromSecretKey(secretKey),
+  };
 }
 
 export async function createNIP98Authorization(

@@ -34,6 +34,7 @@ import {
   stopLegacyCocod,
 } from "./daemon/wallet/coco-client";
 import { migrateLegacyWallet } from "./daemon/wallet/migration";
+import { readWalletMnemonic } from "./daemon/wallet/wallet-config";
 import {
   legacyCocodPidPath,
   legacyCocodSocketPath,
@@ -42,7 +43,7 @@ import {
 } from "./daemon/wallet/paths";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
-import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey, nsecFromMnemonic } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
@@ -207,6 +208,27 @@ async function requireLocalDaemon(): Promise<void> {
   }
 }
 
+function deriveNostrIdentity(): {
+  nsec: string;
+  npub: string;
+  fromMnemonic: boolean;
+} {
+  const mnemonic = readWalletMnemonic();
+  if (mnemonic) {
+    const { nsec, npub } = nsecFromMnemonic(mnemonic);
+    return { nsec, npub, fromMnemonic: true };
+  }
+
+  // Fallback for paths where no wallet exists yet (e.g. configuring a remote
+  // daemon before a local wallet has been created).
+  const secretKey = generateSecretKey();
+  return {
+    nsec: nip19.nsecEncode(secretKey),
+    npub: npubFromSecretKey(secretKey),
+    fromMnemonic: false,
+  };
+}
+
 async function initDaemon(): Promise<void> {
   console.log("Initializing routstrd...");
 
@@ -227,17 +249,6 @@ async function initDaemon(): Promise<void> {
   }
 
   const config = await loadConfig();
-
-  if (!config.nsec) {
-    const secretKey = generateSecretKey();
-    const nsec = nip19.nsecEncode(secretKey);
-    const npub = npubFromSecretKey(secretKey);
-    config.nsec = nsec;
-    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
-    console.log("\nA new Nostr identity has been generated for authentication.");
-    console.log(`Your npub: ${npub}`);
-    console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
-  }
 
   console.log(`Database will be stored at: ${DB_PATH}`);
   await stopLegacyCocod();
@@ -270,6 +281,21 @@ async function initDaemon(): Promise<void> {
     for (const warning of migration.cleanupWarnings) console.warn(warning);
   }
   initializeWallet();
+
+  if (!config.nsec) {
+    const { nsec, npub, fromMnemonic } = deriveNostrIdentity();
+    config.nsec = nsec;
+    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+    if (fromMnemonic) {
+      console.log(
+        "\nA Nostr identity has been derived from your wallet mnemonic for authentication.",
+      );
+    } else {
+      console.log("\nA new Nostr identity has been generated for authentication.");
+    }
+    console.log(`Your npub: ${npub}`);
+    console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
+  }
 
   await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
 
@@ -483,13 +509,13 @@ program
       updates.authUrl = options.authUrl;
     }
     let generatedNpub: string | undefined;
+    let identityDerivedFromMnemonic = false;
 
     if (!config.nsec) {
-      const secretKey = generateSecretKey();
-      const nsec = nip19.nsecEncode(secretKey);
-      const npub = npubFromSecretKey(secretKey);
+      const { nsec, npub, fromMnemonic } = deriveNostrIdentity();
       updates.nsec = nsec;
       generatedNpub = npub;
+      identityDerivedFromMnemonic = fromMnemonic;
     }
 
     const updatedConfig: RoutstrdConfig = {
@@ -504,9 +530,15 @@ program
       console.log(`Auth proxy URL set to: ${options.authUrl}`);
     }
     if (generatedNpub) {
-      console.log(
-        `\nA new Nostr identity has been generated for remote authentication.`,
-      );
+      if (identityDerivedFromMnemonic) {
+        console.log(
+          `\nA Nostr identity has been derived from your wallet mnemonic for remote authentication.`,
+        );
+      } else {
+        console.log(
+          `\nA new Nostr identity has been generated for remote authentication.`,
+        );
+      }
       console.log(`Your npub: ${generatedNpub}`);
       console.log(
         `You can view it in the config file at: ${CONFIG_FILE}`,
