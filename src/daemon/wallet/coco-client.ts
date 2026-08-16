@@ -701,7 +701,9 @@ export async function createCocoClient(
     },
 
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
+      const targetMint = mintUrl
+        ? normalizeMintUrl(mintUrl)
+        : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning invoice");
       }
@@ -717,7 +719,9 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
+      const targetMint = mintUrl
+        ? normalizeMintUrl(mintUrl)
+        : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for sending");
       }
@@ -730,7 +734,9 @@ export async function createCocoClient(
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl || walletConfig.defaultMintUrl;
+      const targetMint = mintUrl
+        ? normalizeMintUrl(mintUrl)
+        : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning payment");
       }
