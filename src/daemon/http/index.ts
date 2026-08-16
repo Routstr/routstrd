@@ -325,6 +325,8 @@ export function createDaemonRequestHandler(deps: {
   getModelProviders: (modelId: string) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
+  /** Default max_tokens/max_output_tokens to inject when the client omits one. */
+  maxTokens: number;
   /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
   routstrPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
@@ -1484,6 +1486,22 @@ export function createDaemonRequestHandler(deps: {
     if (!modelId) {
       sendJson(res, 400, { error: "Missing required 'model' field." });
       return;
+    }
+
+    // Cap the completion budget when the client does not set an output token
+    // limit. Without this, the SDK prices at the provider's worst-case
+    // max_completion_cost, which varies widely across providers (2.3× for
+    // kimi-k3) and balloons during provider failover. Chat/completions use
+    // max_tokens; the OpenAI Responses API uses max_output_tokens.
+    if (deps.maxTokens > 0) {
+      const isResponsesPath = url.pathname.includes("/responses");
+      if (isResponsesPath) {
+        if (typeof bodyObj.max_output_tokens !== "number") {
+          bodyObj.max_output_tokens = deps.maxTokens;
+        }
+      } else if (typeof bodyObj.max_tokens !== "number") {
+        bodyObj.max_tokens = deps.maxTokens;
+      }
     }
 
     const forcedProvider: string | undefined =

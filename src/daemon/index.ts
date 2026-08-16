@@ -217,6 +217,7 @@ async function main(): Promise<void> {
       getModelProviders,
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
+      maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
       usageTrackingDriver,
       providerManager,
