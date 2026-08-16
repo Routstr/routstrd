@@ -451,12 +451,36 @@ program
     }
   });
 
-// Remote - configure a remote daemon URL
+// Remote - show or configure a remote daemon URL
 program
-  .command("remote <url>")
-  .description("Configure a remote daemon URL")
+  .command("remote [url]")
+  .description(
+    "Show the configured remote daemon, or configure one. With no URL, prints the current remote node; pass a URL to set one up.",
+  )
   .option("--auth-url <authUrl>", "URL of the auth proxy for management commands (npubs, clients, usage)")
-  .action(async (url: string, options: { authUrl?: string }) => {
+  .action(async (url: string | undefined, options: { authUrl?: string }) => {
+    const config = await loadConfig();
+
+    // No URL provided -> show the current remote node, or tell the user to set one up.
+    if (!url) {
+      if (config.daemonUrl) {
+        console.log(`Remote daemon URL: ${config.daemonUrl}`);
+        if (config.authUrl) {
+          console.log(`Auth proxy URL: ${config.authUrl}`);
+        }
+        const npub = getUserNpub(config);
+        if (npub) {
+          console.log(`Nostr identity: ${npub}`);
+        }
+        return;
+      }
+      console.error("No remote node is set up.");
+      console.error(
+        "Pass a URL to set one up, e.g. 'routstrd remote https://<host>:<port>'.",
+      );
+      process.exit(1);
+    }
+
     try {
       new URL(url);
     } catch {
@@ -477,7 +501,6 @@ program
       mkdirSync(CONFIG_DIR, { recursive: true });
     }
 
-    const config = await loadConfig();
     const updates: Partial<RoutstrdConfig> = { daemonUrl: url };
     if (options.authUrl) {
       updates.authUrl = options.authUrl;
