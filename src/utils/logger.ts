@@ -2,6 +2,12 @@ import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
+
+// `bun test` sets NODE_ENV=test. Test runs import modules that pull in this
+// singleton, so without this guard their output would be written into the real
+// ~/.routstrd log files alongside production daemon output.
+const isTest = process.env.NODE_ENV === "test";
+
 const LOG_DIR = process.env.ROUTSTRD_DIR || `${HOME}/.routstrd`;
 const LOGS_DIR = join(LOG_DIR, "logs");
 /** Wallet-engine (coco-core / Cashu) diagnostics land in their own directory. */
@@ -24,6 +30,7 @@ function ensureDir(dir: string) {
 // right after logger.error(...) on fatal paths, and async writes were being
 // silently dropped, making startup failures invisible.
 function writeLog(logsDir: string, level: string, ...args: unknown[]) {
+  if (isTest) return;
   ensureDir(logsDir);
   const timestamp = new Date().toISOString();
   const message = args
