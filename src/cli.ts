@@ -1548,6 +1548,113 @@ walletCmd
     await handleDaemonCommand("/wallet/balance");
   });
 
+walletCmd
+  .command("cleanup")
+  .description("Clear stuck pending/in-flight wallet operations")
+  .option("--mint-url <url>", "Only clean up operations for this mint URL")
+  .option(
+    "--min-age <hours>",
+    "Minimum age for reclaiming sends/cancelling melts, in hours (default: 168, one week; expired mint quotes are always failed)",
+    "168",
+  )
+  .option("--dry-run", "Report what would be cleaned without applying changes", false)
+  .option("-y, --yes", "Skip confirmation prompt", false)
+  .action(
+    async (options: {
+      mintUrl?: string;
+      minAge: string;
+      dryRun: boolean;
+      yes: boolean;
+    }) => {
+      const minAgeHours = Number.parseFloat(options.minAge);
+      if (!Number.isFinite(minAgeHours) || minAgeHours < 0) {
+        console.error(`Invalid --min-age value: ${options.minAge}`);
+        process.exit(1);
+      }
+
+      if (!options.dryRun && !options.yes) {
+        const rl = require("readline").createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(
+            "This will fail expired mint quotes, reclaim old pending sends, and cancel prepared melts. Continue? [y/N] ",
+            (value: string) => {
+              rl.close();
+              resolve(value.trim().toLowerCase());
+            },
+          );
+        });
+        if (answer !== "y" && answer !== "yes") {
+          console.log("Aborted.");
+          return;
+        }
+      }
+
+      try {
+        await ensureDaemonRunning();
+
+        const result = await callDaemon("/wallet/cleanup", {
+          method: "POST",
+          body: {
+            mintUrl: options.mintUrl,
+            minAgeMs: Math.round(minAgeHours * 60 * 60 * 1000),
+            dryRun: options.dryRun === true,
+          },
+        });
+
+        if (result.error) {
+          console.log(result.error);
+          process.exit(1);
+        }
+
+        const output = result.output as
+          | {
+              dryRun?: boolean;
+              failedMintQuotes?: number;
+              reclaimedSends?: number;
+              cancelledMelts?: number;
+              skipped?: number;
+              errors?: Array<{ operationId: string; error: string }>;
+            }
+          | undefined;
+
+        if (output) {
+          const prefix = output.dryRun ? "Would clean up:" : "Cleaned up:";
+          console.log(prefix);
+          console.log(
+            `  Expired mint quotes failed: ${output.failedMintQuotes ?? 0}`,
+          );
+          console.log(`  Pending sends reclaimed: ${output.reclaimedSends ?? 0}`);
+          console.log(
+            `  Prepared melts cancelled: ${output.cancelledMelts ?? 0}`,
+          );
+          console.log(
+            `  Skipped (still recent or already terminal): ${output.skipped ?? 0}`,
+          );
+          if (output.errors && output.errors.length > 0) {
+            console.log("\nErrors:");
+            for (const e of output.errors) {
+              console.log(`  - ${e.operationId}: ${e.error}`);
+            }
+          }
+        }
+      } catch (error) {
+        const message = (error as Error).message;
+        if (
+          message?.includes("fetch failed") ||
+          message?.includes("Connection refused")
+        ) {
+          console.error("Daemon is not running");
+          process.exit(1);
+        }
+        console.error(message);
+        process.exit(1);
+      }
+    },
+  );
+
 const walletReceiveCmd = walletCmd
   .command("receive")
   .description("Wallet receive operations");

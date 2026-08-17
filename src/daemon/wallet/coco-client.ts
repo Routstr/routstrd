@@ -30,7 +30,10 @@ import type {
   CocodState,
   NpcAddress,
   NpcUsernameResult,
+  WalletCleanupOptions,
+  WalletCleanupResult,
 } from "./cocod-client";
+import { selectCleanupOperations } from "./cleanup";
 import { cocoLogger, logger } from "../../utils/logger";
 import {
   legacyCocodPidPath,
@@ -558,6 +561,19 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
   };
 }
 
+/**
+ * Minimal structural view of coco-core's MintOperationService.
+ * `failPendingOperation` is private on the exported class, so the in-process
+ * client reaches it through this narrow cast. The method only needs the
+ * operation id; it reloads the latest persisted row before mutating it.
+ */
+interface MintOperationServiceCleanup {
+  failPendingOperation(
+    op: { id: string },
+    terminalFailure: { reason: string; retryable?: boolean; observedAt: number },
+  ): Promise<unknown>;
+}
+
 export interface CreateCocoClientOptions {
   /** Override the canonical wallet data directory. */
   walletDir?: string;
@@ -881,6 +897,105 @@ export async function createCocoClient(
 
     async syncNpc(): Promise<void> {
       await npcApi().sync();
+    },
+
+    async cleanupStuckOperations(
+      options: WalletCleanupOptions = {},
+    ): Promise<WalletCleanupResult> {
+      const minAgeMs = options.minAgeMs ?? 7 * 24 * 60 * 60 * 1000;
+      const dryRun = options.dryRun === true;
+      const nowMs = Date.now();
+
+      const [pendingMints, inFlightSends, preparedMelts] = await Promise.all([
+        coco.ops.mint.listPending(),
+        coco.ops.send.listInFlight(),
+        coco.ops.melt.listPrepared(),
+      ]);
+
+      const filteredMints = options.mintUrl
+        ? pendingMints.filter((op) => op.mintUrl === options.mintUrl)
+        : pendingMints;
+      const filteredSends = options.mintUrl
+        ? inFlightSends.filter((op) => op.mintUrl === options.mintUrl)
+        : inFlightSends;
+      const filteredMelts = options.mintUrl
+        ? preparedMelts.filter((op) => op.mintUrl === options.mintUrl)
+        : preparedMelts;
+
+      const selection = selectCleanupOperations({
+        mints: filteredMints,
+        sends: filteredSends,
+        melts: filteredMelts,
+        nowMs,
+        minAgeMs,
+      });
+
+      const errors: WalletCleanupResult["errors"] = [];
+
+      if (!dryRun) {
+        const mintService = (
+          coco as unknown as {
+            mintOperationService: MintOperationServiceCleanup;
+          }
+        ).mintOperationService;
+
+        for (const op of selection.mintsToFail) {
+          try {
+            await mintService.failPendingOperation(
+              { id: op.id },
+              {
+                reason: "Expired unpaid mint quote cleaned up by routstrd",
+                retryable: false,
+                observedAt: nowMs,
+              },
+            );
+          } catch (error) {
+            errors.push({
+              operationId: op.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        for (const op of selection.sendsToReclaim) {
+          try {
+            await coco.ops.send.reclaim(op.id);
+          } catch (error) {
+            errors.push({
+              operationId: op.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
+        for (const op of selection.meltsToCancel) {
+          try {
+            await coco.ops.melt.cancel(op.id, "Cancelled by wallet cleanup");
+          } catch (error) {
+            errors.push({
+              operationId: op.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      const actedOn =
+        selection.mintsToFail.length +
+        selection.sendsToReclaim.length +
+        selection.meltsToCancel.length;
+      const skipped =
+        filteredMints.length + filteredSends.length + filteredMelts.length -
+        actedOn;
+
+      return {
+        dryRun,
+        failedMintQuotes: selection.mintsToFail.length,
+        reclaimedSends: selection.sendsToReclaim.length,
+        cancelledMelts: selection.meltsToCancel.length,
+        skipped,
+        errors,
+      };
     },
   };
 }
