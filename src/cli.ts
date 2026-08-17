@@ -15,9 +15,8 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
 import { execSync } from "child_process";
-import { dirname, join } from "path";
 import {
   CONFIG_DIR,
   DB_PATH,
@@ -28,24 +27,15 @@ import {
 } from "./utils/config";
 import { COCO_LOGS_DIR, logger } from "./utils/logger";
 import { setupIntegration, runIntegrationsForClients } from "./integrations";
-import {
-  assertLegacyCocodNotRunning,
-  claimLegacyCocodPidFile,
-  stopLegacyCocod,
-} from "./daemon/wallet/coco-client";
-import { migrateLegacyWallet } from "./daemon/wallet/migration";
+import { stopLegacyCocod } from "./daemon/wallet/coco-client";
 import { readWalletMnemonic } from "./daemon/wallet/wallet-config";
-import {
-  legacyCocodPidPath,
-  legacyCocodSocketPath,
-  walletDir as defaultWalletDir,
-  walletPidPath,
-} from "./daemon/wallet/paths";
+import { ensureLocalWallet } from "./daemon/wallet/ensure-wallet";
+import { walletPidPath } from "./daemon/wallet/paths";
 import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey, nsecFromMnemonic } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
-import { generateMnemonic } from "@scure/bip39";
+import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import packageJson from "../package.json" with { type: "json" };
 import {
@@ -96,35 +86,6 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   });
 
   console.log(`${qr}\nInvoice:\n${invoice}`);
-}
-
-export function initializeWallet(walletDir = defaultWalletDir()): void {
-  const walletConfig = join(walletDir, "config.json");
-
-  // The wallet directory and config contain the plaintext seed phrase. Correct
-  // permissions on existing installations as well as newly created ones.
-  mkdirSync(walletDir, { recursive: true, mode: 0o700 });
-  chmodSync(walletDir, 0o700);
-
-  if (existsSync(walletConfig)) {
-    chmodSync(walletConfig, 0o600);
-    console.log("Wallet already initialized.");
-    return;
-  }
-
-  const mnemonic = generateMnemonic(wordlist);
-  const config = {
-    version: 1,
-    mnemonic,
-    encrypted: false,
-    createdAt: new Date().toISOString(),
-  };
-  writeFileSync(walletConfig, JSON.stringify(config, null, 2), {
-    mode: 0o600,
-    flag: "wx",
-  });
-  console.log("Initialized. Mnemonic:", mnemonic);
-  console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
 /**
@@ -215,12 +176,24 @@ function deriveNostrIdentity(): {
 } {
   const mnemonic = readWalletMnemonic();
   if (mnemonic) {
+    // The wallet and NPC plugin derive their keys from this same raw string
+    // without checksum validation, so deriving anyway keeps all identities
+    // consistent even when the mnemonic is corrupted. Warn loudly instead of
+    // silently falling back to a divergent random identity.
+    if (!validateMnemonic(mnemonic, wordlist)) {
+      console.warn(
+        "Warning: the wallet mnemonic fails BIP-39 checksum validation and may be corrupted. " +
+          "Deriving the authentication identity from it anyway so it stays consistent with the wallet/NPC identity — " +
+          "verify your wallet backup.",
+      );
+    }
     const { nsec, npub } = nsecFromMnemonic(mnemonic);
     return { nsec, npub, fromMnemonic: true };
   }
 
-  // Fallback for paths where no wallet exists yet (e.g. configuring a remote
-  // daemon before a local wallet has been created).
+  // Fallback for wallets whose mnemonic cannot be read (encrypted or malformed
+  // wallet config). Callers ensure a wallet exists before deriving, so a
+  // missing wallet should no longer reach this path.
   const secretKey = generateSecretKey();
   return {
     nsec: nip19.nsecEncode(secretKey),
@@ -251,36 +224,7 @@ async function initDaemon(): Promise<void> {
   const config = await loadConfig();
 
   console.log(`Database will be stored at: ${DB_PATH}`);
-  await stopLegacyCocod();
-
-  let migrationLockOwner: number | undefined;
-  const migration = await migrateLegacyWallet({
-    assertLegacyStopped: () =>
-      assertLegacyCocodNotRunning({
-        socketPath: legacyCocodSocketPath(),
-        pidFilePath: legacyCocodPidPath(),
-        ignorePid: migrationLockOwner,
-      }),
-    acquireLegacyLock: () => {
-      mkdirSync(dirname(legacyCocodPidPath()), {
-        recursive: true,
-        mode: 0o700,
-      });
-      const release = claimLegacyCocodPidFile({
-        pidFilePath: legacyCocodPidPath(),
-      });
-      migrationLockOwner = process.pid;
-      return () => {
-        migrationLockOwner = undefined;
-        release();
-      };
-    },
-  });
-  if (migration.status === "migrated") {
-    console.log(`Migrated wallet from ${migration.from} to ${migration.to}.`);
-    for (const warning of migration.cleanupWarnings) console.warn(warning);
-  }
-  initializeWallet();
+  await ensureLocalWallet();
 
   if (!config.nsec) {
     const { nsec, npub, fromMnemonic } = deriveNostrIdentity();
@@ -512,6 +456,17 @@ program
     let identityDerivedFromMnemonic = false;
 
     if (!config.nsec) {
+      // The auth identity is derived from the wallet mnemonic, so make sure a
+      // wallet exists first — migrating a legacy cocod wallet when present so
+      // its mnemonic wins over a fresh one. This makes the derived nsec
+      // recoverable from the wallet backup even for users who never run local
+      // wallet commands.
+      const { created } = await ensureLocalWallet();
+      if (created) {
+        console.log(
+          "A local wallet was created so the Nostr identity can be derived from its mnemonic.",
+        );
+      }
       const { nsec, npub, fromMnemonic } = deriveNostrIdentity();
       updates.nsec = nsec;
       generatedNpub = npub;

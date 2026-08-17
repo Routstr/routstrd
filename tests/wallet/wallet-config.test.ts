@@ -1,8 +1,13 @@
 import { describe, expect, test, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { readWalletMnemonic } from "../../src/daemon/wallet/wallet-config";
+import { validateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
+import {
+  initializeWallet,
+  readWalletMnemonic,
+} from "../../src/daemon/wallet/wallet-config";
 
 const MNEMONIC =
   "legal winner thank year wave sausage worth useful legal winner thank yellow";
@@ -25,8 +30,7 @@ afterEach(() => {
   }
 });
 
-describe("readWalletMnemonic", () => {
-  test("returns the mnemonic from a valid config", () => {
+describe("readWalletMnemonic", () => {  test("returns the mnemonic from a valid config", () => {
     const dir = makeWalletDir();
     writeConfig(dir, { version: 1, mnemonic: MNEMONIC, encrypted: false });
 
@@ -69,5 +73,53 @@ describe("readWalletMnemonic", () => {
     });
 
     expect(readWalletMnemonic(dir)).toBe(MNEMONIC);
+  });
+});
+
+describe("initializeWallet", () => {
+  const silent = () => {};
+
+  function permissions(path: string): number {
+    return statSync(path).mode & 0o777;
+  }
+
+  test("creates the wallet with a valid BIP-39 mnemonic and restrictive permissions", () => {
+    const dir = join(makeWalletDir(), "wallet");
+
+    expect(initializeWallet(dir, silent)).toBe(true);
+
+    expect(permissions(dir)).toBe(0o700);
+    const configPath = join(dir, "config.json");
+    expect(permissions(configPath)).toBe(0o600);
+
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    expect(config.version).toBe(1);
+    expect(config.encrypted).toBe(false);
+    expect(validateMnemonic(config.mnemonic, wordlist)).toBe(true);
+    expect(readWalletMnemonic(dir)).toBe(config.mnemonic);
+  });
+
+  test("keeps the existing mnemonic on repeat calls", () => {
+    const dir = join(makeWalletDir(), "wallet");
+    initializeWallet(dir, silent);
+    const first = readWalletMnemonic(dir);
+
+    expect(initializeWallet(dir, silent)).toBe(false);
+    expect(readWalletMnemonic(dir)).toBe(first);
+  });
+
+  test("repairs permissions without replacing an existing wallet", () => {
+    const dir = join(makeWalletDir(), "wallet");
+    const configPath = join(dir, "config.json");
+    const existingConfig = JSON.stringify({ mnemonic: "existing seed" });
+
+    mkdirSync(dir, { mode: 0o755 });
+    writeFileSync(configPath, existingConfig, { mode: 0o644 });
+
+    expect(initializeWallet(dir, silent)).toBe(false);
+
+    expect(readFileSync(configPath, "utf8")).toBe(existingConfig);
+    expect(permissions(dir)).toBe(0o700);
+    expect(permissions(configPath)).toBe(0o600);
   });
 });

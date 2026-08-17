@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { getPublicKey, nip19 } from "nostr-tools";
+import { validateMnemonic } from "@scure/bip39";
+import { wordlist } from "@scure/bip39/wordlists/english.js";
 import {
   AUTH_NOSTR_ACCOUNT_INDEX,
   nsecFromMnemonic,
@@ -63,5 +65,19 @@ describe("nsecFromMnemonic", () => {
     const decoded = nip19.decode(npub);
     expect(decoded.type).toBe("npub");
     expect(decoded.data).toBe(getPublicKey(secretKey));
+  });
+
+  test("derives deterministically even from a checksum-invalid mnemonic", () => {
+    // Same words, last word swapped so the BIP-39 checksum fails. The wallet
+    // and the NPC plugin derive their keys from the raw string without
+    // checksum validation, so the auth identity must do the same to stay
+    // consistent with them rather than erroring out.
+    const corrupted = MNEMONIC.replace(/yellow$/, "zebra");
+    expect(validateMnemonic(corrupted, wordlist)).toBe(false);
+
+    const identity = nsecFromMnemonic(corrupted);
+    expect(identity.secretKey).toHaveLength(32);
+    expect(nsecFromMnemonic(corrupted)).toEqual(identity);
+    expect(identity.nsec).not.toBe(ACCOUNT_0.nsec);
   });
 });
