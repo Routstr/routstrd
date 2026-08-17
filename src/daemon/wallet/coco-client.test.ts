@@ -14,6 +14,7 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  isZombieProcess,
   stopLegacyCocod,
 } from "./coco-client";
 
@@ -227,13 +228,29 @@ describe("legacy cocod wallet migration", () => {
   });
 });
 
+describe("isZombieProcess", () => {
+  it("recognizes Linux proc stat zombie state", () => {
+    expect(
+      isZombieProcess(4242, () => "4242 (routstrd worker) Z 1 4242 4242"),
+    ).toBe(true);
+  });
+
+  it("does not mistake a running process or unreadable proc entry for a zombie", () => {
+    expect(isZombieProcess(4242, () => "4242 (bun) S 1 4242 4242")).toBe(false);
+    expect(
+      isZombieProcess(4242, () => {
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }),
+    ).toBe(false);
+  });
+});
+
 describe("assertLegacyCocodNotRunning", () => {
-  it("does not probe when the legacy socket and PID file do not exist", async () => {
+  it("does not probe when the legacy socket does not exist", async () => {
     const fetchImpl = mock<LegacyFetch>(async () => new Response("pong"));
 
     await assertLegacyCocodNotRunning({
       socketPath: SOCKET_PATH,
-      pidFilePath: PID_FILE_PATH,
       pathExists: () => false,
       fetchImpl,
     });
@@ -249,7 +266,6 @@ describe("assertLegacyCocodNotRunning", () => {
     await expect(
       assertLegacyCocodNotRunning({
         socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
         pathExists: socketOnly,
         fetchImpl,
       }),
@@ -270,7 +286,6 @@ describe("assertLegacyCocodNotRunning", () => {
       await expect(
         assertLegacyCocodNotRunning({
           socketPath: SOCKET_PATH,
-          pidFilePath: PID_FILE_PATH,
           pathExists: socketOnly,
           fetchImpl,
         }),
@@ -290,14 +305,13 @@ describe("assertLegacyCocodNotRunning", () => {
     await expect(
       assertLegacyCocodNotRunning({
         socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
         pathExists: socketOnly,
         fetchImpl,
       }),
     ).resolves.toBeUndefined();
   });
 
-  it("refuses to continue when the legacy PID is still running", async () => {
+  it("allows a live shared PID owner when no cocod socket exists", async () => {
     const fetchImpl = mock<LegacyFetch>(async () =>
       Response.json({ output: "pong" }),
     );
@@ -305,38 +319,26 @@ describe("assertLegacyCocodNotRunning", () => {
     await expect(
       assertLegacyCocodNotRunning({
         socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
         pathExists: (path) => path === PID_FILE_PATH,
-        readFile: () => "4242\n",
-        isProcessRunning: (pid) => pid === 4242,
         fetchImpl,
       }),
-    ).rejects.toThrow("Legacy cocod daemon is still running with PID 4242");
+    ).resolves.toBeUndefined();
 
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("ignores a stale PID file when no socket exists", async () => {
-    await expect(
-      assertLegacyCocodNotRunning({
-        socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
-        pathExists: (path) => path === PID_FILE_PATH,
-        readFile: () => "4242\n",
-        isProcessRunning: () => false,
-      }),
-    ).resolves.toBeUndefined();
-  });
+  it("allows a live shared PID owner when the cocod socket is stale", async () => {
+    const fetchImpl = mock<LegacyFetch>(async () => {
+      throw Object.assign(new Error("socket unavailable"), {
+        code: "ECONNREFUSED",
+      });
+    });
 
-  it("ignores the caller's own migration lock PID", async () => {
     await expect(
       assertLegacyCocodNotRunning({
         socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
-        pathExists: (path) => path === PID_FILE_PATH,
-        readFile: () => "4242\n",
-        isProcessRunning: () => true,
-        ignorePid: 4242,
+        pathExists: () => true,
+        fetchImpl,
       }),
     ).resolves.toBeUndefined();
   });
@@ -349,7 +351,6 @@ describe("assertLegacyCocodNotRunning", () => {
     await expect(
       assertLegacyCocodNotRunning({
         socketPath: SOCKET_PATH,
-        pidFilePath: PID_FILE_PATH,
         pathExists: socketOnly,
         fetchImpl,
       }),
@@ -466,7 +467,7 @@ describe("claimLegacyCocodPidFile", () => {
         readFile: () => "4242",
         isProcessRunning: () => true,
       }),
-    ).toThrow("Another cocod or routstrd process may be starting");
+    ).toThrow("PID 4242 is still running and holds it");
   });
 
   it("replaces a confirmed stale PID file before claiming it", () => {
@@ -517,5 +518,22 @@ describe("claimLegacyCocodPidFile", () => {
 
     release();
     expect(removed).toBe(false);
+  });
+
+  it("registers and removes synchronous process-exit cleanup", () => {
+    const before = process.listenerCount("exit");
+    const release = claimLegacyCocodPidFile({
+      pidFilePath: PID_FILE_PATH,
+      pid: 4242,
+      openExclusive: () => 7,
+      writePid: () => {},
+      closeFile: () => {},
+      readFile: () => "4242",
+      removeFile: () => {},
+    });
+
+    expect(process.listenerCount("exit")).toBe(before + 1);
+    release();
+    expect(process.listenerCount("exit")).toBe(before);
   });
 });

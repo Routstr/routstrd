@@ -80,6 +80,17 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main(): Promise<void> {
+  // Install signal handlers before migration and wallet startup. If a signal
+  // arrives before the full shutdown path is wired, process.exit() still runs
+  // the synchronous PID-lock exit hooks registered by claimPidFile.
+  let shutdownDaemon: () => void = () => process.exit(0);
+  const shutdownForSignal = (signal: NodeJS.Signals) => {
+    logger.log(`Received ${signal}; shutting down...`);
+    shutdownDaemon();
+  };
+  process.once("SIGINT", shutdownForSignal);
+  process.once("SIGTERM", shutdownForSignal);
+
   startupProgress("Loading configuration...");
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
@@ -134,27 +145,19 @@ async function main(): Promise<void> {
     pidFilePath: legacyCocodPidPath(),
   });
 
-  let migrationLockOwner: number | undefined;
   const migration = await migrateLegacyWallet({
     assertLegacyStopped: () =>
       assertLegacyCocodNotRunning({
         socketPath: legacyCocodSocketPath(),
-        pidFilePath: legacyCocodPidPath(),
-        ignorePid: migrationLockOwner,
       }),
     acquireLegacyLock: () => {
       mkdirSync(dirname(legacyCocodPidPath()), {
         recursive: true,
         mode: 0o700,
       });
-      const release = claimLegacyCocodPidFile({
+      return claimLegacyCocodPidFile({
         pidFilePath: legacyCocodPidPath(),
       });
-      migrationLockOwner = process.pid;
-      return () => {
-        migrationLockOwner = undefined;
-        release();
-      };
     },
   });
   if (migration.status === "migrated") {
@@ -197,9 +200,6 @@ async function main(): Promise<void> {
   );
 
   const server = createServer();
-  let shutdownDaemon: () => void = () => {
-    server.close(() => process.exit(0));
-  };
   server.on(
     "request",
     createDaemonRequestHandler({
@@ -354,14 +354,6 @@ async function main(): Promise<void> {
       void disposeWallet().finally(() => process.exit(0));
     });
   };
-
-  const shutdownForSignal = (signal: NodeJS.Signals) => {
-    logger.log(`Received ${signal}; shutting down...`);
-    shutdownDaemon();
-  };
-
-  process.once("SIGINT", shutdownForSignal);
-  process.once("SIGTERM", shutdownForSignal);
 
   startupProgress("Starting HTTP server...");
   server.listen(port, host, async () => {

@@ -60,12 +60,7 @@ type LegacyCocodFetch = (
 
 export interface LegacyCocodGuardOptions {
   socketPath?: string;
-  pidFilePath?: string;
   pathExists?: (path: string) => boolean;
-  readFile?: (path: string) => string;
-  isProcessRunning?: (pid: number) => boolean;
-  /** PID owned by the caller's already-acquired legacy exclusion lock. */
-  ignorePid?: number;
   fetchImpl?: LegacyCocodFetch;
   timeoutMs?: number;
 }
@@ -73,6 +68,8 @@ export interface LegacyCocodGuardOptions {
 export interface LegacyCocodPidClaimOptions {
   pidFilePath?: string;
   pid?: number;
+  /** Human-readable lock name used in contention errors. */
+  label?: string;
   openExclusive?: (path: string) => number;
   writePid?: (fd: number, pid: number) => void;
   closeFile?: (fd: number) => void;
@@ -230,13 +227,35 @@ function saveConfig(config: CocodConfig, configFile: string): void {
   }
 }
 
+export function isZombieProcess(
+  pid: number,
+  readFile: (path: string) => string = (path) =>
+    readFileSync(path, "utf-8"),
+): boolean {
+  try {
+    // Linux exposes zombie state as the character following the final `)` in
+    // /proc/<pid>/stat. Use the final parenthesis because process names may
+    // themselves contain spaces or parentheses. Other platforms simply fall
+    // back to process.kill(pid, 0) below.
+    const stat = readFile(`/proc/${pid}/stat`);
+    const commandEnd = stat.lastIndexOf(")");
+    return commandEnd >= 0 && stat.charAt(commandEnd + 2) === "Z";
+  } catch {
+    return false;
+  }
+}
+
 function defaultIsProcessRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+
+  // kill(pid, 0) also succeeds for dead-but-unreaped processes. Zombies hold
+  // no database or socket resources, so treating them as dead allows stale
+  // wallet locks to be reclaimed (notably under non-reaping Docker PID 1s).
+  return !isZombieProcess(pid);
 }
 
 function hasErrorCode(error: unknown, codes: Set<string>): boolean {
@@ -256,8 +275,14 @@ function hasErrorCode(error: unknown, codes: Set<string>): boolean {
 }
 
 /**
- * Refuse to open coco.db while the legacy cocod daemon owns its Unix socket.
+ * Refuse to open coco.db while a daemon answers on legacy cocod's Unix socket.
  * Two independent wallet engines must never operate on the same proof database.
+ *
+ * cocod.pid is deliberately shared: routstrd writes its own PID there while
+ * the in-process wallet is open, fencing old cocod binaries from starting. A
+ * live PID in that file therefore cannot identify cocod. Socket responsiveness
+ * is the authoritative identity check; the atomic PID-file claim below closes
+ * the race when cocod is still starting and has not opened its socket yet.
  *
  * A socket left behind after a crash is safe to ignore only when connecting
  * fails with ENOENT or ECONNREFUSED. Other probe failures are treated as unsafe
@@ -267,37 +292,7 @@ export async function assertLegacyCocodNotRunning(
   options: LegacyCocodGuardOptions = {},
 ): Promise<void> {
   const socketPath = options.socketPath || legacyCocodSocketPath();
-  const pidFilePath = options.pidFilePath || legacyCocodPidPath();
   const pathExists = options.pathExists || existsSync;
-  const readFile = options.readFile || ((path) => readFileSync(path, "utf-8"));
-  const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
-
-  const getRunningLegacyPid = (): number | null => {
-    if (!pathExists(pidFilePath)) return null;
-
-    try {
-      const pid = Number.parseInt(readFile(pidFilePath).trim(), 10);
-      return Number.isInteger(pid) &&
-        pid > 0 &&
-        pid !== options.ignorePid &&
-        isProcessRunning(pid)
-        ? pid
-        : null;
-    } catch {
-      // An unreadable or malformed PID file does not prove that cocod is alive;
-      // the socket probe below remains the authoritative fallback.
-      return null;
-    }
-  };
-
-  const runningPid = getRunningLegacyPid();
-  if (runningPid !== null) {
-    throw new Error(
-      `Legacy cocod daemon is still running with PID ${runningPid}. ` +
-        "Refusing to open the wallet database because cocod and coco-core cannot safely use it at the same time. " +
-        `Run 'cocod stop' or 'kill ${runningPid}' and try again.`,
-    );
-  }
 
   if (!pathExists(socketPath)) return;
 
@@ -312,19 +307,8 @@ export async function assertLegacyCocodNotRunning(
     await response.body?.cancel();
   } catch (error) {
     if (hasErrorCode(error, STALE_SOCKET_ERROR_CODES)) {
-      // Recheck after the failed probe in case cocod started concurrently.
-      const newlyRunningPid = getRunningLegacyPid();
-      if (newlyRunningPid === null) {
-        logger.debug(`Ignoring stale legacy cocod socket at ${socketPath}`);
-        return;
-      }
-
-      throw new Error(
-        `Legacy cocod daemon is still running with PID ${newlyRunningPid}. ` +
-          "Refusing to open the wallet database because cocod and coco-core cannot safely use it at the same time. " +
-          `Run 'cocod stop' or 'kill ${newlyRunningPid}' and try again.`,
-        { cause: error },
-      );
+      logger.debug(`Ignoring stale legacy cocod socket at ${socketPath}`);
+      return;
     }
 
     throw new Error(
@@ -449,12 +433,14 @@ export function claimLegacyCocodPidFile(
   return claimPidFile({
     ...options,
     pidFilePath: options.pidFilePath || legacyCocodPidPath(),
+    label: options.label || "legacy cocod exclusion lock",
   });
 }
 
 function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: string }): () => void {
   const pidFilePath = options.pidFilePath;
   const pid = options.pid ?? process.pid;
+  const label = options.label || "wallet process lock";
   const openExclusive =
     options.openExclusive || ((path: string) => openSync(path, "wx", 0o600));
   const writePid =
@@ -480,7 +466,7 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
       stalePid = Number.parseInt(readFile(pidFilePath).trim(), 10);
     } catch {
       throw new Error(
-        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
+        `Cannot claim the ${label} at ${pidFilePath}. ` +
           "Another cocod or routstrd process may be starting. Stop it and try again.",
         { cause: error },
       );
@@ -491,9 +477,13 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
       stalePid <= 0 ||
       isProcessRunning(stalePid)
     ) {
+      const ownerMessage =
+        Number.isInteger(stalePid) && stalePid > 0
+          ? `PID ${stalePid} is still running and holds it. ` +
+            `Stop that process first ('routstrd stop' or 'kill ${stalePid}').`
+          : "Another cocod or routstrd process may be starting. Stop it and try again.";
       throw new Error(
-        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
-          "Another cocod or routstrd process may be starting. Stop it and try again.",
+        `Cannot claim the ${label} at ${pidFilePath}: ${ownerMessage}`,
         { cause: error },
       );
     }
@@ -503,7 +493,7 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
       fd = openExclusive(pidFilePath);
     } catch (retryError) {
       throw new Error(
-        `Cannot claim the wallet process lock at ${pidFilePath}. ` +
+        `Cannot claim the ${label} at ${pidFilePath}. ` +
           "Another cocod or routstrd process may be starting. Stop it and try again.",
         { cause: retryError },
       );
@@ -524,9 +514,10 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
   }
 
   let released = false;
-  return () => {
+  const release = () => {
     if (released) return;
     released = true;
+    process.removeListener("exit", release);
 
     try {
       if (readFile(pidFilePath).trim() === String(pid)) {
@@ -535,12 +526,17 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         logger.warn(
-          `Failed to release wallet process lock at ${pidFilePath}:`,
+          `Failed to release ${label} at ${pidFilePath}:`,
           error,
         );
       }
     }
   };
+
+  // process.exit() and natural shutdown still run synchronous exit handlers.
+  // This prevents migration or startup failures from stranding our PID files.
+  process.once("exit", release);
+  return release;
 }
 
 /**
@@ -696,14 +692,14 @@ export async function createCocoClient(
   const npcBaseUrl = options.npcBaseUrl || NPC_DEFAULT_BASE_URL;
   const npcAddressDomain = new URL(npcBaseUrl).host;
 
-  await assertLegacyCocodNotRunning({
-    socketPath: legacySocket,
-    pidFilePath: legacyPidFile,
-  });
+  await assertLegacyCocodNotRunning({ socketPath: legacySocket });
   // The canonical wallet directory is created by initialization/migration.
   // Keep a legacy PID claim as an exclusion fence for old cocod binaries.
   mkdirSync(dirname(legacyPidFile), { recursive: true, mode: 0o700 });
-  const releaseWalletPidClaim = claimPidFile({ pidFilePath: walletPidFile });
+  const releaseWalletPidClaim = claimPidFile({
+    pidFilePath: walletPidFile,
+    label: "routstrd wallet lock",
+  });
   let releaseLegacyPidClaim: () => void;
   try {
     releaseLegacyPidClaim = claimLegacyCocodPidFile({

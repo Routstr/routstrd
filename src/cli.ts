@@ -242,27 +242,19 @@ async function initDaemon(): Promise<void> {
   console.log(`Database will be stored at: ${DB_PATH}`);
   await stopLegacyCocod();
 
-  let migrationLockOwner: number | undefined;
   const migration = await migrateLegacyWallet({
     assertLegacyStopped: () =>
       assertLegacyCocodNotRunning({
         socketPath: legacyCocodSocketPath(),
-        pidFilePath: legacyCocodPidPath(),
-        ignorePid: migrationLockOwner,
       }),
     acquireLegacyLock: () => {
       mkdirSync(dirname(legacyCocodPidPath()), {
         recursive: true,
         mode: 0o700,
       });
-      const release = claimLegacyCocodPidFile({
+      return claimLegacyCocodPidFile({
         pidFilePath: legacyCocodPidPath(),
       });
-      migrationLockOwner = process.pid;
-      return () => {
-        migrationLockOwner = undefined;
-        release();
-      };
     },
   });
   if (migration.status === "migrated") {

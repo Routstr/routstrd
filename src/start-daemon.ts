@@ -221,7 +221,10 @@ async function startDaemonUnlocked(
   }
 
   throw new Error(
-    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs in ${LOGS_DIR}`,
+    `Daemon did not become healthy within ${Math.round(startupTimeoutMs / 1000)} seconds. ` +
+      `Process ${proc.pid} had not exited when the timeout elapsed and may still finish starting; ` +
+      "check 'routstrd status'. " +
+      `If it remains stuck, run 'kill ${proc.pid}' and try again. Check logs in ${LOGS_DIR}`,
   );
 }
 
