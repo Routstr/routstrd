@@ -17,6 +17,13 @@ interface HermesCustomProvider {
   [key: string]: unknown;
 }
 
+/** Hermes references a custom provider as `custom:<slug>`, where the slug is
+ *  the provider name lowercased with runs of whitespace collapsed to hyphens
+ *  (e.g. `Routstr (routstr.ft.hn)` -> `custom:routstr-(routstr.ft.hn)`). */
+function hermesProviderRef(name: string): string {
+  return `custom:${name.toLowerCase().replace(/\s+/g, "-")}`;
+}
+
 export function mergeHermesConfig(
   content: string,
   routstr: HermesRoutstrConfig,
@@ -29,8 +36,9 @@ export function mergeHermesConfig(
   const urlDisplay = routstr.baseUrl
     .replace(/\/v1$/, "")
     .replace(/^https?:\/\//, "");
+  const providerName = `Routstr (${urlDisplay})`;
   const provider = {
-    name: `Routstr (${urlDisplay})`,
+    name: providerName,
     base_url: routstr.baseUrl,
     api_key: routstr.apiKey,
     model: routstr.defaultModel,
@@ -46,16 +54,47 @@ export function mergeHermesConfig(
     });
   }
 
+  // Replace an existing Routstr custom provider in place so that re-running
+  // `clients add --hermes` after changing the daemon URL updates base_url /
+  // api_key / model instead of silently keeping the stale entry. We only touch
+  // the first matching entry; any other providers are left as-is.
   const existingConfig = document.toJS() as {
     custom_providers?: HermesCustomProvider[];
   };
   const existingProviders = existingConfig.custom_providers;
-  const providers = Array.isArray(existingProviders) ? existingProviders : [];
-  if (providers.some((item) => item.name?.startsWith("Routstr ("))) {
-    return content;
+  const providers = Array.isArray(existingProviders)
+    ? existingProviders.slice()
+    : [];
+  const routstrIndex = providers.findIndex(
+    (item) => typeof item?.name === "string" && item.name.startsWith("Routstr ("),
+  );
+  let previousName: string | undefined;
+  if (routstrIndex >= 0) {
+    previousName = providers[routstrIndex]!.name;
+    providers[routstrIndex] = { ...providers[routstrIndex], ...provider };
+  } else {
+    providers.push(provider);
   }
-  providers.push(provider);
   document.set("custom_providers", providers);
+
+  // If we renamed the Routstr provider, keep `model.provider` pointing at it so
+  // Hermes doesn't end up referencing a provider that no longer exists. We only
+  // adjust configs whose default model already routes through a Routstr custom
+  // provider, leaving any other selection untouched.
+  if (
+    !isNewConfig &&
+    previousName &&
+    previousName !== providerName &&
+    document.hasIn(["model", "provider"])
+  ) {
+    const currentRef = document.getIn(["model", "provider"]);
+    if (
+      typeof currentRef === "string" &&
+      currentRef === hermesProviderRef(previousName)
+    ) {
+      document.setIn(["model", "provider"], hermesProviderRef(providerName));
+    }
+  }
 
   return document.toString();
 }

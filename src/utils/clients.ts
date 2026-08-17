@@ -2,6 +2,7 @@ import {
   callDaemon,
   loadConfig,
   getDaemonBaseUrl,
+  getUserNpub,
   ensureDaemonRunning,
 } from "./daemon-client";
 import { logger } from "./logger";
@@ -202,6 +203,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   if (options.hermes) integrationKeys.push("hermes");
 
   if (integrationKeys.length > 0) {
+    let hadFailure = false;
     for (const key of integrationKeys) {
       const integrationFn = CLIENT_INTEGRATIONS[key];
       const integrationConfig = CLIENT_CONFIGS[key];
@@ -222,15 +224,34 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         console.log(`    Client ID: ${client.id}`);
         console.log(`    API Key:   ${client.apiKey}`);
       } catch (error) {
+        const message = (error as Error)?.message ?? String(error);
         logger.error(
           `Failed to set up ${integrationConfig.name} integration:`,
           error,
         );
+        console.error(
+          `\n  Error: failed to set up ${integrationConfig.name} integration.`,
+        );
+        console.error(`  ${message}`);
+        if (/NIP-98|registered npub\/pubkey|registered/i.test(message)) {
+          const npub = getUserNpub(config);
+          console.error(
+            `  The daemon at ${getDaemonBaseUrl(config)} rejected this account.`,
+          );
+          if (npub) {
+            console.error(
+              `  Register/authorize this npub on the remote daemon first:`,
+            );
+            console.error(`    ${npub}`);
+          }
+        }
+        hadFailure = true;
         continue;
       }
     }
 
     console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
+    if (hadFailure) process.exit(1);
     return;
   }
 
