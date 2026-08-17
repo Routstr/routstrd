@@ -110,6 +110,33 @@ function startupProgress(message: string): void {
   console.log(`${STARTUP_LOG_PREFIX} ${message}`);
 }
 
+// Set only around the blocking initializeCoco() call. While set, coco logger
+// messages that indicate recovery progress are forwarded to the CLI startup
+// stream (see createCocoLogger).
+let surfacingStartupProgress = false;
+
+// @cashu/coco-core has no recovery progress callback: initializeCoco() performs
+// all recovery phases in one blocking call and only logs when a phase finishes
+// (or when a per-mint check fails). Forward those boundaries to the startup
+// stream so a slow recovery shows which phase it is in, rather than only
+// elapsed seconds. A true per-mint counter is not available without patching
+// the library, because its happy path logs nothing per operation.
+const RECOVERY_PHASE_MARKERS = new Map<string, string>([
+  ["SendOperationService\u0000Recovery completed", "Send recovery complete"],
+  ["MeltOperationService\u0000Recovery completed", "Melt recovery complete"],
+  ["ReceiveOperationService\u0000Receive recovery completed", "Receive recovery complete"],
+  ["MintOperationService\u0000Mint operation recovery completed", "Mint recovery complete"],
+]);
+
+// These fire once per operation when a mint is unreachable or otherwise fails
+// to reconcile. They are the only per-mint signal coco emits, and they happen
+// exactly when recovery is slow.
+const RECOVERY_STALL_MARKERS = new Map<string, string>([
+  ["SendOperationService\u0000Could not reach mint for recovery, will retry later", "Send recovery: mint unreachable"],
+  ["ReceiveOperationService\u0000Could not reach mint for receive recovery, will retry later", "Receive recovery: mint unreachable"],
+  ["MintOperationService\u0000Failed to reconcile stale pending mint operation", "Mint recovery: pending operation check failed"],
+]);
+
 const SAFE_COCO_LOG_FIELDS = new Set([
   "module",
   "mintUrl",
@@ -149,6 +176,25 @@ function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
     // useful without copying wallet material into routstrd's logs. Written to
     // ~/.routstrd/coco-logs/ so wallet-engine noise stays out of the main logs.
     const metadata = safeCocoMetadata([bindings, ...meta]);
+
+    if (surfacingStartupProgress) {
+      const module = typeof bindings.module === "string" ? bindings.module : undefined;
+      if (module) {
+        const key = `${module}\u0000${message}`;
+        const phase = RECOVERY_PHASE_MARKERS.get(key);
+        if (phase) {
+          startupProgress(phase);
+        } else {
+          const stall = RECOVERY_STALL_MARKERS.get(key);
+          if (stall) {
+            const mintUrl =
+              typeof metadata.mintUrl === "string" ? metadata.mintUrl : undefined;
+            startupProgress(mintUrl ? `${stall} (${mintUrl})` : stall);
+          }
+        }
+      }
+    }
+
     cocoLogger[level](
       `[coco] ${message}`,
       ...(Object.keys(metadata).length > 0 ? [metadata] : []),
@@ -594,11 +640,16 @@ export async function createCocoClient(
       startupProgress("Initializing Cashu wallet...");
     }
 
-    coco = await initializeCoco({
-      repo,
-      seedGetter: async () => seed,
-      logger: createCocoLogger(),
-    });
+    surfacingStartupProgress = true;
+    try {
+      coco = await initializeCoco({
+        repo,
+        seedGetter: async () => seed,
+        logger: createCocoLogger(),
+      });
+    } finally {
+      surfacingStartupProgress = false;
+    }
 
     const trustedMints = await coco.mint.getAllTrustedMints();
     const configuredDefault = walletConfig.defaultMintUrl;
