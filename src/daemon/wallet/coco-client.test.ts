@@ -42,6 +42,19 @@ function socketOnly(path: string): boolean {
   return path === SOCKET_PATH;
 }
 
+async function waitForWalletUnlocked(
+  client: Awaited<ReturnType<typeof createCocoClient>>,
+): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const status = await client.getStatus();
+    if (status === "UNLOCKED") return;
+    if (status === "ERROR") throw new Error("Wallet recovery failed");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for wallet recovery to complete");
+}
+
 describe("default mint functionality", () => {
   it("automatically adds default mint when no mints exist", async () => {
     const walletDir = join(makeTempDir(), "wallet");
@@ -192,7 +205,7 @@ describe("legacy cocod wallet migration", () => {
       enableNpc: false,
     });
     try {
-      expect(await client.getStatus()).toBe("UNLOCKED");
+      await waitForWalletUnlocked(client);
       expect(await client.getBalances()).toEqual({ [mintUrl]: 10 });
     } finally {
       await client.dispose?.();

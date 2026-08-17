@@ -16,6 +16,7 @@ import {
   CocodHttpError,
   type CocodClient,
   type CocodState,
+  type WalletRecoveryProgress,
 } from "../wallet/cocod-client";
 import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
@@ -43,7 +44,7 @@ type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
   daemon: "running";
-  wallet: "connected" | "error";
+  wallet: "connected" | "recovering" | "error";
   walletState: CocodState;
   balances?: Record<string, number>;
   mode: ClientMode;
@@ -154,6 +155,8 @@ function getWalletStateMessage(state: CocodState): string {
       return "Wallet is locked. Unlock it before performing wallet operations.";
     case "UNINITIALIZED":
       return "Wallet is not initialized. Run 'routstrd onboard' first.";
+    case "RECOVERING":
+      return "Wallet is recovering from a previous run. Balance and send/receive operations will be available once recovery completes.";
     case "ERROR":
       return "Wallet is in an error state.";
     default:
@@ -241,6 +244,15 @@ async function buildStatusOutput(
 
   try {
     const walletState = await deps.walletClient.getStatus();
+    if (walletState === "RECOVERING") {
+      return {
+        daemon: "running",
+        wallet: "recovering",
+        walletState,
+        mode,
+        error: getWalletStateMessage(walletState),
+      };
+    }
     if (walletState !== "UNLOCKED") {
       return {
         daemon: "running",
@@ -277,10 +289,12 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
   unit?: "sat";
   activeMint?: string | null;
   defaultMint?: string | null;
+  recovery?: WalletRecoveryProgress;
 }> {
   const state = await deps.walletClient.getStatus();
+  const recovery = await deps.walletClient.getRecoveryProgress?.();
   if (state !== "UNLOCKED") {
-    return { state, ready: false };
+    return { state, ready: false, ...(recovery ? { recovery } : {}) };
   }
 
   const [balances, defaultMint] = await Promise.all([
@@ -294,6 +308,7 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
     unit: "sat",
     activeMint: deps.walletAdapter.getActiveMintUrl(),
     defaultMint,
+    ...(recovery ? { recovery } : {}),
   };
 }
 

@@ -10,6 +10,7 @@ function mint(overrides: Record<string, unknown>) {
     state: "pending",
     expiry: NOW_MS / 1000 - 1000, // expired
     updatedAt: NOW_MS - 2 * DAY_MS,
+    lastObservedRemoteState: undefined,
     ...overrides,
   };
 }
@@ -48,6 +49,30 @@ describe("selectCleanupOperations", () => {
   it("ignores mint quotes that have not expired", () => {
     const result = selectCleanupOperations({
       mints: [mint({ id: "a", expiry: NOW_MS / 1000 + 1000 })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("ignores expired mint quotes already observed as PAID", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", lastObservedRemoteState: "PAID" })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("ignores expired mint quotes already observed as ISSUED", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", lastObservedRemoteState: "ISSUED" })],
       sends: [],
       melts: [],
       nowMs: NOW_MS,

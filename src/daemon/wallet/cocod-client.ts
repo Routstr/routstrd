@@ -32,7 +32,25 @@ type SpawnDaemon = (
   env: Record<string, string>,
 ) => SpawnedProcess;
 
-export type CocodState = "UNINITIALIZED" | "LOCKED" | "UNLOCKED" | "ERROR";
+export type CocodState =
+  | "UNINITIALIZED"
+  | "LOCKED"
+  | "UNLOCKED"
+  | "RECOVERING"
+  | "ERROR";
+
+/** Live progress for background wallet recovery started at daemon startup. */
+export interface WalletRecoveryProgress {
+  state: "RECOVERING" | "UNLOCKED" | "ERROR";
+  /** Current recovery phase, e.g. "Mint recovery" or "done". */
+  phase: string;
+  pendingSends: number;
+  inflightProofs: number;
+  pendingMints: number;
+  /** Expired unpaid mint quotes failed locally without a mint round-trip. */
+  failedMintQuotes: number;
+  error?: string;
+}
 
 export type CocodBalanceOutput = Record<string, { sats?: number } | number>;
 
@@ -118,6 +136,8 @@ export interface CocodClient {
   cleanupStuckOperations?(
     options?: WalletCleanupOptions,
   ): Promise<WalletCleanupResult>;
+  /** Report background wallet recovery progress, when the wallet supports it. */
+  getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {

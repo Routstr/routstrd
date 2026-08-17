@@ -1,5 +1,5 @@
 import {
-  initializeCoco,
+  Manager,
   getEncodedToken,
   normalizeMintUrl,
 } from "@cashu/coco-core";
@@ -32,6 +32,7 @@ import type {
   NpcUsernameResult,
   WalletCleanupOptions,
   WalletCleanupResult,
+  WalletRecoveryProgress,
 } from "./cocod-client";
 import { selectCleanupOperations } from "./cleanup";
 import { cocoLogger, logger } from "../../utils/logger";
@@ -113,23 +114,10 @@ function startupProgress(message: string): void {
   console.log(`${STARTUP_LOG_PREFIX} ${message}`);
 }
 
-// Set only around the blocking initializeCoco() call. While set, coco logger
-// messages that indicate recovery progress are forwarded to the CLI startup
-// stream (see createCocoLogger).
-let surfacingStartupProgress = false;
-
-// @cashu/coco-core has no recovery progress callback: initializeCoco() performs
-// all recovery phases in one blocking call and only logs when a phase finishes
-// (or when a per-mint check fails). Forward those boundaries to the startup
-// stream so a slow recovery shows which phase it is in, rather than only
-// elapsed seconds. A true per-mint counter is not available without patching
-// the library, because its happy path logs nothing per operation.
-const RECOVERY_PHASE_MARKERS = new Map<string, string>([
-  ["SendOperationService\u0000Recovery completed", "Send recovery complete"],
-  ["MeltOperationService\u0000Recovery completed", "Melt recovery complete"],
-  ["ReceiveOperationService\u0000Receive recovery completed", "Receive recovery complete"],
-  ["MintOperationService\u0000Mint operation recovery completed", "Mint recovery complete"],
-]);
+// Set only while the background wallet recovery sweeps are running. While set,
+// coco logger messages that indicate a stalled/failed per-mint check are
+// forwarded to the startup stream (see createCocoLogger).
+let surfacingRecoveryProgress = false;
 
 // These fire once per operation when a mint is unreachable or otherwise fails
 // to reconcile. They are the only per-mint signal coco emits, and they happen
@@ -180,20 +168,14 @@ function createCocoLogger(bindings: Record<string, unknown> = {}): CocoLogger {
     // ~/.routstrd/coco-logs/ so wallet-engine noise stays out of the main logs.
     const metadata = safeCocoMetadata([bindings, ...meta]);
 
-    if (surfacingStartupProgress) {
+    if (surfacingRecoveryProgress) {
       const module = typeof bindings.module === "string" ? bindings.module : undefined;
       if (module) {
-        const key = `${module}\u0000${message}`;
-        const phase = RECOVERY_PHASE_MARKERS.get(key);
-        if (phase) {
-          startupProgress(phase);
-        } else {
-          const stall = RECOVERY_STALL_MARKERS.get(key);
-          if (stall) {
-            const mintUrl =
-              typeof metadata.mintUrl === "string" ? metadata.mintUrl : undefined;
-            startupProgress(mintUrl ? `${stall} (${mintUrl})` : stall);
-          }
+        const stall = RECOVERY_STALL_MARKERS.get(`${module}\u0000${message}`);
+        if (stall) {
+          const mintUrl =
+            typeof metadata.mintUrl === "string" ? metadata.mintUrl : undefined;
+          startupProgress(mintUrl ? `${stall} (${mintUrl})` : stall);
         }
       }
     }
@@ -590,6 +572,114 @@ export interface CreateCocoClientOptions {
   npcBaseUrl?: string;
 }
 
+/**
+ * Build a usable coco Manager without running the blocking recovery sweeps.
+ *
+ * This replicates `initializeCoco()` up to (but not including) the send/melt/
+ * receive/mint recovery passes, so the daemon can serve wallet reads while
+ * recovery proceeds in the background.
+ */
+async function buildCocoManager(
+  repo: SqliteRepositories,
+  seed: Uint8Array,
+): Promise<Manager> {
+  const coco = new Manager(repo, async () => seed, createCocoLogger());
+  await coco.initPlugins();
+  await coco.reconcileLegacyMintQuotes();
+  await coco.enableMintOperationWatcher();
+  await coco.enableProofStateWatcher();
+  await coco.enableMintOperationProcessor();
+  return coco;
+}
+
+/**
+ * Fail expired unpaid mint quotes locally, without contacting their mints.
+ *
+ * An expired bolt11 invoice can never be paid, so a pending quote whose
+ * invoice has expired is guaranteed never to be issued. Paid/issued quotes are
+ * deliberately left alone so they go through normal recovery and have their
+ * proofs claimed.
+ */
+async function failExpiredMintsLocally(
+  coco: Manager,
+  nowMs: number,
+): Promise<number> {
+  const pendingMints = await coco.ops.mint.listPending();
+  const selection = selectCleanupOperations({
+    mints: pendingMints,
+    sends: [],
+    melts: [],
+    nowMs,
+    minAgeMs: 0,
+  });
+
+  const mintService = (
+    coco as unknown as { mintOperationService: MintOperationServiceCleanup }
+  ).mintOperationService;
+
+  let failed = 0;
+  for (const op of selection.mintsToFail) {
+    try {
+      await mintService.failPendingOperation(
+        { id: op.id },
+        {
+          reason: "Expired unpaid mint quote cleaned up by routstrd",
+          retryable: false,
+          observedAt: nowMs,
+        },
+      );
+      failed++;
+    } catch (error) {
+      logger.warn("Failed to fail expired mint quote during recovery", {
+        operationId: op.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return failed;
+}
+
+interface RecoveryPhaseProgress {
+  phase: string;
+  failedMintQuotes: number;
+}
+
+/**
+ * Run the wallet recovery sweeps in order, reporting phase changes.
+ *
+ * The local mint pruning runs first so expired unpaid quotes are failed before
+ * `recoverPendingMintOperations()` would otherwise contact their mints.
+ */
+async function runWalletRecovery(
+  coco: Manager,
+  onProgress: (progress: RecoveryPhaseProgress) => void,
+): Promise<void> {
+  surfacingRecoveryProgress = true;
+  let failedMintQuotes = 0;
+  try {
+    onProgress({ phase: "Pruning expired mint quotes", failedMintQuotes });
+    failedMintQuotes = await failExpiredMintsLocally(coco, Date.now());
+    onProgress({ phase: "Pruned expired mint quotes", failedMintQuotes });
+
+    onProgress({ phase: "Send recovery", failedMintQuotes });
+    await coco.ops.send.recovery.run();
+
+    onProgress({ phase: "Melt recovery", failedMintQuotes });
+    await coco.ops.melt.recovery.run();
+
+    onProgress({ phase: "Receive recovery", failedMintQuotes });
+    await coco.ops.receive.recovery.run();
+
+    onProgress({ phase: "Mint recovery", failedMintQuotes });
+    await coco.recoverPendingMintOperations();
+
+    onProgress({ phase: "done", failedMintQuotes });
+  } finally {
+    surfacingRecoveryProgress = false;
+  }
+}
+
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<CocodClient> {
@@ -625,8 +715,22 @@ export async function createCocoClient(
   }
 
   let database: Database | undefined;
-  let coco: Awaited<ReturnType<typeof initializeCoco>> | undefined;
+  let coco: Manager | undefined;
   let walletConfig = loadConfig(configFile);
+
+  let recoveryPhase = "queued";
+  let recoveryFailedMintQuotes = 0;
+  let recoveryDone = false;
+  let recoveryError: string | undefined;
+  const recoveryCounts = {
+    pendingSends: 0,
+    inflightProofs: 0,
+    pendingMints: 0,
+  };
+  let recoveryResolve: (() => void) | undefined;
+  const recoveryPromise = new Promise<void>((resolve) => {
+    recoveryResolve = resolve;
+  });
 
   try {
     startupProgress("Opening Cashu wallet database...");
@@ -644,28 +748,24 @@ export async function createCocoClient(
       repo.proofRepository.getInflightProofs(),
       repo.mintOperationRepository.getPending(),
     ]);
+    recoveryCounts.pendingSends = pendingSends.length;
+    recoveryCounts.inflightProofs = inflightProofs.length;
+    recoveryCounts.pendingMints = pendingMints.length;
     const recoveryCount =
-      pendingSends.length + inflightProofs.length + pendingMints.length;
+      recoveryCounts.pendingSends +
+      recoveryCounts.inflightProofs +
+      recoveryCounts.pendingMints;
+
     if (recoveryCount > 0) {
       startupProgress(
-        `Recovering wallet state: ${pendingSends.length} pending sends, ` +
-          `${inflightProofs.length} in-flight proofs, ${pendingMints.length} pending mints. ` +
-          "This may take a few minutes while Cashu mints are contacted.",
+        `Recovering wallet state in background: ${recoveryCounts.pendingSends} pending sends, ` +
+          `${recoveryCounts.inflightProofs} in-flight proofs, ${recoveryCounts.pendingMints} pending mints.`,
       );
     } else {
       startupProgress("Initializing Cashu wallet...");
     }
 
-    surfacingStartupProgress = true;
-    try {
-      coco = await initializeCoco({
-        repo,
-        seedGetter: async () => seed,
-        logger: createCocoLogger(),
-      });
-    } finally {
-      surfacingStartupProgress = false;
-    }
+    coco = await buildCocoManager(repo, seed);
 
     const trustedMints = await coco.mint.getAllTrustedMints();
     const configuredDefault = walletConfig.defaultMintUrl;
@@ -707,6 +807,29 @@ export async function createCocoClient(
     }
 
     startupProgress("Cashu wallet ready.");
+
+    // Recovery runs in the background so the daemon can serve wallet reads
+    // immediately. Value-moving operations await the same promise below.
+    runWalletRecovery(coco, (progress) => {
+      recoveryPhase = progress.phase;
+      recoveryFailedMintQuotes = progress.failedMintQuotes;
+      if (progress.phase !== "done") {
+        startupProgress(`Wallet recovery: ${progress.phase}...`);
+      }
+    })
+      .then(() => {
+        recoveryDone = true;
+        recoveryPhase = "done";
+        recoveryResolve?.();
+        startupProgress("Wallet recovery complete.");
+      })
+      .catch((error) => {
+        recoveryDone = true;
+        recoveryPhase = "error";
+        recoveryError = error instanceof Error ? error.message : String(error);
+        recoveryResolve?.();
+        startupProgress(`Wallet recovery failed: ${recoveryError}`);
+      });
   } catch (error) {
     database?.close();
     releaseLegacyPidClaim();
@@ -727,6 +850,18 @@ export async function createCocoClient(
   };
 
   let disposed = false;
+
+  /**
+   * Block a value-moving operation until background recovery has settled.
+   * Reads stay ungated so the daemon can report balances/status immediately.
+   */
+  const waitForRecovery = async (): Promise<void> => {
+    if (!recoveryDone) await recoveryPromise;
+    if (recoveryError) {
+      throw new Error(`Wallet is not ready: ${recoveryError}`);
+    }
+  };
+
   return {
     async ping(): Promise<boolean> {
       try {
@@ -738,12 +873,26 @@ export async function createCocoClient(
     },
 
     async getStatus(): Promise<CocodState> {
+      if (recoveryError) return "ERROR";
+      if (!recoveryDone) return "RECOVERING";
       try {
         await coco.wallet.balances.total();
         return "UNLOCKED";
       } catch {
         return "ERROR";
       }
+    },
+
+    async getRecoveryProgress(): Promise<WalletRecoveryProgress> {
+      return {
+        state: recoveryError ? "ERROR" : recoveryDone ? "UNLOCKED" : "RECOVERING",
+        phase: recoveryPhase,
+        pendingSends: recoveryCounts.pendingSends,
+        inflightProofs: recoveryCounts.inflightProofs,
+        pendingMints: recoveryCounts.pendingMints,
+        failedMintQuotes: recoveryFailedMintQuotes,
+        ...(recoveryError ? { error: recoveryError } : {}),
+      };
     },
 
     async unlock(_passphrase: string): Promise<string> {
@@ -763,11 +912,13 @@ export async function createCocoClient(
     },
 
     async receiveCashu(token: string): Promise<string> {
+      await waitForRecovery();
       await coco.wallet.receive(token);
       return "Token received successfully";
     },
 
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
@@ -786,6 +937,7 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
@@ -801,6 +953,7 @@ export async function createCocoClient(
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
@@ -822,6 +975,7 @@ export async function createCocoClient(
     },
 
     async addMint(url: string): Promise<string> {
+      await waitForRecovery();
       const mintUrl = normalizeMintUrl(url);
       await coco.mint.addMint(mintUrl, { trusted: true });
       return `Mint ${mintUrl} added successfully`;
@@ -836,6 +990,7 @@ export async function createCocoClient(
     },
 
     async setDefaultMint(url: string): Promise<string> {
+      await waitForRecovery();
       const mintUrl = normalizeMintUrl(url);
       const trustedMints = await coco.mint.getAllTrustedMints();
       if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
@@ -851,6 +1006,9 @@ export async function createCocoClient(
       if (disposed) return;
       disposed = true;
       try {
+        // Let any in-flight recovery settle before closing the database from
+        // underneath it. The recovery promise resolves on success or failure.
+        await recoveryPromise;
         await coco.dispose();
       } finally {
         try {
@@ -884,6 +1042,7 @@ export async function createCocoClient(
       username: string,
       confirm?: boolean,
     ): Promise<NpcUsernameResult> {
+      await waitForRecovery();
       const result = await npcApi().setUsername(username, confirm === true);
       if (result.success) {
         return { success: true };
@@ -896,12 +1055,14 @@ export async function createCocoClient(
     },
 
     async syncNpc(): Promise<void> {
+      await waitForRecovery();
       await npcApi().sync();
     },
 
     async cleanupStuckOperations(
       options: WalletCleanupOptions = {},
     ): Promise<WalletCleanupResult> {
+      await waitForRecovery();
       const minAgeMs = options.minAgeMs ?? 7 * 24 * 60 * 60 * 1000;
       const dryRun = options.dryRun === true;
       const nowMs = Date.now();

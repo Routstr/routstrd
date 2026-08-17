@@ -15,6 +15,11 @@ export interface MintCleanupCandidate {
   expiry: number;
   /** Last update time in epoch milliseconds. */
   updatedAt: number;
+  /**
+   * Last quote state observed from the mint (e.g. "PAID", "ISSUED").
+   * Unknown/undefined means no terminal observation has been recorded.
+   */
+  lastObservedRemoteState?: string;
 }
 
 export interface NonMintCleanupCandidate {
@@ -50,7 +55,10 @@ export interface CleanupSelection<
  * Select stuck operations that are old enough to be safe to clear.
  *
  * - Pending mint quotes are failed only when their bolt11 quote has expired
- *   (an expired Lightning invoice can never be paid).
+ *   (an expired Lightning invoice can never be paid) and the mint has not
+ *   already reported it as PAID/ISSUED. A paid-but-unfinalized quote still has
+ *   claimable proofs, so it must go through normal recovery instead of being
+ *   failed locally.
  * - Pending sends are reclaimed (rolled back) only when they are older than
  *   `minAgeMs`, so we never roll back a token that a receiver might still
  *   legitimately claim.
@@ -71,7 +79,9 @@ export function selectCleanupOperations<
     (op) =>
       op.state === "pending" &&
       op.expiry > 0 &&
-      op.expiry * 1000 <= nowMs,
+      op.expiry * 1000 <= nowMs &&
+      op.lastObservedRemoteState !== "PAID" &&
+      op.lastObservedRemoteState !== "ISSUED",
   );
 
   const sendsToReclaim = sends.filter(
