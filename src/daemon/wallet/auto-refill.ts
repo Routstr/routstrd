@@ -66,8 +66,6 @@ export function startAutoRefillLoop(
       return;
     }
 
-    checkInProgress = true;
-
     // If we've been failing too much, back off rather than retrying at full speed.
     // This prevents tight loops on transient errors.
     const backoffInterval = Math.min(
@@ -77,6 +75,8 @@ export function startAutoRefillLoop(
     if (now - lastAttemptAt < backoffInterval) {
       return;
     }
+
+    checkInProgress = true;
 
     try {
       const balances = await cocod.getBalances();
