@@ -170,6 +170,22 @@ async function startDaemonUnlocked(
 
   proc.unref();
 
+  // The daemon must outlive a successful start, but a start we give up on must not
+  // leave a detached process holding the wallet locks. `detached` makes it a group leader.
+  const killSpawnedDaemon = (): void => {
+    try {
+      process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      // Already exited.
+    }
+  };
+  const abandonOnSignal = (): void => {
+    killSpawnedDaemon();
+    process.exit(1);
+  };
+  process.once("SIGINT", abandonOnSignal);
+  process.once("SIGTERM", abandonOnSignal);
+
   let exitCode: number | null = null;
   proc.exited.then((code) => {
     exitCode = code;
@@ -212,6 +228,8 @@ async function startDaemonUnlocked(
     }
 
     if (await healthyDaemonHost(port, host)) {
+      process.off("SIGINT", abandonOnSignal);
+      process.off("SIGTERM", abandonOnSignal);
       printStartupProgress(progressLogOffset);
       console.log(
         `Routstr daemon started (PID: ${proc.pid}, ${formatElapsed(Date.now() - startedAt)}).`,
@@ -220,11 +238,10 @@ async function startDaemonUnlocked(
     }
   }
 
+  killSpawnedDaemon();
   throw new Error(
-    `Daemon did not become healthy within ${Math.round(startupTimeoutMs / 1000)} seconds. ` +
-      `Process ${proc.pid} had not exited when the timeout elapsed and may still finish starting; ` +
-      "check 'routstrd status'. " +
-      `If it remains stuck, run 'kill ${proc.pid}' and try again. Check logs in ${LOGS_DIR}`,
+    `Daemon did not become healthy within ${Math.round(startupTimeoutMs / 1000)} seconds; ` +
+      `the incomplete daemon (PID ${proc.pid}) was stopped. Check logs in ${LOGS_DIR}`,
   );
 }
 
