@@ -1048,8 +1048,16 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
+        // User-driven disables belong in the *manual* disabled list. The
+        // review-based list (setDisabledProviders) is owned by the Nostr
+        // kind-38425 review sync, which overwrites it and would otherwise
+        // silently re-enable manually-disabled providers. Disabling also
+        // clears any manual-enable override for that provider.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
         ];
 
         const toDisable: string[] = [];
@@ -1060,15 +1068,21 @@ export function createDaemonRequestHandler(deps: {
             idx < baseUrlsList.length
           ) {
             const baseUrl = baseUrlsList[idx]!;
-            if (!disabledProviders.includes(baseUrl)) {
-              disabledProviders.push(baseUrl);
+            if (!manuallyDisabledProviders.includes(baseUrl)) {
+              manuallyDisabledProviders.push(baseUrl);
               toDisable.push(baseUrl);
+            }
+            const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+            if (enabledPos !== -1) {
+              manuallyEnabledProviders.splice(enabledPos, 1);
             }
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1104,8 +1118,14 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
+        // Re-enabling clears the manual disable and records a manual-enable
+        // override so the review sync (which disables providers without an
+        // lgtm review) does not silently re-disable it on the next pass.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
         ];
 
         const toEnable: string[] = [];
@@ -1116,16 +1136,21 @@ export function createDaemonRequestHandler(deps: {
             idx < baseUrlsList.length
           ) {
             const baseUrl = baseUrlsList[idx]!;
-            const pos = disabledProviders.indexOf(baseUrl);
+            const pos = manuallyDisabledProviders.indexOf(baseUrl);
             if (pos !== -1) {
-              disabledProviders.splice(pos, 1);
-              toEnable.push(baseUrl);
+              manuallyDisabledProviders.splice(pos, 1);
             }
+            if (!manuallyEnabledProviders.includes(baseUrl)) {
+              manuallyEnabledProviders.push(baseUrl);
+            }
+            toEnable.push(baseUrl);
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1344,7 +1369,15 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = state.disabledProviders || [];
+        const manuallyEnabled = new Set(
+          state.manuallyEnabledProviders || [],
+        );
+        const disabledProviders: string[] = [
+          ...new Set([
+            ...(state.disabledProviders || []),
+            ...(state.manuallyDisabledProviders || []),
+          ]),
+        ].filter((url) => !manuallyEnabled.has(url));
 
         const providers = baseUrlsList.map((baseUrl, index) => ({
           index,

@@ -41,8 +41,17 @@ export function createModelService(
     const currentProviders = new Set(
       modelManager.getBaseUrls().map(normalizeBaseUrl),
     );
+    const s = store.getState();
+    const manuallyEnabled = new Set(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
     const disabledProviders = new Set(
-      (store.getState().disabledProviders || []).map(normalizeBaseUrl),
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
     );
     const bestById = new Map<string, PricedModel>();
 
@@ -140,7 +149,16 @@ export function createModelService(
   ): Promise<ModelWithProviders | null> => {
     await ensureProvidersBootstrapped();
 
-    const disabledSet = new Set<string>(store.getState().disabledProviders || []);
+    const s = store.getState();
+    const manuallyEnabled = new Set<string>(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledSet = new Set<string>(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ].filter((url) => !manuallyEnabled.has(normalizeBaseUrl(url))),
+    );
 
     // Use the SDK ranking (sorted by prompt+completion per million tokens)
     // so the display order matches real routing. includeDisabled keeps
@@ -212,28 +230,27 @@ export function createModelService(
       undefined,
       true,
     );
-    if (reviewedDisabled.length > 0) {
+    if (reviewedDisabled && reviewedDisabled.length > 0) {
       console.log(
         `Review sync disabled ${reviewedDisabled.length} provider(s): ${reviewedDisabled.join(", ")}`,
       );
     }
 
     // Sync discovered providers into the store
-    const { baseUrlsList, setBaseUrlsList, disabledProviders, setDisabledProviders } =
-      store.getState() as any;
+    const { setBaseUrlsList, setDisabledProviders } = store.getState() as any;
 
     // Replace baseUrlsList with the fresh provider list
     setBaseUrlsList(providers);
 
-    // Merge review-disabled providers into the store's disabled list
-    const existingDisabled = new Set(disabledProviders || []);
-    for (const url of reviewedDisabled) {
-      existingDisabled.add(url);
+    // Mirror the review-disabled set into the store's auto-disabled list.
+    // `null` means the review sync left the adapter unchanged (e.g. no lgtm
+    // reviews found), so we must not clobber the store list with an empty array.
+    if (reviewedDisabled !== null) {
+      setDisabledProviders(reviewedDisabled);
     }
-    setDisabledProviders([...existingDisabled]);
 
     console.log(
-      `Provider refresh complete: ${providers.length} total, ${existingDisabled.size} disabled`,
+      `Provider refresh complete: ${providers.length} total, ${reviewedDisabled?.length ?? store.getState().disabledProviders?.length ?? 0} review-disabled`,
     );
   };
 
