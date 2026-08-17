@@ -148,7 +148,7 @@ Manage admin npubs (subcommand required).
 
 ### `routstrd remote <url>`
 
-Configure a remote daemon URL. Generates a Nostr identity (nsec/npub) for NIP-98 authentication automatically.
+Configure a remote daemon URL. Creates a Nostr identity (nsec/npub) for NIP-98 authentication automatically — derived from the local wallet mnemonic (NIP-06 account 0). A local wallet is created on the spot when none exists (migrating a legacy cocod wallet first, so its mnemonic wins); a random identity is generated only when the wallet mnemonic is unavailable (e.g. an encrypted wallet).
 
 ```sh
 routstrd remote https://your-remote-daemon.com
@@ -163,7 +163,7 @@ Refresh routstr21 models from Nostr and re-run integrations for all registered c
 | `port` | number | 8008 | Daemon HTTP port |
 | `provider` | string\|null | null | Default provider URL |
 | `daemonUrl` | string\|null | null | Remote daemon URL |
-| `nsec` | string\|null | null | Nostr secret key for NIP-98 auth |
+| `nsec` | string\|null | null | Nostr secret key for NIP-98 auth (derived from the wallet mnemonic via NIP-06 account 0 whenever no nsec is configured yet — on init or when configuring a remote) |
 | `cocodPath` | string\|null | null | Custom path to cocod executable |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
 
