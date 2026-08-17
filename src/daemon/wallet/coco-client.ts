@@ -541,15 +541,22 @@ function claimPidFile(options: LegacyCocodPidClaimOptions & { pidFilePath: strin
 
 /**
  * Minimal structural view of coco-core's MintOperationService.
- * `failPendingOperation` is private on the exported class, so the in-process
- * client reaches it through this narrow cast. The method only needs the
- * operation id; it reloads the latest persisted row before mutating it.
+ * The service is private on the exported Manager class, so the in-process
+ * client reaches it through this narrow cast. Both methods reload the latest
+ * persisted row before mutating anything, so a bare operation id is enough.
  */
 interface MintOperationServiceCleanup {
   failPendingOperation(
     op: { id: string },
     terminalFailure: { reason: string; retryable?: boolean; observedAt: number },
   ): Promise<unknown>;
+  /**
+   * Ask the mint for a pending quote's current state and persist the
+   * observation. "waiting" means the mint still reports the quote as unpaid.
+   */
+  observePendingOperation(
+    operationId: string,
+  ): Promise<{ category: "waiting" | "ready" | "completed" | "terminal" }>;
 }
 
 export interface CreateCocoClientOptions {
@@ -589,18 +596,80 @@ async function buildCocoManager(
 }
 
 /**
- * Fail expired unpaid mint quotes locally, without contacting their mints.
- *
- * An expired bolt11 invoice can never be paid, so a pending quote whose
- * invoice has expired is guaranteed never to be issued. Paid/issued quotes are
- * deliberately left alone so they go through normal recovery and have their
- * proofs claimed.
+ * Shared wall-clock budget for checking expired mint quotes with their mints
+ * during background recovery. coco-core issues mint requests without a
+ * timeout, so a hung mint could otherwise stall this phase (and with it the
+ * recovery promise that gates value-moving operations) far longer than this.
  */
-async function failExpiredMintsLocally(
-  coco: Manager,
+const EXPIRED_MINT_OBSERVATION_DEADLINE_MS = 15_000;
+
+/** Rejects when `timeoutMs` elapses before `promise` settles. */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("Timed out contacting mint")),
+      timeoutMs,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+/** Structural subset of coco's Manager used by expired-quote settlement. */
+export interface ExpiredMintQuoteSource {
+  ops: {
+    mint: {
+      listPending(): Promise<
+        Array<{
+          id: string;
+          mintUrl: string;
+          quoteId?: string;
+          state: string;
+          /** Quote expiry in epoch seconds. */
+          expiry: number;
+          updatedAt: number;
+          lastObservedRemoteState?: string;
+        }>
+      >;
+    };
+  };
+  mintOperationService: MintOperationServiceCleanup;
+}
+
+export interface ExpiredMintSettlement {
+  /** Quotes their mint confirmed as UNPAID, failed locally. */
+  failed: number;
+  /** Quotes observed as PAID/ISSUED, left for mint recovery to finalize. */
+  leftForRecovery: number;
+  /** Quotes whose mint could not be checked in time, left pending. */
+  unobserved: number;
+}
+
+/**
+ * Settle expired pending mint quotes before the mint recovery sweep runs.
+ *
+ * An expired bolt11 invoice can never be paid again, so a quote the mint
+ * still reports as UNPAID is guaranteed never to be issued and is failed
+ * locally. That local fail is what keeps coco-core's mint recovery sweep
+ * quick: the sweep treats UNPAID as "waiting" and would otherwise re-contact
+ * every dead quote's mint on every startup.
+ *
+ * The observation round is what makes the local fail safe: a quote can have
+ * been paid before expiry while the daemon was down, leaving no local
+ * observation behind. Failing such a quote without asking the mint would
+ * strand the paid funds, because failed operations are skipped by recovery.
+ * Asking the mint first closes that hole: PAID/ISSUED quotes are left for
+ * the sweep to finalize, and quotes whose mint is unreachable or too slow
+ * are left pending so a later startup can still recover them.
+ */
+export async function settleExpiredMintQuotes(
+  source: ExpiredMintQuoteSource,
   nowMs: number,
-): Promise<number> {
-  const pendingMints = await coco.ops.mint.listPending();
+  deadlineMs: number = EXPIRED_MINT_OBSERVATION_DEADLINE_MS,
+): Promise<ExpiredMintSettlement> {
+  const pendingMints = await source.ops.mint.listPending();
   const selection = selectCleanupOperations({
     mints: pendingMints,
     sends: [],
@@ -609,31 +678,74 @@ async function failExpiredMintsLocally(
     minAgeMs: 0,
   });
 
-  const mintService = (
-    coco as unknown as { mintOperationService: MintOperationServiceCleanup }
-  ).mintOperationService;
+  const settlement: ExpiredMintSettlement = {
+    failed: 0,
+    leftForRecovery: 0,
+    unobserved: 0,
+  };
+  const candidates = selection.mintsToFail;
+  if (candidates.length === 0) return settlement;
 
-  let failed = 0;
-  for (const op of selection.mintsToFail) {
-    try {
-      await mintService.failPendingOperation(
-        { id: op.id },
-        {
-          reason: "Expired unpaid mint quote cleaned up by routstrd",
-          retryable: false,
-          observedAt: nowMs,
-        },
+  const startedAt = Date.now();
+  for (const op of candidates) {
+    const remainingMs = deadlineMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      const skipped =
+        candidates.length -
+        settlement.failed -
+        settlement.leftForRecovery -
+        settlement.unobserved;
+      settlement.unobserved += skipped;
+      startupProgress(
+        `Expired mint quote check budget exhausted; ${skipped} quote(s) left for mint recovery.`,
       );
-      failed++;
+      break;
+    }
+
+    try {
+      const result = await withTimeout(
+        source.mintOperationService.observePendingOperation(op.id),
+        remainingMs,
+      );
+      if (result.category === "waiting") {
+        // The mint confirms the expired quote is still unpaid: it can never
+        // be issued now, so failing it locally cannot strand funds.
+        await source.mintOperationService.failPendingOperation(
+          { id: op.id },
+          {
+            reason: "Expired mint quote confirmed unpaid by mint",
+            retryable: false,
+            observedAt: Date.now(),
+          },
+        );
+        settlement.failed++;
+      } else {
+        // PAID/ISSUED (or terminally failed) at the mint: normal recovery
+        // must see this quote so paid proofs get claimed.
+        settlement.leftForRecovery++;
+        const observed =
+          result.category === "ready"
+            ? "was paid at the mint"
+            : result.category === "completed"
+              ? "was already issued at the mint"
+              : "failed terminally at the mint";
+        startupProgress(
+          `Expired mint quote ${op.quoteId ?? op.id} at ${op.mintUrl} ${observed}; leaving it for mint recovery.`,
+        );
+      }
     } catch (error) {
-      logger.warn("Failed to fail expired mint quote during recovery", {
+      // Mint unreachable, too slow, or the quote unknown to it: leave the
+      // operation pending so a later startup can still recover it.
+      settlement.unobserved++;
+      logger.warn("Could not check expired mint quote; leaving it pending", {
         operationId: op.id,
+        mintUrl: op.mintUrl,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
-  return failed;
+  return settlement;
 }
 
 interface RecoveryPhaseProgress {
@@ -644,8 +756,9 @@ interface RecoveryPhaseProgress {
 /**
  * Run the wallet recovery sweeps in order, reporting phase changes.
  *
- * The local mint pruning runs first so expired unpaid quotes are failed before
- * `recoverPendingMintOperations()` would otherwise contact their mints.
+ * Expired mint quotes are settled first: quotes their mint confirms as unpaid
+ * are failed locally so `recoverPendingMintOperations()` skips them, while
+ * paid/issued and unreachable-mint quotes stay pending for the sweep.
  */
 async function runWalletRecovery(
   coco: Manager,
@@ -654,9 +767,27 @@ async function runWalletRecovery(
   surfacingRecoveryProgress = true;
   let failedMintQuotes = 0;
   try {
-    onProgress({ phase: "Pruning expired mint quotes", failedMintQuotes });
-    failedMintQuotes = await failExpiredMintsLocally(coco, Date.now());
-    onProgress({ phase: "Pruned expired mint quotes", failedMintQuotes });
+    onProgress({ phase: "Settling expired mint quotes", failedMintQuotes });
+    const settlement = await settleExpiredMintQuotes(
+      {
+        ops: coco.ops,
+        mintOperationService: (
+          coco as unknown as {
+            mintOperationService: MintOperationServiceCleanup;
+          }
+        ).mintOperationService,
+      },
+      Date.now(),
+    );
+    failedMintQuotes = settlement.failed;
+    if (settlement.leftForRecovery > 0 || settlement.unobserved > 0) {
+      startupProgress(
+        `Expired mint quotes: ${settlement.failed} failed locally, ` +
+          `${settlement.leftForRecovery} paid/issued (kept for recovery), ` +
+          `${settlement.unobserved} unverifiable (kept pending).`,
+      );
+    }
+    onProgress({ phase: "Settled expired mint quotes", failedMintQuotes });
 
     onProgress({ phase: "Send recovery", failedMintQuotes });
     await coco.ops.send.recovery.run();

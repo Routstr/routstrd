@@ -52,13 +52,20 @@ export interface CleanupSelection<
 }
 
 /**
- * Select stuck operations that are old enough to be safe to clear.
+ * Select stuck operations that are old enough to be considered for clearing.
  *
- * - Pending mint quotes are failed only when their bolt11 quote has expired
- *   (an expired Lightning invoice can never be paid) and the mint has not
- *   already reported it as PAID/ISSUED. A paid-but-unfinalized quote still has
- *   claimable proofs, so it must go through normal recovery instead of being
- *   failed locally.
+ * - Pending mint quotes are candidates once their bolt11 quote has expired
+ *   (an expired Lightning invoice can never be paid again) and the mint has
+ *   not already reported it as PAID/ISSUED. A paid-but-unfinalized quote
+ *   still has claimable proofs, so it must go through normal recovery instead
+ *   of being failed locally.
+ *
+ *   Note that expiry alone does not prove a quote was never paid: the payment
+ *   can have happened before expiry while the daemon was down, leaving no
+ *   local observation. Callers that fail quotes automatically at startup must
+ *   therefore confirm UNPAID with the mint first (see
+ *   settleExpiredMintQuotes in coco-client.ts); only the explicit,
+ *   user-invoked cleanup command may fail candidates purely locally.
  * - Pending sends are reclaimed (rolled back) only when they are older than
  *   `minAgeMs`, so we never roll back a token that a receiver might still
  *   legitimately claim.
@@ -73,8 +80,9 @@ export function selectCleanupOperations<
 ): CleanupSelection<TMint, TSend, TMelt> {
   const { mints, sends, melts, nowMs, minAgeMs } = options;
 
-  // Expiry alone is enough for mint quotes: once a bolt11 quote has expired it
-  // can never be paid, regardless of when the watcher last touched the row.
+  // Expired quotes can never be paid again, but may have been paid before
+  // expiry without a local observation: this is a candidate set, and whether
+  // failing is safe without a mint round-trip depends on the caller (above).
   const mintsToFail = mints.filter(
     (op) =>
       op.state === "pending" &&

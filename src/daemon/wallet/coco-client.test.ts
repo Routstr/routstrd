@@ -15,7 +15,9 @@ import {
   claimLegacyCocodPidFile,
   createCocoClient,
   isZombieProcess,
+  settleExpiredMintQuotes,
   stopLegacyCocod,
+  type ExpiredMintQuoteSource,
 } from "./coco-client";
 
 type GuardOptions = NonNullable<
@@ -535,5 +537,133 @@ describe("claimLegacyCocodPidFile", () => {
     expect(process.listenerCount("exit")).toBe(before + 1);
     release();
     expect(process.listenerCount("exit")).toBe(before);
+  });
+});
+
+describe("settleExpiredMintQuotes", () => {
+  const EXPIRED_S = 1_000_000; // epoch seconds, long past
+  const NOW_MS = 2_000_000_000_000;
+
+  function pendingMintOp(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "op-1",
+      mintUrl: "https://mint.example.com",
+      quoteId: "quote-1",
+      state: "pending",
+      expiry: EXPIRED_S,
+      updatedAt: NOW_MS - 60_000,
+      lastObservedRemoteState: undefined,
+      ...overrides,
+    };
+  }
+
+  function fakeSource(
+    ops: Array<Record<string, unknown>>,
+    behavior: {
+      observe?: (id: string) => Promise<{ category: "waiting" | "ready" | "completed" | "terminal" }>;
+    } = {},
+  ) {
+    const failPendingOperation = mock(
+      async (
+        _op: { id: string },
+        _failure: { reason: string; retryable?: boolean; observedAt: number },
+      ) => ({}),
+    );
+    const observePendingOperation = mock(
+      behavior.observe ??
+        (async (
+          _id: string,
+        ): Promise<{ category: "waiting" | "ready" | "completed" | "terminal" }> => ({
+          category: "waiting",
+        })),
+    );
+    const source = {
+      ops: { mint: { listPending: async () => ops } },
+      mintOperationService: { observePendingOperation, failPendingOperation },
+    } as unknown as ExpiredMintQuoteSource;
+    return { source, observePendingOperation, failPendingOperation };
+  }
+
+  it("fails an expired quote locally when its mint confirms it is unpaid", async () => {
+    const op = pendingMintOp();
+    const { source, failPendingOperation } = fakeSource([op]);
+
+    const result = await settleExpiredMintQuotes(source, NOW_MS);
+
+    expect(result).toEqual({ failed: 1, leftForRecovery: 0, unobserved: 0 });
+    expect(failPendingOperation).toHaveBeenCalledTimes(1);
+    expect(failPendingOperation.mock.calls[0]?.[0]).toEqual({ id: "op-1" });
+  });
+
+  it("leaves an expired quote observed as PAID for mint recovery", async () => {
+    const op = pendingMintOp();
+    const { source, failPendingOperation } = fakeSource([op], {
+      observe: async () => ({ category: "ready" }),
+    });
+
+    const result = await settleExpiredMintQuotes(source, NOW_MS);
+
+    expect(result).toEqual({ failed: 0, leftForRecovery: 1, unobserved: 0 });
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("leaves an expired quote observed as ISSUED for mint recovery", async () => {
+    const op = pendingMintOp();
+    const { source, failPendingOperation } = fakeSource([op], {
+      observe: async () => ({ category: "completed" }),
+    });
+
+    const result = await settleExpiredMintQuotes(source, NOW_MS);
+
+    expect(result).toEqual({ failed: 0, leftForRecovery: 1, unobserved: 0 });
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("leaves quotes pending when their mint cannot be checked", async () => {
+    const op = pendingMintOp();
+    const { source, failPendingOperation } = fakeSource([op], {
+      observe: async () => {
+        throw new Error("Network request failed");
+      },
+    });
+
+    const result = await settleExpiredMintQuotes(source, NOW_MS);
+
+    expect(result).toEqual({ failed: 0, leftForRecovery: 0, unobserved: 1 });
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("stops observing once the shared deadline is exhausted", async () => {
+    const ops = [
+      pendingMintOp({ id: "op-1", quoteId: "q-1" }),
+      pendingMintOp({ id: "op-2", quoteId: "q-2" }),
+    ];
+    const { source, failPendingOperation } = fakeSource(ops, {
+      // A hung mint: the observation never settles.
+      observe: () => new Promise(() => {}),
+    });
+
+    const started = Date.now();
+    const result = await settleExpiredMintQuotes(source, NOW_MS, 50);
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result).toEqual({ failed: 0, leftForRecovery: 0, unobserved: 2 });
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("does not touch unexpired or already-observed quotes", async () => {
+    const ops = [
+      pendingMintOp({ id: "unexpired", expiry: NOW_MS / 1000 + 600 }),
+      pendingMintOp({ id: "seen-paid", lastObservedRemoteState: "PAID" }),
+      pendingMintOp({ id: "seen-issued", lastObservedRemoteState: "ISSUED" }),
+    ];
+    const { source, observePendingOperation, failPendingOperation } =
+      fakeSource(ops);
+
+    const result = await settleExpiredMintQuotes(source, NOW_MS);
+
+    expect(result).toEqual({ failed: 0, leftForRecovery: 0, unobserved: 0 });
+    expect(observePendingOperation).not.toHaveBeenCalled();
+    expect(failPendingOperation).not.toHaveBeenCalled();
   });
 });
