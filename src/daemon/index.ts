@@ -67,17 +67,14 @@ import {
   legacyCocodPidPath,
   legacyCocodSocketPath,
 } from "./wallet/paths";
+import { installGlobalErrorHandlers } from "./fatal-error";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
-// the process silently. Log to the file logger before exiting.
-process.on("uncaughtException", (error) => {
-  logger.error("UNCAUGHT EXCEPTION:", error);
-});
-
-process.on("unhandledRejection", (reason) => {
-  logger.error("UNHANDLED REJECTION:", reason);
-});
+// the process silently. Uncaught exceptions are fatal: the process state can
+// no longer be trusted, so the daemon logs and exits for its supervisor to
+// restart (see fatal-error.ts).
+installGlobalErrorHandlers();
 
 async function main(): Promise<void> {
   // Install signal handlers before migration and wallet startup. If a signal
