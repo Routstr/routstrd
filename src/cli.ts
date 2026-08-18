@@ -348,7 +348,7 @@ program
   .description("Refund pending tokens and API keys to a specified mint")
   .option(
     "-m, --mint-url <mintUrl>",
-    "Mint URL to refund to (defaults to first mint in wallet)",
+    "Mint URL to refund to (defaults to active wallet mint)",
   )
   .option("-y, --yes", "Skip confirmation prompt", false)
   .option("--xcashu", "Refund xcashu tokens only (uses refundXcashuTokens)", false)
@@ -362,18 +362,19 @@ program
         console.log(balanceResult.error);
         process.exit(1);
       }
-      const balances = (
-        balanceResult.output as
-          | {
-              balances?: Record<string, number>;
-            }
-          | undefined
-      )?.balances;
-      if (!balances || Object.keys(balances).length === 0) {
+      const output = balanceResult.output as
+        | {
+            balances?: Record<string, number>;
+            activeMint?: string;
+          }
+        | undefined;
+      mintUrl =
+        output?.activeMint ??
+        (output?.balances ? Object.keys(output.balances)[0] : undefined);
+      if (!mintUrl) {
         console.log("No mint URLs found in wallet balance");
         process.exit(1);
       }
-      mintUrl = Object.keys(balances)[0];
       console.log(`Using mint URL: ${mintUrl}`);
     }
 
@@ -657,7 +658,7 @@ program
   )
   .option(
     "--mint-url <url>",
-    "Mint URL to refund the deleted API key balance to (defaults to first mint in wallet)",
+    "Mint URL to refund the deleted API key balance to (defaults to active wallet mint)",
   )
   .action(async (options: { apiKeys: boolean; deleteApiKeys?: string; mintUrl?: string }) => {
     await ensureDaemonRunning();

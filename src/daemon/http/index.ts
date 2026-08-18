@@ -1005,12 +1005,9 @@ export function createDaemonRequestHandler(deps: {
 
         if (!mintUrl) {
           try {
-            const walletBalances =
-              await deps.walletAdapter.getBalances();
-            const mintUrls = Object.keys(walletBalances);
-            if (mintUrls.length > 0) {
-              mintUrl = mintUrls[0];
-            }
+            mintUrl =
+              deps.walletAdapter.getActiveMintUrl() ??
+              Object.keys(await deps.walletAdapter.getBalances())[0];
           } catch {
             // ignore
           }
