@@ -295,10 +295,7 @@ program
   .command("update")
   .description("Update routstrd to the latest version")
   .action(async () => {
-    const packages = [
-      { name: "routstrd", label: "routstrd" },
-      { name: "@routstr/cocod", label: "cocod" },
-    ];
+    const packages = [{ name: "routstrd", label: "routstrd" }];
 
     let updatedAny = false;
 
