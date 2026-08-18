@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "os";
 import { join } from "path";
 import { migrateLegacyWallet } from "./migration";
+import { WalletMigrationConflictError } from "./diagnostics";
 
 const roots: string[] = [];
 function root(): string {
@@ -135,13 +136,36 @@ describe("migrateLegacyWallet", () => {
     const walletDir = join(base, ".routstrd", "wallet");
     mkdirSync(legacyDir, { recursive: true });
     mkdirSync(walletDir, { recursive: true });
-    writeFileSync(join(legacyDir, "config.json"), "legacy");
-    writeFileSync(join(walletDir, "config.json"), "current");
-
-    await expect(migrateLegacyWallet({ walletDir, legacyDir })).rejects.toThrow(
-      "both",
+    writeFileSync(
+      join(legacyDir, "config.json"),
+      JSON.stringify({ mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" }),
     );
-    expect(readFileSync(join(walletDir, "config.json"), "utf8")).toBe("current");
-    expect(readFileSync(join(legacyDir, "config.json"), "utf8")).toBe("legacy");
+    writeFileSync(
+      join(walletDir, "config.json"),
+      JSON.stringify({ mnemonic: "legal winner thank year wave sausage worth useful legal winner thank yellow" }),
+    );
+
+    let thrown: unknown;
+    try {
+      await migrateLegacyWallet({ walletDir, legacyDir });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(WalletMigrationConflictError);
+    const err = thrown as WalletMigrationConflictError;
+    expect(err.target.dir).toBe(walletDir);
+    expect(err.source.dir).toBe(legacyDir);
+    expect(err.message).toContain("two different wallets were found");
+    expect(err.message).toContain(walletDir);
+    expect(err.message).toContain(legacyDir);
+    expect(err.message).not.toContain("abandon");
+    expect(err.message).not.toContain("legal winner");
+    expect(readFileSync(join(walletDir, "config.json"), "utf8")).toContain(
+      "legal winner",
+    );
+    expect(readFileSync(join(legacyDir, "config.json"), "utf8")).toContain(
+      "abandon abandon",
+    );
   });
 });

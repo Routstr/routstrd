@@ -35,6 +35,11 @@ import {
 } from "./daemon/wallet/coco-client";
 import { migrateLegacyWallet } from "./daemon/wallet/migration";
 import {
+  renderWalletDoctor,
+  summarizeWalletDirectory,
+} from "./daemon/wallet/diagnostics";
+import {
+  legacyCocodDir,
   legacyCocodPidPath,
   legacyCocodSocketPath,
   walletDir as defaultWalletDir,
@@ -1521,6 +1526,18 @@ walletCmd
   .description("Check wallet status")
   .action(async () => {
     await handleDaemonCommand("/wallet/status");
+  });
+
+walletCmd
+  .command("doctor")
+  .description("Diagnose conflicting wallets (current routstrd wallet vs legacy cocod)")
+  .action(async () => {
+    console.log(
+      renderWalletDoctor(
+        summarizeWalletDirectory(defaultWalletDir(), "canonical"),
+        summarizeWalletDirectory(legacyCocodDir(), "legacy"),
+      ),
+    );
   });
 
 walletCmd

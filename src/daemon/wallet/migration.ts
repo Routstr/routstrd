@@ -11,6 +11,12 @@ import {
 import { Database } from "bun:sqlite";
 import { basename, dirname, join } from "path";
 import { legacyCocodDir, walletDir } from "./paths";
+import {
+  summarizeWalletDirectory,
+  verifyDatabase,
+  WalletMigrationConflictError,
+  type WalletSummary,
+} from "./diagnostics";
 
 export type WalletMigrationResult =
   | { status: "fresh" }
@@ -44,40 +50,6 @@ function filesEqual(left: string, right: string): boolean {
 
 function sqlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
-}
-
-type WalletSummary = Record<string, unknown[]>;
-const SUMMARY_QUERIES: Record<string, string> = {
-  proofs:
-    "SELECT mintUrl, state, COUNT(*) count, COALESCE(SUM(amount), 0) amount FROM coco_cashu_proofs GROUP BY mintUrl, state ORDER BY mintUrl, state",
-  counters:
-    "SELECT mintUrl, keysetId, counter FROM coco_cashu_counters ORDER BY mintUrl, keysetId",
-  mintOperations:
-    "SELECT state, COUNT(*) count FROM coco_cashu_mint_operations GROUP BY state ORDER BY state",
-  sendOperations:
-    "SELECT state, COUNT(*) count FROM coco_cashu_send_operations GROUP BY state ORDER BY state",
-  meltOperations:
-    "SELECT state, COUNT(*) count FROM coco_cashu_melt_operations GROUP BY state ORDER BY state",
-  mints: "SELECT mintUrl, trusted FROM coco_cashu_mints ORDER BY mintUrl",
-};
-
-function verifyDatabase(database: Database, label: string): WalletSummary {
-  const checks = database.query("PRAGMA quick_check").values() as unknown[][];
-  if (checks.length !== 1 || checks[0]?.[0] !== "ok") {
-    throw new Error(`${label} failed PRAGMA quick_check: ${JSON.stringify(checks)}`);
-  }
-
-  const tables = new Set(
-    (database
-      .query("SELECT name FROM sqlite_master WHERE type = 'table'")
-      .values() as string[][]).map(([name]) => name),
-  );
-  const summary: WalletSummary = {};
-  for (const [name, query] of Object.entries(SUMMARY_QUERIES)) {
-    const table = query.match(/FROM\s+(coco_cashu_\w+)/i)?.[1];
-    summary[name] = table && tables.has(table) ? database.query(query).all() : [];
-  }
-  return summary;
 }
 
 /** Write a standalone SQLite snapshot containing committed WAL frames. */
@@ -134,9 +106,9 @@ export async function migrateLegacyWallet(
         ? true
         : filesEqual(targetDb, sourceDb);
     if (configsMatch && databasesMatch) return { status: "already-current" };
-    throw new Error(
-      `Cannot migrate wallet: both ${targetDir} and ${sourceDir} contain different wallet data. ` +
-        "Refusing to choose a mnemonic or merge wallet databases automatically.",
+    throw new WalletMigrationConflictError(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
     );
   }
   if (targetState === "initialized") return { status: "already-current" };
