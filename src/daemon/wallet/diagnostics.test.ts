@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -343,5 +343,36 @@ describe("diagnoseWallets", () => {
     );
     expect(verdict.conflict).toBe(false);
     expect(verdict.showResolution).toBe(false);
+  });
+
+  it("survives an unreadable wallet file without crashing", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    // Equal sizes force the classifier's filesEqual past the size check into
+    // raw reads, where the permission error would otherwise crash the doctor.
+    mkdirSync(targetDir, { recursive: true });
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(targetDir, "config.json"), `{"mnemonic":"${"a".repeat(50)}"}`);
+    const sourceConfig = join(sourceDir, "config.json");
+    writeFileSync(sourceConfig, `{"mnemonic":"${"b".repeat(50)}"}`);
+    chmodSync(sourceConfig, 0o000);
+
+    try {
+      const target = summarizeWalletDirectory(targetDir, "canonical");
+      const source = summarizeWalletDirectory(sourceDir, "legacy");
+      expect(source.config.error).toBeTruthy();
+
+      const verdict = diagnoseWallets(target, source);
+      expect(verdict.conflict).toBe(true);
+      expect(verdict.showResolution).toBe(true);
+      expect(verdict.text).toContain("could not be fully read");
+
+      // The full report must render too — this is the user-facing path.
+      const report = renderWalletDoctor(target, source);
+      expect(report).toContain("could not be fully read");
+      expect(report).toContain("mv \"");
+    } finally {
+      chmodSync(sourceConfig, 0o600);
+    }
   });
 });

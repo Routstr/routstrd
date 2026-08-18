@@ -430,11 +430,24 @@ export function diagnoseWallets(
   target: WalletDiagnostic,
   source: WalletDiagnostic,
 ): WalletVerdict {
-  return verdictFromClassification(
-    target,
-    source,
-    classifyWalletMigration(target.dir, source.dir),
-  );
+  let classification: WalletMigrationClass;
+  try {
+    classification = classifyWalletMigration(target.dir, source.dir);
+  } catch {
+    // classifyWalletMigration does raw reads (filesEqual) that can throw on
+    // unreadable or concurrently-removed files. The doctor exists to diagnose
+    // broken states, so it must never crash on one. Fail safe: treat the
+    // state as a conflict — startup hits the same read error and refuses.
+    if (target.config.error || source.config.error || target.db.error || source.db.error) {
+      return conflictVerdict(target, source);
+    }
+    return {
+      text: "Verdict: the wallets could not be fully compared (read error); startup will refuse to migrate. See the details above.",
+      showResolution: true,
+      conflict: true,
+    };
+  }
+  return verdictFromClassification(target, source, classification);
 }
 
 export function renderWalletDoctor(
