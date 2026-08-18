@@ -5,6 +5,7 @@ import {
 } from "@cashu/coco-core";
 import type {
   HistoryEntry,
+  ReceiveOperation,
   Logger as CocoLogger,
   Plugin as CocoPlugin,
 } from "@cashu/coco-core";
@@ -35,6 +36,20 @@ import type {
   WalletRecoveryProgress,
 } from "./cocod-client";
 import { selectCleanupOperations } from "./cleanup";
+import {
+  clearInterruptedReceiveReservations,
+  deleteReceiveTokenReservation,
+  getReceiveReconcileBackup,
+  initReceiveDedupSchema,
+  listProcessingReceiveTokens,
+  receiveInputFingerprint,
+  reconcileExecutingReceives,
+  releaseReceiveToken,
+  reserveReceiveToken,
+  setReceiveReconcileBackup,
+  updateReceiveToken,
+  type ReceiveReconcileSource,
+} from "./receive-dedup";
 import { cocoLogger, logger } from "../../utils/logger";
 import {
   legacyCocodPidPath,
@@ -582,17 +597,19 @@ export interface CreateCocoClientOptions {
  * receive/mint recovery passes, so the daemon can serve wallet reads while
  * recovery proceeds in the background.
  */
-async function buildCocoManager(
+function constructCocoManager(
   repo: SqliteRepositories,
   seed: Uint8Array,
-): Promise<Manager> {
-  const coco = new Manager(repo, async () => seed, createCocoLogger());
+): Manager {
+  return new Manager(repo, async () => seed, createCocoLogger());
+}
+
+async function enableCocoManager(coco: Manager): Promise<void> {
   await coco.initPlugins();
   await coco.reconcileLegacyMintQuotes();
   await coco.enableMintOperationWatcher();
   await coco.enableProofStateWatcher();
   await coco.enableMintOperationProcessor();
-  return coco;
 }
 
 /**
@@ -748,6 +765,85 @@ export async function settleExpiredMintQuotes(
   return settlement;
 }
 
+interface ReceiveRecoveryInternals {
+  receiveOperationService: {
+    checkProofStatesWithMint(
+      mintUrl: string,
+      proofs: Array<{ secret: string }>,
+    ): Promise<Array<{ state: string }>>;
+    hasSavedOutputs(operation: unknown): Promise<boolean>;
+    markAsRolledBack(operation: unknown, error: string): Promise<unknown>;
+  };
+  mintAdapter: {
+    getCashuMint(mintUrl: string): {
+      restore(input: { outputs: Array<{ amount: number; id: string; B_: string }> }): Promise<{
+        outputs: Array<{ B_: string }>;
+      }>;
+    };
+  };
+}
+
+async function reconcileDuplicateReceiveOperations(
+  coco: Manager,
+  repo: SqliteRepositories,
+): Promise<Awaited<ReturnType<typeof reconcileExecutingReceives>>> {
+  const internals = coco as unknown as ReceiveRecoveryInternals;
+  const unavailableMints = new Set<string>();
+  const deadline = Date.now() + 45_000;
+  const ensureMintBudget = (mintUrl: string): void => {
+    if (Date.now() >= deadline) throw new Error("Receive cleanup time budget exhausted");
+    if (unavailableMints.has(mintUrl)) throw new Error("Mint already failed receive cleanup");
+  };
+  const markMintFailure = (mintUrl: string, error: unknown): never => {
+    unavailableMints.add(mintUrl);
+    throw error;
+  };
+  const source: ReceiveReconcileSource = {
+    listExecuting: () => repo.receiveOperationRepository.getByState("executing"),
+    checkProofStates: async (operation) => {
+      ensureMintBudget(operation.mintUrl);
+      try {
+        return await withTimeout(
+          internals.receiveOperationService.checkProofStatesWithMint(
+            operation.mintUrl,
+            operation.inputProofs,
+          ),
+          Math.min(15_000, Math.max(1, deadline - Date.now())),
+        );
+      } catch (error) {
+        return markMintFailure(operation.mintUrl, error);
+      }
+    },
+    restoreOutputs: async (mintUrl, outputs) => {
+      ensureMintBudget(mintUrl);
+      // Probe deterministic outputs in bounded batches. The Cashu restore
+      // response echoes only blinded messages with stored signatures, which
+      // identifies the owning operation. Coco later performs the real proof
+      // recovery for the retained operation.
+      const restored: Array<{ B_: string }> = [];
+      const mint = internals.mintAdapter.getCashuMint(mintUrl);
+      for (let index = 0; index < outputs.length; index += 300) {
+        try {
+          const response = await withTimeout(
+            mint.restore({ outputs: outputs.slice(index, index + 300) }),
+            Math.min(15_000, Math.max(1, deadline - Date.now())),
+          );
+          restored.push(...response.outputs);
+        } catch (error) {
+          return markMintFailure(mintUrl, error);
+        }
+      }
+      return restored;
+    },
+    hasSavedOutputs: (operation) =>
+      internals.receiveOperationService.hasSavedOutputs(operation),
+    rollBack: async (operation, reason) => {
+      await internals.receiveOperationService.markAsRolledBack(operation, reason);
+    },
+  };
+  return reconcileExecutingReceives(source);
+}
+
 interface RecoveryPhaseProgress {
   phase: string;
   failedMintQuotes: number;
@@ -763,6 +859,7 @@ interface RecoveryPhaseProgress {
 async function runWalletRecovery(
   coco: Manager,
   onProgress: (progress: RecoveryPhaseProgress) => void,
+  receiveOperationIds?: string[],
 ): Promise<void> {
   surfacingRecoveryProgress = true;
   let failedMintQuotes = 0;
@@ -796,7 +893,24 @@ async function runWalletRecovery(
     await coco.ops.melt.recovery.run();
 
     onProgress({ phase: "Receive recovery", failedMintQuotes });
-    await coco.ops.receive.recovery.run();
+    if (receiveOperationIds) {
+      // The pre-check already classified every executing receive by unique
+      // input set. Recover only the conclusive retained operations; unresolved
+      // groups stay untouched instead of falling back to Coco 1's expensive
+      // per-row sweep on this startup.
+      for (const operationId of receiveOperationIds) {
+        try {
+          await withTimeout(coco.ops.receive.refresh(operationId), 15_000);
+        } catch (error) {
+          logger.warn("Targeted receive recovery did not complete", {
+            operationId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } else {
+      await coco.ops.receive.recovery.run();
+    }
 
     onProgress({ phase: "Mint recovery", failedMintQuotes });
     await coco.recoverPendingMintOperations();
@@ -843,6 +957,9 @@ export async function createCocoClient(
 
   let database: Database | undefined;
   let coco: Manager | undefined;
+  let findFinalizedReceiveSibling: (
+    operation: ReceiveOperation | null,
+  ) => Promise<string | null> = async () => null;
   let walletConfig = loadConfig(configFile);
 
   let recoveryPhase = "queued";
@@ -869,6 +986,13 @@ export async function createCocoClient(
     database = new Database(dbPath);
     const repo = new SqliteRepositories({ database });
     await repo.init();
+    initReceiveDedupSchema(database);
+    const interruptedReservations = clearInterruptedReceiveReservations(database);
+    if (interruptedReservations > 0) {
+      logger.warn("Cleared interrupted receive reservations with no Coco operation", {
+        count: interruptedReservations,
+      });
+    }
 
     const [pendingSends, inflightProofs, pendingMints] = await Promise.all([
       repo.sendOperationRepository.getPending(),
@@ -892,7 +1016,95 @@ export async function createCocoClient(
       startupProgress("Initializing Cashu wallet...");
     }
 
-    coco = await buildCocoManager(repo, seed);
+    // Construct Coco so the pre-recovery checker can reuse its mint adapter,
+    // but do not enable watchers/processors until the backup and cleanup finish.
+    coco = constructCocoManager(repo, seed);
+
+    const executingReceives = await repo.receiveOperationRepository.getByState("executing");
+    let receiveRecoveryOperationIds: string[] | undefined;
+    if (executingReceives.length > 0) {
+      startupProgress(
+        `Checking ${executingReceives.length} unfinished Cashu receive operation(s) for duplicates...`,
+      );
+      const recordedBackup = getReceiveReconcileBackup(database);
+      if (!recordedBackup || !existsSync(recordedBackup)) {
+        const backupPath = `${dbPath}.pre-receive-reconcile-${Date.now()}`;
+        database.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
+        setReceiveReconcileBackup(database, backupPath);
+        startupProgress(`Created wallet backup before receive cleanup: ${backupPath}`);
+      }
+      const receiveReconcile = await reconcileDuplicateReceiveOperations(coco, repo);
+      receiveRecoveryOperationIds = receiveReconcile.recoveryOperationIds;
+      startupProgress(
+        `Receive cleanup: ${receiveReconcile.executing} operation(s), ` +
+          `${receiveReconcile.uniqueGroups} unique input set(s), ` +
+          `${receiveReconcile.rolledBack} stale duplicate(s) retired, ` +
+          `${receiveReconcile.unresolved} unresolved.`,
+      );
+    }
+
+    await enableCocoManager(coco);
+    const openDatabase = database;
+
+    findFinalizedReceiveSibling = async (
+      operation: ReceiveOperation | null,
+    ): Promise<string | null> => {
+      if (!operation) return null;
+      const fingerprint = receiveInputFingerprint(operation);
+      const siblings = await repo.receiveOperationRepository.getByMintUrl(operation.mintUrl);
+      return (
+        siblings.find(
+          (candidate) =>
+            candidate.state === "finalized" &&
+            receiveInputFingerprint(candidate) === fingerprint,
+        )?.id ?? null
+      );
+    };
+
+    const syncReceiveReservations = async (): Promise<void> => {
+      for (const reservation of listProcessingReceiveTokens(openDatabase)) {
+        if (!reservation.operationId) continue;
+        try {
+          const operation = await coco!.ops.receive.get(reservation.operationId);
+          if (operation?.state === "finalized") {
+            updateReceiveToken(openDatabase, reservation.tokenHash, {
+              state: "succeeded",
+              operationId: operation.id,
+            });
+          } else if (operation?.state === "rolled_back") {
+            const finalizedSibling = await findFinalizedReceiveSibling(operation);
+            updateReceiveToken(openDatabase, reservation.tokenHash, finalizedSibling
+              ? {
+                  state: "succeeded",
+                  operationId: finalizedSibling,
+                }
+              : {
+                  state: "failed",
+                  operationId: operation.id,
+                  error: operation.error || "Token receive was rolled back",
+                });
+          } else if (operation?.state === "prepared") {
+            // A crash before execute had no mint side effect. Cancel the stale
+            // prepared operation and permit a fresh exact-token attempt.
+            await coco!.ops.receive.cancel(
+              operation.id,
+              "Cancelled interrupted receive before execution",
+            );
+            deleteReceiveTokenReservation(openDatabase, reservation.tokenHash);
+          } else if (!operation) {
+            deleteReceiveTokenReservation(openDatabase, reservation.tokenHash);
+          }
+        } catch (error) {
+          // One damaged/stale reservation must never block daemon startup or
+          // make every wallet write fail after recovery.
+          logger.warn("Could not reconcile receive token reservation", {
+            operationId: reservation.operationId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+    await syncReceiveReservations();
 
     const trustedMints = await coco.mint.getAllTrustedMints();
     const configuredDefault = walletConfig.defaultMintUrl;
@@ -937,14 +1149,19 @@ export async function createCocoClient(
 
     // Recovery runs in the background so the daemon can serve wallet reads
     // immediately. Value-moving operations await the same promise below.
-    runWalletRecovery(coco, (progress) => {
-      recoveryPhase = progress.phase;
-      recoveryFailedMintQuotes = progress.failedMintQuotes;
-      if (progress.phase !== "done") {
-        startupProgress(`Wallet recovery: ${progress.phase}...`);
-      }
-    })
-      .then(() => {
+    runWalletRecovery(
+      coco,
+      (progress) => {
+        recoveryPhase = progress.phase;
+        recoveryFailedMintQuotes = progress.failedMintQuotes;
+        if (progress.phase !== "done") {
+          startupProgress(`Wallet recovery: ${progress.phase}...`);
+        }
+      },
+      receiveRecoveryOperationIds,
+    )
+      .then(async () => {
+        await syncReceiveReservations();
         recoveryDone = true;
         recoveryPhase = "done";
         recoveryResolve?.();
@@ -1039,9 +1256,131 @@ export async function createCocoClient(
     },
 
     async receiveCashu(token: string): Promise<string> {
-      await waitForRecovery();
-      await coco.wallet.receive(token);
-      return "Token received successfully";
+      const reservation = reserveReceiveToken(database, token);
+      if (!reservation.acquired) {
+        if (reservation.existing?.state === "succeeded") {
+          return "Token already received successfully";
+        }
+        if (
+          reservation.existing?.state === "processing" &&
+          reservation.existing.operationId
+        ) {
+          // A prior request may have stopped after the mint call became
+          // uncertain. Re-drive that one Coco operation instead of creating a
+          // duplicate. Refresh is idempotent and uses its stored output data.
+          try {
+            const operation = await withTimeout(
+              coco.ops.receive.refresh(reservation.existing.operationId),
+              15_000,
+            );
+            if (operation.state === "finalized") {
+              updateReceiveToken(database, reservation.tokenHash, {
+                state: "succeeded",
+                operationId: operation.id,
+              });
+              return "Token received successfully";
+            }
+            if (operation.state === "rolled_back") {
+              const finalizedSibling = await findFinalizedReceiveSibling(operation);
+              if (finalizedSibling) {
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "succeeded",
+                  operationId: finalizedSibling,
+                });
+                return "Token already received successfully";
+              }
+              updateReceiveToken(database, reservation.tokenHash, {
+                state: "failed",
+                operationId: operation.id,
+                error: operation.error || "Token receive was rolled back",
+              });
+              throw new Error(operation.error || "Token receive was rolled back");
+            }
+          } catch (error) {
+            const latest = await coco.ops.receive.get(reservation.existing.operationId);
+            if (latest?.state === "finalized") {
+              updateReceiveToken(database, reservation.tokenHash, {
+                state: "succeeded",
+                operationId: latest.id,
+              });
+              return "Token received successfully";
+            }
+            throw error;
+          }
+          throw new Error("Token receive is still unresolved");
+        }
+        if (reservation.existing?.state === "processing") {
+          throw new Error("Token receive is already in progress");
+        }
+        throw new Error(reservation.existing?.error || "Token receive previously failed");
+      }
+
+      let preparedOperationId: string | undefined;
+      try {
+        await waitForRecovery();
+        const prepared = await coco.ops.receive.prepare({ token });
+        preparedOperationId = prepared.id;
+        updateReceiveToken(database, reservation.tokenHash, {
+          state: "processing",
+          operationId: prepared.id,
+        });
+        await coco.ops.receive.execute(prepared.id);
+        updateReceiveToken(database, reservation.tokenHash, {
+          state: "succeeded",
+          operationId: prepared.id,
+        });
+        return "Token received successfully";
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (preparedOperationId) {
+          let latest: Awaited<ReturnType<typeof coco.ops.receive.get>> = null;
+          try {
+            latest = await coco.ops.receive.get(preparedOperationId);
+          } catch (lookupError) {
+            logger.warn("Could not inspect failed receive operation", {
+              operationId: preparedOperationId,
+              error:
+                lookupError instanceof Error ? lookupError.message : String(lookupError),
+            });
+          }
+          if (latest?.state === "finalized") {
+            updateReceiveToken(database, reservation.tokenHash, {
+              state: "succeeded",
+              operationId: preparedOperationId,
+            });
+            return "Token received successfully";
+          }
+          if (latest?.state === "executing") {
+            updateReceiveToken(database, reservation.tokenHash, {
+              state: "processing",
+              operationId: preparedOperationId,
+              error: message,
+            });
+          } else if (latest?.state === "rolled_back") {
+            const finalizedSibling = await findFinalizedReceiveSibling(latest);
+            if (finalizedSibling) {
+              updateReceiveToken(database, reservation.tokenHash, {
+                state: "succeeded",
+                operationId: finalizedSibling,
+              });
+              return "Token already received successfully";
+            }
+            updateReceiveToken(database, reservation.tokenHash, {
+              state: "failed",
+              operationId: preparedOperationId,
+              error: latest.error || message,
+            });
+          } else {
+            // A prepared or missing operation had no known mint side effect.
+            deleteReceiveTokenReservation(database, reservation.tokenHash);
+          }
+        } else {
+          // Decode/validation failed before coco created an operation. Do not
+          // permanently reserve malformed input or transient mint-fetch errors.
+          releaseReceiveToken(database, reservation.tokenHash);
+        }
+        throw error;
+      }
     },
 
     async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
