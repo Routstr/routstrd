@@ -355,6 +355,17 @@ async function main(): Promise<void> {
     });
   };
 
+  // Without this a listen failure only reaches uncaughtException, which logs and
+  // returns, leaving the daemon alive holding the wallet locks with no listener.
+  server.on("error", (error) => {
+    logger.error("Failed to start Routstr daemon:", error);
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
+    process.exit(1);
+  });
+
   startupProgress("Starting HTTP server...");
   server.listen(port, host, async () => {
     logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
