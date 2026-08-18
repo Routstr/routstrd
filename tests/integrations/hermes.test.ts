@@ -66,7 +66,7 @@ other_setting: true
     });
   });
 
-  it("keeps an existing Routstr provider unchanged without duplicating it", () => {
+  it("updates an existing Routstr provider in place without duplicating it", () => {
     const existing = `custom_providers:
   - name: Routstr (old-host:8008)
     base_url: http://old-host:8008/v1
@@ -83,12 +83,49 @@ other_setting: true
 
     expect(routstrProviders).toHaveLength(1);
     expect(routstrProviders[0]).toEqual({
-      name: "Routstr (old-host:8008)",
-      base_url: "http://old-host:8008/v1",
-      api_key: "old-key",
-      model: "old-model",
+      name: "Routstr (localhost:8008)",
+      base_url: ROUTSTR.baseUrl,
+      api_key: ROUTSTR.apiKey,
+      model: ROUTSTR.defaultModel,
     });
     expect(twice).toBe(once);
+  });
+
+  it("repoints model.provider when the Routstr provider is renamed", () => {
+    const existing = `model:
+  default: old-model
+  provider: custom:routstr-(old-host:8008)
+
+custom_providers:
+  - name: Routstr (old-host:8008)
+    base_url: http://old-host:8008/v1
+    api_key: old-key
+    model: old-model
+`;
+
+    const merged = parse(mergeHermesConfig(existing, ROUTSTR));
+
+    expect(merged.model).toEqual({
+      default: "old-model",
+      provider: "custom:routstr-(localhost:8008)",
+    });
+  });
+
+  it("leaves model.provider alone when it does not reference the Routstr provider", () => {
+    const existing = `model:
+  default: user-model
+  provider: custom:user-provider
+
+custom_providers:
+  - name: Routstr (old-host:8008)
+    base_url: http://old-host:8008/v1
+    api_key: old-key
+    model: old-model
+`;
+
+    const merged = parse(mergeHermesConfig(existing, ROUTSTR));
+
+    expect(merged.model.provider).toBe("custom:user-provider");
   });
 
   it("rejects malformed YAML instead of replacing it", () => {
