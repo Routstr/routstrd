@@ -31,6 +31,11 @@ function writeWalletConfig(dir: string, config: unknown): void {
   writeFileSync(join(dir, "config.json"), JSON.stringify(config));
 }
 
+function writeFakeDbFile(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "coco.db"), "not a real sqlite database");
+}
+
 function writeProofsDb(dir: string): void {
   mkdirSync(dir, { recursive: true });
   const db = new Database(join(dir, "coco.db"));
@@ -172,14 +177,19 @@ describe("renderWalletDoctor", () => {
     const targetDir = join(root(), "wallet");
     const sourceDir = join(root(), ".cocod");
     writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
-    writeWalletConfig(sourceDir, { mnemonic: MNEMONIC_A });
+    // Same mnemonic, but different bytes (extra metadata) — migration compares
+    // files, not mnemonics, so startup still refuses.
+    writeWalletConfig(sourceDir, {
+      mnemonic: MNEMONIC_A,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
 
     const report = renderWalletDoctor(
       summarizeWalletDirectory(targetDir, "canonical"),
       summarizeWalletDirectory(sourceDir, "legacy"),
     );
     expect(report).toContain("share the same mnemonic");
-    expect(report).toContain("Startup still refuses");
+    expect(report).toContain("startup still refuses");
     expect(report).toContain("mv \"");
   });
 
@@ -279,5 +289,59 @@ describe("diagnoseWallets", () => {
     );
     expect(verdict.conflict).toBe(true);
     expect(verdict.text).toContain("incomplete");
+  });
+
+  it("treats a stray legacy database as already-current when the canonical wallet exists", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+    writeFakeDbFile(sourceDir);
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(verdict.conflict).toBe(false);
+    expect(verdict.showResolution).toBe(false);
+  });
+
+  it("flags an incomplete canonical database as a conflict", () => {
+    const targetDir = join(root(), "wallet");
+    writeFakeDbFile(targetDir);
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(join(root(), ".cocod"), "legacy"),
+    );
+    expect(verdict.conflict).toBe(true);
+    expect(verdict.showResolution).toBe(false);
+  });
+
+  it("flags orphaned legacy sidecars as a conflict", () => {
+    const sourceDir = join(root(), ".cocod");
+    mkdirSync(sourceDir, { recursive: true });
+    writeFileSync(join(sourceDir, "coco.db-wal"), "wal");
+    writeFileSync(join(sourceDir, "coco.db-shm"), "shm");
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(join(root(), "wallet"), "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(verdict.conflict).toBe(true);
+    expect(verdict.showResolution).toBe(false);
+  });
+
+  it("treats byte-identical wallets as already-current", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+    writeWalletConfig(sourceDir, { mnemonic: MNEMONIC_A });
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(verdict.conflict).toBe(false);
+    expect(verdict.showResolution).toBe(false);
   });
 });

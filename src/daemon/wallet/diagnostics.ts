@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "fs";
 import { Database } from "bun:sqlite";
 import { join } from "path";
+import {
+  classifyWalletMigration,
+  type WalletMigrationClass,
+} from "./wallet-state";
 
 /**
  * Wallet diagnostics for the cocod → routstrd wallet-directory migration.
@@ -343,59 +347,18 @@ export interface WalletVerdict {
   conflict: boolean;
 }
 
-function walletExists(diag: WalletDiagnostic): boolean {
-  return diag.config.exists || diag.db.exists;
-}
-
-/** Classify the two wallet locations the same way startup migration sees them. */
-export function diagnoseWallets(
+function conflictVerdict(
   target: WalletDiagnostic,
   source: WalletDiagnostic,
 ): WalletVerdict {
-  const targetExists = walletExists(target);
-  const sourceExists = walletExists(source);
-
-  if (!targetExists && !sourceExists) {
+  const unreadable =
+    !!target.config.error ||
+    !!source.config.error ||
+    !!target.db.error ||
+    !!source.db.error;
+  if (unreadable) {
     return {
-      text: "Verdict: no wallet found in either location (fresh install).",
-      showResolution: false,
-      conflict: false,
-    };
-  }
-  if (targetExists && !sourceExists) {
-    return {
-      text: "Verdict: only the current routstrd wallet exists; no migration needed.",
-      showResolution: false,
-      conflict: false,
-    };
-  }
-  if (!targetExists && sourceExists) {
-    if (!source.config.exists) {
-      return {
-        text: "Verdict: the legacy wallet is incomplete (coco.db without config.json); restore the matching config before startup can migrate it.",
-        showResolution: false,
-        conflict: true,
-      };
-    }
-    return {
-      text: "Verdict: only the legacy cocod wallet exists; it will be migrated on next startup.",
-      showResolution: false,
-      conflict: false,
-    };
-  }
-
-  // Both locations hold wallet data: startup refuses unless the files are
-  // byte-identical leftovers of a prior migration.
-  if (!target.config.exists || !source.config.exists) {
-    return {
-      text: "Verdict: one wallet is incomplete (missing config.json); startup will refuse to migrate. See the details above.",
-      showResolution: true,
-      conflict: true,
-    };
-  }
-  if (target.config.error || source.config.error || target.db.error || source.db.error) {
-    return {
-      text: "Verdict: one or both wallets could not be read; startup will refuse to migrate. See the details above.",
+      text: "Verdict: both wallets exist but one or both could not be fully read; startup will refuse to migrate. See the details above.",
       showResolution: true,
       conflict: true,
     };
@@ -403,7 +366,7 @@ export function diagnoseWallets(
   if (target.config.fingerprint && source.config.fingerprint) {
     if (target.config.fingerprint === source.config.fingerprint) {
       return {
-        text: "Verdict: both wallets share the same mnemonic. Startup still refuses while the files differ; keep the wallet with your funds and move the other aside.",
+        text: "Verdict: both wallets share the same mnemonic but the files differ, so startup still refuses. Keep the wallet with your funds and move the other aside.",
         showResolution: true,
         conflict: true,
       };
@@ -419,6 +382,59 @@ export function diagnoseWallets(
     showResolution: true,
     conflict: true,
   };
+}
+
+function verdictFromClassification(
+  target: WalletDiagnostic,
+  source: WalletDiagnostic,
+  classification: WalletMigrationClass,
+): WalletVerdict {
+  switch (classification.kind) {
+    case "fresh":
+      return {
+        text: "Verdict: no wallet found in either location (fresh install).",
+        showResolution: false,
+        conflict: false,
+      };
+    case "already-current":
+      return {
+        text: "Verdict: the current routstrd wallet is authoritative; no migration needed.",
+        showResolution: false,
+        conflict: false,
+      };
+    case "migrate":
+      return {
+        text: "Verdict: only the legacy cocod wallet exists; it will be migrated on next startup.",
+        showResolution: false,
+        conflict: false,
+      };
+    case "conflict":
+      return conflictVerdict(target, source);
+    case "database-only":
+      return {
+        text: "Verdict: a wallet is incomplete (coco.db without config.json). Startup will refuse to migrate. See the details above.",
+        showResolution: false,
+        conflict: true,
+      };
+    case "orphaned-sidecars":
+      return {
+        text: "Verdict: the legacy wallet has SQLite sidecar files without coco.db. Startup will refuse to migrate. Restore the matching database first.",
+        showResolution: false,
+        conflict: true,
+      };
+  }
+}
+
+/** Map the shared migration classification onto a human doctor verdict. */
+export function diagnoseWallets(
+  target: WalletDiagnostic,
+  source: WalletDiagnostic,
+): WalletVerdict {
+  return verdictFromClassification(
+    target,
+    source,
+    classifyWalletMigration(target.dir, source.dir),
+  );
 }
 
 export function renderWalletDoctor(

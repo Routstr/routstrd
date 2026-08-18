@@ -3,7 +3,6 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -17,6 +16,7 @@ import {
   WalletMigrationConflictError,
   type WalletSummary,
 } from "./diagnostics";
+import { classifyWalletMigration } from "./wallet-state";
 
 export type WalletMigrationResult =
   | { status: "fresh" }
@@ -30,22 +30,6 @@ export interface WalletMigrationOptions {
   assertLegacyStopped?: () => void | Promise<void>;
   /** Claims the legacy cocod exclusion lock for the duration of the copy. */
   acquireLegacyLock?: () => (() => void) | Promise<() => void>;
-}
-
-type WalletState = "absent" | "database-only" | "initialized";
-
-function state(configPath: string, dbPath: string): WalletState {
-  const hasConfig = existsSync(configPath);
-  const hasDb = existsSync(dbPath);
-  if (hasConfig) return "initialized";
-  if (hasDb) return "database-only";
-  return "absent";
-}
-
-function filesEqual(left: string, right: string): boolean {
-  if (!existsSync(left) || !existsSync(right)) return false;
-  if (statSync(left).size !== statSync(right).size) return false;
-  return readFileSync(left).equals(readFileSync(right));
 }
 
 function sqlString(value: string): string {
@@ -86,45 +70,34 @@ export async function migrateLegacyWallet(
 ): Promise<WalletMigrationResult> {
   const targetDir = options.walletDir || walletDir();
   const sourceDir = options.legacyDir || legacyCocodDir();
-  const targetConfig = join(targetDir, "config.json");
-  const targetDb = join(targetDir, "coco.db");
   const sourceConfig = join(sourceDir, "config.json");
   const sourceDb = join(sourceDir, "coco.db");
   const sourceWal = `${sourceDb}-wal`;
   const sourceShm = `${sourceDb}-shm`;
-  const targetState = state(targetConfig, targetDb);
-  const sourceState = state(sourceConfig, sourceDb);
-
-  // config.json is sufficient for a newly initialized wallet; coco.db is
-  // created on first open. A database without its mnemonic is never usable.
-  if (targetState === "initialized" && sourceState === "initialized") {
-    // A prior migration may have committed successfully but failed to remove
-    // its source files. Identical leftovers are safe; divergent wallets are not.
-    const configsMatch = filesEqual(targetConfig, sourceConfig);
-    const databasesMatch =
-      !existsSync(targetDb) && !existsSync(sourceDb)
-        ? true
-        : filesEqual(targetDb, sourceDb);
-    if (configsMatch && databasesMatch) return { status: "already-current" };
-    throw new WalletMigrationConflictError(
-      summarizeWalletDirectory(targetDir, "canonical"),
-      summarizeWalletDirectory(sourceDir, "legacy"),
-    );
+  const classification = classifyWalletMigration(targetDir, sourceDir);
+  switch (classification.kind) {
+    case "fresh":
+      return { status: "fresh" };
+    case "already-current":
+      return { status: "already-current" };
+    case "migrate":
+      break;
+    case "conflict":
+      throw new WalletMigrationConflictError(
+        summarizeWalletDirectory(targetDir, "canonical"),
+        summarizeWalletDirectory(sourceDir, "legacy"),
+      );
+    case "orphaned-sidecars":
+      throw new Error(
+        `Cannot migrate wallet: ${sourceDir} contains SQLite sidecar files without coco.db. ` +
+          "Restore the matching main database before migration.",
+      );
+    case "database-only":
+      throw new Error(
+        `Cannot migrate wallet: ${targetDir} is ${classification.targetState} and ${sourceDir} is ${classification.sourceState}. ` +
+          "A coco.db without config.json cannot be opened; restore the matching config first.",
+      );
   }
-  if (targetState === "initialized") return { status: "already-current" };
-  if (!existsSync(sourceDb) && (existsSync(sourceWal) || existsSync(sourceShm))) {
-    throw new Error(
-      `Cannot migrate wallet: ${sourceDir} contains SQLite sidecar files without coco.db. ` +
-        "Restore the matching main database before migration.",
-    );
-  }
-  if (targetState === "database-only" || sourceState === "database-only") {
-    throw new Error(
-      `Cannot migrate wallet: ${targetDir} is ${targetState} and ${sourceDir} is ${sourceState}. ` +
-        "A coco.db without config.json cannot be opened; restore the matching config first.",
-    );
-  }
-  if (sourceState === "absent") return { status: "fresh" };
 
   await options.assertLegacyStopped?.();
   const releaseLegacyLock = await options.acquireLegacyLock?.();
