@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  diagnoseWallets,
   mnemonicFingerprint,
   renderWalletDoctor,
   summarizeWalletDirectory,
@@ -39,6 +40,10 @@ function writeProofsDb(dir: string): void {
     INSERT INTO coco_cashu_proofs VALUES ('https://mint.example', 'ready', 50);
     INSERT INTO coco_cashu_proofs VALUES ('https://mint.example', 'pending', 30);
     INSERT INTO coco_cashu_proofs VALUES ('https://other.example', 'spent', 20);
+    CREATE TABLE coco_cashu_mints (mintUrl TEXT, trusted INTEGER);
+    INSERT INTO coco_cashu_mints VALUES ('https://mint.example', 1);
+    INSERT INTO coco_cashu_mints VALUES ('https://other.example', 1);
+    INSERT INTO coco_cashu_mints VALUES ('https://third.example', 0);
   `);
   db.close();
 }
@@ -116,6 +121,7 @@ describe("summarizeWalletDirectory", () => {
     expect(diag.db.summary?.totalProofs).toBe(4);
     expect(diag.db.summary?.totalAmount).toBe(200);
     expect(diag.db.summary?.distinctMints).toBe(2);
+    expect(diag.db.summary?.mints).toHaveLength(3);
     expect(diag.db.summary?.amountByState).toEqual({
       ready: 150,
       pending: 30,
@@ -140,13 +146,14 @@ describe("WalletMigrationConflictError", () => {
     expect(err.message).toContain(targetDir);
     expect(err.message).toContain(sourceDir);
     expect(err.message).toContain("routstrd wallet doctor");
+    expect(err.message).toContain("routstrd stop");
     expect(err.message).not.toContain("abandon");
     expect(err.message).not.toContain("legal winner");
   });
 });
 
 describe("renderWalletDoctor", () => {
-  it("reports different mnemonics as a conflict", () => {
+  it("reports different mnemonics as a conflict with resolution steps", () => {
     const targetDir = join(root(), "wallet");
     const sourceDir = join(root(), ".cocod");
     writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
@@ -158,9 +165,10 @@ describe("renderWalletDoctor", () => {
     );
     expect(report).toContain("DIFFERENT mnemonics");
     expect(report).toContain("routstrd stop");
+    expect(report).toContain("mv \"");
   });
 
-  it("reports matching mnemonics", () => {
+  it("reports matching mnemonics and warns startup still refuses", () => {
     const targetDir = join(root(), "wallet");
     const sourceDir = join(root(), ".cocod");
     writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
@@ -171,5 +179,105 @@ describe("renderWalletDoctor", () => {
       summarizeWalletDirectory(sourceDir, "legacy"),
     );
     expect(report).toContain("share the same mnemonic");
+    expect(report).toContain("Startup still refuses");
+    expect(report).toContain("mv \"");
+  });
+
+  it("omits resolution steps when there is nothing to resolve", () => {
+    const targetDir = join(root(), "wallet");
+    const emptyDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+
+    const report = renderWalletDoctor(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(emptyDir, "legacy"),
+    );
+    expect(report).toContain("no migration needed");
+    expect(report).not.toContain("routstrd stop");
+    expect(report).not.toContain("mv \"");
+  });
+
+  it("omits resolution steps for a fresh install", () => {
+    const report = renderWalletDoctor(
+      summarizeWalletDirectory(join(root(), "nope"), "canonical"),
+      summarizeWalletDirectory(join(root(), "alsonope"), "legacy"),
+    );
+    expect(report).toContain("fresh install");
+    expect(report).not.toContain("mv \"");
+  });
+
+  it("counts trusted mints from the mints table and formats amounts", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+    writeWalletConfig(sourceDir, { mnemonic: MNEMONIC_B });
+    writeProofsDb(sourceDir);
+
+    const report = renderWalletDoctor(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    // 3 registered mints, not the 2 mints that happen to hold proofs.
+    expect(report).toContain("3 mints");
+  });
+
+  it("formats large balances with thousands separators", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+    writeWalletConfig(sourceDir, { mnemonic: MNEMONIC_B });
+    mkdirSync(sourceDir, { recursive: true });
+    const db = new Database(join(sourceDir, "coco.db"));
+    db.exec(`
+      CREATE TABLE coco_cashu_proofs (mintUrl TEXT, state TEXT, amount INTEGER);
+      INSERT INTO coco_cashu_proofs VALUES ('https://mint.example', 'ready', 21000);
+    `);
+    db.close();
+
+    const report = renderWalletDoctor(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(report).toContain("ready: 21,000 sats");
+  });
+});
+
+describe("diagnoseWallets", () => {
+  it("flags conflicting mnemonics as a conflict needing resolution", () => {
+    const targetDir = join(root(), "wallet");
+    const sourceDir = join(root(), ".cocod");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+    writeWalletConfig(sourceDir, { mnemonic: MNEMONIC_B });
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(verdict.conflict).toBe(true);
+    expect(verdict.showResolution).toBe(true);
+  });
+
+  it("treats a single existing wallet as no conflict", () => {
+    const targetDir = join(root(), "wallet");
+    writeWalletConfig(targetDir, { mnemonic: MNEMONIC_A });
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(targetDir, "canonical"),
+      summarizeWalletDirectory(join(root(), ".cocod"), "legacy"),
+    );
+    expect(verdict.conflict).toBe(false);
+    expect(verdict.showResolution).toBe(false);
+  });
+
+  it("flags a legacy database without config as an incomplete conflict", () => {
+    const sourceDir = join(root(), ".cocod");
+    writeProofsDb(sourceDir);
+
+    const verdict = diagnoseWallets(
+      summarizeWalletDirectory(join(root(), "wallet"), "canonical"),
+      summarizeWalletDirectory(sourceDir, "legacy"),
+    );
+    expect(verdict.conflict).toBe(true);
+    expect(verdict.text).toContain("incomplete");
   });
 });

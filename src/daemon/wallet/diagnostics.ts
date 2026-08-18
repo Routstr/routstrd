@@ -64,7 +64,7 @@ export interface ProofSummaryRow {
 
 export interface DbDiagnosticSummary {
   proofs: ProofSummaryRow[];
-  mints: { mintUrl: string; trusted: boolean }[];
+  mints: { mintUrl: string; trusted: number }[];
   totalProofs: number;
   totalAmount: number;
   amountByState: Record<string, number>;
@@ -117,7 +117,7 @@ export function summarizeDbReadonly(
     const raw = verifyDatabase(database, "Wallet database");
 
     const proofs = (raw.proofs ?? []) as ProofSummaryRow[];
-    const mints = (raw.mints ?? []) as { mintUrl: string; trusted: boolean }[];
+    const mints = (raw.mints ?? []) as { mintUrl: string; trusted: number }[];
     const amountByState: Record<string, number> = {};
     let totalProofs = 0;
     let totalAmount = 0;
@@ -218,6 +218,7 @@ function timeAgo(ms?: number): string | undefined {
   const elapsed = Date.now() - ms;
   if (elapsed < 0) return undefined;
   const seconds = Math.floor(elapsed / 1000);
+  if (seconds < 5) return "just now";
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -253,10 +254,14 @@ function configLine(config: WalletConfigDiagnostic): string {
   return parts.join(" · ");
 }
 
+function formatNumber(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
 function amountByStateLine(summary: DbDiagnosticSummary): string {
   const parts = Object.entries(summary.amountByState).filter(([, amount]) => amount > 0);
   if (parts.length === 0) return "0 sats";
-  return parts.map(([state, amount]) => `${state}: ${amount} sats`).join(", ");
+  return parts.map(([state, amount]) => `${state}: ${formatNumber(amount)} sats`).join(", ");
 }
 
 function dbLine(db: WalletDbDiagnostic): string {
@@ -264,10 +269,13 @@ function dbLine(db: WalletDbDiagnostic): string {
   if (db.error && !db.summary) return `coco.db     present (unreadable: ${db.error})`;
   const parts: string[] = ["coco.db     present"];
   if (db.summary) {
-    const { totalProofs, distinctMints } = db.summary;
-    parts.push(`${totalProofs} proof${totalProofs === 1 ? "" : "s"}`);
+    const { totalProofs, mints, distinctMints } = db.summary;
+    // The mints table is the wallet's mint registry; fall back to mints seen
+    // in proofs for databases old enough to lack the registry table.
+    const mintCount = mints.length > 0 ? mints.length : distinctMints;
+    parts.push(`${formatNumber(totalProofs)} proof${totalProofs === 1 ? "" : "s"}`);
     parts.push(amountByStateLine(db.summary));
-    parts.push(`${distinctMints} mint${distinctMints === 1 ? "" : "s"}`);
+    parts.push(`${mintCount} mint${mintCount === 1 ? "" : "s"}`);
   }
   return parts.join(" · ");
 }
@@ -320,51 +328,115 @@ export function renderWalletConflict(
     "",
     "No files were changed.",
     "",
-    "To continue, decide which wallet is yours, move the other one aside, and run",
-    "'routstrd onboard' (or 'routstrd start') again:",
-    "",
-    moveAsideCommands(target, source),
+    renderResolutionSteps(target, source),
     "",
     "For a full comparison and safe cleanup, run: routstrd wallet doctor",
   ].join("\n");
+}
+
+export interface WalletVerdict {
+  /** One-line human verdict for the doctor report. */
+  text: string;
+  /** Whether the mv-aside resolution steps apply to this state. */
+  showResolution: boolean;
+  /** Whether startup would (or may) refuse to migrate in this state. */
+  conflict: boolean;
+}
+
+function walletExists(diag: WalletDiagnostic): boolean {
+  return diag.config.exists || diag.db.exists;
+}
+
+/** Classify the two wallet locations the same way startup migration sees them. */
+export function diagnoseWallets(
+  target: WalletDiagnostic,
+  source: WalletDiagnostic,
+): WalletVerdict {
+  const targetExists = walletExists(target);
+  const sourceExists = walletExists(source);
+
+  if (!targetExists && !sourceExists) {
+    return {
+      text: "Verdict: no wallet found in either location (fresh install).",
+      showResolution: false,
+      conflict: false,
+    };
+  }
+  if (targetExists && !sourceExists) {
+    return {
+      text: "Verdict: only the current routstrd wallet exists; no migration needed.",
+      showResolution: false,
+      conflict: false,
+    };
+  }
+  if (!targetExists && sourceExists) {
+    if (!source.config.exists) {
+      return {
+        text: "Verdict: the legacy wallet is incomplete (coco.db without config.json); restore the matching config before startup can migrate it.",
+        showResolution: false,
+        conflict: true,
+      };
+    }
+    return {
+      text: "Verdict: only the legacy cocod wallet exists; it will be migrated on next startup.",
+      showResolution: false,
+      conflict: false,
+    };
+  }
+
+  // Both locations hold wallet data: startup refuses unless the files are
+  // byte-identical leftovers of a prior migration.
+  if (!target.config.exists || !source.config.exists) {
+    return {
+      text: "Verdict: one wallet is incomplete (missing config.json); startup will refuse to migrate. See the details above.",
+      showResolution: true,
+      conflict: true,
+    };
+  }
+  if (target.config.error || source.config.error || target.db.error || source.db.error) {
+    return {
+      text: "Verdict: one or both wallets could not be read; startup will refuse to migrate. See the details above.",
+      showResolution: true,
+      conflict: true,
+    };
+  }
+  if (target.config.fingerprint && source.config.fingerprint) {
+    if (target.config.fingerprint === source.config.fingerprint) {
+      return {
+        text: "Verdict: both wallets share the same mnemonic. Startup still refuses while the files differ; keep the wallet with your funds and move the other aside.",
+        showResolution: true,
+        conflict: true,
+      };
+    }
+    return {
+      text: "Verdict: the two wallets have DIFFERENT mnemonics. Startup will refuse to migrate.",
+      showResolution: true,
+      conflict: true,
+    };
+  }
+  return {
+    text: "Verdict: both wallets exist but their mnemonics cannot be compared (encrypted or missing). Startup will refuse to migrate unless the files are identical.",
+    showResolution: true,
+    conflict: true,
+  };
 }
 
 export function renderWalletDoctor(
   target: WalletDiagnostic,
   source: WalletDiagnostic,
 ): string {
-  return [
+  const verdict = diagnoseWallets(target, source);
+  const lines = [
     "Routstr wallet diagnostic",
     "========================",
     "",
     block(target, "A"),
     block(source, "B"),
     "",
-    formatDoctorVerdict(target, source),
-    "",
-    renderResolutionSteps(target, source),
-  ].join("\n");
-}
-
-function formatDoctorVerdict(
-  target: WalletDiagnostic,
-  source: WalletDiagnostic,
-): string {
-  const bothConfigs = target.config.exists && source.config.exists;
-  if (bothConfigs && target.config.fingerprint && source.config.fingerprint) {
-    if (target.config.fingerprint === source.config.fingerprint) {
-      return "Verdict: both wallets share the same mnemonic.";
-    }
-    return "Verdict: the two wallets have DIFFERENT mnemonics. Startup will refuse to migrate.";
+    verdict.text,
+  ];
+  if (verdict.showResolution) {
+    lines.push("", renderResolutionSteps(target, source));
   }
-  if (!target.config.exists && !source.config.exists) {
-    return "Verdict: no wallet found in either location (fresh install).";
-  }
-  if (target.config.exists && !source.config.exists) {
-    return "Verdict: only the current routstrd wallet exists; no migration needed.";
-  }
-  if (source.config.exists && !target.config.exists) {
-    return "Verdict: only the legacy cocod wallet exists; it will be migrated on next startup.";
-  }
-  return "Verdict: one or both wallets could not be read; see the details above.";
+  return lines.join("\n");
 }

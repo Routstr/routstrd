@@ -35,8 +35,10 @@ import {
 } from "./daemon/wallet/coco-client";
 import { migrateLegacyWallet } from "./daemon/wallet/migration";
 import {
+  diagnoseWallets,
   renderWalletDoctor,
   summarizeWalletDirectory,
+  WalletMigrationConflictError,
 } from "./daemon/wallet/diagnostics";
 import {
   legacyCocodDir,
@@ -575,7 +577,17 @@ program
   )
   .action(async () => {
     await requireLocalDaemon();
-    await initDaemon();
+    try {
+      await initDaemon();
+    } catch (error) {
+      // An expected, user-actionable refusal — print the structured message
+      // without Bun's unhandled-rejection source snippet and stack trace.
+      if (error instanceof WalletMigrationConflictError) {
+        console.error(error.message);
+        process.exit(1);
+      }
+      throw error;
+    }
   });
 
 // Start - start the background daemon
@@ -589,11 +601,18 @@ program
     await requireLocalDaemon();
     const config = await loadConfig();
     await stopLegacyCocod();
-    await startDaemon({
-      port: options.port || String(config.port || 8008),
-      host: options.host || config.host || undefined,
-      provider: options.provider,
-    });
+    try {
+      await startDaemon({
+        port: options.port || String(config.port || 8008),
+        host: options.host || config.host || undefined,
+        provider: options.provider,
+      });
+    } catch (error) {
+      // startDaemon embeds the failed daemon's own output in the message
+      // (including the wallet-conflict report), so print it without a stack.
+      console.error(error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
   });
 
 // Status - check daemon status
@@ -1532,12 +1551,10 @@ walletCmd
   .command("doctor")
   .description("Diagnose conflicting wallets (current routstrd wallet vs legacy cocod)")
   .action(async () => {
-    console.log(
-      renderWalletDoctor(
-        summarizeWalletDirectory(defaultWalletDir(), "canonical"),
-        summarizeWalletDirectory(legacyCocodDir(), "legacy"),
-      ),
-    );
+    const target = summarizeWalletDirectory(defaultWalletDir(), "canonical");
+    const source = summarizeWalletDirectory(legacyCocodDir(), "legacy");
+    console.log(renderWalletDoctor(target, source));
+    if (diagnoseWallets(target, source).conflict) process.exit(1);
   });
 
 walletCmd
