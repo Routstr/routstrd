@@ -94,11 +94,9 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
-      // Get active mint
-      const mints = await cocod.listMints();
-      const mintUrl = mints[0];
+      const mintUrl = await cocod.getDefaultMint();
       if (!mintUrl) {
-        logger.error("[auto-refill] No active mint configured");
+        logger.error("[auto-refill] No default mint configured");
         return;
       }
 
