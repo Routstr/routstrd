@@ -1,5 +1,10 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
+import {
+  callDaemon,
+  getDaemonBaseUrl,
+  isDaemonRunning,
+  loadConfig,
+} from "../../utils/daemon-client.ts";
 import type { UsageStats, UsageSummary } from "./types.ts";
 
 export { isDaemonRunning };
@@ -21,12 +26,17 @@ export interface StatusInfo {
   daemon: string;
   wallet: string;
   mode: "xcashu" | "apikeys";
+  /** URL the TUI is connected through (local bind or remote daemonUrl). */
+  url?: string;
   error?: string;
 }
 
 export async function fetchStatus(): Promise<StatusInfo | null> {
   try {
-    const result = await callDaemon("/status");
+    const [result, config] = await Promise.all([
+      callDaemon("/status"),
+      loadConfig(),
+    ]);
     if (result.error) return null;
 
     const output = result.output as {
@@ -40,6 +50,7 @@ export async function fetchStatus(): Promise<StatusInfo | null> {
       daemon: output?.daemon || "unknown",
       wallet: output?.wallet || "unknown",
       mode: output?.mode || "apikeys",
+      url: getDaemonBaseUrl(config),
       error: output?.error,
     };
   } catch {
