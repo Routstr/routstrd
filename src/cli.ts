@@ -1116,6 +1116,94 @@ providersCmd
     }
   });
 
+providersCmd
+  .command("reviews")
+  .description(
+    "Show all known providers with their stored review events and event IDs",
+  )
+  .action(async () => {
+    await ensureDaemonRunning();
+
+    const result = await callDaemon("/providers/reviews");
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          providers: Array<{
+            index: number;
+            baseUrl: string;
+            disabled: boolean;
+            nodePubkeys: string[];
+            reviewCount: number;
+            reviews: Array<{
+              eventId: string;
+              createdAt: number;
+              authorPubkey: string | null;
+              nodePubkey: string | null;
+              label: string;
+              isLgtm: boolean;
+              tags: string[][];
+            }>;
+          }>;
+          unmatchedReviews: Array<{
+            eventId: string;
+            createdAt: number;
+            authorPubkey: string | null;
+            nodePubkey: string | null;
+            label: string;
+            isLgtm: boolean;
+            tags: string[][];
+          }>;
+          totalCount: number;
+          reviewEventCount: number;
+        }
+      | undefined;
+
+    if (!output) {
+      console.log("No provider review data available.");
+      return;
+    }
+
+    console.log(
+      `Providers (${output.totalCount} total, ${output.reviewEventCount} stored review events):\n`,
+    );
+
+    for (const provider of output.providers) {
+      const status = provider.disabled ? "DISABLED" : "enabled ";
+      console.log(
+        `  [${provider.index}] ${status}  ${provider.baseUrl}  (${provider.reviewCount} review${provider.reviewCount === 1 ? "" : "s"})`,
+      );
+
+      if (provider.nodePubkeys.length > 0) {
+        console.log(`      node pubkeys: ${provider.nodePubkeys.join(", ")}`);
+      }
+
+      for (const review of provider.reviews) {
+        const label = review.label || "review";
+        const created = new Date(review.createdAt * 1000).toISOString();
+        console.log(`      - ${label}  eventId: ${review.eventId}`);
+        console.log(`          node:   ${review.nodePubkey ?? "(none)"}`);
+        console.log(`          author: ${review.authorPubkey ?? "(none)"}`);
+        console.log(`          at:     ${created}`);
+      }
+    }
+
+    if (output.unmatchedReviews.length > 0) {
+      console.log(
+        `\n  Unmatched review events (${output.unmatchedReviews.length} — node pubkey not in any known provider):`,
+      );
+      for (const review of output.unmatchedReviews) {
+        const created = new Date(review.createdAt * 1000).toISOString();
+        console.log(`      - eventId: ${review.eventId}`);
+        console.log(`          node:   ${review.nodePubkey ?? "(none)"}`);
+        console.log(`          at:     ${created}`);
+      }
+    }
+  });
+
 // Clients - list and manage clients
 const clientsCmd = program
   .command("clients")

@@ -136,6 +136,50 @@ function parseLimit(value: string | null, fallback = 10): number {
     : fallback;
 }
 
+/** Normalize a provider URL for matching (add https:// and a trailing slash). */
+function normalizeProviderBaseUrl(url: string): string {
+  if (!url.startsWith("http")) {
+    url = `https://${url}`;
+  }
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+/** Extract the provider base URLs a kind 38421 event advertises.
+ *  Parses `u` tags first, then falls back to `content` endpoint URLs,
+ *  mirroring ModelManager.bootstrapFromNostr. */
+function collectProviderUrlsFromEvent(event: {
+  tags: string[][];
+  content: string;
+}): string[] {
+  const urls: string[] = [];
+  for (const tag of event.tags) {
+    if (tag[0] === "u" && typeof tag[1] === "string" && tag[1]) {
+      urls.push(normalizeProviderBaseUrl(tag[1]));
+    }
+  }
+  if (urls.length > 0) return urls;
+  try {
+    const content = JSON.parse(event.content);
+    const providers = Array.isArray(content)
+      ? content
+      : content.providers || [];
+    for (const p of providers) {
+      if (p?.endpoint_url) urls.push(normalizeProviderBaseUrl(p.endpoint_url));
+    }
+  } catch {
+    /* unparseable content — ignore */
+  }
+  return urls;
+}
+
+/** Read a tag value by name from a Nostr event's tag array. */
+function tagValue(tags: string[][], name: string): string | null {
+  for (const tag of tags) {
+    if (tag[0] === name && typeof tag[1] === "string" && tag[1]) return tag[1];
+  }
+  return null;
+}
+
 function sendJson(
   res: ServerResponse,
   status: number,
@@ -1431,6 +1475,111 @@ export function createDaemonRequestHandler(deps: {
               providers,
               disabledCount: activeDisabledCount,
               totalCount: baseUrlsList.length,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/providers/reviews") {
+      try {
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+
+        // Read disable state from the discovery adapter (the same source the
+        // router/ProviderManager uses), not the mirror in the SdkStore, which
+        // can lag behind the review sync on warm boots.
+        const manuallyEnabled = new Set(
+          deps.discoveryAdapter.getManuallyEnabledProviders?.() || [],
+        );
+        const disabledSet = new Set(
+          [
+            ...(deps.discoveryAdapter.getDisabledProviders() || []),
+            ...(deps.discoveryAdapter.getManuallyDisabledProviders() || []),
+          ].filter((u: string) => !manuallyEnabled.has(u)),
+        );
+
+        // url -> set of node pubkeys advertised by that provider's 38421 event(s)
+        const providerNodes = new Map<string, Set<string>>();
+        // All stored kind 38425 review events
+        const reviewEvents: any[] = [];
+
+        const eventStore = await deps.modelManager.getEventStore();
+        if (eventStore) {
+          const providerEvents = eventStore.getTimeline({ kinds: [38421] });
+          for (const ev of providerEvents) {
+            const pubkey = ev.pubkey;
+            for (const u of collectProviderUrlsFromEvent(ev)) {
+              let set = providerNodes.get(u);
+              if (!set) {
+                set = new Set<string>();
+                providerNodes.set(u, set);
+              }
+              set.add(pubkey);
+            }
+          }
+          reviewEvents.push(...eventStore.getTimeline({ kinds: [38425] }));
+        }
+
+        const mapReview = (rv: any) => ({
+          eventId: rv.id,
+          createdAt: rv.created_at,
+          authorPubkey: rv.pubkey,
+          nodePubkey: tagValue(rv.tags, "node"),
+          label: tagValue(rv.tags, "t") ?? "",
+          isLgtm:
+            (tagValue(rv.tags, "t") ?? "").toLowerCase() === "lgtm",
+          tags: rv.tags,
+        });
+
+        const providers = baseUrlsList.map((baseUrl, index) => {
+          const normalized = normalizeProviderBaseUrl(baseUrl);
+          const nodePubkeys = Array.from(
+            providerNodes.get(normalized) || new Set<string>(),
+          );
+          const reviews = reviewEvents
+            .filter((rv) => {
+              const node = tagValue(rv.tags, "node");
+              return node ? nodePubkeys.includes(node) : false;
+            })
+            .sort((a, b) => b.created_at - a.created_at)
+            .map(mapReview);
+          return {
+            index,
+            baseUrl,
+            disabled: disabledSet.has(baseUrl),
+            nodePubkeys,
+            reviewCount: reviews.length,
+            reviews,
+          };
+        });
+
+        // Review events that reference a node pubkey we could not map back to
+        // any currently-known provider URL (kept for completeness).
+        const knownNodePubkeys = new Set<string>();
+        for (const set of providerNodes.values()) {
+          for (const pk of set) knownNodePubkeys.add(pk);
+        }
+        const unmatchedReviews = reviewEvents
+          .filter((rv) => {
+            const node = tagValue(rv.tags, "node");
+            return node ? !knownNodePubkeys.has(node) : false;
+          })
+          .sort((a, b) => b.created_at - a.created_at)
+          .map(mapReview);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              providers,
+              unmatchedReviews,
+              totalCount: baseUrlsList.length,
+              reviewEventCount: reviewEvents.length,
             },
           }),
         );
