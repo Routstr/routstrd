@@ -162,6 +162,14 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
     const walletColor = status.wallet === "connected" ? COLORS.green : COLORS.red;
     const modeColor = COLORS.cyan;
     statusLines.push(`${COLORS.bold}Daemon:${COLORS.reset} ${daemonColor}${status.daemon}${COLORS.reset}`);
+    if (status.url) {
+      const label = "Running on: ";
+      const maxUrlLen = Math.max(8, halfWidth2 - 4 - label.length);
+      const url = status.url.length > maxUrlLen
+        ? `${status.url.slice(0, Math.max(0, maxUrlLen - 1))}…`
+        : status.url;
+      statusLines.push(`${COLORS.bold}${label}${COLORS.reset} ${COLORS.cyan}${url}${COLORS.reset}`);
+    }
     statusLines.push(`${COLORS.bold}Wallet:${COLORS.reset} ${walletColor}${status.wallet}${COLORS.reset}`);
     statusLines.push(`${COLORS.bold}Mode:${COLORS.reset} ${modeColor}${status.mode}${COLORS.reset}`);
     if (status.error) {
