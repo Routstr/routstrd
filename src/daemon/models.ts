@@ -117,7 +117,7 @@ export function createModelService(
   ): Promise<ExposedModel[]> => {
     const routstr21ModelIds = Array.from(
       new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
-    ).slice(0, 21);
+    );
 
     let discoveredModels: ExposedModel[];
     if (!forceRefresh) {
