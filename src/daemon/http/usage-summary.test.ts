@@ -263,6 +263,23 @@ describe("getUsageSummary", () => {
     expect(providers[0]!.requests).toBe(4);
   });
 
+  it("displays an SDK-attributed agent name without rewriting it", async () => {
+    driver = createMemoryUsageTrackingDriver([
+      makeEntry("agent-entry", {
+        id: "agent-entry",
+        timestamp: D3,
+        modelId: "model-a",
+        client: "Hermes Agent",
+        totalTokens: 2,
+      }),
+    ]);
+
+    const summary = await getUsageSummary(driver, [], TZ);
+
+    expect(summary.clients[0]?.client).toBe("Hermes Agent");
+    expect(summary.recent[0]?.client).toBe("Hermes Agent");
+  });
+
   it("caches results for same key within TTL", async () => {
     const summary1 = await getUsageSummary(driver, CLIENTS, TZ);
     const summary2 = await getUsageSummary(driver, CLIENTS, TZ);
