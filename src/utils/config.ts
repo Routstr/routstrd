@@ -48,8 +48,10 @@ export interface RoutstrdConfig {
    * Defaults to daemonUrl or localhost:{port} if not set. */
   authUrl?: string;
   nsec?: string;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   /** Nostr relay URLs for provider/model discovery (kinds 38421/38423/38425).
    * When unset, each method uses its own built-in defaults. */
   relays?: string[];

@@ -66,8 +66,10 @@ type DaemonDeps = {
   getModelProviders: (modelId: string) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
@@ -386,8 +388,10 @@ export function createDaemonRequestHandler(deps: {
   mode?: "xcashu" | "apikeys";
   /** Default max_tokens/max_output_tokens to inject when the client omits one. */
   maxTokens: number;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
   refundClient: any;
@@ -1763,6 +1767,9 @@ export function createDaemonRequestHandler(deps: {
           ? { requestResponseLogSink: deps.requestResponseLogSink }
           : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
+        ...(deps.routstrModelsPubkey
+          ? { routstrModelsPubkey: deps.routstrModelsPubkey }
+          : {}),
       });
 
       // Bridge the Web `Response` to the Node `ServerResponse`: status +

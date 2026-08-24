@@ -128,6 +128,7 @@ async function main(): Promise<void> {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
     routstrPubkey: config.routstrPubkey,
+    routstrModelsPubkey: config.routstrModelsPubkey,
     nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
@@ -216,6 +217,7 @@ async function main(): Promise<void> {
       mode: config.mode || "apikeys",
       maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
+      routstrModelsPubkey: config.routstrModelsPubkey,
       usageTrackingDriver,
       providerManager,
       refundClient,
