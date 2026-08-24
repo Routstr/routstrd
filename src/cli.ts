@@ -1,5 +1,6 @@
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
+import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
 import {
   handleDaemonCommand,
   callDaemon,
@@ -217,19 +218,19 @@ async function requireLocalDaemon(): Promise<void> {
 async function initDaemon(): Promise<void> {
   console.log("Initializing routstrd...");
 
-  // Create config directory
+  // Create config directory (0700, correcting existing installs too)
   if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
     console.log(`Created config directory: ${CONFIG_DIR}`);
   }
+  ensureDirsSync();
 
-  // Create initial config
+  // Create initial config (0600, atomic write)
   if (!existsSync(CONFIG_FILE)) {
     const config: RoutstrdConfig = {
       ...DEFAULT_CONFIG,
       cocodPath: null,
     };
-    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+    saveDaemonConfig(config);
     console.log(`Created config file: ${CONFIG_FILE}`);
   }
 
@@ -240,7 +241,7 @@ async function initDaemon(): Promise<void> {
     const nsec = nip19.nsecEncode(secretKey);
     const npub = npubFromSecretKey(secretKey);
     config.nsec = nsec;
-    await Bun.write(CONFIG_FILE, JSON.stringify(config, null, 2));
+    saveDaemonConfig(config);
     console.log("\nA new Nostr identity has been generated for authentication.");
     console.log(`Your npub: ${npub}`);
     console.log(`You can view it in the config file at: ${CONFIG_FILE}\n`);
@@ -517,7 +518,7 @@ program
       ...updates,
     };
 
-    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+    saveDaemonConfig(updatedConfig);
 
     console.log(`Remote daemon URL set to: ${url}`);
     if (options.authUrl) {
@@ -552,7 +553,7 @@ program
     const { daemonUrl: _daemonUrl, authUrl: _authUrl, ...rest } = config;
     const updatedConfig: RoutstrdConfig = rest;
 
-    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+    saveDaemonConfig(updatedConfig);
 
     console.log("Switched back to local daemon mode.");
     if (previousDaemonUrl) {
@@ -2227,7 +2228,7 @@ program
       ...config,
       mode: selectedMode,
     };
-    await Bun.write(CONFIG_FILE, JSON.stringify(updatedConfig, null, 2));
+    saveDaemonConfig(updatedConfig);
     console.log(`Mode set to '${selectedMode}'. Restarting daemon...`);
 
     // Restart daemon
