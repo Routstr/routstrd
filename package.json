@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -26,7 +26,7 @@
     "@cashu/cashu-ts": "^4.3.0",
     "@cashu/coco-core": "^1.0.1",
     "@cashu/coco-sqlite-bun": "^1.0.1",
-    "@routstr/sdk": "file:../routstr-sdk",
+    "@routstr/sdk": "^0.4.1",
     "@scure/bip39": "^2.2.0",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
