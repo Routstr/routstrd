@@ -35,5 +35,9 @@ temp/
 # Graphify output
 graphify-out/
 
+# Findings
+findings/
+routstrd-findings.zip
+
 # Standalone prototype scripts
 index.ts
