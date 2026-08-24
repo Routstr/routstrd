@@ -89,7 +89,11 @@ export function createModelService(
 
         // Sync discovered providers into the store so `providers list` reflects
         // the same set that the model manager knows about.
-        const { baseUrlsList, setBaseUrlsList } = store.getState();
+        const {
+          baseUrlsList,
+          setBaseUrlsList,
+          setDisabledProviders,
+        } = store.getState();
         const existing = new Set(baseUrlsList);
         const merged = [
           ...baseUrlsList,
@@ -100,6 +104,18 @@ export function createModelService(
           logger.log(
             `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
           );
+        }
+
+        // Mirror the review-disabled set (kind 38425) into the store. The SDK
+        // applies review disables to the discovery adapter during bootstrap,
+        // but `providers list` and the per-model provider views read the store,
+        // so without this a fresh install reports "0 disabled" while routing
+        // silently excludes the review-disabled providers.
+        const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
+          providers,
+        );
+        if (reviewedDisabled !== null) {
+          setDisabledProviders(reviewedDisabled);
         }
 
         logger.log("Provider bootstrap complete.");
