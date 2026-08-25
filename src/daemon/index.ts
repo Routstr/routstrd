@@ -232,7 +232,13 @@ async function main(): Promise<void> {
       requestResponseLogSink,
     },
   );
-  installMintFallbackTopUp(routeClient, walletClient, walletAdapter, daemonSdkLogger, provider);
+  installMintFallbackTopUp(
+    routeClient,
+    walletClient,
+    walletAdapter,
+    daemonSdkLogger,
+    provider ?? undefined,
+  );
 
   const refundClient = new RoutstrClient(
     walletAdapter,

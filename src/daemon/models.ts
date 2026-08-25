@@ -19,35 +19,75 @@ export type ModelWithProviders = ExposedModel & {
 export function createModelService(modelManager: ModelManager, store: SdkStore) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
-  /**
-   * Returns the set of disabled provider base URLs (normalized with trailing
-   * slash, matching the SDK's convention) so callers can skip them before
-   * passing a provider list to `fetchModels`.
-   */
-  const getDisabledProviderSet = (): Set<string> => {
-    const raw: string[] = store.getState().disabledProviders || [];
-    return new Set(
-      raw.map((url) => (url.endsWith("/") ? url : `${url}/`)),
+  const normalizeProviderUrl = (url: string): string =>
+    url.endsWith("/") ? url : `${url}/`;
+
+  const getProviderSelection = () => {
+    const state = store.getState() as any;
+    const baseUrls: string[] = state.baseUrlsList || [];
+    const disabled = new Set<string>(
+      (state.disabledProviders || []).map(normalizeProviderUrl),
     );
+    const enabled = new Set(
+      baseUrls
+        .map(normalizeProviderUrl)
+        .filter((url) => !disabled.has(url)),
+    );
+
+    return {
+      disabled,
+      enabled,
+      selectionIsExplicit: baseUrls.length > 0 && disabled.size > 0,
+    };
   };
 
   /**
-   * Filter a list of provider base URLs, removing any that are currently
-   * disabled in the store. This prevents wasteful HTTP requests to providers
-   * the user has explicitly disabled.
+   * Once the user has disabled any provider, their stored provider selection
+   * becomes an allowlist. Newly discovered providers remain visible in the
+   * provider list but are disabled by default instead of being contacted.
    */
-  const filterDisabled = (providers: string[]): string[] => {
-    const disabled = getDisabledProviderSet();
-    if (disabled.size === 0) return providers;
-    const filtered = providers.filter(
-      (url) => {
-        const base = url.endsWith("/") ? url : `${url}/`;
-        return !disabled.has(base);
-      },
+  const syncDiscoveredProviders = (
+    providers: string[],
+    replace = false,
+  ): void => {
+    const state = store.getState() as any;
+    const existing: string[] = state.baseUrlsList || [];
+    const existingNormalized = new Set(existing.map(normalizeProviderUrl));
+    const newlyDiscovered = providers.filter(
+      (url) => !existingNormalized.has(normalizeProviderUrl(url)),
+    );
+    const merged = replace
+      ? providers
+      : [...existing, ...newlyDiscovered];
+
+    state.setBaseUrlsList(merged);
+
+    const disabled: string[] = state.disabledProviders || [];
+    if (disabled.length > 0 && newlyDiscovered.length > 0) {
+      state.setDisabledProviders(
+        Array.from(new Set([...disabled, ...newlyDiscovered])),
+      );
+      logger.log(
+        `Added ${newlyDiscovered.length} newly discovered provider(s) as disabled`,
+      );
+    }
+  };
+
+  /**
+   * Return only providers the user has explicitly left enabled. Before the
+   * first provider selection is made, preserve the fresh-install behavior and
+   * fetch every discovered provider.
+   */
+  const filterEnabled = (providers: string[]): string[] => {
+    const { enabled, selectionIsExplicit } = getProviderSelection();
+    if (!selectionIsExplicit) return providers;
+
+    const filtered = providers.filter((url) =>
+      enabled.has(normalizeProviderUrl(url))
     );
     if (filtered.length < providers.length) {
       logger.log(
-        `Skipped ${providers.length - filtered.length} disabled provider(s) before model fetch`,
+        `Skipped ${providers.length - filtered.length} non-enabled provider(s) before model fetch`,
       );
     }
     return filtered;
@@ -59,23 +99,8 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
-        await modelManager.fetchModels(filterDisabled(providers));
-
-        // Sync discovered providers into the store so `providers list` reflects
-        // the same set that the model manager knows about.
-        const { baseUrlsList, setBaseUrlsList } = store.getState();
-        const existing = new Set(baseUrlsList);
-        const merged = [
-          ...baseUrlsList,
-          ...providers.filter((url) => !existing.has(url)),
-        ];
-        if (merged.length !== baseUrlsList.length) {
-          setBaseUrlsList(merged);
-          logger.log(
-            `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
-          );
-        }
-
+        syncDiscoveredProviders(providers);
+        await modelManager.fetchModels(filterEnabled(providers));
         logger.log("Provider bootstrap complete.");
       })().catch((error) => {
         logger.error("Provider bootstrap failed:", error);
@@ -95,7 +120,7 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     ).slice(0, 21);
     const baseUrls = modelManager.getBaseUrls();
     const discoveredModels = await modelManager.fetchModels(
-      filterDisabled(baseUrls),
+      filterEnabled(baseUrls),
       forceRefresh,
     );
     const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
@@ -113,8 +138,12 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
 
     const allModels = modelManager.getAllCachedModels();
     const providers: ModelProviderInfo[] = [];
+    const { enabled, selectionIsExplicit } = getProviderSelection();
 
     for (const [baseUrl, models] of Object.entries(allModels)) {
+      if (selectionIsExplicit && !enabled.has(normalizeProviderUrl(baseUrl))) {
+        continue;
+      }
       const model = models.find((m) => m.id === modelId);
       if (model && model.sats_pricing) {
         providers.push({
@@ -173,16 +202,21 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
     console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
-    // Force-refresh models from all enabled providers
-    const models = await modelManager.fetchModels(filterDisabled(providers), true);
-    console.log(`Fetched ${models.length} models from ${providers.length} providers`);
+    // Preserve an explicit provider selection before contacting any newly
+    // discovered provider. New providers are visible but disabled by default.
+    syncDiscoveredProviders(providers, true);
+
+    // Force-refresh models from enabled providers only
+    const enabledProviders = filterEnabled(providers);
+    const models = await modelManager.fetchModels(enabledProviders, true);
+    console.log(`Fetched ${models.length} models from ${enabledProviders.length} enabled provider(s)`);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status
-    const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
+    const reviewedDisabled = (await modelManager.syncReviewedProvidersFromNostr(
       providers,
       undefined,
       true,
-    );
+    )) ?? [];
     if (reviewedDisabled.length > 0) {
       console.log(
         `Review sync disabled ${reviewedDisabled.length} provider(s): ${reviewedDisabled.join(", ")}`,
@@ -190,14 +224,10 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     }
 
     // Sync discovered providers into the store
-    const { baseUrlsList, setBaseUrlsList, disabledProviders, setDisabledProviders } =
-      store.getState() as any;
-
-    // Replace baseUrlsList with the fresh provider list
-    setBaseUrlsList(providers);
+    const { disabledProviders, setDisabledProviders } = store.getState() as any;
 
     // Merge review-disabled providers into the store's disabled list
-    const existingDisabled = new Set(disabledProviders || []);
+    const existingDisabled = new Set<string>(disabledProviders || []);
     for (const url of reviewedDisabled) {
       existingDisabled.add(url);
     }

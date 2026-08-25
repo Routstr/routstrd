@@ -28,7 +28,6 @@ type BalanceManagerLike = {
 type RoutstrClientLike = {
   getBalanceManager(): unknown;
   getMode?(): string;
-  mode?: string;
 };
 
 type WalletAdapterLike = {
@@ -222,7 +221,7 @@ function isMintUnreachableResponse(status: number, responseBody: unknown): boole
 
 /** Returns true if the client is operating in xcashu mode. */
 function isXcashuMode(client: RoutstrClientLike): boolean {
-  const mode = client.getMode?.() ?? client.mode;
+  const mode = client.getMode?.() ?? (client as Record<string, unknown>).mode;
   return mode === "xcashu";
 }
 
