@@ -1,5 +1,5 @@
 import { createServer } from "http";
-import { existsSync } from "fs";
+import { existsSync, unlinkSync } from "fs";
 import {
   ProviderManager,
   createStorageAdapterFromStore,
@@ -20,31 +20,6 @@ import {
 } from "../utils/config";
 import { logger } from "../utils/logger";
 
-// ── Console noise filter ─────────────────────────────────────────
-// The @routstr/sdk's SSE inspector does unconditional console.log("[routstr:sse]
-// chunk:", ...) for every single streaming token. This produced a 195 MB log
-// file that filled swap and caused silent OOM crashes. The SDK's own
-// debugLevel flag only governs its _logger_ calls, not these raw console.log
-// statements, so we intercept console.log here and drop the per-token SSE
-// spam while preserving everything else (including real errors and the
-// crash/shutdown markers written via process.stderr).
-//
-// Set ROUTSTRD_VERBOSE_SSE=1 to restore the full per-token logging (useful for
-// deep SDK debugging, but it will grow the log file fast).
-const _origConsoleLog = console.log.bind(console);
-const _verboseSse = process.env.ROUTSTRD_VERBOSE_SSE === "1";
-console.log = (...args: unknown[]) => {
-  if (_verboseSse) {
-    _origConsoleLog(...args);
-    return;
-  }
-  const first = args[0];
-  if (typeof first === "string" && first.startsWith("[routstr:sse]")) {
-    return; // suppress per-token SSE spam
-  }
-  _origConsoleLog(...args);
-};
-
 
 function makeSdkLogger(prefix?: string): SdkLogger {
   const tag = prefix ? `[${prefix}]` : undefined;
@@ -58,6 +33,13 @@ function makeSdkLogger(prefix?: string): SdkLogger {
   };
 }
 const daemonSdkLogger: SdkLogger = makeSdkLogger();
+const STARTUP_LOG_PREFIX = "[routstrd:start]";
+
+function startupProgress(message: string): void {
+  logger.info(message);
+  console.log(`${STARTUP_LOG_PREFIX} ${message}`);
+}
+
 import { parseArgs } from "./args";
 import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
 import {
@@ -67,93 +49,51 @@ import {
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
-import { createCocodClient } from "./wallet/cocod-client";
-import { installMintFallbackTopUp } from "./wallet/sdk-mint-fallback";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
 import { refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
+import { mkdirSync } from "fs";
+import { dirname } from "path";
+import {
+  assertLegacyCocodNotRunning,
+  claimLegacyCocodPidFile,
+  createCocoClient,
+  stopLegacyCocod,
+} from "./wallet/coco-client";
+import { migrateLegacyWallet } from "./wallet/migration";
+import {
+  legacyCocodPidPath,
+  legacyCocodSocketPath,
+} from "./wallet/paths";
+import { installGlobalErrorHandlers } from "./fatal-error";
 
-// ── Global error & shutdown handlers ─────────────────────────────
-// The daemon is spawned detached with stdout/stderr redirected to a file,
-// so without these handlers, uncaught async errors and external signals
-// (SIGTERM/OOM-killer) would kill the process silently — leaving no trace
-// in the structured logs. These handlers write a clear crash/shutdown marker
-// (with timestamp + stack trace) to the file logger AND to stderr, so the
-// cause is visible in both ~/.routstrd/logs/YYYY-MM-DD.log and the
-// stdout/stderr capture file (debug.log).
-//
-// The daemon is a long-lived server: we do NOT exit on uncaughtException /
-// unhandledRejection (a single broken request should not take down the whole
-// process). We log loudly and keep running. External kill signals (SIGTERM,
-// SIGINT) and process.exit() are logged as a final marker so you can always
-// see exactly when and why the process stopped.
-
-const SHUTDOWN_MARKER =
-  "══════════════════════════════════════════════════";
-
-function logToStderr(msg: string): void {
-  try {
-    process.stderr.write(`${msg}\n`);
-  } catch {
-    // stderr may be closed during final shutdown — ignore.
-  }
-}
-
-process.on("uncaughtException", (error) => {
-  const msg = `${SHUTDOWN_MARKER}\n[CRASH] uncaughtException at ${new Date().toISOString()}\n${error.stack || error.message || String(error)}\n${SHUTDOWN_MARKER}`;
-  logger.error(msg);
-  logToStderr(msg);
-  // Do NOT exit — the daemon is a server; one bad request should not kill it.
-  // The error is logged prominently so it can be diagnosed.
-});
-
-process.on("unhandledRejection", (reason) => {
-  const detail =
-    reason instanceof Error
-      ? `${reason.stack || reason.message}`
-      : String(reason);
-  const msg = `[CRASH] unhandledRejection at ${new Date().toISOString()}\n${detail}`;
-  logger.error(msg);
-  logToStderr(msg);
-  // Do NOT exit — same rationale as uncaughtException.
-});
-
-// Graceful shutdown signal handlers. These fire when the process is killed
-// externally (systemctl stop, OOM-killer, kill <pid>, Ctrl+C). Without them
-// the process just vanishes and the logs show nothing after the last request.
-const shutdown = (signal: string) => {
-  const msg = `[SHUTDOWN] received ${signal} at ${new Date().toISOString()}, pid=${process.pid}`;
-  logger.log(msg);
-  logToStderr(msg);
-  // Give the file logger a moment to flush, then exit.
-  setTimeout(() => process.exit(0), 200);
-};
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-// Final marker on exit — records the exit code so you can distinguish a
-// clean shutdown (code 0) from a crash (code 1) when reading logs.
-process.on("exit", (code) => {
-  const msg = `[EXIT] code=${code} at ${new Date().toISOString()}, pid=${process.pid}`;
-  // The file logger uses async fs/promises — it may not flush during exit,
-  // so also write to stderr (which is sync) as a guaranteed record.
-  logToStderr(msg);
-  try {
-    // Best-effort sync write to stderr is already done above; the async logger
-    // may or may not flush, but the stderr capture file will have it.
-  } catch {
-    // ignore
-  }
-});
+// Global error handlers — the daemon is spawned detached with stdout/stderr
+// redirected to a file, so without these, uncaught async errors would kill
+// the process silently. Uncaught exceptions are fatal: the process state can
+// no longer be trusted, so the daemon logs and exits for its supervisor to
+// restart (see fatal-error.ts).
+installGlobalErrorHandlers();
 
 async function main(): Promise<void> {
+  // Install signal handlers before migration and wallet startup. If a signal
+  // arrives before the full shutdown path is wired, process.exit() still runs
+  // the synchronous PID-lock exit hooks registered by claimPidFile.
+  let shutdownDaemon: () => void = () => process.exit(0);
+  const shutdownForSignal = (signal: NodeJS.Signals) => {
+    logger.log(`Received ${signal}; shutting down...`);
+    shutdownDaemon();
+  };
+  process.once("SIGINT", shutdownForSignal);
+  process.once("SIGTERM", shutdownForSignal);
+
+  startupProgress("Loading configuration...");
   const args = parseArgs(process.argv);
   const config = await loadDaemonConfig();
 
-  const port = args.port ?? config.port ?? 8008;
+  const port = args.port;
+  const host = args.host || config.host || "127.0.0.1";
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
     process.env.ROUTSTRD_REQUEST_RESPONSE_LOG_DIR ||
@@ -169,9 +109,10 @@ async function main(): Promise<void> {
 
   await ensureDirs();
 
-  const updatedConfig = { ...config, port, provider };
+  const updatedConfig = { ...config, port, host, provider };
   saveDaemonConfig(updatedConfig);
 
+  startupProgress("Opening Routstr databases...");
   const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
@@ -182,18 +123,47 @@ async function main(): Promise<void> {
 
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
+  startupProgress("Routstr databases ready.");
   const modelManager = new ModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
     routstrPubkey: config.routstrPubkey,
+    routstrModelsPubkey: config.routstrModelsPubkey,
     nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
-    createModelService(modelManager, store);
+    createModelService(modelManager, providerManager, store);
 
-  const walletClient = createCocodClient({ cocodPath: config.cocodPath });
+  // The daemon may be launched directly (or by an older/global CLI), so do
+  // not rely on the parent command having stopped the external wallet first.
+  await stopLegacyCocod({
+    socketPath: legacyCocodSocketPath(),
+    pidFilePath: legacyCocodPidPath(),
+  });
+
+  const migration = await migrateLegacyWallet({
+    assertLegacyStopped: () =>
+      assertLegacyCocodNotRunning({
+        socketPath: legacyCocodSocketPath(),
+      }),
+    acquireLegacyLock: () => {
+      mkdirSync(dirname(legacyCocodPidPath()), {
+        recursive: true,
+        mode: 0o700,
+      });
+      return claimLegacyCocodPidFile({
+        pidFilePath: legacyCocodPidPath(),
+      });
+    },
+  });
+  if (migration.status === "migrated") {
+    startupProgress(`Wallet migrated from ${migration.from} to ${migration.to}.`);
+    for (const warning of migration.cleanupWarnings) logger.warn(warning);
+  }
+
+  const walletClient = await createCocoClient();
 
   // ── Auto-refill configuration ────────────────────────────────
   // Uses a getter that reads config from disk each cycle, so
@@ -218,28 +188,6 @@ async function main(): Promise<void> {
     nwcConnectionString: config.nwc?.connectionString,
   });
 
-  const routeClient = new RoutstrClient(
-    walletAdapter,
-    storageAdapter,
-    discoveryAdapter,
-    "min",
-    config.mode || "apikeys",
-    {
-      usageTrackingDriver,
-      sdkStore: store,
-      providerManager,
-      logger: daemonSdkLogger,
-      requestResponseLogSink,
-    },
-  );
-  installMintFallbackTopUp(
-    routeClient,
-    walletClient,
-    walletAdapter,
-    daemonSdkLogger,
-    provider ?? undefined,
-  );
-
   const refundClient = new RoutstrClient(
     walletAdapter,
     storageAdapter,
@@ -255,6 +203,7 @@ async function main(): Promise<void> {
     createDaemonRequestHandler({
       provider,
       server,
+      shutdown: () => shutdownDaemon(),
       store,
       walletClient,
       walletAdapter,
@@ -266,10 +215,11 @@ async function main(): Promise<void> {
       getModelProviders,
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
+      maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
+      routstrModelsPubkey: config.routstrModelsPubkey,
       usageTrackingDriver,
       providerManager,
-      routeClient,
       refundClient,
       requestResponseLogSink,
     }),
@@ -279,7 +229,7 @@ async function main(): Promise<void> {
 
   try {
     if (existsSync(SOCKET_PATH)) {
-      Bun.spawn(["rm", SOCKET_PATH]);
+      unlinkSync(SOCKET_PATH);
     }
   } catch {
     // Ignore
@@ -369,27 +319,6 @@ async function main(): Promise<void> {
           logger.log(
             `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
           );
-
-          // Also sweep pending xcashu tokens that failed inline refund
-          // (e.g. "proofs already spent" — token stays in storage, needs retry)
-          const xcashuTokens = (state.xcashuTokens || {}) as Record<
-            string,
-            unknown[]
-          >;
-          const xcashuCount = Object.values(xcashuTokens).reduce(
-            (sum, tokens) => sum + (tokens?.length || 0),
-            0,
-          );
-          if (xcashuCount > 0) {
-            logger.log(`Sweeping ${xcashuCount} pending xcashu token(s)...`);
-            const xcashuResults = await spender.refundXcashuTokens(mintUrl);
-            const xcashuSuccess = xcashuResults.filter(
-              (r: { success: boolean }) => r.success,
-            ).length;
-            logger.log(
-              `xcashu sweep completed: ${xcashuSuccess}/${xcashuResults.length} tokens refunded.`,
-            );
-          }
         } catch (error) {
           logger.error("Scheduled refund failed:", error);
         }
@@ -405,14 +334,40 @@ async function main(): Promise<void> {
     }
   };
 
+  let walletDisposePromise: Promise<void> | undefined;
+  const disposeWallet = (): Promise<void> => {
+    walletDisposePromise ??= walletClient.dispose?.() || Promise.resolve();
+    return walletDisposePromise;
+  };
+
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
-
+    void disposeWallet().catch((error) => {
+      logger.error("Failed to dispose wallet:", error);
+    });
   });
 
-  server.listen(port, async () => {
-    logger.log(`Routstr daemon listening on http://localhost:${port}/v1`);
+  shutdownDaemon = () => {
+    server.close(() => {
+      void disposeWallet().finally(() => process.exit(0));
+    });
+  };
+
+  // Without this a listen failure only reaches uncaughtException, which logs and
+  // returns, leaving the daemon alive holding the wallet locks with no listener.
+  server.on("error", (error) => {
+    logger.error("Failed to start Routstr daemon:", error);
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
+    process.exit(1);
+  });
+
+  startupProgress("Starting HTTP server...");
+  server.listen(port, host, async () => {
+    logger.log(`Routstr daemon listening on http://${host}:${port}/v1`);
     if (requestResponseLogDir) {
       logger.log(`Raw request/response logs: ${requestResponseLogDir}`);
     }
@@ -442,6 +397,12 @@ async function main(): Promise<void> {
 if (import.meta.main) {
   main().catch((error) => {
     logger.error("Failed to start Routstr daemon:", error);
+    // Also write to stderr so the spawning CLI can surface the real error
+    // (stdout/stderr are redirected to debug.log by start-daemon.ts).
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
     process.exit(1);
   });
 }

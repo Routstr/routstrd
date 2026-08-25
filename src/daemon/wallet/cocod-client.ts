@@ -1,7 +1,9 @@
 import { existsSync } from "fs";
 import { createHash } from "crypto";
+import { isAbsolute } from "path";
 import { logger } from "../../utils/logger";
 import { withCrossProcessLock } from "../../utils/process-lock";
+import type { HistoryEntry } from "@cashu/coco-core";
 
 const DEFAULT_CONFIG_DIR =
   process.env.COCOD_DIR || `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
@@ -30,9 +32,72 @@ type SpawnDaemon = (
   env: Record<string, string>,
 ) => SpawnedProcess;
 
-export type CocodState = "UNINITIALIZED" | "LOCKED" | "UNLOCKED" | "ERROR";
+export type CocodState =
+  | "UNINITIALIZED"
+  | "LOCKED"
+  | "UNLOCKED"
+  | "RECOVERING"
+  | "ERROR";
+
+/** Live progress for background wallet recovery started at daemon startup. */
+export interface WalletRecoveryProgress {
+  state: "RECOVERING" | "UNLOCKED" | "ERROR";
+  /** Current recovery phase, e.g. "Mint recovery" or "done". */
+  phase: string;
+  pendingSends: number;
+  inflightProofs: number;
+  pendingMints: number;
+  /** Expired unpaid mint quotes failed locally without a mint round-trip. */
+  failedMintQuotes: number;
+  error?: string;
+}
 
 export type CocodBalanceOutput = Record<string, { sats?: number } | number>;
+
+/** NPC (npubx.cash) Lightning address details for this wallet. */
+export interface NpcAddress {
+  /** Full Lightning address, e.g. "alice@npubx.cash" (npub fallback when no username is set). */
+  address: string;
+  /** NPC username, when one has been claimed. */
+  name?: string;
+  /** Nostr hex pubkey of the NPC account (only available from the in-process wallet). */
+  pubkey?: string;
+}
+
+/** Result of an NPC username claim attempt. */
+export interface NpcUsernameResult {
+  success: boolean;
+  /** Present when NPC requires payment to claim the username. */
+  paymentRequest?: {
+    amount?: number;
+    mints?: string[];
+    [key: string]: unknown;
+  };
+}
+
+/** Options for the wallet cleanup command. */
+export interface WalletCleanupOptions {
+  /** Only clean up operations for this mint URL. */
+  mintUrl?: string;
+  /** Minimum operation age in milliseconds (defaults to 7 days / 1 week). */
+  minAgeMs?: number;
+  /** Report what would be cleaned without applying changes. */
+  dryRun?: boolean;
+}
+
+/** Summary of a wallet cleanup run. */
+export interface WalletCleanupResult {
+  dryRun: boolean;
+  /** Number of expired pending mint quotes marked as failed. */
+  failedMintQuotes: number;
+  /** Number of stale pending send operations reclaimed. */
+  reclaimedSends: number;
+  /** Number of stale prepared melt operations cancelled. */
+  cancelledMelts: number;
+  /** Number of in-flight operations that were left untouched. */
+  skipped: number;
+  errors: Array<{ operationId: string; error: string }>;
+}
 
 export class CocodHttpError extends Error {
   status: number;
@@ -56,6 +121,23 @@ export interface CocodClient {
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;
   getMintInfo(url: string): Promise<unknown>;
+  getDefaultMint(): Promise<string | null>;
+  setDefaultMint(url: string): Promise<string>;
+  /** Release resources held by in-process wallet implementations. */
+  dispose?(): Promise<void>;
+  getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
+  /** NPC (npubx.cash) Lightning address for this wallet. */
+  getNpcAddress(): Promise<NpcAddress>;
+  /** Claim an NPC username; pass confirm=true to pay the claim fee from the wallet. */
+  setNpcUsername(username: string, confirm?: boolean): Promise<NpcUsernameResult>;
+  /** Manually trigger an NPC quote sync into the wallet. */
+  syncNpc(): Promise<void>;
+  /** Clear stuck pending/in-flight wallet operations that are safe to resolve. */
+  cleanupStuckOperations?(
+    options?: WalletCleanupOptions,
+  ): Promise<WalletCleanupResult>;
+  /** Report background wallet recovery progress, when the wallet supports it. */
+  getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {
@@ -68,13 +150,18 @@ export async function isCocodInstalled(
 ): Promise<boolean> {
   const executable = resolveCocodExecutable(cocodPath);
 
-  if (executable.includes("/")) {
+  if (
+    isAbsolute(executable) ||
+    executable.includes("/") ||
+    executable.includes("\\")
+  ) {
     return existsSync(executable);
   }
 
   try {
+    const command = process.platform === "win32" ? "where.exe" : "which";
     const proc = Bun.spawn({
-      cmd: ["which", executable],
+      cmd: [command, executable],
       stdout: "ignore",
       stderr: "ignore",
     });
@@ -352,6 +439,51 @@ export function createCocodClient(
     },
     async getMintInfo(url: string): Promise<unknown> {
       return post<unknown>("/mints/info", { url });
+    },
+    async getDefaultMint(): Promise<string | null> {
+      return callDaemon<string | null>("/mints/default");
+    },
+    async setDefaultMint(url: string): Promise<string> {
+      return post<string>("/mints/default", { url });
+    },
+    async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
+      return [];
+    },
+    async getNpcAddress(): Promise<NpcAddress> {
+      const address = await callDaemon<string>("/npc/address");
+      if (typeof address !== "string" || !address.trim()) {
+        throw new CocodHttpError(
+          502,
+          "Unexpected response from cocod while fetching NPC address.",
+        );
+      }
+      const trimmed = address.trim();
+      const localPart = trimmed.split("@")[0];
+      return {
+        address: trimmed,
+        ...(localPart && !localPart.startsWith("npub1")
+          ? { name: localPart }
+          : {}),
+      };
+    },
+    async setNpcUsername(
+      username: string,
+      confirm?: boolean,
+    ): Promise<NpcUsernameResult> {
+      // cocod answers 402 with a payment-required message when the claim fee
+      // has not been confirmed; fetchJson preserves that status on the thrown
+      // CocodHttpError, so callers can surface it unchanged.
+      const result = await post<{ success?: boolean }>("/npc/username", {
+        username,
+        confirm: confirm === true,
+      });
+      return { success: result?.success !== false };
+    },
+    async syncNpc(): Promise<void> {
+      throw new CocodHttpError(
+        501,
+        "Manual NPC sync is not supported by the legacy cocod client.",
+      );
     },
   };
 }

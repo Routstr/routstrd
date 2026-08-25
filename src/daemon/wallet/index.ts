@@ -1,20 +1,35 @@
-import { getDecodedToken, Amount } from "@cashu/cashu-ts";
+import { getTokenMetadata } from "@cashu/cashu-ts";
+import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { createCocodClient, type CocodClient } from "./cocod-client";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
-import { receiveBolt11WithMintFallback } from "./mint-fallback";
 
 export function decodeCashuTokenAmount(token: string): {
   amount: number;
   unit: "sat" | "msat";
 } {
-  const decoded = getDecodedToken(token, []);
-  const amount =
-    decoded?.proofs?.reduce((sum, proof) => sum + proof.amount.toNumber(), 0) ?? 0;
-  const unit = decoded?.unit === "msat" ? "msat" : "sat";
+  // TokenV4 may contain an 8-byte short keyset ID. Fully decoding its
+  // proofs requires the mint's full keyset IDs, but amount and unit do not.
+  // getTokenMetadata intentionally extracts those fields without trying to
+  // map short IDs, unlike getDecodedToken(token, []).
+  const metadata = getTokenMetadata(token);
+  const amount = metadata.amount.toNumber();
+  const unit = metadata.unit === "msat" ? "msat" : "sat";
   return { amount, unit };
+}
+
+export async function receiveCashuToken(
+  client: Pick<CocodClient, "receiveCashu">,
+  token: string,
+): Promise<{ message: string; amount: number; unit: "sat" | "msat" }> {
+  // Validate the token before handing it to a state-changing wallet call. This
+  // prevents a successful receive from being reported as a failure if local
+  // metadata parsing ever rejects a future token format.
+  const { amount, unit } = decodeCashuTokenAmount(token);
+  const message = await client.receiveCashu(token);
+  return { message, amount, unit };
 }
 
 type SendCashuOptions = {
@@ -45,20 +60,11 @@ export function getSameMintSendAmounts(
     denomination *= 2;
   }
 
-  // The entire ready balance is always worth trying last: even when no single
-  // power-of-two proof exists, all ready proofs together may be selectable.
   if (!candidates.includes(available)) candidates.push(available);
   return candidates;
 }
 
-/**
- * Create a token from exactly the requested mint.
- *
- * The SDK associates the returned token with `mintUrl`. Falling back to another
- * mint here makes that association false and can send providers a token from a
- * mint they cannot reach. Cross-mint fallback belongs above this adapter, where
- * the actual mint URL remains part of the request state.
- */
+/** Create a token from exactly the requested mint. */
 export async function sendCashuFromMint(
   client: Pick<CocodClient, "sendCashu">,
   mintUrl: string,
@@ -67,11 +73,15 @@ export async function sendCashuFromMint(
 ): Promise<string> {
   const maxRetries = options.maxRetries ?? 3;
   const retryDelayMs = options.retryDelayMs ?? 5000;
-  const minimumAmountSats = options.minimumAmountSats ?? MIN_PROVIDER_TOKEN_AMOUNT_SATS;
+  const minimumAmountSats =
+    options.minimumAmountSats ?? MIN_PROVIDER_TOKEN_AMOUNT_SATS;
   const sendAmounts = [
     Math.max(amount, minimumAmountSats),
     ...(options.fallbackAmounts ?? []),
-  ].filter((candidate, index, all) => candidate > 0 && all.indexOf(candidate) === index);
+  ].filter(
+    (candidate, index, all) =>
+      candidate > 0 && all.indexOf(candidate) === index,
+  );
   const retryErrorPattern = "Proof already reserved by operation";
   let lastInsufficientProofsError: unknown;
 
@@ -80,11 +90,12 @@ export async function sendCashuFromMint(
       try {
         return await client.sendCashu(sendAmount, mintUrl);
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        const shouldRetry =
-          attempt < maxRetries && errorMessage.includes(retryErrorPattern);
-
-        if (shouldRetry) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        if (
+          attempt < maxRetries &&
+          errorMessage.includes(retryErrorPattern)
+        ) {
           logger.log(
             `sendToken attempt ${attempt + 1} failed with reserved proof error for ${mintUrl}, retrying in ${retryDelayMs / 1000}s...`,
           );
@@ -108,7 +119,8 @@ export async function sendCashuFromMint(
     }
   }
 
-  throw lastInsufficientProofsError ?? new Error("sendToken failed after max retries");
+  throw lastInsufficientProofsError ??
+    new Error("sendToken failed after max retries");
 }
 
 export interface WalletAdapterOptions {
@@ -134,60 +146,6 @@ export async function createWalletAdapter(
   let activeMintUrl: string | null = null;
   let mintUnits: Record<string, "sat" | "msat"> = {};
 
-  // ── Mint health cache ──────────────────────────────────────────
-  // Track mints that are temporarily unreachable (connection refused,
-  // DNS failure, etc.). Unhealthy mints are skipped by getActiveMintUrl()
-  // and sendToken() so we don't waste a round-trip on every request.
-  const MINT_HEALTH_COOLDOWN_MS = 60_000; // 1 minute
-  const unhealthyMints = new Map<string, number>(); // mintUrl → timestamp marked unhealthy
-
-  function markMintUnhealthy(mintUrl: string): void {
-    const now = Date.now();
-    if (!unhealthyMints.has(mintUrl)) {
-      logger.warn(`[wallet] Marking mint ${mintUrl} as unhealthy (will skip for ${MINT_HEALTH_COOLDOWN_MS / 1000}s)`);
-    }
-    unhealthyMints.set(mintUrl, now);
-    // If the active mint just went unhealthy, switch to a healthy one
-    if (activeMintUrl === mintUrl) {
-      const healthy = getFirstHealthyMint();
-      if (healthy) {
-        activeMintUrl = healthy;
-        logger.log(`[wallet] Active mint switched to ${healthy}`);
-      }
-    }
-  }
-
-  function isMintHealthy(mintUrl: string): boolean {
-    const markedAt = unhealthyMints.get(mintUrl);
-    if (!markedAt) return true;
-    if (Date.now() - markedAt >= MINT_HEALTH_COOLDOWN_MS) {
-      unhealthyMints.delete(mintUrl);
-      logger.log(`[wallet] Mint ${mintUrl} health cooldown expired — will retry`);
-      return true;
-    }
-    return false;
-  }
-
-  // Cache of known mints (updated by syncMintState)
-  let knownMints: string[] = [];
-
-  function getFirstHealthyMint(): string | null {
-    // Try known mints in order, return first healthy one
-    for (const mint of knownMints) {
-      if (isMintHealthy(mint)) return mint;
-    }
-    // Fallback: any configured mint even if not in knownMints yet
-    return activeMintUrl && isMintHealthy(activeMintUrl) ? activeMintUrl : null;
-  }
-
-  function isNetworkFetchError(error: unknown): boolean {
-    const msg = error instanceof Error ? error.message : String(error);
-    return /failed to fetch/i.test(msg) ||
-      /networkerror when attempting to fetch resource/i.test(msg) ||
-      /load failed/i.test(msg) ||
-      /unable to connect/i.test(msg);
-  }
-
   async function syncMintState(
     balances?: Record<string, number>,
   ): Promise<Record<string, number>> {
@@ -197,22 +155,12 @@ export async function createWalletAdapter(
       Object.keys(nextBalances).map((mintUrl) => [mintUrl, "sat"]),
     );
 
-    // Update known mints list
-    knownMints = [...new Set([
-      ...Object.keys(nextBalances),
-      ...(activeMintUrl ? [activeMintUrl] : []),
-    ])];
-
     try {
-      const mints = await client.listMints();
-      // Add configured mints to knownMints
-      knownMints = [...new Set([...knownMints, ...mints])];
-      // Pick first healthy mint — prefer the first configured one,
-      // but skip mints currently in the unhealthy cooldown
-      const healthyMint = mints.find(m => isMintHealthy(m));
-      activeMintUrl = healthyMint || mints[0] || Object.keys(nextBalances)[0] || null;
+      // Use default mint as active mint, fall back to first mint in list
+      const defaultMint = await client.getDefaultMint();
+      activeMintUrl = defaultMint || Object.keys(nextBalances)[0] || null;
     } catch (error) {
-      logger.error("Failed to list cocod mints:", error);
+      logger.error("Failed to get default mint:", error);
       if (!activeMintUrl) {
         activeMintUrl = Object.keys(nextBalances)[0] || null;
       }
@@ -289,9 +237,7 @@ export async function createWalletAdapter(
       return mintUnits;
     },
     getActiveMintUrl(): string | null {
-      // Return the first healthy mint, falling back to activeMintUrl
-      const healthy = getFirstHealthyMint();
-      return healthy || activeMintUrl;
+      return activeMintUrl;
     },
 
     // ── NWC funding methods ────────────────────────────────────
@@ -312,33 +258,16 @@ export async function createWalletAdapter(
         return { success: false, invoice: "", error: "NWC not connected" };
       }
 
-      // Ensure we have configured mints. If the active mint is unreachable,
-      // invoice creation will fall back to later configured mints.
-      await syncMintState();
-      const configuredMints = await client.listMints();
-      const mintCandidates = [activeMintUrl, ...configuredMints].filter(
-        (mintUrl): mintUrl is string => typeof mintUrl === "string" && mintUrl.length > 0,
-      );
-      if (mintCandidates.length === 0) {
-        logger.error("[nwc] No active mint configured");
-        return { success: false, invoice: "", error: "No active mint configured" };
+      // Use default mint for NWC funding
+      const defaultMint = await client.getDefaultMint();
+      const mintUrl = defaultMint;
+      if (!mintUrl) {
+        logger.error("[nwc] No default mint configured");
+        return { success: false, invoice: "", error: "No default mint configured" };
       }
 
       try {
-        // Step 1: Create a BOLT-11 invoice via cocod
-        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
-        const { invoice, mintUrl } = await receiveBolt11WithMintFallback(
-          client,
-          amount,
-          mintCandidates,
-          "[nwc]",
-        );
-        logger.log(`[nwc]   Invoice: ${invoice}`);
-        if (mintUrl !== activeMintUrl) {
-          logger.log(`[nwc]   Using fallback mint: ${mintUrl}`);
-        }
-
-        // Step 2: Check initial balance
+        // Step 1: Check initial balance
         logger.log(`[nwc] Checking initial cocod balance on mint ${mintUrl}...`);
         let initialBalance: number | null = null;
         try {
@@ -348,6 +277,11 @@ export async function createWalletAdapter(
         } catch {
           logger.log("[nwc]   Could not retrieve initial balance");
         }
+
+        // Step 2: Create a BOLT-11 invoice via cocod
+        logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
+        const invoice = await client.receiveBolt11(amount, mintUrl);
+        logger.log(`[nwc]   Invoice: ${invoice}`);
 
         // Step 3: Pay it via NWC
         logger.log("[nwc] Paying invoice via NWC...");
@@ -423,60 +357,27 @@ export async function createWalletAdapter(
       }
     },
 
-    /** Pay an externally-created BOLT-11 invoice via NWC. */
-    async payBolt11(bolt11: string): Promise<{
-      success: boolean;
-      preimage?: string;
-      error?: string;
-    }> {
-      if (!wallet || !wallet.service) {
-        return { success: false, error: "NWC not connected" };
-      }
-      if (!bolt11 || typeof bolt11 !== "string" || !bolt11.startsWith("lnbc")) {
-        return { success: false, error: "Invalid bolt11 invoice (must start with 'lnbc')" };
-      }
-      try {
-        const { preimage } = await wallet.payInvoice(bolt11);
-        return { success: true, preimage };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error(`[nwc] payBolt11 failed: ${message}`);
-        return { success: false, error: message };
-      }
-    },
-
     /** Get the current auto-refill config, re-reading from the getter if available */
     getAutoRefillConfig(): AutoRefillConfig | undefined {
       return options.getAutoRefillConfig?.() ?? options.autoRefill;
     },
     async sendToken(mintUrl: string, amount: number): Promise<string> {
       try {
-        // If the requested mint is unhealthy, skip it immediately and
-        // try a healthy mint instead. This prevents the wasted round-trip
-        // of attempting an unreachable mint on every single request.
-        let effectiveMint = mintUrl;
-        if (!isMintHealthy(mintUrl)) {
-          const healthy = getFirstHealthyMint();
-          if (healthy && healthy !== mintUrl) {
-            logger.log(`[wallet] sendToken: skipping unhealthy mint ${mintUrl}, using ${healthy}`);
-            effectiveMint = healthy;
-          }
-        }
-
         const balances: Record<string, number> = await syncMintState().catch(
           () => ({}),
         );
         const sendAmounts = getSameMintSendAmounts(
           amount,
-          balances[effectiveMint] ?? amount,
+          balances[mintUrl] ?? amount,
         );
-        return await sendCashuFromMint(client, effectiveMint, sendAmounts[0]!, {
+        return await sendCashuFromMint(client, mintUrl, sendAmounts[0]!, {
           fallbackAmounts: sendAmounts.slice(1),
         });
       } catch (error) {
-        // Mark the mint as unhealthy so future requests skip it
-        if (isNetworkFetchError(error)) {
-          markMintUnhealthy(mintUrl);
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        if (errorMessage.includes("Not enough proofs")) {
+          throw new InsufficientBalanceError(amount, 0);
         }
         logger.error("Error in walletAdapter sendToken:", error);
         throw error;
@@ -489,20 +390,11 @@ export async function createWalletAdapter(
       message?: string;
     }> {
       try {
-        const message = await client.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
+        const { amount, unit, message } = await receiveCashuToken(client, token);
         return { success: true, amount, unit, message };
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        // Mark the mint as unhealthy if it's a network error
-        // (receiveCashu errors include the mint URL in the message)
-        if (isNetworkFetchError(error)) {
-          // Try to extract mint URL from error message or use activeMintUrl
-          const mintMatch = errorMessage.match(/https?:\/\/[^\s/]+\/[^\s]*/);
-          const failedMint = mintMatch?.[0] || activeMintUrl;
-          if (failedMint) markMintUnhealthy(failedMint);
-        }
         logger.error("Error in walletAdapter receiveToken:", errorMessage);
         return { success: false, amount: 0, unit: "sat", message: errorMessage };
       }
@@ -531,16 +423,14 @@ export async function createWalletAdapter(
   }
 
   try {
-    const [balances, mints] = await Promise.all([
+    const [balances, defaultMint] = await Promise.all([
       client.getBalances(),
-      client.listMints().catch(() => []),
+      client.getDefaultMint().catch(() => null),
     ]);
     mintUnits = Object.fromEntries(
       Object.keys(balances).map((mintUrl) => [mintUrl, "sat"]),
     );
-    knownMints = [...new Set([...Object.keys(balances), ...mints])];
-    const healthyMint = mints.find(m => isMintHealthy(m));
-    activeMintUrl = healthyMint || mints[0] || Object.keys(balances)[0] || null;
+    activeMintUrl = defaultMint || Object.keys(balances)[0] || null;
   } catch (error) {
     logger.error("Failed to initialize wallet adapter state:", error);
   }

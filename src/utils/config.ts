@@ -32,6 +32,7 @@ export interface NwcConfig {
 
 export interface RoutstrdConfig {
   port: number;
+  host: string;
   provider: string | null;
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
@@ -47,18 +48,30 @@ export interface RoutstrdConfig {
    * Defaults to daemonUrl or localhost:{port} if not set. */
   authUrl?: string;
   nsec?: string;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   /** Nostr relay URLs for provider/model discovery (kinds 38421/38423/38425).
    * When unset, each method uses its own built-in defaults. */
   relays?: string[];
   /** NWC integration configuration */
   nwc?: NwcConfig;
+  /**
+   * Default max_tokens (chat/completions) and max_output_tokens (responses)
+   * injected into proxied requests when the client does not supply one.
+   * Caps the completion budget the SDK prices against (completion × maxTokens)
+   * instead of the provider's worst-case max_completion_cost. Set to 0 to
+   * disable injection and always forward the client's value as-is.
+   */
+  maxTokens?: number;
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
   port: 8008,
+  host: "127.0.0.1",
   provider: null,
   cocodPath: null,
   mode: "apikeys",
+  maxTokens: 64000,
 };

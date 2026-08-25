@@ -8,6 +8,8 @@ import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 type PiModelEntry = {
   id: string;
   contextWindow?: number;
+  // Preserve arbitrary manual fields (reasoning, thinkingLevelMap, compat, cost, maxTokens, etc.)
+  [key: string]: unknown;
 };
 
 type PiProviderConfig = {
@@ -40,8 +42,9 @@ export async function installPiIntegration(
       const content = await readFile(configPath, "utf-8");
       piConfig = JSON.parse(content) as PiConfig;
     }
-  } catch {
-    piConfig = {};
+  } catch (error) {
+    console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
+    return;
   }
 
   if (!piConfig.providers) {
@@ -60,15 +63,29 @@ export async function installPiIntegration(
       return;
     }
 
+    // Preserve any manually-added per-model fields (reasoning, thinkingLevelMap,
+    // compat, cost, maxTokens, etc.) across refreshes. Only `id` and `contextWindow`
+    // are managed by routstrd.
+    const existingModels = new Map<string, PiModelEntry>(
+      (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
+    );
+
     const providerModels: PiModelEntry[] = models.map((model) => {
-      const entry: PiModelEntry = { id: model.id };
+      const previous = existingModels.get(model.id);
+      const entry: PiModelEntry = previous ? { ...previous } : { id: model.id };
+
+      entry.id = model.id;
       if (model.context_length !== undefined && model.context_length > 0) {
         entry.contextWindow = model.context_length;
       }
+
       return entry;
     });
 
+    // Preserve provider-level manual fields (compat, headers, name, etc.); only update
+    // the routstrd-managed fields below.
     piConfig.providers["routstr"] = {
+      ...(piConfig.providers["routstr"] ?? {}),
       baseUrl,
       api: "openai-completions",
       apiKey,

@@ -1,9 +1,10 @@
-import { ModelManager, type SdkStore } from "@routstr/sdk";
+import { ModelManager, ProviderManager, type SdkStore } from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
 
 export type ModelProviderInfo = {
   baseUrl: string;
+  disabled: boolean;
   pricing: {
     prompt: number;
     completion: number;
@@ -16,81 +17,152 @@ export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
 };
 
-export function createModelService(modelManager: ModelManager, store: SdkStore) {
+export function createModelService(
+  modelManager: ModelManager,
+  providerManager: ProviderManager,
+  store: SdkStore,
+) {
   let providerBootstrapPromise: Promise<void> | null = null;
 
-  const normalizeProviderUrl = (url: string): string =>
+  const normalizeBaseUrl = (url: string): string =>
     url.endsWith("/") ? url : `${url}/`;
 
   const getProviderSelection = () => {
-    const state = store.getState() as any;
+    const state = store.getState();
     const baseUrls: string[] = state.baseUrlsList || [];
-    const disabled = new Set<string>(
-      (state.disabledProviders || []).map(normalizeProviderUrl),
+    const manuallyEnabled = new Set(
+      (state.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const manuallyDisabled = new Set(
+      (state.manuallyDisabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabled = new Set(
+      [
+        ...(state.disabledProviders || []),
+        ...(state.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
     );
     const enabled = new Set(
       baseUrls
-        .map(normalizeProviderUrl)
+        .map(normalizeBaseUrl)
         .filter((url) => !disabled.has(url)),
     );
 
     return {
       disabled,
       enabled,
-      selectionIsExplicit: baseUrls.length > 0 && disabled.size > 0,
+      selectionIsExplicit:
+        manuallyEnabled.size > 0 || manuallyDisabled.size > 0,
     };
   };
 
-  /**
-   * Once the user has disabled any provider, their stored provider selection
-   * becomes an allowlist. Newly discovered providers remain visible in the
-   * provider list but are disabled by default instead of being contacted.
-   */
-  const syncDiscoveredProviders = (
-    providers: string[],
-    replace = false,
-  ): void => {
-    const state = store.getState() as any;
-    const existing: string[] = state.baseUrlsList || [];
-    const existingNormalized = new Set(existing.map(normalizeProviderUrl));
-    const newlyDiscovered = providers.filter(
-      (url) => !existingNormalized.has(normalizeProviderUrl(url)),
-    );
-    const merged = replace
-      ? providers
-      : [...existing, ...newlyDiscovered];
+  const filterEnabledProviders = (providers: string[]): string[] => {
+    const { disabled, enabled, selectionIsExplicit } = getProviderSelection();
+    const filtered = providers.filter((url) => {
+      const normalized = normalizeBaseUrl(url);
+      return selectionIsExplicit
+        ? enabled.has(normalized)
+        : !disabled.has(normalized);
+    });
 
-    state.setBaseUrlsList(merged);
-
-    const disabled: string[] = state.disabledProviders || [];
-    if (disabled.length > 0 && newlyDiscovered.length > 0) {
-      state.setDisabledProviders(
-        Array.from(new Set([...disabled, ...newlyDiscovered])),
-      );
-      logger.log(
-        `Added ${newlyDiscovered.length} newly discovered provider(s) as disabled`,
-      );
-    }
-  };
-
-  /**
-   * Return only providers the user has explicitly left enabled. Before the
-   * first provider selection is made, preserve the fresh-install behavior and
-   * fetch every discovered provider.
-   */
-  const filterEnabled = (providers: string[]): string[] => {
-    const { enabled, selectionIsExplicit } = getProviderSelection();
-    if (!selectionIsExplicit) return providers;
-
-    const filtered = providers.filter((url) =>
-      enabled.has(normalizeProviderUrl(url))
-    );
-    if (filtered.length < providers.length) {
+    if (filtered.length !== providers.length) {
       logger.log(
         `Skipped ${providers.length - filtered.length} non-enabled provider(s) before model fetch`,
       );
     }
     return filtered;
+  };
+
+  /**
+   * Keep discovery visible without silently enabling new providers after the
+   * user has made an explicit provider selection.
+   */
+  const syncDiscoveredProviders = (
+    providers: string[],
+    replace = false,
+  ): void => {
+    const state = store.getState();
+    const existing: string[] = state.baseUrlsList || [];
+    const existingNormalized = new Set(existing.map(normalizeBaseUrl));
+    const newlyDiscovered = providers.filter(
+      (url) => !existingNormalized.has(normalizeBaseUrl(url)),
+    );
+    const selectionIsExplicit =
+      (state.manuallyEnabledProviders || []).length > 0 ||
+      (state.manuallyDisabledProviders || []).length > 0;
+
+    state.setBaseUrlsList(
+      replace ? providers : [...existing, ...newlyDiscovered],
+    );
+
+    if (selectionIsExplicit && newlyDiscovered.length > 0) {
+      state.setManuallyDisabledProviders(
+        Array.from(
+          new Set([
+            ...(state.manuallyDisabledProviders || []),
+            ...newlyDiscovered,
+          ]),
+        ),
+      );
+      logger.log(
+        `Added ${newlyDiscovered.length} newly discovered provider(s) as manually disabled`,
+      );
+    }
+  };
+
+  /**
+   * Build the same cheapest-per-model view as ModelManager.fetchModels, but
+   * exclusively from the persisted cache. Model-list reads must not wait for
+   * unavailable providers; explicit and scheduled refreshes own network I/O.
+   */
+  const getCachedModels = (): ExposedModel[] => {
+    type PricedModel = ExposedModel & {
+      sats_pricing?: { completion?: number };
+    };
+
+    const cachedByProvider = modelManager.getAllCachedModels();
+    const currentProviders = new Set(
+      modelManager.getBaseUrls().map(normalizeBaseUrl),
+    );
+    const s = store.getState();
+    const manuallyEnabled = new Set(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledProviders = new Set(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
+    );
+    const bestById = new Map<string, PricedModel>();
+
+    for (const [baseUrl, models] of Object.entries(cachedByProvider)) {
+      const normalized = normalizeBaseUrl(baseUrl);
+      if (
+        disabledProviders.has(normalized) ||
+        (currentProviders.size > 0 && !currentProviders.has(normalized))
+      ) {
+        continue;
+      }
+
+      for (const model of models as PricedModel[]) {
+        if (!model.sats_pricing) continue;
+        const existing = bestById.get(model.id);
+        if (
+          !existing ||
+          (model.sats_pricing.completion ?? 0) <
+            (existing.sats_pricing?.completion ?? 0)
+        ) {
+          bestById.set(model.id, model);
+        }
+      }
+    }
+
+    return [...bestById.values()];
   };
 
   const ensureProvidersBootstrapped = (): Promise<void> => {
@@ -99,10 +171,24 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
+
         syncDiscoveredProviders(providers);
-        await modelManager.fetchModels(filterEnabled(providers));
+
+        // Mirror the review-disabled set (kind 38425) into the store. The SDK
+        // applies review disables to the discovery adapter during bootstrap,
+        // but `providers list` and the per-model provider views read the store,
+        // so without this a fresh install reports "0 disabled" while routing
+        // silently excludes the review-disabled providers.
+        const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
+          providers,
+        );
+        if (reviewedDisabled !== null) {
+          store.getState().setDisabledProviders(reviewedDisabled);
+        }
+
         logger.log("Provider bootstrap complete.");
       })().catch((error) => {
+        providerBootstrapPromise = null;
         logger.error("Provider bootstrap failed:", error);
         throw error;
       });
@@ -113,16 +199,27 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
   const getRoutstr21Models = async (
     forceRefresh = false,
   ): Promise<ExposedModel[]> => {
-    await ensureProvidersBootstrapped();
-
     const routstr21ModelIds = Array.from(
       new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
-    ).slice(0, 21);
-    const baseUrls = modelManager.getBaseUrls();
-    const discoveredModels = await modelManager.fetchModels(
-      filterEnabled(baseUrls),
-      forceRefresh,
     );
+
+    let discoveredModels: ExposedModel[];
+    if (!forceRefresh) {
+      discoveredModels = getCachedModels();
+    } else {
+      discoveredModels = [];
+    }
+
+    // Warm reads are cache-only. A cold start and explicit refresh still
+    // populate models from the provider network.
+    if (forceRefresh || discoveredModels.length === 0) {
+      await ensureProvidersBootstrapped();
+      discoveredModels = await modelManager.fetchModels(
+        filterEnabledProviders(modelManager.getBaseUrls()),
+        forceRefresh,
+      );
+    }
+
     const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
 
     return routstr21ModelIds.map((modelId) => {
@@ -136,37 +233,42 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
   ): Promise<ModelWithProviders | null> => {
     await ensureProvidersBootstrapped();
 
-    const allModels = modelManager.getAllCachedModels();
-    const providers: ModelProviderInfo[] = [];
-    const { enabled, selectionIsExplicit } = getProviderSelection();
+    const s = store.getState();
+    const manuallyEnabled = new Set<string>(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledSet = new Set<string>(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ].filter((url) => !manuallyEnabled.has(normalizeBaseUrl(url))),
+    );
 
-    for (const [baseUrl, models] of Object.entries(allModels)) {
-      if (selectionIsExplicit && !enabled.has(normalizeProviderUrl(baseUrl))) {
-        continue;
-      }
-      const model = models.find((m) => m.id === modelId);
-      if (model && model.sats_pricing) {
-        providers.push({
-          baseUrl,
-          pricing: {
-            prompt: model.sats_pricing.prompt,
-            completion: model.sats_pricing.completion,
-            request: model.sats_pricing.request,
-            max_cost: model.sats_pricing.max_cost,
-          },
-        });
-      }
-    }
+    // Use the SDK ranking (sorted by prompt+completion per million tokens)
+    // so the display order matches real routing. includeDisabled keeps
+    // disabled providers visible so we can annotate them.
+    const ranking = providerManager.getProviderPriceRankingForModel(modelId, {
+      includeDisabled: true,
+    });
 
-    // Sort by max_cost (cheapest first)
-    providers.sort((a, b) => a.pricing.max_cost - b.pricing.max_cost);
+    const providers: ModelProviderInfo[] = ranking.map((entry: any) => ({
+      baseUrl: entry.baseUrl,
+      disabled: disabledSet.has(entry.baseUrl),
+      pricing: {
+        prompt: entry.promptPerMillion / 1_000_000,
+        completion: entry.completionPerMillion / 1_000_000,
+        request: entry.model.sats_pricing?.request ?? 0,
+        max_cost: entry.model.sats_pricing?.max_cost ?? 0,
+      },
+    }));
 
     if (providers.length === 0) {
       return null;
     }
 
-    // Get model metadata from first provider that has it
+    // Get model metadata from first (cheapest) provider
     const cheapest = providers[0]!;
+    const allModels = modelManager.getAllCachedModels();
     const firstProvider = allModels[cheapest.baseUrl];
     const modelInfo = firstProvider?.find((m: { id: string }) => m.id === modelId);
 
@@ -202,39 +304,36 @@ export function createModelService(modelManager: ModelManager, store: SdkStore) 
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
     console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
-    // Preserve an explicit provider selection before contacting any newly
-    // discovered provider. New providers are visible but disabled by default.
     syncDiscoveredProviders(providers, true);
 
-    // Force-refresh models from enabled providers only
-    const enabledProviders = filterEnabled(providers);
-    const models = await modelManager.fetchModels(enabledProviders, true);
-    console.log(`Fetched ${models.length} models from ${enabledProviders.length} enabled provider(s)`);
-
-    // Sync review events from Nostr (kind 38425) and apply disabled status
-    const reviewedDisabled = (await modelManager.syncReviewedProvidersFromNostr(
+    // Sync review events before model HTTP requests so review-disabled
+    // providers are never contacted during this refresh.
+    const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
       providers,
       undefined,
       true,
-    )) ?? [];
-    if (reviewedDisabled.length > 0) {
+    );
+    if (reviewedDisabled && reviewedDisabled.length > 0) {
       console.log(
         `Review sync disabled ${reviewedDisabled.length} provider(s): ${reviewedDisabled.join(", ")}`,
       );
     }
 
-    // Sync discovered providers into the store
-    const { disabledProviders, setDisabledProviders } = store.getState() as any;
-
-    // Merge review-disabled providers into the store's disabled list
-    const existingDisabled = new Set<string>(disabledProviders || []);
-    for (const url of reviewedDisabled) {
-      existingDisabled.add(url);
+    // Mirror the review-disabled set into the store's auto-disabled list.
+    // `null` means the review sync left the adapter unchanged (e.g. no lgtm
+    // reviews found), so we must not clobber the store list with an empty array.
+    if (reviewedDisabled !== null) {
+      store.getState().setDisabledProviders(reviewedDisabled);
     }
-    setDisabledProviders([...existingDisabled]);
+
+    const enabledProviders = filterEnabledProviders(providers);
+    const models = await modelManager.fetchModels(enabledProviders, true);
+    console.log(
+      `Fetched ${models.length} models from ${enabledProviders.length} enabled provider(s)`,
+    );
 
     console.log(
-      `Provider refresh complete: ${providers.length} total, ${existingDisabled.size} disabled`,
+      `Provider refresh complete: ${providers.length} total, ${reviewedDisabled?.length ?? store.getState().disabledProviders?.length ?? 0} review-disabled`,
     );
   };
 

@@ -67,8 +67,6 @@ export function startAutoRefillLoop(
       return;
     }
 
-    checkInProgress = true;
-
     // If we've been failing too much, back off rather than retrying at full speed.
     // This prevents tight loops on transient errors.
     const backoffInterval = Math.min(
@@ -78,6 +76,8 @@ export function startAutoRefillLoop(
     if (now - lastAttemptAt < backoffInterval) {
       return;
     }
+
+    checkInProgress = true;
 
     try {
       const balances = await cocod.getBalances();
@@ -95,22 +95,27 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
-      // Get configured mints. If the active mint is unreachable, fall back to
-      // later configured mints before giving up.
-      const mints = await cocod.listMints();
-      if (mints.length === 0) {
-        logger.error("[auto-refill] No active mint configured");
+      const [defaultMint, configuredMints] = await Promise.all([
+        cocod.getDefaultMint(),
+        cocod.listMints(),
+      ]);
+      const mintCandidates = Array.from(
+        new Set([defaultMint, ...configuredMints].filter(Boolean) as string[]),
+      );
+      if (mintCandidates.length === 0) {
+        logger.error("[auto-refill] No mint configured");
         return;
       }
 
-      // Step 1: Create a BOLT-11 invoice via cocod to fund the Cashu wallet
+      // Step 1: Create a BOLT-11 invoice from the preferred mint, falling
+      // back across the remaining trusted mints when one is unavailable.
       logger.log(
-        `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mints[0]}...`,
+        `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats...`,
       );
       const { invoice, mintUrl } = await receiveBolt11WithMintFallback(
         cocod,
         config.amount,
-        mints,
+        mintCandidates,
         "[auto-refill]",
       );
 

@@ -8,12 +8,17 @@ const NEWLY_DISCOVERED = "https://new.example/";
 function createStore() {
   const state = {
     baseUrlsList: [ACTIVE, DISABLED],
-    disabledProviders: [DISABLED],
+    disabledProviders: [] as string[],
+    manuallyDisabledProviders: [DISABLED],
+    manuallyEnabledProviders: [] as string[],
     setBaseUrlsList(urls: string[]) {
       state.baseUrlsList = urls;
     },
     setDisabledProviders(urls: string[]) {
       state.disabledProviders = urls;
+    },
+    setManuallyDisabledProviders(urls: string[]) {
+      state.manuallyDisabledProviders = urls;
     },
   };
 
@@ -43,14 +48,15 @@ describe("model provider filtering", () => {
     const { store, state } = createStore();
     const service = createModelService(
       createModelManager(fetchCalls) as any,
+      {} as any,
       store as any,
     );
 
     await service.getRoutstr21Models(true);
 
-    expect(fetchCalls).toEqual([[ACTIVE], [ACTIVE]]);
+    expect(fetchCalls).toEqual([[ACTIVE]]);
     expect(state.baseUrlsList).toContain(NEWLY_DISCOVERED);
-    expect(state.disabledProviders).toContain(NEWLY_DISCOVERED);
+    expect(state.manuallyDisabledProviders).toContain(NEWLY_DISCOVERED);
   });
 
   test("forced refresh contacts only explicitly enabled providers", async () => {
@@ -58,6 +64,7 @@ describe("model provider filtering", () => {
     const { store, state } = createStore();
     const service = createModelService(
       createModelManager(fetchCalls) as any,
+      {} as any,
       store as any,
     );
 
@@ -65,6 +72,6 @@ describe("model provider filtering", () => {
 
     expect(fetchCalls).toEqual([[ACTIVE]]);
     expect(state.baseUrlsList).toEqual([ACTIVE, DISABLED, NEWLY_DISCOVERED]);
-    expect(state.disabledProviders).toContain(NEWLY_DISCOVERED);
+    expect(state.manuallyDisabledProviders).toContain(NEWLY_DISCOVERED);
   });
 });

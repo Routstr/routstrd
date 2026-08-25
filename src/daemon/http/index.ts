@@ -8,23 +8,44 @@ import {
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
+import { getEncodedToken } from "@cashu/coco-core";
+import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
   CocodHttpError,
   type CocodClient,
   type CocodState,
+  type WalletRecoveryProgress,
 } from "../wallet/cocod-client";
-import { decodeCashuTokenAmount } from "../wallet";
+import { receiveCashuToken } from "../wallet";
 import { receiveBolt11WithMintFallback } from "../wallet/mint-fallback";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
+
+// Hop-by-hop headers describe the *upstream* connection, not this one, and must
+// never be copied onto our response. In particular, copying the upstream's
+// `Transfer-Encoding: chunked` while Node also frames the streamed body as
+// chunked produces a duplicated `Transfer-Encoding: chunked, chunked` header,
+// which strict HTTP/1.x clients (e.g. Go's net/http) reject with
+// "too many transfer encodings". Node derives Content-Length for buffered
+// bodies and Transfer-Encoding: chunked for streams itself.
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
   daemon: "running";
-  wallet: "connected" | "error";
+  wallet: "connected" | "recovering" | "error";
   walletState: CocodState;
   balances?: Record<string, number>;
   mode: ClientMode;
@@ -34,6 +55,7 @@ type WalletStatusOutput = {
 type DaemonDeps = {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -45,10 +67,11 @@ type DaemonDeps = {
   getModelProviders: (modelId: string) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   providerManager: ProviderManager;
-  routeClient: any;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
 };
@@ -116,6 +139,50 @@ function parseLimit(value: string | null, fallback = 10): number {
     : fallback;
 }
 
+/** Normalize a provider URL for matching (add https:// and a trailing slash). */
+function normalizeProviderBaseUrl(url: string): string {
+  if (!url.startsWith("http")) {
+    url = `https://${url}`;
+  }
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+/** Extract the provider base URLs a kind 38421 event advertises.
+ *  Parses `u` tags first, then falls back to `content` endpoint URLs,
+ *  mirroring ModelManager.bootstrapFromNostr. */
+function collectProviderUrlsFromEvent(event: {
+  tags: string[][];
+  content: string;
+}): string[] {
+  const urls: string[] = [];
+  for (const tag of event.tags) {
+    if (tag[0] === "u" && typeof tag[1] === "string" && tag[1]) {
+      urls.push(normalizeProviderBaseUrl(tag[1]));
+    }
+  }
+  if (urls.length > 0) return urls;
+  try {
+    const content = JSON.parse(event.content);
+    const providers = Array.isArray(content)
+      ? content
+      : content.providers || [];
+    for (const p of providers) {
+      if (p?.endpoint_url) urls.push(normalizeProviderBaseUrl(p.endpoint_url));
+    }
+  } catch {
+    /* unparseable content — ignore */
+  }
+  return urls;
+}
+
+/** Read a tag value by name from a Nostr event's tag array. */
+function tagValue(tags: string[][], name: string): string | null {
+  for (const tag of tags) {
+    if (tag[0] === name && typeof tag[1] === "string" && tag[1]) return tag[1];
+  }
+  return null;
+}
+
 function sendJson(
   res: ServerResponse,
   status: number,
@@ -135,6 +202,8 @@ function getWalletStateMessage(state: CocodState): string {
       return "Wallet is locked. Unlock it before performing wallet operations.";
     case "UNINITIALIZED":
       return "Wallet is not initialized. Run 'routstrd onboard' first.";
+    case "RECOVERING":
+      return "Wallet is recovering from a previous run. Balance and send/receive operations will be available once recovery completes.";
     case "ERROR":
       return "Wallet is in an error state.";
     default:
@@ -222,6 +291,15 @@ async function buildStatusOutput(
 
   try {
     const walletState = await deps.walletClient.getStatus();
+    if (walletState === "RECOVERING") {
+      return {
+        daemon: "running",
+        wallet: "recovering",
+        walletState,
+        mode,
+        error: getWalletStateMessage(walletState),
+      };
+    }
     if (walletState !== "UNLOCKED") {
       return {
         daemon: "running",
@@ -257,19 +335,27 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
   balances?: Record<string, number>;
   unit?: "sat";
   activeMint?: string | null;
+  defaultMint?: string | null;
+  recovery?: WalletRecoveryProgress;
 }> {
   const state = await deps.walletClient.getStatus();
+  const recovery = await deps.walletClient.getRecoveryProgress?.();
   if (state !== "UNLOCKED") {
-    return { state, ready: false };
+    return { state, ready: false, ...(recovery ? { recovery } : {}) };
   }
 
-  const balances = await deps.walletAdapter.getBalances();
+  const [balances, defaultMint] = await Promise.all([
+    deps.walletAdapter.getBalances(),
+    deps.walletClient.getDefaultMint(),
+  ]);
   return {
     state,
     ready: true,
     balances,
     unit: "sat",
     activeMint: deps.walletAdapter.getActiveMintUrl(),
+    defaultMint,
+    ...(recovery ? { recovery } : {}),
   };
 }
 
@@ -289,6 +375,7 @@ const sdkLogger: SdkLogger = makeSdkLogger();
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
+  shutdown?: () => void;
   store: any;
   walletClient: CocodClient;
   walletAdapter: any;
@@ -300,11 +387,14 @@ export function createDaemonRequestHandler(deps: {
   getModelProviders: (modelId: string) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Default max_tokens/max_output_tokens to inject when the client omits one. */
+  maxTokens: number;
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
-  routeClient: any;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
 }) {
@@ -361,13 +451,36 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/cleanup") {
+      await respond(res, async () => {
+        if (!deps.walletClient.cleanupStuckOperations) {
+          throw new CocodHttpError(
+            501,
+            "Wallet cleanup is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const result = await deps.walletClient.cleanupStuckOperations({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          minAgeMs:
+            typeof body.minAgeMs === "number" && Number.isFinite(body.minAgeMs)
+              ? body.minAgeMs
+              : undefined,
+          dryRun: body.dryRun === true,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/receive/cashu") {
       await respond(res, async () => {
         const body = await readJsonBody(req);
         const token = getRequiredStringField(body, "token");
-        const message = await deps.walletClient.receiveCashu(token);
-        const { amount, unit } = decodeCashuTokenAmount(token);
-        return { output: { message, amount, unit } };
+        return {
+          output: await receiveCashuToken(deps.walletClient, token),
+        };
       });
       return;
     }
@@ -423,11 +536,15 @@ export function createDaemonRequestHandler(deps: {
 
     if (req.method === "GET" && url.pathname === "/wallet/mints") {
       await respond(res, async () => {
-        const mints = await deps.walletClient.listMints();
+        const [mints, defaultMint] = await Promise.all([
+          deps.walletClient.listMints(),
+          deps.walletClient.getDefaultMint(),
+        ]);
         return {
           output: {
             mints,
-            activeMint: mints[0] || null,
+            activeMint: defaultMint,
+            defaultMint,
           },
         };
       });
@@ -450,6 +567,93 @@ export function createDaemonRequestHandler(deps: {
         const mintUrl = getRequiredStringField(body, "url");
         const info = await deps.walletClient.getMintInfo(mintUrl);
         return { output: { url: mintUrl, info } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const defaultMint = await deps.walletClient.getDefaultMint();
+        return { output: { defaultMint } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/mints/default") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        const message = await deps.walletClient.setDefaultMint(mintUrl);
+        return { output: { message, url: mintUrl } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/history") {
+      await respond(res, async () => {
+        const offsetParam = url.searchParams.get("offset");
+        const limitParam = url.searchParams.get("limit");
+        const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
+        const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
+        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        const encoded = entries.map((entry: HistoryEntry) => {
+          const base = { ...entry } as Record<string, unknown>;
+          if (
+            (entry.type === "send" || entry.type === "receive") &&
+            entry.token
+          ) {
+            base.encodedToken = getEncodedToken(entry.token);
+          }
+          return base;
+        });
+
+        return { output: { entries: encoded, offset, limit } };
+      });
+      return;
+    }
+
+    // ── NPC (npubx.cash) Lightning address endpoints ──────────────
+
+    if (req.method === "GET" && url.pathname === "/wallet/npc/address") {
+      await respond(res, async () => {
+        const info = await deps.walletClient.getNpcAddress();
+        return { output: info };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/username") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const username = getRequiredStringField(body, "username");
+        const confirm = body.confirm === true;
+        const result = await deps.walletClient.setNpcUsername(username, confirm);
+        if (!result.success) {
+          const pr = result.paymentRequest ?? {};
+          const amount = typeof pr.amount === "number" ? pr.amount : 0;
+          const mints = Array.isArray(pr.mints) ? pr.mints.join(", ") : "";
+          if (confirm) {
+            throw new CocodHttpError(
+              402,
+              `Failed to set username. Required amount: ${amount} SATS. Required mints: ${mints}`,
+            );
+          }
+          throw new CocodHttpError(
+            402,
+            `Payment required to set username: ${amount} SATS. ` +
+              `Use 'routstrd wallet npc username ${username} --confirm' to proceed`,
+          );
+        }
+        return { output: { success: true, username } };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/npc/sync") {
+      await respond(res, async () => {
+        await deps.walletClient.syncNpc();
+        return { output: { message: "NPC sync completed" } };
       });
       return;
     }
@@ -646,9 +850,11 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/stop") {
       sendJson(res, 200, { output: "stopping" });
       setTimeout(() => {
-        deps.server.close(() => {
-          process.exit(0);
-        });
+        if (deps.shutdown) {
+          deps.shutdown();
+        } else {
+          deps.server.close(() => process.exit(0));
+        }
       }, 50);
       return;
     }
@@ -800,6 +1006,130 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/keys/api") {
+      try {
+        const apiKeys = deps.storageAdapter.getAllApiKeys() as Array<{
+          baseUrl: string;
+          key: string;
+          balance: number;
+          lastUsed: number | null;
+        }>;
+        const totalApiKeys = apiKeys.reduce(
+          (sum: number, k) => sum + (k.balance || 0),
+          0,
+        );
+        sendJson(res, 200, {
+          output: {
+            apiKeys,
+            count: apiKeys.length,
+            total: totalApiKeys,
+            unit: "sat",
+          },
+        });
+      } catch (error) {
+        respondWithError(res, error);
+      }
+      return;
+    }
+
+    // Refund remaining balance to a mint before removing the key.
+    const apiKeyDeleteMatch =
+      (req.method === "DELETE" || req.method === "POST") &&
+      url.pathname === "/keys/api/delete";
+    if (apiKeyDeleteMatch) {
+      try {
+        let baseUrl: string | undefined;
+        let mintUrl: string | undefined;
+        if (req.method === "DELETE") {
+          baseUrl = url.searchParams.get("baseUrl") || undefined;
+          mintUrl = url.searchParams.get("mintUrl") || undefined;
+        } else {
+          const body = await readJsonBody(req);
+          baseUrl = getRequiredStringField(body, "baseUrl");
+          mintUrl = body.mintUrl as string | undefined;
+        }
+        if (!baseUrl) {
+          sendJson(res, 400, {
+            error: "Missing required 'baseUrl' field.",
+          });
+          return;
+        }
+
+        const existing = deps.storageAdapter.getApiKey(baseUrl);
+        if (!existing) {
+          sendJson(res, 200, {
+            output: {
+              baseUrl,
+              removed: false,
+              refunded: false,
+              message: `No API key found for ${baseUrl}`,
+            },
+          });
+          return;
+        }
+
+        if (!mintUrl) {
+          try {
+            mintUrl =
+              deps.walletAdapter.getActiveMintUrl() ??
+              Object.keys(await deps.walletAdapter.getBalances())[0];
+          } catch {
+            // ignore
+          }
+        }
+
+        let refunded = false;
+        let refundMessage: string | undefined;
+        let refundedAmount: number | undefined;
+
+        if (mintUrl) {
+          try {
+            const balanceManager = deps.refundClient.getBalanceManager();
+            if (balanceManager) {
+              const refundResult = await balanceManager.refundApiKey({
+                mintUrl,
+                baseUrl: existing.baseUrl,
+                apiKey: existing.key,
+                forceRefund: true,
+              });
+              refunded = refundResult.success;
+              refundMessage = refundResult.message;
+              if (refundResult.refundedAmount) {
+                refundedAmount = Math.floor(
+                  refundResult.refundedAmount / 1000,
+                );
+              }
+            }
+          } catch (error) {
+            refundMessage = `Refund error: ${toErrorMessage(error)}`;
+          }
+        } else {
+          refundMessage = "No mint available to refund to";
+        }
+
+        // refundApiKey removes the key on success; remove manually on failure.
+        if (!refunded) {
+          deps.storageAdapter.removeApiKey(existing.baseUrl);
+        }
+
+        sendJson(res, 200, {
+          output: {
+            baseUrl: existing.baseUrl,
+            removed: true,
+            refunded,
+            refundedAmount,
+            refundMessage,
+            message: refunded
+              ? `Refunded and removed API key for ${existing.baseUrl}`
+              : `Removed API key for ${existing.baseUrl} (refund failed: ${refundMessage ?? "unknown"})`,
+          },
+        });
+      } catch (error) {
+        respondWithError(res, error);
+      }
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/providers/disable") {
       try {
         const bodyText = await readBody(req);
@@ -818,8 +1148,16 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
+        // User-driven disables belong in the *manual* disabled list. The
+        // review-based list (setDisabledProviders) is owned by the Nostr
+        // kind-38425 review sync, which overwrites it and would otherwise
+        // silently re-enable manually-disabled providers. Disabling also
+        // clears any manual-enable override for that provider.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
         ];
 
         const toDisable: string[] = [];
@@ -830,15 +1168,21 @@ export function createDaemonRequestHandler(deps: {
             idx < baseUrlsList.length
           ) {
             const baseUrl = baseUrlsList[idx]!;
-            if (!disabledProviders.includes(baseUrl)) {
-              disabledProviders.push(baseUrl);
+            if (!manuallyDisabledProviders.includes(baseUrl)) {
+              manuallyDisabledProviders.push(baseUrl);
               toDisable.push(baseUrl);
+            }
+            const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+            if (enabledPos !== -1) {
+              manuallyEnabledProviders.splice(enabledPos, 1);
             }
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -874,8 +1218,14 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
+        // Re-enabling clears the manual disable and records a manual-enable
+        // override so the review sync (which disables providers without an
+        // lgtm review) does not silently re-disable it on the next pass.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
         ];
 
         const toEnable: string[] = [];
@@ -886,16 +1236,21 @@ export function createDaemonRequestHandler(deps: {
             idx < baseUrlsList.length
           ) {
             const baseUrl = baseUrlsList[idx]!;
-            const pos = disabledProviders.indexOf(baseUrl);
+            const pos = manuallyDisabledProviders.indexOf(baseUrl);
             if (pos !== -1) {
-              disabledProviders.splice(pos, 1);
-              toEnable.push(baseUrl);
+              manuallyDisabledProviders.splice(pos, 1);
             }
+            if (!manuallyEnabledProviders.includes(baseUrl)) {
+              manuallyEnabledProviders.push(baseUrl);
+            }
+            toEnable.push(baseUrl);
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1114,7 +1469,15 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = state.disabledProviders || [];
+        const manuallyEnabled = new Set(
+          state.manuallyEnabledProviders || [],
+        );
+        const disabledProviders: string[] = [
+          ...new Set([
+            ...(state.disabledProviders || []),
+            ...(state.manuallyDisabledProviders || []),
+          ]),
+        ].filter((url) => !manuallyEnabled.has(url));
 
         const providers = baseUrlsList.map((baseUrl, index) => ({
           index,
@@ -1133,6 +1496,111 @@ export function createDaemonRequestHandler(deps: {
               providers,
               disabledCount: activeDisabledCount,
               totalCount: baseUrlsList.length,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/providers/reviews") {
+      try {
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+
+        // Read disable state from the discovery adapter (the same source the
+        // router/ProviderManager uses), not the mirror in the SdkStore, which
+        // can lag behind the review sync on warm boots.
+        const manuallyEnabled = new Set(
+          deps.discoveryAdapter.getManuallyEnabledProviders?.() || [],
+        );
+        const disabledSet = new Set(
+          [
+            ...(deps.discoveryAdapter.getDisabledProviders() || []),
+            ...(deps.discoveryAdapter.getManuallyDisabledProviders() || []),
+          ].filter((u: string) => !manuallyEnabled.has(u)),
+        );
+
+        // url -> set of node pubkeys advertised by that provider's 38421 event(s)
+        const providerNodes = new Map<string, Set<string>>();
+        // All stored kind 38425 review events
+        const reviewEvents: any[] = [];
+
+        const eventStore = await deps.modelManager.getEventStore();
+        if (eventStore) {
+          const providerEvents = eventStore.getTimeline({ kinds: [38421] });
+          for (const ev of providerEvents) {
+            const pubkey = ev.pubkey;
+            for (const u of collectProviderUrlsFromEvent(ev)) {
+              let set = providerNodes.get(u);
+              if (!set) {
+                set = new Set<string>();
+                providerNodes.set(u, set);
+              }
+              set.add(pubkey);
+            }
+          }
+          reviewEvents.push(...eventStore.getTimeline({ kinds: [38425] }));
+        }
+
+        const mapReview = (rv: any) => ({
+          eventId: rv.id,
+          createdAt: rv.created_at,
+          authorPubkey: rv.pubkey,
+          nodePubkey: tagValue(rv.tags, "node"),
+          label: tagValue(rv.tags, "t") ?? "",
+          isLgtm:
+            (tagValue(rv.tags, "t") ?? "").toLowerCase() === "lgtm",
+          tags: rv.tags,
+        });
+
+        const providers = baseUrlsList.map((baseUrl, index) => {
+          const normalized = normalizeProviderBaseUrl(baseUrl);
+          const nodePubkeys = Array.from(
+            providerNodes.get(normalized) || new Set<string>(),
+          );
+          const reviews = reviewEvents
+            .filter((rv) => {
+              const node = tagValue(rv.tags, "node");
+              return node ? nodePubkeys.includes(node) : false;
+            })
+            .sort((a, b) => b.created_at - a.created_at)
+            .map(mapReview);
+          return {
+            index,
+            baseUrl,
+            disabled: disabledSet.has(baseUrl),
+            nodePubkeys,
+            reviewCount: reviews.length,
+            reviews,
+          };
+        });
+
+        // Review events that reference a node pubkey we could not map back to
+        // any currently-known provider URL (kept for completeness).
+        const knownNodePubkeys = new Set<string>();
+        for (const set of providerNodes.values()) {
+          for (const pk of set) knownNodePubkeys.add(pk);
+        }
+        const unmatchedReviews = reviewEvents
+          .filter((rv) => {
+            const node = tagValue(rv.tags, "node");
+            return node ? !knownNodePubkeys.has(node) : false;
+          })
+          .sort((a, b) => b.created_at - a.created_at)
+          .map(mapReview);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              providers,
+              unmatchedReviews,
+              totalCount: baseUrlsList.length,
+              reviewEventCount: reviewEvents.length,
             },
           }),
         );
@@ -1229,8 +1697,11 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    // Allow client management endpoints through
-    if (req.method !== "POST" && !url.pathname.startsWith("/clients")) {
+    if (
+      req.method !== "POST" &&
+      !url.pathname.startsWith("/clients") &&
+      !url.pathname.startsWith("/keys/api")
+    ) {
       res.writeHead(405, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Only POST is supported." }));
       return;
@@ -1253,6 +1724,22 @@ export function createDaemonRequestHandler(deps: {
     if (!modelId) {
       sendJson(res, 400, { error: "Missing required 'model' field." });
       return;
+    }
+
+    // Cap the completion budget when the client does not set an output token
+    // limit. Without this, the SDK prices at the provider's worst-case
+    // max_completion_cost, which varies widely across providers (2.3× for
+    // kimi-k3) and balloons during provider failover. Chat/completions use
+    // max_tokens; the OpenAI Responses API uses max_output_tokens.
+    if (deps.maxTokens > 0) {
+      const isResponsesPath = url.pathname.includes("/responses");
+      if (isResponsesPath) {
+        if (typeof bodyObj.max_output_tokens !== "number") {
+          bodyObj.max_output_tokens = deps.maxTokens;
+        }
+      } else if (typeof bodyObj.max_tokens !== "number") {
+        bodyObj.max_tokens = deps.maxTokens;
+      }
     }
 
     const forcedProvider: string | undefined =
@@ -1287,23 +1774,28 @@ export function createDaemonRequestHandler(deps: {
         storageAdapter: deps.storageAdapter,
         discoveryAdapter: deps.discoveryAdapter,
         modelManager: deps.modelManager,
-        debugLevel: "WARN",
+        debugLevel: "DEBUG",
         mode: deps.mode,
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
         providerManager: deps.providerManager,
-        client: deps.routeClient,
         logger: reqLogger,
         ...(deps.requestResponseLogSink
           ? { requestResponseLogSink: deps.requestResponseLogSink }
           : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
+        ...(deps.routstrModelsPubkey
+          ? { routstrModelsPubkey: deps.routstrModelsPubkey }
+          : {}),
       });
 
-      // Bridge the Web `Response` to the Node `ServerResponse` with no
-      // transforms: status + headers + pipe(body → res).
+      // Bridge the Web `Response` to the Node `ServerResponse`: status +
+      // headers + pipe(body → res). Hop-by-hop headers are dropped (see
+      // HOP_BY_HOP_HEADERS) so Node computes correct framing for THIS
+      // connection.
       res.statusCode = response.status;
       response.headers.forEach((value, key) => {
+        if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) return;
         res.setHeader(key, value);
       });
 
