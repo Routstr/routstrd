@@ -8,7 +8,10 @@ import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 type PiModelEntry = {
   id: string;
   contextWindow?: number;
-  // Preserve arbitrary manual fields (reasoning, thinkingLevelMap, compat, cost, maxTokens, etc.)
+  name?: string;
+  input?: string[];
+  maxTokens?: number;
+  // Preserve arbitrary manual fields (reasoning, thinkingLevelMap, compat, cost, etc.)
   [key: string]: unknown;
 };
 
@@ -75,8 +78,31 @@ export async function installPiIntegration(
       const entry: PiModelEntry = previous ? { ...previous } : { id: model.id };
 
       entry.id = model.id;
+
       if (model.context_length !== undefined && model.context_length > 0) {
         entry.contextWindow = model.context_length;
+      } else {
+        delete entry.contextWindow;
+      }
+
+      if (model.name) {
+        entry.name = model.name;
+      } else {
+        delete entry.name;
+      }
+
+      // Map the daemon's input modalities to Pi's ["text", "image"] vocabulary.
+      const mods = model.architecture?.input_modalities ?? [];
+      const input: string[] = [];
+      if (mods.includes("text")) input.push("text");
+      if (mods.includes("image")) input.push("image");
+      entry.input = input;
+
+      const maxTokens = model.top_provider?.max_completion_tokens;
+      if (maxTokens !== undefined && maxTokens !== null && maxTokens > 0) {
+        entry.maxTokens = maxTokens;
+      } else {
+        delete entry.maxTokens;
       }
 
       return entry;

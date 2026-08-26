@@ -18,6 +18,15 @@ export type RoutstrModel = {
   id: string;
   name?: string;
   context_length?: number;
+  architecture?: {
+    modality?: string;
+    input_modalities?: string[];
+    output_modalities?: string[];
+  };
+  top_provider?: {
+    context_length?: number;
+    max_completion_tokens?: number;
+  };
 };
 
 export type IntegrationFn = (
