@@ -10,7 +10,6 @@ type PiModelEntry = {
   contextWindow?: number;
   name?: string;
   input?: string[];
-  maxTokens?: number;
   // Preserve arbitrary manual fields (reasoning, thinkingLevelMap, compat, cost, etc.)
   [key: string]: unknown;
 };
@@ -97,13 +96,6 @@ export async function installPiIntegration(
       if (mods.includes("text")) input.push("text");
       if (mods.includes("image")) input.push("image");
       entry.input = input;
-
-      const maxTokens = model.top_provider?.max_completion_tokens;
-      if (maxTokens !== undefined && maxTokens !== null && maxTokens > 0) {
-        entry.maxTokens = maxTokens;
-      } else {
-        delete entry.maxTokens;
-      }
 
       return entry;
     });
