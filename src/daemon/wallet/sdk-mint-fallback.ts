@@ -219,6 +219,54 @@ function isMintUnreachableResponse(status: number, responseBody: unknown): boole
   return status >= 500 && isMintUnreachableError(responseBody);
 }
 
+function getProviderReportedRequiredSats(responseBody: unknown): number | undefined {
+  let payload: unknown = responseBody;
+  if (typeof responseBody === "string") {
+    try {
+      payload = JSON.parse(responseBody);
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (!payload || typeof payload !== "object") return undefined;
+  const root = payload as Record<string, any>;
+  const candidates = [root.detail?.error, root.error].filter(Boolean);
+  const error = candidates.find(
+    (candidate) =>
+      candidate?.type === "insufficient_quota" &&
+      candidate?.code === "insufficient_balance",
+  );
+  if (!error) return undefined;
+
+  const explicitMsats = Number(error.required_msats ?? root.required_msats);
+  if (Number.isFinite(explicitMsats) && explicitMsats > 0) {
+    return explicitMsats / 1_000;
+  }
+
+  const explicitSats = Number(error.required_sats ?? root.required_sats);
+  if (Number.isFinite(explicitSats) && explicitSats > 0) {
+    return explicitSats;
+  }
+
+  const message = typeof error.message === "string" ? error.message : "";
+  const satsAndMsats = message.match(
+    /([\d,.]+)\s*sats?\s*\(([\d,]+)\s*msats?\)\s*required/i,
+  );
+  if (satsAndMsats) {
+    const msats = Number(satsAndMsats[2]!.replaceAll(",", ""));
+    if (Number.isFinite(msats) && msats > 0) return msats / 1_000;
+  }
+
+  const satsOnly = message.match(/([\d,.]+)\s*sats?\s+required/i);
+  if (satsOnly) {
+    const sats = Number(satsOnly[1]!.replaceAll(",", ""));
+    if (Number.isFinite(sats) && sats > 0) return sats;
+  }
+
+  return undefined;
+}
+
 /** Returns true if the client is operating in xcashu mode. */
 function isXcashuMode(client: RoutstrClientLike): boolean {
   const mode = client.getMode?.() ?? (client as Record<string, unknown>).mode;
@@ -595,6 +643,23 @@ export function installMintUnreachableErrorRetry(
     retryCount = 0,
   ): Promise<unknown> {
     const mode = this.mode;
+    const providerRequiredSats = status === 402
+      ? getProviderReportedRequiredSats(responseBody)
+      : undefined;
+    const localRequiredSats = Number(params?.requiredSats);
+
+    if (
+      mode === "apikeys" &&
+      providerRequiredSats !== undefined &&
+      (!Number.isFinite(localRequiredSats) || providerRequiredSats > localRequiredSats)
+    ) {
+      logger.warn(
+        `[wallet] Provider reports ${providerRequiredSats} sats required, above local estimate ` +
+          `${params?.requiredSats ?? "unknown"}; using provider requirement for balance validation and top-up.`,
+      );
+      params = { ...params, requiredSats: providerRequiredSats };
+    }
+
     const baseUrl = params?.baseUrl;
     const initialMintUrl = params?.mintUrl;
 

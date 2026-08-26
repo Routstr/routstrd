@@ -131,6 +131,49 @@ describe("SDK top-up mint fallback", () => {
     ]);
   });
 
+  test("uses the provider-reported requirement when a 402 exceeds the local estimate", async () => {
+    let forwardedParams: Record<string, unknown> | undefined;
+    const client = {
+      mode: "apikeys",
+      getBalanceManager: () => ({ topUp: async () => ({ success: true }) }),
+      _handleErrorResponse: async (params: Record<string, unknown>) => {
+        forwardedParams = params;
+        return { ok: true };
+      },
+    };
+
+    installMintUnreachableErrorRetry(
+      client,
+      createCocodClient(["https://mint-a.example", "https://mint-b.example"]),
+      { getBalances: async () => ({ "https://mint-b.example": 5_000 }) },
+      { log: () => undefined, warn: () => undefined, error: () => undefined },
+    );
+
+    await client._handleErrorResponse(
+      {
+        baseUrl: "https://provider.example",
+        mintUrl: "https://mint-a.example",
+        requiredSats: 216.477629672696,
+      },
+      "sk-test",
+      402,
+      "request-id",
+      undefined,
+      JSON.stringify({
+        detail: {
+          error: {
+            message:
+              "Insufficient balance: 3112.2 sats (3112200 msats) required for this model; 266.066 sats (266066 msats) available.",
+            type: "insufficient_quota",
+            code: "insufficient_balance",
+          },
+        },
+      }),
+    );
+
+    expect(forwardedParams?.requiredSats).toBe(3112.2);
+  });
+
   test("does not retry provider top-up on unrelated failure", async () => {
     const attempts: string[] = [];
     const balanceManager = {

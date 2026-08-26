@@ -5,6 +5,7 @@ import {
   routeRequests,
   InsufficientBalanceError,
   ProviderManager,
+  type RoutstrClient,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
@@ -72,6 +73,7 @@ type DaemonDeps = {
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
   routstrModelsPubkey?: string;
   providerManager: ProviderManager;
+  routeClient: RoutstrClient;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
 };
@@ -395,6 +397,7 @@ export function createDaemonRequestHandler(deps: {
   routstrModelsPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
   providerManager: ProviderManager;
+  routeClient: RoutstrClient;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
 }) {
@@ -1779,6 +1782,7 @@ export function createDaemonRequestHandler(deps: {
         usageTrackingDriver: deps.usageTrackingDriver,
         sdkStore: deps.store,
         providerManager: deps.providerManager,
+        client: deps.routeClient,
         logger: reqLogger,
         ...(deps.requestResponseLogSink
           ? { requestResponseLogSink: deps.requestResponseLogSink }
