@@ -219,7 +219,9 @@ function isMintUnreachableResponse(status: number, responseBody: unknown): boole
   return status >= 500 && isMintUnreachableError(responseBody);
 }
 
-function getProviderReportedRequiredSats(responseBody: unknown): number | undefined {
+function getProviderReportedRequirement(
+  responseBody: unknown,
+): { type: string; sats: number } | undefined {
   let payload: unknown = responseBody;
   if (typeof responseBody === "string") {
     try {
@@ -231,37 +233,78 @@ function getProviderReportedRequiredSats(responseBody: unknown): number | undefi
 
   if (!payload || typeof payload !== "object") return undefined;
   const root = payload as Record<string, any>;
-  const candidates = [root.detail?.error, root.error].filter(Boolean);
+  const candidates = [
+    root.detail?.error,
+    root.error,
+    root.detail,
+    root,
+  ].filter(
+    (candidate): candidate is Record<string, any> =>
+      Boolean(candidate) && typeof candidate === "object",
+  );
   const error = candidates.find(
     (candidate) =>
-      candidate?.type === "insufficient_quota" &&
-      candidate?.code === "insufficient_balance",
+      (candidate.type === "insufficient_quota" &&
+        candidate.code === "insufficient_balance") ||
+      candidate.type === "minimum_balance_required",
   );
   if (!error) return undefined;
 
-  const explicitMsats = Number(error.required_msats ?? root.required_msats);
-  if (Number.isFinite(explicitMsats) && explicitMsats > 0) {
-    return explicitMsats / 1_000;
+  const explicitMsats = [
+    error.amount_required_msat,
+    error.amount_required_msats,
+    error.required_msats,
+    root.detail?.amount_required_msat,
+    root.detail?.amount_required_msats,
+    root.detail?.required_msats,
+    root.amount_required_msat,
+    root.amount_required_msats,
+    root.required_msats,
+  ]
+    .map(Number)
+    .find((amount) => Number.isFinite(amount) && amount > 0);
+  if (explicitMsats !== undefined) {
+    return { type: error.type, sats: explicitMsats / 1_000 };
   }
 
-  const explicitSats = Number(error.required_sats ?? root.required_sats);
-  if (Number.isFinite(explicitSats) && explicitSats > 0) {
-    return explicitSats;
+  const explicitSats = [
+    error.amount_required_sat,
+    error.amount_required_sats,
+    error.required_sats,
+    root.detail?.amount_required_sat,
+    root.detail?.amount_required_sats,
+    root.detail?.required_sats,
+    root.amount_required_sat,
+    root.amount_required_sats,
+    root.required_sats,
+  ]
+    .map(Number)
+    .find((amount) => Number.isFinite(amount) && amount > 0);
+  if (explicitSats !== undefined) {
+    return { type: error.type, sats: explicitSats };
   }
 
-  const message = typeof error.message === "string" ? error.message : "";
+  const message = typeof error.message === "string"
+    ? error.message
+    : typeof error.reason === "string"
+      ? error.reason
+      : "";
   const satsAndMsats = message.match(
     /([\d,.]+)\s*sats?\s*\(([\d,]+)\s*msats?\)\s*required/i,
   );
   if (satsAndMsats) {
     const msats = Number(satsAndMsats[2]!.replaceAll(",", ""));
-    if (Number.isFinite(msats) && msats > 0) return msats / 1_000;
+    if (Number.isFinite(msats) && msats > 0) {
+      return { type: error.type, sats: msats / 1_000 };
+    }
   }
 
   const satsOnly = message.match(/([\d,.]+)\s*sats?\s+required/i);
   if (satsOnly) {
     const sats = Number(satsOnly[1]!.replaceAll(",", ""));
-    if (Number.isFinite(sats) && sats > 0) return sats;
+    if (Number.isFinite(sats) && sats > 0) {
+      return { type: error.type, sats };
+    }
   }
 
   return undefined;
@@ -643,9 +686,10 @@ export function installMintUnreachableErrorRetry(
     retryCount = 0,
   ): Promise<unknown> {
     const mode = this.mode;
-    const providerRequiredSats = status === 402
-      ? getProviderReportedRequiredSats(responseBody)
+    const providerRequirement = status === 402
+      ? getProviderReportedRequirement(responseBody)
       : undefined;
+    const providerRequiredSats = providerRequirement?.sats;
     const localRequiredSats = Number(params?.requiredSats);
 
     if (
@@ -729,6 +773,95 @@ export function installMintUnreachableErrorRetry(
           );
         }
       }
+    }
+
+    // Routstr-core reports the exact minimum for an undersized per-request
+    // X-Cashu token. The SDK's normal 402 top-up path is API-key-only, so
+    // reclaim the rejected token and retry this provider once with enough sats.
+    if (
+      mode === "xcashu" &&
+      status === 402 &&
+      baseUrl &&
+      initialMintUrl &&
+      retryCount < 2 &&
+      params?.minimumBalanceRetryProvider !== baseUrl &&
+      providerRequirement?.type === "minimum_balance_required" &&
+      providerRequiredSats !== undefined &&
+      (!Number.isFinite(localRequiredSats) || providerRequiredSats > localRequiredSats)
+    ) {
+      const recoveryTokens = [xCashuRefundToken, params?.token]
+        .filter((candidate): candidate is string =>
+          typeof candidate === "string" && candidate.startsWith("cashu")
+        )
+        .filter((candidate, index, all) => all.indexOf(candidate) === index);
+      let recovered = false;
+      let recoveredAmount: unknown;
+
+      for (const recoveryToken of recoveryTokens) {
+        try {
+          const receiveResult = await this.cashuSpender?.receiveToken?.(recoveryToken);
+          if (receiveResult?.success) {
+            recovered = true;
+            recoveredAmount = receiveResult.amount;
+            break;
+          }
+          logger.warn(
+            `[wallet] Could not restore undersized xcashu token before minimum-balance retry: ` +
+              `${receiveResult?.message ?? "unknown error"}.`,
+          );
+        } catch (error) {
+          logger.warn(
+            `[wallet] Error restoring undersized xcashu token before minimum-balance retry: ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+        }
+      }
+
+      if (recovered) {
+        this.storageAdapter?.removeXcashuToken?.(baseUrl, params.token);
+        const retryAmountSats = Math.max(1, Math.ceil(providerRequiredSats));
+        logger.warn(
+          `[wallet] Provider ${baseUrl} requires ${providerRequiredSats} sats, above local estimate ` +
+            `${params?.requiredSats ?? "unknown"}; restored ${recoveredAmount ?? "the"} sats and ` +
+            `retrying once with ${retryAmountSats} sats.`,
+        );
+
+        const spendResult = await this._spendToken({
+          mintUrl: initialMintUrl,
+          amount: retryAmountSats,
+          baseUrl,
+        });
+        const retryToken = spendResult?.token;
+        if (!retryToken) {
+          throw new Error("X-Cashu minimum-balance retry returned no token");
+        }
+
+        const retryResponse = await this._makeRequest({
+          ...params,
+          token: retryToken,
+          selectedMintUrl: spendResult.selectedMintUrl,
+          requiredSats: retryAmountSats,
+          headers: this._withAuthAndTinfoilHeaders(
+            params.baseHeaders,
+            retryToken,
+            params.tinfoilEnabled,
+            params.selectedModel?.id,
+          ),
+          retryCount: retryCount + 1,
+          minimumBalanceRetryProvider: baseUrl,
+        });
+
+        retryResponse.initialTokenBalanceInSats = spendResult.tokenBalanceUnit === "msat"
+          ? spendResult.tokenBalance / 1_000
+          : spendResult.tokenBalance;
+        retryResponse.initialTokenBalanceUnknown = spendResult.tokenBalanceUnknown;
+        return retryResponse;
+      }
+
+      logger.warn(
+        `[wallet] Could not reclaim the undersized xcashu token for ${baseUrl}; ` +
+          `using the SDK's normal recovery and provider failover path.`,
+      );
     }
 
     return originalHandleErrorResponse.call(
