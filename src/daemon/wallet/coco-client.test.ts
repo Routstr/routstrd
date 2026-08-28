@@ -59,6 +59,34 @@ async function waitForWalletUnlocked(
 }
 
 describe("default mint functionality", () => {
+  it("can initialize offline without adding a default mint", async () => {
+    const walletDir = join(makeTempDir(), "wallet");
+    mkdirSync(walletDir, { recursive: true });
+    writeFileSync(
+      join(walletDir, "config.json"),
+      JSON.stringify({
+        version: 1,
+        mnemonic:
+          "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        encrypted: false,
+      }),
+    );
+
+    const client = await createCocoClient({
+      walletDir,
+      legacySocketPath: join(walletDir, "legacy-cocod.sock"),
+      legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+      initializeDefaultMint: false,
+      enableNpc: false,
+    });
+    try {
+      expect(await client.listMints()).toEqual([]);
+      expect(await client.getDefaultMint()).toBeNull();
+    } finally {
+      await client.dispose?.();
+    }
+  });
+
   it("automatically adds default mint when no mints exist", async () => {
     const walletDir = join(makeTempDir(), "wallet");
     mkdirSync(walletDir, { recursive: true });

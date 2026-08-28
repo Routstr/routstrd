@@ -42,6 +42,92 @@ bun install
 bun link
 ```
 
+**OR - With Nix:**
+
+```sh
+nix run github:Routstr/routstrd -- --help
+```
+
+## NixOS
+
+The flake exports `nixosModules.default` and packages for x86_64 and aarch64
+Linux. A minimal NixOS configuration is:
+
+```nix
+{
+  inputs.routstrd.url = "github:Routstr/routstrd";
+
+  outputs = { nixpkgs, routstrd, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        routstrd.nixosModules.default
+        {
+          services.routstrd = {
+            enable = true;
+            openFirewall = true;
+            settings = {
+              host = "0.0.0.0";
+              port = 8008;
+              maxTokens = 64000;
+              relays = [ "wss://relay.example.com" ];
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+The module creates a dedicated `routstrd` system account and stores state in
+`/var/lib/routstrd`. A wallet is generated automatically on first boot. Back up
+its recovery mnemonic with:
+
+```sh
+sudo -u routstrd routstrd wallet backup \
+  --wallet-dir /var/lib/routstrd/wallet
+```
+
+Values in `services.routstrd.settings` are declarative and override mutable
+runtime values. Do not put `nsec` or an NWC connection string there because Nix
+store paths are world-readable. Put sensitive values in an external JSON file
+readable by the service account instead:
+
+```nix
+services.routstrd.secretConfigFile = "/run/agenix/routstrd.json";
+```
+
+```json
+{
+  "nsec": "nsec1...",
+  "nwc": {
+    "mode": "funding_source",
+    "connectionString": "nostr+walletconnect://..."
+  }
+}
+```
+
+For offline or isolated startup, disable network-dependent wallet bootstrap:
+
+```nix
+services.routstrd.settings.wallet = {
+  initializeDefaultMint = false;
+  enableNpc = false;
+};
+```
+
+Build the package, demonstration VM, or explicit NixOS integration test with:
+
+```sh
+nix build .#routstrd
+nix build .#vm
+nix build .#nixos-test
+```
+
+The VM test is intentionally not part of `nix flake check` because software
+QEMU can be slow on hosts without KVM acceleration.
+
 ### Step 2: Setup & Fund
 
 ```sh
@@ -195,6 +281,8 @@ Configuration is stored in `~/.routstrd/config.json`:
 - `ROUTSTRD_DIR` - Config directory (default: `~/.routstrd`)
 - `ROUTSTRD_SOCKET` - Socket path (default: `~/.routstrd/routstrd.sock`)
 - `ROUTSTRD_PID` - PID file path (default: `~/.routstrd/routstrd.pid`)
+- `ROUTSTRD_CONFIG_FILE` - Read-only managed JSON configuration
+- `ROUTSTRD_SECRET_CONFIG_FILE` - External secret JSON configuration loaded last
 
 ## Development
 

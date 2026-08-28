@@ -13,11 +13,14 @@ const SCENARIO = join(import.meta.dir, "config-store.scenario.ts");
 
 function runScenario(name: string): { code: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), `routstrd-cfg-${name}-`));
+  const daemonDir = join(dir, "daemon");
   const res = spawnSync("bun", [SCENARIO, name], {
     env: {
       ...process.env,
       NODE_ENV: "test",
-      ROUTSTRD_DIR: join(dir, "daemon"),
+      ROUTSTRD_DIR: daemonDir,
+      ROUTSTRD_CONFIG_FILE: join(dir, "managed.json"),
+      ROUTSTRD_SECRET_CONFIG_FILE: join(dir, "secret.json"),
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -49,6 +52,12 @@ describe("daemon config store permissions", () => {
 
   test("corrupt JSON falls back to defaults", () => {
     const { code, out } = runScenario("corrupt-json");
+    expect(out).toContain("SCENARIO-OK");
+    expect(code).toBe(0);
+  });
+
+  test("managed and secret layers override runtime without being persisted", () => {
+    const { code, out } = runScenario("config-layers");
     expect(out).toContain("SCENARIO-OK");
     expect(code).toBe(0);
   });
