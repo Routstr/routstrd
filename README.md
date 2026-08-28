@@ -48,6 +48,55 @@ bun link
 nix run github:Routstr/routstrd -- --help
 ```
 
+To install the CLI into a user profile on x86-64 or AArch64 Linux:
+
+```sh
+nix profile add github:Routstr/routstrd#routstrd
+routstrd --version
+```
+
+`routstrd start` and `routstrd stop` manage a detached daemon for the current
+user. For the app's existing PM2-managed service flow, run:
+
+```sh
+routstrd service install
+routstrd-pm2 startup
+routstrd-pm2 save
+```
+
+The installer starts routstrd under PM2 immediately. The namespaced
+`routstrd-pm2` command avoids conflicting with a separately installed PM2. The
+final two commands configure PM2's existing system startup integration and must
+be run separately as instructed by PM2. If `routstrd init` already started a
+detached daemon, stop it before installing the PM2 service so only one process
+owns the wallet.
+
+The profile owns the installed files, so update this installation through Nix
+rather than `routstrd update`:
+
+Detached daemon upgrade:
+
+```sh
+routstrd stop
+nix profile upgrade routstrd
+routstrd start
+```
+
+PM2 records immutable Nix store paths, so remove its old process and startup
+unit before upgrading, then recreate them from the new profile generation:
+
+```sh
+routstrd service uninstall
+routstrd-pm2 unstartup
+nix profile upgrade routstrd
+routstrd service install
+routstrd-pm2 startup
+routstrd-pm2 save
+```
+
+Follow any privileged command printed by PM2 when removing or creating its
+system startup integration.
+
 ## NixOS
 
 The flake exports `nixosModules.default` and packages for x86_64 and aarch64

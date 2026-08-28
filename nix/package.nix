@@ -2,7 +2,6 @@
   pkgs,
   src,
   version,
-  systems,
 }:
 let
   inherit (pkgs) lib stdenvNoCC;
@@ -47,18 +46,35 @@ let
   routstrd = stdenvNoCC.mkDerivation {
     pname = "routstrd";
     inherit version src;
-    nativeBuildInputs = [ pkgs.makeWrapper ];
-    dontBuild = true;
+    nativeBuildInputs = [
+      pkgs.bun
+      pkgs.makeWrapper
+    ];
+    buildPhase = ''
+      runHook preBuild
+      ln -s ${nodeModules}/node_modules node_modules
+      bun run build
+      mv dist/daemon/index.js dist/daemon/runtime.js
+      cp nix/daemon-entry.js dist/daemon/index.js
+      runHook postBuild
+    '';
     installPhase = ''
       runHook preInstall
       app="$out/share/routstrd"
       mkdir -p "$app" "$out/bin"
-      cp package.json bun.lock tsconfig.json "$app/"
-      cp -R src "$app/"
+      cp package.json "$app/"
+      cp -R dist "$app/"
       cp -R ${nodeModules}/node_modules "$app/"
       makeWrapper ${lib.getExe pkgs.bun} "$out/bin/routstrd" \
+        --prefix PATH : ${
+          lib.makeBinPath [
+            pkgs.bun
+            pkgs.pm2
+          ]
+        } \
         --add-flags "run" \
-        --add-flags "$app/src/index.ts"
+        --add-flags "$app/dist/index.js"
+      ln -s ${lib.getExe pkgs.pm2} "$out/bin/routstrd-pm2"
       runHook postInstall
     '';
     meta = {
@@ -66,11 +82,11 @@ let
       homepage = "https://github.com/Routstr/routstrd";
       license = lib.licenses.mit;
       mainProgram = "routstrd";
-      platforms = systems;
+      platforms = lib.platforms.linux;
     };
   };
 in
 {
   default = routstrd;
-  inherit nodeModules routstrd;
+  inherit routstrd;
 }

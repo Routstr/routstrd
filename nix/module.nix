@@ -10,6 +10,41 @@ let
   jsonFormat = pkgs.formats.json { };
   managedConfig = jsonFormat.generate "routstrd-config.json" cfg.settings;
   defaultDataDir = "/var/lib/routstrd";
+  secretCredentialName = "routstrd-secret-config.json";
+  secretCredentialPath = "%d/${secretCredentialName}";
+  validateConfig = pkgs.writeShellScript "routstrd-validate-config" ''
+    set -euo pipefail
+    runtime_config="$1"
+    if [[ -e "$runtime_config" ]]; then
+      ${lib.getExe pkgs.jq} -e 'type == "object"' "$runtime_config" >/dev/null
+    fi
+    if [[ "$#" -eq 2 ]]; then
+      ${lib.getExe pkgs.jq} -e 'type == "object"' "$2" >/dev/null
+    fi
+  '';
+  directorySettings = path: {
+    ${path}.d = {
+      mode = "0700";
+      user = cfg.user;
+      group = cfg.group;
+    };
+  };
+  unsafeStateDirectories = [
+    "/"
+    "/boot"
+    "/etc"
+    "/home"
+    "/nix"
+    "/root"
+    "/run"
+    "/tmp"
+    "/usr"
+    "/var"
+    "/var/lib"
+  ];
+  isHomePath =
+    path:
+    path == "/home" || path == "/root" || lib.hasPrefix "/home/" path || lib.hasPrefix "/root/" path;
 in
 {
   options.services.routstrd = {
@@ -104,22 +139,26 @@ in
     };
 
     secretConfigFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
       description = ''
-        External JSON configuration file loaded with highest precedence.
-        Use this for nsec and nwc.connectionString so secrets do not enter the Nix store.
+        Absolute path to an external JSON configuration file loaded through a
+        systemd credential with highest precedence. Use this for nsec and
+        nwc.connectionString so secrets do not enter the Nix store.
       '';
     };
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
-      description = "Additional environment variables passed to routstrd.";
+      description = ''
+        Additional non-secret environment variables passed to routstrd. Values
+        are rendered into the world-readable system configuration.
+      '';
     };
     environmentFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
+      type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Optional systemd EnvironmentFile containing additional variables or secret paths.";
+      description = "Absolute path to an optional systemd EnvironmentFile.";
     };
     openFirewall = lib.mkOption {
       type = lib.types.bool;
@@ -141,12 +180,39 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = lib.hasPrefix "/" cfg.dataDir;
-        message = "services.routstrd.dataDir must be an absolute path";
+        assertion = lib.hasPrefix "/" cfg.dataDir && !(lib.elem cfg.dataDir unsafeStateDirectories);
+        message = "services.routstrd.dataDir must be an absolute, dedicated state directory";
       }
       {
-        assertion = lib.hasPrefix "/" cfg.walletDir;
-        message = "services.routstrd.walletDir must be an absolute path";
+        assertion = lib.hasPrefix "/" cfg.walletDir && !(lib.elem cfg.walletDir unsafeStateDirectories);
+        message = "services.routstrd.walletDir must be an absolute, dedicated state directory";
+      }
+      {
+        assertion = !(isHomePath cfg.dataDir) && !(isHomePath cfg.walletDir);
+        message = "services.routstrd state directories cannot be under /home or /root while ProtectHome is enabled";
+      }
+      {
+        assertion = !cfg.createUser || (cfg.user == "routstrd" && cfg.group == "routstrd");
+        message = ''
+          services.routstrd.createUser may only manage the default routstrd
+          account; set createUser = false when selecting an existing account
+        '';
+      }
+      {
+        assertion = cfg.secretConfigFile == null || lib.hasPrefix "/" cfg.secretConfigFile;
+        message = "services.routstrd.secretConfigFile must be an absolute runtime path";
+      }
+      {
+        assertion = cfg.secretConfigFile == null || !(lib.hasPrefix builtins.storeDir cfg.secretConfigFile);
+        message = "services.routstrd.secretConfigFile must not point into the world-readable Nix store";
+      }
+      {
+        assertion = cfg.environmentFile == null || lib.hasPrefix "/" cfg.environmentFile;
+        message = "services.routstrd.environmentFile must be an absolute runtime path";
+      }
+      {
+        assertion = cfg.environmentFile == null || !(lib.hasPrefix builtins.storeDir cfg.environmentFile);
+        message = "services.routstrd.environmentFile must not point into the world-readable Nix store";
       }
     ];
     warnings = lib.optional (
@@ -170,10 +236,9 @@ in
       };
     };
 
-    systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0700 ${cfg.user} ${cfg.group} -"
-      "d ${cfg.walletDir} 0700 ${cfg.user} ${cfg.group} -"
-    ];
+    systemd.tmpfiles.settings."10-routstrd" =
+      lib.optionalAttrs (cfg.dataDir != defaultDataDir) (directorySettings cfg.dataDir)
+      // lib.optionalAttrs (cfg.walletDir != cfg.dataDir) (directorySettings cfg.walletDir);
 
     systemd.services.routstrd = {
       description = "Routstr routing daemon";
@@ -184,21 +249,33 @@ in
         "network-online.target"
         "systemd-tmpfiles-setup.service"
       ];
-      environment = {
-        HOME = cfg.dataDir;
-        ROUTSTRD_DIR = cfg.dataDir;
-        ROUTSTRD_WALLET_DIR = cfg.walletDir;
-        ROUTSTRD_CONFIG_FILE = managedConfig;
-      }
-      // lib.optionalAttrs (cfg.secretConfigFile != null) {
-        ROUTSTRD_SECRET_CONFIG_FILE = toString cfg.secretConfigFile;
-      }
-      // cfg.environment;
+      environment =
+        cfg.environment
+        // {
+          HOME = cfg.dataDir;
+          ROUTSTRD_DIR = cfg.dataDir;
+          ROUTSTRD_WALLET_DIR = cfg.walletDir;
+          ROUTSTRD_CONFIG_FILE = managedConfig;
+        }
+        // lib.optionalAttrs (cfg.secretConfigFile != null) {
+          ROUTSTRD_SECRET_CONFIG_FILE = secretCredentialPath;
+        };
       serviceConfig = {
+        ExecCondition = lib.escapeShellArgs (
+          [
+            validateConfig
+            "${cfg.dataDir}/config.json"
+          ]
+          ++ lib.optional (cfg.secretConfigFile != null) secretCredentialPath
+        );
         ExecStart = lib.escapeShellArgs (
           [
             (lib.getExe cfg.package)
             "daemon"
+            "--host"
+            cfg.settings.host
+            "--port"
+            (toString cfg.settings.port)
           ]
           ++ cfg.extraArgs
         );
@@ -208,6 +285,8 @@ in
         Restart = "on-failure";
         RestartSec = 5;
         UMask = "0077";
+        CapabilityBoundingSet = "";
+        LockPersonality = true;
         ReadWritePaths = lib.unique [
           cfg.dataDir
           cfg.walletDir
@@ -216,11 +295,19 @@ in
         PrivateDevices = true;
         PrivateTmp = true;
         ProtectControlGroups = true;
+        ProtectClock = true;
         ProtectHome = true;
+        ProtectHostname = true;
         ProtectKernelLogs = true;
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
         ProtectSystem = "strict";
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
+        RestrictNamespaces = true;
         RestrictSUIDSGID = true;
       }
       // lib.optionalAttrs (cfg.dataDir == defaultDataDir) {
@@ -229,6 +316,9 @@ in
       }
       // lib.optionalAttrs (cfg.environmentFile != null) {
         EnvironmentFile = toString cfg.environmentFile;
+      }
+      // lib.optionalAttrs (cfg.secretConfigFile != null) {
+        LoadCredential = "${secretCredentialName}:${cfg.secretConfigFile}";
       }
       // cfg.extraServiceConfig;
     };

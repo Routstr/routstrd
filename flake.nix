@@ -36,7 +36,7 @@
       packages = forAllSystems (
         system: pkgs:
         (import ./nix/package.nix {
-          inherit pkgs src systems;
+          inherit pkgs src;
           version = (builtins.fromJSON (builtins.readFile ./package.json)).version;
         })
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
@@ -68,17 +68,21 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.bun
-              pkgs.nixfmt-rfc-style
+              pkgs.nixfmt
             ];
           };
         }
       );
 
-      formatter = forAllSystems (_system: pkgs: pkgs.nixfmt-rfc-style);
+      formatter = forAllSystems (_system: pkgs: pkgs.nixfmt);
 
       checks = forAllSystems (
-        system: _pkgs: {
+        system: pkgs: {
           package = self.packages.${system}.default;
+          profile = import ./nix/profile-test.nix {
+            inherit pkgs;
+            package = self.packages.${system}.default;
+          };
         }
       );
     };
