@@ -1,3 +1,7 @@
+import { isStandaloneExecutable } from "../runtime";
+import { VERSION } from "../version";
+import { getLatestStandaloneRelease } from "./standalone-update";
+
 const NPM_REGISTRY = "https://registry.npmjs.org";
 
 /** Packages that `routstrd update` manages. */
@@ -97,6 +101,30 @@ export interface UpdateCheckResult {
  * Returns a result with per-package details and an overall `hasUpdate` flag.
  */
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  if (isStandaloneExecutable()) {
+    let latest: string | null = null;
+    try {
+      latest = (await getLatestStandaloneRelease()).version;
+    } catch {
+      // Update checks are best-effort and must not disrupt the TUI.
+    }
+    const hasUpdate = !!(
+      latest && (compareVersions(VERSION, latest) ?? -1) < 0
+    );
+    return {
+      hasUpdate,
+      packages: [
+        {
+          name: "routstrd",
+          label: "routstrd",
+          current: VERSION,
+          latest,
+          hasUpdate,
+        },
+      ],
+    };
+  }
+
   const packages = await Promise.all(
     UPDATE_PACKAGES.map(async ({ name, label }) => {
       const [current, latest] = await Promise.all([

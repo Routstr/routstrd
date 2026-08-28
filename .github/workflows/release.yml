@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Verify tag version
+        run: |
+          package_version="$(bun -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+      - run: bun run lint
+      - run: bun test
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: bun-linux-x64
+            platform: linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            target: bun-linux-arm64
+            platform: linux
+            arch: arm64
+          - runner: macos-15-intel
+            target: bun-darwin-x64
+            platform: darwin
+            arch: x64
+          - runner: macos-15
+            target: bun-darwin-arm64
+            platform: darwin
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - name: Build standalone executable
+        run: >-
+          bun build --compile
+          --target=${{ matrix.target }}
+          --no-compile-autoload-dotenv
+          --no-compile-autoload-bunfig
+          src/index.ts
+          --outfile=build/routstrd
+      - name: Smoke test executable
+        run: |
+          test "$(build/routstrd --version)" = "${GITHUB_REF_NAME#v}"
+          build/routstrd --help >/dev/null
+      - name: Package executable
+        run: >-
+          tar -C build -czf
+          routstrd-${GITHUB_REF_NAME}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz
+          routstrd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: routstrd-${{ matrix.platform }}-${{ matrix.arch }}
+          path: routstrd-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: routstrd-*
+          merge-multiple: true
+      - name: Create checksums
+        run: shasum -a 256 routstrd-*.tar.gz > SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          routstrd-*.tar.gz SHA256SUMS
+          --repo "${GITHUB_REPOSITORY}"
+          --verify-tag
+          --generate-notes
+          --title "${GITHUB_REF_NAME}"
