@@ -6,25 +6,30 @@
   outputs =
     { self, nixpkgs, ... }:
     let
+      inherit (nixpkgs) lib;
       systems = [
         "x86_64-linux"
         "aarch64-linux"
       ];
-      forAllSystems =
-        f: nixpkgs.lib.genAttrs systems (system: f system (import nixpkgs { inherit system; }));
-      sourceExclusions = [
-        ".git"
-        ".github"
-        ".planning"
-        ".vscode"
-        "dist"
-        "graphify-out"
-        "node_modules"
-        "result"
-      ];
-      src = nixpkgs.lib.cleanSourceWith {
-        src = ./.;
-        filter = path: _type: !(nixpkgs.lib.elem (baseNameOf path) sourceExclusions);
+      pkgsFor = lib.genAttrs systems (system: nixpkgs.legacyPackages.${system});
+      forAllSystems = f: lib.genAttrs systems (system: f system pkgsFor.${system});
+      src = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./src
+          ./tests
+          ./nix/daemon-entry.js
+          ./package.json
+          ./bun.lock
+          ./tsconfig.json
+        ];
+      };
+      dependencySrc = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./package.json
+          ./bun.lock
+        ];
       };
     in
     {
@@ -36,10 +41,10 @@
       packages = forAllSystems (
         system: pkgs:
         (import ./nix/package.nix {
-          inherit pkgs src;
+          inherit pkgs src dependencySrc;
           version = (builtins.fromJSON (builtins.readFile ./package.json)).version;
         })
-        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+        // lib.optionalAttrs (system == "x86_64-linux") {
           nixos-test = pkgs.testers.runNixOSTest (import ./nix/test.nix { inherit self; });
           vm =
             (nixpkgs.lib.nixosSystem {
@@ -57,7 +62,7 @@
         system: _pkgs: {
           default = {
             type = "app";
-            program = nixpkgs.lib.getExe self.packages.${system}.default;
+            program = lib.getExe self.packages.${system}.default;
             meta.description = "Run the routstrd CLI";
           };
         }

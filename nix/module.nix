@@ -8,7 +8,9 @@ self:
 let
   cfg = config.services.routstrd;
   jsonFormat = pkgs.formats.json { };
-  managedConfig = jsonFormat.generate "routstrd-config.json" cfg.settings;
+  managedConfig = jsonFormat.generate "routstrd-config.json" (
+    lib.filterAttrsRecursive (_: value: value != null) cfg.settings
+  );
   defaultDataDir = "/var/lib/routstrd";
   secretCredentialName = "routstrd-secret-config.json";
   secretCredentialPath = "%d/${secretCredentialName}";
@@ -42,9 +44,16 @@ let
     "/var"
     "/var/lib"
   ];
-  isHomePath =
+  isStateDirectory =
     path:
-    path == "/home" || path == "/root" || lib.hasPrefix "/home/" path || lib.hasPrefix "/root/" path;
+    lib.hasPrefix "/" path
+    && path != "/"
+    && !lib.hasSuffix "/" path
+    && !lib.hasInfix "//" path
+    && lib.all (component: component != "." && component != "..") (lib.splitString "/" path)
+    && !(lib.elem path unsafeStateDirectories)
+    && !(lib.hasPrefix "/home/" path)
+    && !(lib.hasPrefix "/root/" path);
 in
 {
   options.services.routstrd = {
@@ -104,35 +113,39 @@ in
             description = "Optional default Routstr provider URL.";
           };
           mode = lib.mkOption {
-            type = lib.types.enum [
-              "apikeys"
-              "xcashu"
-            ];
-            default = "apikeys";
+            type = lib.types.nullOr (
+              lib.types.enum [
+                "apikeys"
+                "xcashu"
+              ]
+            );
+            default = null;
             description = "Routstr client payment mode.";
           };
           maxTokens = lib.mkOption {
-            type = lib.types.ints.unsigned;
-            default = 64000;
+            type = lib.types.nullOr lib.types.ints.unsigned;
+            default = null;
             description = "Default output-token limit; zero disables injection.";
           };
           wallet = lib.mkOption {
-            default = { };
+            default = null;
             description = "Cashu wallet startup integrations.";
-            type = lib.types.submodule {
-              options = {
-                initializeDefaultMint = lib.mkOption {
-                  type = lib.types.bool;
-                  default = true;
-                  description = "Whether a fresh wallet adds the built-in default mint during startup.";
+            type = lib.types.nullOr (
+              lib.types.submodule {
+                options = {
+                  initializeDefaultMint = lib.mkOption {
+                    type = lib.types.nullOr lib.types.bool;
+                    default = null;
+                    description = "Whether a fresh wallet adds the built-in default mint during startup.";
+                  };
+                  enableNpc = lib.mkOption {
+                    type = lib.types.nullOr lib.types.bool;
+                    default = null;
+                    description = "Whether to register the npubx.cash NPC plugin.";
+                  };
                 };
-                enableNpc = lib.mkOption {
-                  type = lib.types.bool;
-                  default = true;
-                  description = "Whether to register the npubx.cash NPC plugin.";
-                };
-              };
-            };
+              }
+            );
           };
         };
       };
@@ -180,16 +193,12 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = lib.hasPrefix "/" cfg.dataDir && !(lib.elem cfg.dataDir unsafeStateDirectories);
-        message = "services.routstrd.dataDir must be an absolute, dedicated state directory";
+        assertion = isStateDirectory cfg.dataDir;
+        message = "services.routstrd.dataDir must be a canonical, absolute, dedicated state directory";
       }
       {
-        assertion = lib.hasPrefix "/" cfg.walletDir && !(lib.elem cfg.walletDir unsafeStateDirectories);
-        message = "services.routstrd.walletDir must be an absolute, dedicated state directory";
-      }
-      {
-        assertion = !(isHomePath cfg.dataDir) && !(isHomePath cfg.walletDir);
-        message = "services.routstrd state directories cannot be under /home or /root while ProtectHome is enabled";
+        assertion = isStateDirectory cfg.walletDir;
+        message = "services.routstrd.walletDir must be a canonical, absolute, dedicated state directory";
       }
       {
         assertion = !cfg.createUser || (cfg.user == "routstrd" && cfg.group == "routstrd");

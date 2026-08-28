@@ -174,8 +174,8 @@ nix build .#vm
 nix build .#nixos-test
 ```
 
-The VM test is intentionally not part of `nix flake check` because software
-QEMU can be slow on hosts without KVM acceleration.
+The NixOS integration test is intentionally not part of `nix flake check`
+because software QEMU can be slow on hosts without KVM acceleration.
 
 ### Step 2: Setup & Fund
 

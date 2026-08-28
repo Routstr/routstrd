@@ -1,6 +1,7 @@
 {
   pkgs,
   src,
+  dependencySrc,
   version,
 }:
 let
@@ -8,7 +9,8 @@ let
 
   nodeModules = stdenvNoCC.mkDerivation {
     pname = "routstrd-node-modules";
-    inherit version src;
+    inherit version;
+    src = dependencySrc;
 
     impureEnvVars = lib.fetchers.proxyImpureEnvVars ++ [
       "GIT_PROXY_COMMAND"
