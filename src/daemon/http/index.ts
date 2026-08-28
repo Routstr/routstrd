@@ -358,18 +358,17 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
   };
 }
 
-function makeSdkLogger(prefix?: string): SdkLogger {
-  const tag = prefix ? `[${prefix}]` : undefined;
+function makeSdkLogger(...parts: string[]): SdkLogger {
+  const tag = parts.length ? parts.map((p) => `[${p}]`).join(" ") : undefined;
   const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
   return {
     log: (...args: unknown[]) => logger.log(...fmt(...args)),
     warn: (...args: unknown[]) => logger.warn(...fmt(...args)),
     error: (...args: unknown[]) => logger.error(...fmt(...args)),
     debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
-    child: (p: string) => makeSdkLogger(prefix ? `${prefix}:${p}` : p),
+    child: (p: string) => makeSdkLogger(...parts, p),
   };
 }
-const sdkLogger: SdkLogger = makeSdkLogger();
 
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
@@ -1744,8 +1743,8 @@ export function createDaemonRequestHandler(deps: {
     try {
       await deps.ensureProvidersBootstrapped();
       const reqId = randomBytes(4).toString("hex");
-      const reqLogger = sdkLogger.child(`req:${reqId}`);
-      logger.log(`[req:${reqId}] Routing request with path: `, url.pathname);
+      const reqLogger = makeSdkLogger(`req:${reqId}`, `model:${modelId}`);
+      reqLogger.log(`Routing request with path: ${url.pathname}`);
 
       const response = await routeRequests({
         modelId,

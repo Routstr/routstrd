@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun src/index.ts start",
+    "stop": "bun src/index.ts stop",
     "monitor": "bun src/index.ts monitor",
     "lint": "tsc --noEmit",
     "test": "bun test",
