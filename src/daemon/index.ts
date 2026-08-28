@@ -74,9 +74,8 @@ import { installGlobalErrorHandlers } from "./fatal-error";
 // the process silently. Uncaught exceptions are fatal: the process state can
 // no longer be trusted, so the daemon logs and exits for its supervisor to
 // restart (see fatal-error.ts).
-installGlobalErrorHandlers();
-
-async function main(): Promise<void> {
+export async function runDaemon(argv: string[] = process.argv): Promise<void> {
+  installGlobalErrorHandlers();
   // Install signal handlers before migration and wallet startup. If a signal
   // arrives before the full shutdown path is wired, process.exit() still runs
   // the synchronous PID-lock exit hooks registered by claimPidFile.
@@ -89,10 +88,10 @@ async function main(): Promise<void> {
   process.once("SIGTERM", shutdownForSignal);
 
   startupProgress("Loading configuration...");
-  const args = parseArgs(process.argv);
+  const args = parseArgs(argv);
   const config = await loadDaemonConfig();
 
-  const port = args.port;
+  const port = args.port ?? config.port ?? 8008;
   const host = args.host || config.host || "127.0.0.1";
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
@@ -395,7 +394,7 @@ async function main(): Promise<void> {
 }
 
 if (import.meta.main) {
-  main().catch((error) => {
+  runDaemon().catch((error) => {
     logger.error("Failed to start Routstr daemon:", error);
     // Also write to stderr so the spawning CLI can surface the real error
     // (stdout/stderr are redirected to debug.log by start-daemon.ts).

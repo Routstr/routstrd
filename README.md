@@ -19,15 +19,28 @@ For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-
 
 ## Requirements
 
-- [Bun](https://bun.sh) runtime
-
-```sh
-curl -fsSL https://bun.com/install | bash
-```
+The standalone release does not require Bun, Node.js, or npm. Installing from
+npm or running from source requires the [Bun](https://bun.sh) runtime.
 
 ## Installation
 
 ### Step 1: Install
+
+**Standalone binary:**
+
+Download the archive for your operating system and architecture from the
+[latest GitHub Release](https://github.com/Routstr/routstrd/releases/latest).
+Release archives are available for Linux and macOS on x64 and arm64.
+
+```sh
+grep "routstrd-v0.5.0-linux-x64.tar.gz" SHA256SUMS | shasum -a 256 -c -
+tar -xzf routstrd-v0.5.0-linux-x64.tar.gz
+mkdir -p "$HOME/.local/bin"
+install -m 755 routstrd "$HOME/.local/bin/routstrd"
+```
+
+Substitute the version, platform, and architecture for the archive you
+downloaded, and ensure `$HOME/.local/bin` is on `PATH`.
 
 **Global with bun:**
 ```sh
@@ -212,6 +225,18 @@ Run daemon:
 ```sh
 bun run start
 ```
+
+Build a standalone executable for the current platform:
+
+```sh
+bun run build:binary
+./dist/routstrd --version
+```
+
+Standalone installations update directly from GitHub Releases with
+`routstrd update`. npm installations continue to update through Bun. PM2 is an
+optional external dependency used only by `routstrd service`; normal daemon
+operation does not require it.
 
 Typecheck:
 ```sh
