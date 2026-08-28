@@ -2268,11 +2268,15 @@ function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
   return `${logsDir}/${year}-${month}-${day}.log`;
 }
 
-function readLastLines(file: string, lines: number): string {
+function readAllLines(file: string): string[] {
   const content = readFileSync(file, "utf8");
   const allLines = content.replace(/\r\n/g, "\n").split("\n");
   if (allLines.at(-1) === "") allLines.pop();
-  return allLines.slice(-lines).join("\n");
+  return allLines;
+}
+
+function readLastLines(file: string, lines: number): string {
+  return readAllLines(file).slice(-lines).join("\n");
 }
 
 async function followLogFile(file: string, lines: number): Promise<void> {
@@ -2302,51 +2306,239 @@ async function followLogFile(file: string, lines: number): Promise<void> {
   }
 }
 
+type StructuredLogLine = {
+  timestamp?: string;
+  level?: string;
+  requestId?: string;
+  modelId?: string;
+  isRouting: boolean;
+};
+
+export function parseStructuredLogLine(line: string): StructuredLogLine {
+  const out: StructuredLogLine = { isRouting: false };
+
+  const head = line.match(/^\[([^\]]+)\]\s+\[([^\]]+)\]/);
+  if (head) {
+    out.timestamp = head[1];
+    out.level = head[2];
+  }
+
+  // Request ids are hex (no colons). Stop at the first ':' so legacy
+  // colon-joined child tags like `[req:2c30d5ed:RoutstrClient]` still yield
+  // the bare request id.
+  const req = line.match(/\[req:([^\]\:]+)/);
+  if (req) {
+    out.requestId = req[1]!.trim();
+  }
+
+  // Prefer an explicit `[model:...]` tag; fall back to the modelId embedded
+  // in the SDK's `generic request pricing input {"modelId":"..."}` line.
+  const model = line.match(/\[model:([^\]\:]+)\]/);
+  if (model) {
+    out.modelId = model[1]!.trim();
+  } else {
+    const jsonModel = line.match(/"modelId"\s*:\s*"([^"]+)"/);
+    if (jsonModel) {
+      out.modelId = jsonModel[1];
+    }
+  }
+
+  out.isRouting = !!out.requestId && line.includes("Routing request with path");
+  return out;
+}
+
+type RequestSummary = {
+  requestId: string;
+  modelId: string;
+  timestamp?: string;
+};
+
+/**
+ * Scan log lines newest-first and collect one record per request, keyed off
+ * the "Routing request with path" line (the canonical per-request entry).
+ * The model is enriched in a second pass from any line belonging to the
+ * request (the SDK pricing line embeds modelId even in legacy logs).
+ */
+export function collectRecentRequestsFromLines(
+  lines: string[],
+  limit: number,
+): RequestSummary[] {
+  const result: RequestSummary[] = [];
+  const seen = new Set<string>();
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const parsed = parseStructuredLogLine(lines[i]!);
+    if (!parsed.isRouting || !parsed.requestId) continue;
+    if (seen.has(parsed.requestId)) continue;
+    seen.add(parsed.requestId);
+
+    result.push({
+      requestId: parsed.requestId,
+      modelId: parsed.modelId ?? "unknown",
+      timestamp: parsed.timestamp,
+    });
+
+    if (result.length >= limit) break;
+  }
+
+  // Second pass: fill in the model for requests whose routing line predates
+  // the `[model:...]` tag but which logged `{"modelId":"..."}` later on.
+  const byRequestId = new Map(result.map((r) => [r.requestId, r]));
+  for (const line of lines) {
+    const parsed = parseStructuredLogLine(line);
+    if (!parsed.requestId || !parsed.modelId) continue;
+    const record = byRequestId.get(parsed.requestId);
+    if (record && record.modelId === "unknown") {
+      record.modelId = parsed.modelId;
+    }
+  }
+
+  return result;
+}
+
+function collectRecentRequests(
+  files: string[],
+  limit: number,
+): RequestSummary[] {
+  const result: RequestSummary[] = [];
+  const seen = new Set<string>();
+
+  // Files are passed oldest-first (yesterday, today); scan newest-first.
+  for (const file of [...files].reverse()) {
+    if (!existsSync(file)) continue;
+    const remaining = limit - result.length;
+    if (remaining <= 0) break;
+
+    for (const request of collectRecentRequestsFromLines(
+      readAllLines(file),
+      remaining,
+    )) {
+      if (seen.has(request.requestId)) continue;
+      seen.add(request.requestId);
+      result.push(request);
+      if (result.length >= limit) return result;
+    }
+  }
+
+  return result;
+}
+
+function filterLinesByRequestId(
+  files: string[],
+  requestId: string,
+): string[] {
+  const matches: string[] = [];
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    for (const line of readAllLines(file)) {
+      if (parseStructuredLogLine(line).requestId === requestId) {
+        matches.push(line);
+      }
+    }
+  }
+  return matches;
+}
+
+function parseLinesOption(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 50;
+}
+
+
 program
   .command("logs")
   .description("View daemon logs")
   .option("-f, --follow", "Follow log output", false)
   .option("-c, --coco", "Show Cashu wallet-engine (coco) logs instead of daemon logs", false)
   .option("-n, --lines <number>", "Number of lines to show", "50")
-  .action(async (options: { follow: boolean; lines: string; coco: boolean }) => {
-    await requireLocalDaemon();
-    const logsDir = options.coco ? COCO_LOGS_DIR : LOGS_DIR;
-    const todayFile = getLogFileForDate(logsDir);
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayFile = getLogFileForDate(logsDir, yesterday);
+  .option("-r, --recent", "List recent request ids with their model", false)
+  .option("-i, --request-id <id>", "Only show log lines for a specific request id")
+  .action(
+    async (options: {
+      follow: boolean;
+      lines: string;
+      coco: boolean;
+      recent: boolean;
+      requestId?: string;
+    }) => {
+      await requireLocalDaemon();
 
-    if (!existsSync(todayFile) && !existsSync(yesterdayFile)) {
-      console.log("No log files found. Daemon may not have started yet.");
-      console.log(`Logs directory: ${logsDir}`);
-      process.exit(1);
-    }
-
-    const lines = parseInt(options.lines, 10);
-
-    const logFiles = [yesterdayFile, todayFile].filter((file, index, files) => {
-      return existsSync(file) && files.indexOf(file) === index;
-    });
-
-    if (options.follow) {
-      if (existsSync(todayFile)) {
-        await followLogFile(todayFile, lines);
-      } else {
-        console.log("No log file for today to follow.");
+      if (options.recent && options.requestId) {
+        console.error(
+          "Cannot combine --recent (-r) with --request-id (-i).",
+        );
+        process.exit(1);
       }
-      return;
-    }
 
-    for (const file of logFiles) {
-      if (logFiles.length > 1) {
-        console.log(`==> ${file} <==`);
+      const logsDir = options.coco ? COCO_LOGS_DIR : LOGS_DIR;
+      const todayFile = getLogFileForDate(logsDir);
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayFile = getLogFileForDate(logsDir, yesterday);
+
+      if (!existsSync(todayFile) && !existsSync(yesterdayFile)) {
+        console.log("No log files found. Daemon may not have started yet.");
+        console.log(`Logs directory: ${logsDir}`);
+        process.exit(1);
       }
-      const output = readLastLines(file, lines);
-      if (output) {
-        console.log(output);
+
+      const lines = parseLinesOption(options.lines);
+
+      const logFiles = [yesterdayFile, todayFile].filter(
+        (file, index, files) =>
+          existsSync(file) && files.indexOf(file) === index,
+      );
+
+      if (options.recent) {
+        const requests = collectRecentRequests(logFiles, lines);
+        if (requests.length === 0) {
+          console.log("No requests found in recent logs.");
+          return;
+        }
+
+        console.log("Recent requests (newest first):");
+        for (const request of requests) {
+          const when = request.timestamp ? `  ${request.timestamp}` : "";
+          console.log(`  ${request.requestId}  ${request.modelId}${when}`);
+        }
+        return;
       }
-    }
-  });
+
+      if (options.requestId) {
+        const matches = filterLinesByRequestId(logFiles, options.requestId);
+        if (matches.length === 0) {
+          console.log(
+            `No log lines found for request '${options.requestId}'.`,
+          );
+          return;
+        }
+
+        for (const line of matches) {
+          console.log(line);
+        }
+        return;
+      }
+
+      if (options.follow) {
+        if (existsSync(todayFile)) {
+          await followLogFile(todayFile, lines);
+        } else {
+          console.log("No log file for today to follow.");
+        }
+        return;
+      }
+
+      for (const file of logFiles) {
+        if (logFiles.length > 1) {
+          console.log(`==> ${file} <==`);
+        }
+        const output = readLastLines(file, lines);
+        if (output) {
+          console.log(output);
+        }
+      }
+    },
+  );
 
 export function cli(args: string[]) {
   program.parse(args);
