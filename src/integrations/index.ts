@@ -64,9 +64,72 @@ function parseChoice(input: string): number {
   return 1;
 }
 
+/**
+ * Either a client integration key (as used in CLIENT_CONFIGS) or "skip".
+ */
+export type IntegrationKey = keyof typeof CLIENT_CONFIGS | "skip";
+
+/**
+ * Create/find the API key for a client and run its install integration.
+ * Shared by the interactive menu in setupIntegration and direct onboarding
+ * via `routstrd onboard --<client>` flags.
+ */
+async function installIntegrationByKey(
+  config: RoutstrdConfig,
+  key: keyof typeof CLIENT_CONFIGS,
+): Promise<void> {
+  const integrationConfig = CLIENT_CONFIGS[key];
+  if (!integrationConfig) {
+    console.log(`Unknown integration: ${key}`);
+    return;
+  }
+
+  const { client, created } = await addDaemonClient(
+    integrationConfig.name,
+  );
+
+  if (created) {
+    console.log(`Created new API key for ${integrationConfig.name}`);
+  } else {
+    console.log(`Using existing API key for ${integrationConfig.name}`);
+  }
+
+  switch (key) {
+    case "opencode":
+      await installOpencodeIntegration(config, client.apiKey, integrationConfig);
+      return;
+    case "openclaw":
+      await installOpenClawIntegration(config, client.apiKey, integrationConfig);
+      return;
+    case "pi-agent":
+      await installPiIntegration(config, client.apiKey, integrationConfig);
+      return;
+    case "claude-code":
+      await installClaudeCodeIntegration(config, client.apiKey, integrationConfig);
+      return;
+    case "hermes":
+      await installHermesIntegration(config, client.apiKey, integrationConfig);
+      return;
+    default:
+      console.log(`Unknown integration: ${key}`);
+  }
+}
+
 export async function setupIntegration(
   config: RoutstrdConfig,
+  integrationKey?: IntegrationKey,
 ): Promise<void> {
+  // Non-interactive selection (e.g. `routstrd onboard --pi-agent`).
+  if (integrationKey === "skip") {
+    console.log("Skipping integration setup.");
+    return;
+  }
+
+  if (integrationKey !== undefined) {
+    await installIntegrationByKey(config, integrationKey);
+    return;
+  }
+
   console.log("\nChoose an integration to set up:");
   console.log("1. OpenCode (default)");
   console.log("2. OpenClaw");
@@ -92,39 +155,5 @@ export async function setupIntegration(
     return;
   }
 
-  const integrationConfig = CLIENT_CONFIGS[key]!;
-  const { client, created } = await addDaemonClient(
-    integrationConfig.name,
-  );
-
-  if (created) {
-    console.log(`Created new API key for ${integrationConfig.name}`);
-  } else {
-    console.log(`Using existing API key for ${integrationConfig.name}`);
-  }
-
-  if (key === "opencode") {
-    await installOpencodeIntegration(config, client.apiKey, integrationConfig);
-    return;
-  }
-
-  if (key === "openclaw") {
-    await installOpenClawIntegration(config, client.apiKey, integrationConfig);
-    return;
-  }
-
-  if (key === "pi-agent") {
-    await installPiIntegration(config, client.apiKey, integrationConfig);
-    return;
-  }
-
-  if (key === "claude-code") {
-    await installClaudeCodeIntegration(config, client.apiKey, integrationConfig);
-    return;
-  }
-
-  if (key === "hermes") {
-    await installHermesIntegration(config, client.apiKey, integrationConfig);
-    return;
-  }
+  await installIntegrationByKey(config, key);
 }

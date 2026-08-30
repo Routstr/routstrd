@@ -28,7 +28,7 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { COCO_LOGS_DIR, logger } from "./utils/logger";
-import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { setupIntegration, runIntegrationsForClients, type IntegrationKey } from "./integrations";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
@@ -215,7 +215,7 @@ async function requireLocalDaemon(): Promise<void> {
   }
 }
 
-async function initDaemon(): Promise<void> {
+async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
   console.log("Initializing routstrd...");
 
   // Create config directory (0700, correcting existing installs too)
@@ -273,7 +273,7 @@ async function initDaemon(): Promise<void> {
 
   await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
 
-  await setupIntegration(config);
+  await setupIntegration(config, integrationKey);
 
   console.log("\nInitialization complete!");
   console.log(
@@ -574,20 +574,68 @@ program
   .description(
     "Initialize routstrd (creates config directory and initializes wallet)",
   )
-  .action(async () => {
-    await requireLocalDaemon();
-    try {
-      await initDaemon();
-    } catch (error) {
-      // An expected, user-actionable refusal — print the structured message
-      // without Bun's unhandled-rejection source snippet and stack trace.
-      if (error instanceof WalletMigrationConflictError) {
-        console.error(error.message);
+  .option("--opencode", "Set up OpenCode integration (non-interactive)")
+  .option("--openclaw", "Set up OpenClaw integration (non-interactive)")
+  .option("--pi-agent", "Set up Pi Agent integration (non-interactive)")
+  .option("--claude-code", "Set up Claude Code integration (non-interactive)")
+  .option("--hermes", "Set up Hermes integration (non-interactive)")
+  .option("--skip-integration", "Skip integration setup")
+  .action(
+    async (options: {
+      opencode?: boolean;
+      openclaw?: boolean;
+      piAgent?: boolean;
+      claudeCode?: boolean;
+      hermes?: boolean;
+      skipIntegration?: boolean;
+    }) => {
+      await requireLocalDaemon();
+
+      const integrationFlags: Record<string, boolean | undefined> = {
+        opencode: options.opencode,
+        openclaw: options.openclaw,
+        "pi-agent": options.piAgent,
+        "claude-code": options.claudeCode,
+        hermes: options.hermes,
+      };
+      const selectedIntegrations = Object.keys(integrationFlags).filter(
+        (key) => integrationFlags[key],
+      );
+
+      if (selectedIntegrations.length > 1) {
+        console.error(
+          "Error: use only one integration flag, or use 'routstrd clients add' for multiple clients.",
+        );
         process.exit(1);
       }
-      throw error;
-    }
-  });
+
+      if (options.skipIntegration && selectedIntegrations.length > 0) {
+        console.error(
+          "Error: --skip-integration cannot be combined with an integration flag.",
+        );
+        process.exit(1);
+      }
+
+      let integrationKey: IntegrationKey | undefined;
+      if (options.skipIntegration) {
+        integrationKey = "skip";
+      } else if (selectedIntegrations.length === 1) {
+        integrationKey = selectedIntegrations[0];
+      }
+
+      try {
+        await initDaemon(integrationKey);
+      } catch (error) {
+        // An expected, user-actionable refusal — print the structured message
+        // without Bun's unhandled-rejection source snippet and stack trace.
+        if (error instanceof WalletMigrationConflictError) {
+          console.error(error.message);
+          process.exit(1);
+        }
+        throw error;
+      }
+    },
+  );
 
 // Start - start the background daemon
 program
