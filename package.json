@@ -13,7 +13,8 @@
     "monitor": "bun src/index.ts monitor",
     "lint": "tsc --noEmit",
     "test": "bun test",
-    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
+    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3",
+    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts --outfile=dist/routstrd",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
