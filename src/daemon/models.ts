@@ -27,6 +27,91 @@ export function createModelService(
   const normalizeBaseUrl = (url: string): string =>
     url.endsWith("/") ? url : `${url}/`;
 
+  const getProviderSelection = () => {
+    const state = store.getState();
+    const baseUrls: string[] = state.baseUrlsList || [];
+    const manuallyEnabled = new Set(
+      (state.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const manuallyDisabled = new Set(
+      (state.manuallyDisabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabled = new Set(
+      [
+        ...(state.disabledProviders || []),
+        ...(state.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
+    );
+    const enabled = new Set(
+      baseUrls
+        .map(normalizeBaseUrl)
+        .filter((url) => !disabled.has(url)),
+    );
+
+    return {
+      disabled,
+      enabled,
+      selectionIsExplicit:
+        manuallyEnabled.size > 0 || manuallyDisabled.size > 0,
+    };
+  };
+
+  const filterEnabledProviders = (providers: string[]): string[] => {
+    const { disabled, enabled, selectionIsExplicit } = getProviderSelection();
+    const filtered = providers.filter((url) => {
+      const normalized = normalizeBaseUrl(url);
+      return selectionIsExplicit
+        ? enabled.has(normalized)
+        : !disabled.has(normalized);
+    });
+
+    if (filtered.length !== providers.length) {
+      logger.log(
+        `Skipped ${providers.length - filtered.length} non-enabled provider(s) before model fetch`,
+      );
+    }
+    return filtered;
+  };
+
+  /**
+   * Keep discovery visible without silently enabling new providers after the
+   * user has made an explicit provider selection.
+   */
+  const syncDiscoveredProviders = (
+    providers: string[],
+    replace = false,
+  ): void => {
+    const state = store.getState();
+    const existing: string[] = state.baseUrlsList || [];
+    const existingNormalized = new Set(existing.map(normalizeBaseUrl));
+    const newlyDiscovered = providers.filter(
+      (url) => !existingNormalized.has(normalizeBaseUrl(url)),
+    );
+    const selectionIsExplicit =
+      (state.manuallyEnabledProviders || []).length > 0 ||
+      (state.manuallyDisabledProviders || []).length > 0;
+
+    state.setBaseUrlsList(
+      replace ? providers : [...existing, ...newlyDiscovered],
+    );
+
+    if (selectionIsExplicit && newlyDiscovered.length > 0) {
+      state.setManuallyDisabledProviders(
+        Array.from(
+          new Set([
+            ...(state.manuallyDisabledProviders || []),
+            ...newlyDiscovered,
+          ]),
+        ),
+      );
+      logger.log(
+        `Added ${newlyDiscovered.length} newly discovered provider(s) as manually disabled`,
+      );
+    }
+  };
+
   /**
    * Build the same cheapest-per-model view as ModelManager.fetchModels, but
    * exclusively from the persisted cache. Model-list reads must not wait for
@@ -87,24 +172,7 @@ export function createModelService(
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
 
-        // Sync discovered providers into the store so `providers list` reflects
-        // the same set that the model manager knows about.
-        const {
-          baseUrlsList,
-          setBaseUrlsList,
-          setDisabledProviders,
-        } = store.getState();
-        const existing = new Set(baseUrlsList);
-        const merged = [
-          ...baseUrlsList,
-          ...providers.filter((url) => !existing.has(url)),
-        ];
-        if (merged.length !== baseUrlsList.length) {
-          setBaseUrlsList(merged);
-          logger.log(
-            `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
-          );
-        }
+        syncDiscoveredProviders(providers);
 
         // Mirror the review-disabled set (kind 38425) into the store. The SDK
         // applies review disables to the discovery adapter during bootstrap,
@@ -115,7 +183,7 @@ export function createModelService(
           providers,
         );
         if (reviewedDisabled !== null) {
-          setDisabledProviders(reviewedDisabled);
+          store.getState().setDisabledProviders(reviewedDisabled);
         }
 
         logger.log("Provider bootstrap complete.");
@@ -147,7 +215,7 @@ export function createModelService(
     if (forceRefresh || discoveredModels.length === 0) {
       await ensureProvidersBootstrapped();
       discoveredModels = await modelManager.fetchModels(
-        modelManager.getBaseUrls(),
+        filterEnabledProviders(modelManager.getBaseUrls()),
         forceRefresh,
       );
     }
@@ -236,11 +304,10 @@ export function createModelService(
     const routstr21ModelIds = await modelManager.fetchRoutstr21Models(true);
     console.log(`Fetched ${routstr21ModelIds.length} routstr21 model IDs from Nostr`);
 
-    // Force-refresh models from all providers
-    const models = await modelManager.fetchModels(providers, true);
-    console.log(`Fetched ${models.length} models from ${providers.length} providers`);
+    syncDiscoveredProviders(providers, true);
 
-    // Sync review events from Nostr (kind 38425) and apply disabled status
+    // Sync review events before model HTTP requests so review-disabled
+    // providers are never contacted during this refresh.
     const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
       providers,
       undefined,
@@ -252,18 +319,18 @@ export function createModelService(
       );
     }
 
-    // Sync discovered providers into the store
-    const { setBaseUrlsList, setDisabledProviders } = store.getState() as any;
-
-    // Replace baseUrlsList with the fresh provider list
-    setBaseUrlsList(providers);
-
     // Mirror the review-disabled set into the store's auto-disabled list.
     // `null` means the review sync left the adapter unchanged (e.g. no lgtm
     // reviews found), so we must not clobber the store list with an empty array.
     if (reviewedDisabled !== null) {
-      setDisabledProviders(reviewedDisabled);
+      store.getState().setDisabledProviders(reviewedDisabled);
     }
+
+    const enabledProviders = filterEnabledProviders(providers);
+    const models = await modelManager.fetchModels(enabledProviders, true);
+    console.log(
+      `Fetched ${models.length} models from ${enabledProviders.length} enabled provider(s)`,
+    );
 
     console.log(
       `Provider refresh complete: ${providers.length} total, ${reviewedDisabled?.length ?? store.getState().disabledProviders?.length ?? 0} review-disabled`,

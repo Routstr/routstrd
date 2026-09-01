@@ -19,6 +19,7 @@ import {
   type WalletRecoveryProgress,
 } from "../wallet/cocod-client";
 import { receiveCashuToken } from "../wallet";
+import { receiveBolt11WithMintFallback } from "../wallet/mint-fallback";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 
@@ -487,8 +488,24 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const body = await readJsonBody(req);
         const amount = getRequiredPositiveNumberField(body, "amount");
-        const mintUrl = optionalStringField(body, "mintUrl");
-        const invoice = await deps.walletClient.receiveBolt11(amount, mintUrl);
+        const requestedMintUrl = optionalStringField(body, "mintUrl");
+        let invoice: string;
+        let mintUrl: string | undefined = requestedMintUrl;
+
+        if (requestedMintUrl) {
+          invoice = await deps.walletClient.receiveBolt11(amount, requestedMintUrl);
+        } else {
+          const mints = await deps.walletClient.listMints();
+          const result = await receiveBolt11WithMintFallback(
+            deps.walletClient,
+            amount,
+            mints,
+            "[wallet]",
+          );
+          invoice = result.invoice;
+          mintUrl = result.mintUrl;
+        }
+
         return { output: { invoice, amount, mintUrl } };
       });
       return;

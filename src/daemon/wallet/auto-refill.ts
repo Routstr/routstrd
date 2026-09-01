@@ -7,6 +7,7 @@
 import type { CocodClient } from "./cocod-client";
 import type { WalletConnect } from "applesauce-wallet-connect";
 import { logger } from "../../utils/logger";
+import { receiveBolt11WithMintFallback } from "./mint-fallback";
 
 export interface AutoRefillConfig {
   /** Minimum sats balance before triggering a refill */
@@ -94,17 +95,29 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
-      const mintUrl = await cocod.getDefaultMint();
-      if (!mintUrl) {
-        logger.error("[auto-refill] No default mint configured");
+      const [defaultMint, configuredMints] = await Promise.all([
+        cocod.getDefaultMint(),
+        cocod.listMints(),
+      ]);
+      const mintCandidates = Array.from(
+        new Set([defaultMint, ...configuredMints].filter(Boolean) as string[]),
+      );
+      if (mintCandidates.length === 0) {
+        logger.error("[auto-refill] No mint configured");
         return;
       }
 
-      // Step 1: Create a BOLT-11 invoice via cocod to fund the Cashu wallet
+      // Step 1: Create a BOLT-11 invoice from the preferred mint, falling
+      // back across the remaining trusted mints when one is unavailable.
       logger.log(
-        `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mintUrl}...`,
+        `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats...`,
       );
-      const invoice = await cocod.receiveBolt11(config.amount, mintUrl);
+      const { invoice, mintUrl } = await receiveBolt11WithMintFallback(
+        cocod,
+        config.amount,
+        mintCandidates,
+        "[auto-refill]",
+      );
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
