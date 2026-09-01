@@ -69,17 +69,30 @@ function repairConfigPermissions(): void {
   }
 }
 
+/**
+ * Environment-variable overrides take precedence over config.json so operators
+ * can set values via Cloudron/docker env (e.g. ROUTSTRD_MODELS_PUBKEY) without
+ * hand-editing the config file.
+ */
+function envConfigOverrides(): Partial<RoutstrdConfig> {
+  const overrides: Partial<RoutstrdConfig> = {};
+  if (process.env.ROUTSTRD_MODELS_PUBKEY) {
+    overrides.routstrModelsPubkey = process.env.ROUTSTRD_MODELS_PUBKEY;
+  }
+  return overrides;
+}
+
 export async function loadDaemonConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {
       repairConfigPermissions();
       const content = await Bun.file(CONFIG_FILE).text();
-      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+      return { ...DEFAULT_CONFIG, ...JSON.parse(content), ...envConfigOverrides() };
     }
   } catch (error) {
     logger.error("Failed to load config:", error);
   }
-  return DEFAULT_CONFIG;
+  return { ...DEFAULT_CONFIG, ...envConfigOverrides() };
 }
 
 export function loadDaemonConfigSync(): RoutstrdConfig {
@@ -87,12 +100,12 @@ export function loadDaemonConfigSync(): RoutstrdConfig {
     if (existsSync(CONFIG_FILE)) {
       repairConfigPermissions();
       const content = readFileSync(CONFIG_FILE, "utf-8");
-      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
+      return { ...DEFAULT_CONFIG, ...JSON.parse(content), ...envConfigOverrides() };
     }
   } catch (error) {
     logger.error("Failed to load config:", error);
   }
-  return DEFAULT_CONFIG;
+  return { ...DEFAULT_CONFIG, ...envConfigOverrides() };
 }
 
 /**

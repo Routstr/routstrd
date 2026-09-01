@@ -218,6 +218,20 @@ Typecheck:
 bun run lint
 ```
 
+### Manual chat-completions smoke test
+
+With a funded daemon running, create or reuse a client API key and pass one or
+more current model IDs to the smoke script:
+
+```sh
+routstrd clients add --name smoke-test
+ROUTSTRD_API_KEY=<api-key> scripts/smoke/chat-completions.sh <model> [model ...]
+```
+
+Set `ROUTSTRD_BASE_URL` to test a daemon at a different address. The script
+makes live provider requests that may spend wallet funds, so it is intentionally
+not part of `bun test`.
+
 ## Project Structure
 
 ```
