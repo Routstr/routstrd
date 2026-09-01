@@ -5,6 +5,8 @@ export const SOCKET_PATH = process.env.ROUTSTRD_SOCKET || `${CONFIG_DIR}/routstr
 export const PID_FILE = process.env.ROUTSTRD_PID || `${CONFIG_DIR}/routstrd.pid`;
 export const DB_PATH = `${CONFIG_DIR}/routstr.db`;
 export const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
+export const MANAGED_CONFIG_FILE = process.env.ROUTSTRD_CONFIG_FILE;
+export const SECRET_CONFIG_FILE = process.env.ROUTSTRD_SECRET_CONFIG_FILE;
 export const LOGS_DIR = `${CONFIG_DIR}/logs`;
 export const REQUEST_RESPONSE_LOGS_DIR = `${CONFIG_DIR}/request-response-logs`;
 
@@ -57,6 +59,13 @@ export interface RoutstrdConfig {
   relays?: string[];
   /** NWC integration configuration */
   nwc?: NwcConfig;
+  /** Cashu wallet startup integrations. */
+  wallet?: {
+    /** Add the built-in default mint when a fresh wallet has no trusted mints. */
+    initializeDefaultMint?: boolean;
+    /** Register the npubx.cash NPC plugin. */
+    enableNpc?: boolean;
+  };
   /**
    * Default max_tokens (chat/completions) and max_output_tokens (responses)
    * injected into proxied requests when the client does not supply one.

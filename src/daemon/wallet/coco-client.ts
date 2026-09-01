@@ -588,6 +588,8 @@ export interface CreateCocoClientOptions {
   enableNpc?: boolean;
   /** NPC server base URL. Default: https://npubx.cash */
   npcBaseUrl?: string;
+  /** Add the built-in default mint when the wallet has no trusted mints. Default: true. */
+  initializeDefaultMint?: boolean;
 }
 
 /**
@@ -1108,11 +1110,19 @@ export async function createCocoClient(
 
     const trustedMints = await coco.mint.getAllTrustedMints();
     const configuredDefault = walletConfig.defaultMintUrl;
-    const defaultMintUrl = normalizeMintUrl(
-      configuredDefault || trustedMints[0]?.mintUrl || DEFAULT_MINT_URL,
-    );
+    const selectedDefault =
+      configuredDefault ||
+      trustedMints[0]?.mintUrl ||
+      (options.initializeDefaultMint === false ? undefined : DEFAULT_MINT_URL);
+    const defaultMintUrl = selectedDefault
+      ? normalizeMintUrl(selectedDefault)
+      : undefined;
 
-    if (!trustedMints.some((mint) => mint.mintUrl === defaultMintUrl)) {
+    if (
+      defaultMintUrl &&
+      options.initializeDefaultMint !== false &&
+      !trustedMints.some((mint) => mint.mintUrl === defaultMintUrl)
+    ) {
       startupProgress(`Adding default mint: ${defaultMintUrl}`);
       await coco.mint.addMint(defaultMintUrl, { trusted: true });
     }
@@ -1120,7 +1130,7 @@ export async function createCocoClient(
     // Persist only after the mint was successfully fetched and trusted. A failed
     // network request must not leave config pointing at an unusable default.
     walletConfig.defaultMintUrl = defaultMintUrl;
-    if (configuredDefault !== defaultMintUrl) {
+    if (defaultMintUrl && configuredDefault !== defaultMintUrl) {
       saveConfig(walletConfig, configFile);
     }
 

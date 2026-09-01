@@ -16,7 +16,7 @@ import {
   deleteClientAction,
   addClientAction,
 } from "./utils/clients";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
 import { execSync } from "child_process";
 import { dirname, join } from "path";
 import {
@@ -52,8 +52,7 @@ import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
-import { generateMnemonic } from "@scure/bip39";
-import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { initializeWalletDirectory, readWalletMnemonic } from "./daemon/wallet/config";
 import packageJson from "../package.json" with { type: "json" };
 import {
   compareVersions,
@@ -106,31 +105,12 @@ async function printLightningInvoice(invoice: string): Promise<void> {
 }
 
 export function initializeWallet(walletDir = defaultWalletDir()): void {
-  const walletConfig = join(walletDir, "config.json");
-
-  // The wallet directory and config contain the plaintext seed phrase. Correct
-  // permissions on existing installations as well as newly created ones.
-  mkdirSync(walletDir, { recursive: true, mode: 0o700 });
-  chmodSync(walletDir, 0o700);
-
-  if (existsSync(walletConfig)) {
-    chmodSync(walletConfig, 0o600);
+  const result = initializeWalletDirectory(walletDir);
+  if (!result.created) {
     console.log("Wallet already initialized.");
     return;
   }
-
-  const mnemonic = generateMnemonic(wordlist);
-  const config = {
-    version: 1,
-    mnemonic,
-    encrypted: false,
-    createdAt: new Date().toISOString(),
-  };
-  writeFileSync(walletConfig, JSON.stringify(config, null, 2), {
-    mode: 0o600,
-    flag: "wx",
-  });
-  console.log("Initialized. Mnemonic:", mnemonic);
+  console.log("Initialized. Mnemonic:", result.mnemonic);
   console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
@@ -638,6 +618,22 @@ program
   );
 
 // Start - start the background daemon
+program
+  .command("daemon")
+  .description("Run the daemon in the foreground")
+  .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address")
+  .option("-p, --provider <provider>", "Default provider to use")
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
+    await requireLocalDaemon();
+    const argv = ["routstrd", "daemon"];
+    if (options.port) argv.push("--port", options.port);
+    if (options.host) argv.push("--host", options.host);
+    if (options.provider) argv.push("--provider", options.provider);
+    const { runDaemon } = await import("./daemon/index");
+    await runDaemon(argv);
+  });
+
 program
   .command("start")
   .description("Start the background daemon")
@@ -1674,6 +1670,15 @@ program
   });
 
 const walletCmd = program.command("wallet").description("Wallet operations");
+
+walletCmd
+  .command("backup")
+  .description("Print the local wallet recovery mnemonic")
+  .option("--wallet-dir <path>", "Wallet directory to read")
+  .action(async (options: { walletDir?: string }) => {
+    await requireLocalDaemon();
+    console.log(readWalletMnemonic(options.walletDir || defaultWalletDir()));
+  });
 
 walletCmd
   .command("status")
