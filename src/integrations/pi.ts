@@ -8,8 +8,12 @@ import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 type PiModelEntry = {
   id: string;
   contextWindow?: number;
-  // Preserve arbitrary manual fields (reasoning, thinkingLevelMap, compat, cost, maxTokens, etc.)
-  [key: string]: unknown;
+  name?: string;
+  input?: string[];
+  // Thinking/reasoning config is user-curated and preserved across refreshes.
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+  compat?: Record<string, unknown>;
 };
 
 type PiProviderConfig = {
@@ -63,29 +67,43 @@ export async function installPiIntegration(
       return;
     }
 
-    // Preserve any manually-added per-model fields (reasoning, thinkingLevelMap,
-    // compat, cost, maxTokens, etc.) across refreshes. Only `id` and `contextWindow`
-    // are managed by routstrd.
+    // Rebuild every model entry from scratch from the daemon, so the generated
+    // models.json is always a faithful projection of the daemon's state. The only
+    // exception is thinking/reasoning config (reasoning, thinkingLevelMap, compat),
+    // which the daemon does not provide and the user curates by hand — preserve it.
     const existingModels = new Map<string, PiModelEntry>(
       (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
     );
 
     const providerModels: PiModelEntry[] = models.map((model) => {
       const previous = existingModels.get(model.id);
-      const entry: PiModelEntry = previous ? { ...previous } : { id: model.id };
+      const entry: PiModelEntry = { id: model.id };
 
-      entry.id = model.id;
       if (model.context_length !== undefined && model.context_length > 0) {
         entry.contextWindow = model.context_length;
       }
 
+      if (model.name) {
+        entry.name = model.name;
+      }
+
+      // Map the daemon's input modalities to Pi's ["text", "image"] vocabulary.
+      const mods = model.architecture?.input_modalities ?? [];
+      const input: string[] = [];
+      if (mods.includes("text")) input.push("text");
+      if (mods.includes("image")) input.push("image");
+      entry.input = input;
+
+      // Preserve user-curated thinking fields from the previous entry.
+      if (previous?.reasoning !== undefined) entry.reasoning = previous.reasoning;
+      if (previous?.thinkingLevelMap !== undefined) entry.thinkingLevelMap = previous.thinkingLevelMap;
+      if (previous?.compat !== undefined) entry.compat = previous.compat;
+
       return entry;
     });
 
-    // Preserve provider-level manual fields (compat, headers, name, etc.); only update
-    // the routstrd-managed fields below.
+    // Rebuild provider from scratch too; only write routstrd-managed fields.
     piConfig.providers["routstr"] = {
-      ...(piConfig.providers["routstr"] ?? {}),
       baseUrl,
       api: "openai-completions",
       apiKey,
