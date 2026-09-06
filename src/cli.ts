@@ -2721,5 +2721,5 @@ program
   );
 
 export function cli(args: string[]) {
-  program.parse(args);
+  return program.parseAsync(args);
 }
