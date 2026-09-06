@@ -1,5 +1,6 @@
 import {
   Manager,
+  OperationInProgressError,
   getEncodedToken,
   normalizeMintUrl,
 } from "@cashu/coco-core";
@@ -146,6 +147,9 @@ const SAFE_COCO_LOG_FIELDS = new Set([
   "operationId",
   "quoteId",
   "state",
+  "code",
+  "detail",
+  "status",
   "count",
   "total",
   "filterCount",
@@ -765,6 +769,181 @@ export async function settleExpiredMintQuotes(
   return settlement;
 }
 
+const PENDING_MINT_SWEEP_INTERVAL_MS = 15_000;
+/** Per-quote wait inside a sweep, so one stalled mint cannot starve the rest. */
+const PENDING_MINT_CHECK_TIMEOUT_MS = 10_000;
+const PENDING_MINT_SWEEP_DEADLINE_MS = 30_000;
+const PENDING_MINT_STOP_DRAIN_MS = 10_000;
+
+export interface PendingMintQuoteSource {
+  ops: { mint: Pick<Manager["ops"]["mint"], "listPending" | "refresh" | "get"> };
+  wallet: { balances: Pick<Manager["wallet"]["balances"], "byMint"> };
+  mintOperationService: Pick<MintOperationServiceCleanup, "failPendingOperation">;
+}
+
+export interface PendingMintSweepState {
+  /** Refreshes that outlived their wait; skipped until they settle. */
+  outstanding: Map<string, Promise<unknown>>;
+  /** Next sweep starts after this operation. */
+  after?: string;
+}
+
+export interface PendingMintSweepOptions {
+  deadlineMs?: number;
+  checkTimeoutMs?: number;
+  state?: PendingMintSweepState;
+}
+
+type PendingMintOutcome = "unreachable" | "other";
+type PendingMintOp = Awaited<ReturnType<PendingMintQuoteSource["ops"]["mint"]["listPending"]>>[number];
+
+/** Startup mint recovery, run while up: coco's live subscriptions can stop. */
+export async function settlePendingMintQuotes(
+  source: PendingMintQuoteSource,
+  nowMs: number,
+  options: PendingMintSweepOptions = {},
+): Promise<{ unreachable: number }> {
+  const deadlineMs = options.deadlineMs ?? PENDING_MINT_SWEEP_DEADLINE_MS;
+  const checkTimeoutMs = options.checkTimeoutMs ?? PENDING_MINT_CHECK_TIMEOUT_MS;
+  const state: PendingMintSweepState = options.state ?? { outstanding: new Map() };
+  let unreachable = 0;
+
+  const pending = await source.ops.mint.listPending();
+  const resumeAt = pending.findIndex((op) => op.id === state.after) + 1;
+  const ordered = [...pending.slice(resumeAt), ...pending.slice(0, resumeAt)];
+  const startedAt = Date.now();
+  for (const op of ordered) {
+    const remainingMs = deadlineMs - (Date.now() - startedAt);
+    if (state.outstanding.has(op.id) || remainingMs <= 0) {
+      unreachable++;
+      continue;
+    }
+    state.after = op.id;
+    // Report on the refresh itself so a late result is still logged.
+    const settled = source.ops.mint
+      .refresh(op.id)
+      .then(
+        (result) => reportPendingMintRefresh(source, op, result, nowMs),
+        (error) => reportPendingMintRefreshError(source, op, error),
+      )
+      .finally(() => state.outstanding.delete(op.id));
+    state.outstanding.set(op.id, settled);
+    try {
+      const outcome = await withTimeout(settled, Math.min(checkTimeoutMs, remainingMs));
+      if (outcome === "unreachable") unreachable++;
+    } catch {
+      unreachable++;
+    }
+  }
+  return { unreachable };
+}
+
+async function reportPendingMintRefresh(
+  source: PendingMintQuoteSource,
+  op: PendingMintOp,
+  result: Awaited<ReturnType<PendingMintQuoteSource["ops"]["mint"]["refresh"]>>,
+  nowMs: number,
+): Promise<PendingMintOutcome> {
+  const quote = `Mint quote ${op.quoteId} at ${op.mintUrl}`;
+  if (result.state === "finalized") {
+    if (result.error) {
+      // Already issued, proofs not restored: not a credit.
+      logger.warn(`${quote}: ${result.error}`);
+      return "other";
+    }
+    const balance = (await source.wallet.balances.byMint())[op.mintUrl]?.spendable;
+    logger.log(
+      `${quote}: paid, ${op.amount} sat minted` +
+        (balance === undefined ? "" : `, balance now ${balance} sat`),
+    );
+    return "other";
+  }
+  if (result.state === "failed") {
+    logger.warn(`${quote}: failed at the mint: ${result.error ?? "unknown reason"}`);
+    return "other";
+  }
+  // Paid-before-expiry is only known to the mint, so expired quotes are
+  // checked too; confirmed UNPAID after expiry is failed locally, as at startup.
+  const expired = op.expiry > 0 && op.expiry * 1000 <= nowMs;
+  if (expired && result.state === "pending" && result.lastObservedRemoteState === "UNPAID") {
+    await source.mintOperationService.failPendingOperation(
+      { id: op.id },
+      {
+        reason: "Expired mint quote confirmed unpaid by mint",
+        retryable: false,
+        observedAt: Date.now(),
+      },
+    );
+  }
+  return "other";
+}
+
+async function reportPendingMintRefreshError(
+  source: PendingMintQuoteSource,
+  op: PendingMintOp,
+  error: unknown,
+): Promise<PendingMintOutcome> {
+  // coco's own watcher is minting this quote right now; let it finish.
+  if (error instanceof OperationInProgressError) return "other";
+  // A failed mint attempt rejects after coco moved the operation back to pending.
+  const current = await source.ops.mint.get(op.id);
+  if (current?.state === "pending" && current.lastObservedRemoteState === "PAID") {
+    if (op.lastObservedRemoteState !== "PAID" || current.error !== op.error) {
+      logger.warn(
+        `Mint quote ${op.quoteId} at ${op.mintUrl}: paid (${op.amount} sat) but proofs not minted yet: ${current.error ?? String(error)}; will retry`,
+      );
+    }
+    return "other";
+  }
+  return "unreachable";
+}
+
+/**
+ * Stopping waits for the running sweep, then briefly for stragglers. Anything
+ * still running after that fails against the closed database and is picked
+ * up by startup recovery.
+ */
+function startPendingMintSweep(source: PendingMintQuoteSource): () => Promise<void> {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let inFlight: Promise<void> = Promise.resolve();
+  let unreachableBefore = 0;
+  const state: PendingMintSweepState = { outstanding: new Map() };
+
+  const tick = async () => {
+    if (stopped) return;
+    inFlight = settlePendingMintQuotes(source, Date.now(), { state }).then(
+      ({ unreachable }) => {
+        // Report a mint becoming unreachable, or reachable again, once.
+        if (unreachable > 0 && unreachableBefore === 0) {
+          logger.warn(`Could not check ${unreachable} pending mint quote(s); will keep retrying`);
+        } else if (unreachable === 0 && unreachableBefore > 0) {
+          logger.log("Pending mint quote checks are reaching the mint again");
+        }
+        unreachableBefore = unreachable;
+      },
+      (error: unknown) => {
+        logger.warn(
+          `Pending mint quote sweep failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
+    await inFlight;
+    if (!stopped) timer = setTimeout(tick, PENDING_MINT_SWEEP_INTERVAL_MS);
+  };
+  timer = setTimeout(tick, PENDING_MINT_SWEEP_INTERVAL_MS);
+
+  return async () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    await inFlight;
+    await withTimeout(
+      Promise.allSettled(state.outstanding.values()),
+      PENDING_MINT_STOP_DRAIN_MS,
+    ).catch(() => {});
+  };
+}
+
 interface ReceiveRecoveryInternals {
   receiveOperationService: {
     checkProofStatesWithMint(
@@ -972,6 +1151,7 @@ export async function createCocoClient(
     pendingMints: 0,
   };
   let recoveryResolve: (() => void) | undefined;
+  let stopPendingMintSweep: (() => Promise<void>) | undefined;
   const recoveryPromise = new Promise<void>((resolve) => {
     recoveryResolve = resolve;
   });
@@ -1166,6 +1346,13 @@ export async function createCocoClient(
         recoveryPhase = "done";
         recoveryResolve?.();
         startupProgress("Wallet recovery complete.");
+        stopPendingMintSweep = startPendingMintSweep({
+          ops: coco!.ops,
+          wallet: coco!.wallet,
+          mintOperationService: (
+            coco as unknown as { mintOperationService: MintOperationServiceCleanup }
+          ).mintOperationService,
+        });
       })
       .catch((error) => {
         recoveryDone = true;
@@ -1475,6 +1662,7 @@ export async function createCocoClient(
         // Let any in-flight recovery settle before closing the database from
         // underneath it. The recovery promise resolves on success or failure.
         await recoveryPromise;
+        await stopPendingMintSweep?.();
         await coco.dispose();
       } finally {
         try {
