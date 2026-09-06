@@ -105,6 +105,40 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
+/** Block until the daemon has minted the paid invoice, then show the credit. */
+async function waitForMintQuote(operationId: string): Promise<void> {
+  console.log(
+    "\nWaiting for payment... (Ctrl+C stops waiting; the daemon keeps checking)",
+  );
+  for (;;) {
+    const result = await callDaemon(
+      `/wallet/receive/bolt11/${encodeURIComponent(operationId)}`,
+    );
+    const quote = result.output as
+      | { state?: string; amount?: number; error?: string }
+      | undefined;
+    if (quote?.state === "finalized" && quote.error) {
+      // The mint issued the quote but the wallet could not restore the proofs.
+      console.error(`Payment reached the mint but could not be credited: ${quote.error}`);
+      process.exit(1);
+    }
+    if (quote?.state === "finalized") {
+      const balance = await callDaemon("/wallet/balance");
+      const balances =
+        (balance.output as { balances?: Record<string, number> } | undefined)
+          ?.balances ?? {};
+      const total = Object.values(balances).reduce((sum, sats) => sum + sats, 0);
+      console.log(`Received ${quote.amount} sat. Balance: ${total} sat`);
+      return;
+    }
+    if (quote?.state === "failed") {
+      console.error(`Invoice failed: ${quote.error ?? "unknown reason"}`);
+      process.exit(1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 export function initializeWallet(walletDir = defaultWalletDir()): void {
   const walletConfig = join(walletDir, "config.json");
 
@@ -1649,11 +1683,14 @@ program
         });
 
         const output = result.output as
-          | { invoice?: string; amount?: number; mintUrl?: string }
+          | { invoice?: string; operationId?: string; amount?: number; mintUrl?: string }
           | undefined;
 
         if (typeof output?.invoice === "string" && output.invoice) {
           await printLightningInvoice(output.invoice);
+          if (typeof output.operationId === "string") {
+            await waitForMintQuote(output.operationId);
+          }
           return;
         }
 

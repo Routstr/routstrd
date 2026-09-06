@@ -104,7 +104,7 @@ export function startAutoRefillLoop(
       logger.log(
         `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mintUrl}...`,
       );
-      const invoice = await cocod.receiveBolt11(config.amount, mintUrl);
+      const { invoice } = await cocod.receiveBolt11(config.amount, mintUrl);
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);

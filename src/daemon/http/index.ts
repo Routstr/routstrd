@@ -488,8 +488,22 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const amount = getRequiredPositiveNumberField(body, "amount");
         const mintUrl = optionalStringField(body, "mintUrl");
-        const invoice = await deps.walletClient.receiveBolt11(amount, mintUrl);
-        return { output: { invoice, amount, mintUrl } };
+        const { invoice, operationId } = await deps.walletClient.receiveBolt11(
+          amount,
+          mintUrl,
+        );
+        return { output: { invoice, operationId, amount, mintUrl } };
+      });
+      return;
+    }
+
+    const mintQuoteMatch = url.pathname.match(/^\/wallet\/receive\/bolt11\/([^/]+)$/);
+    if (req.method === "GET" && mintQuoteMatch?.[1]) {
+      const operationId = decodeURIComponent(mintQuoteMatch[1]);
+      await respond(res, async () => {
+        const quote = await deps.walletClient.getMintQuote?.(operationId);
+        if (!quote) throw new CocodHttpError(404, "Mint quote not found");
+        return { output: quote };
       });
       return;
     }
