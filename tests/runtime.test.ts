@@ -2,8 +2,28 @@ import { describe, expect, test } from "bun:test";
 import {
   DAEMON_COMMAND,
   daemonSpawnCommand,
+  isStandaloneExecutable,
   pm2DaemonArgs,
 } from "../src/runtime";
+
+describe("isStandaloneExecutable", () => {
+  test("uses Bun's explicit standalone flag when available", () => {
+    expect(
+      isStandaloneExecutable({
+        isStandaloneExecutable: true,
+        main: "/workspace/index.ts",
+      }),
+    ).toBe(true);
+  });
+
+  test("recognizes the virtual bunfs entrypoint used by older Bun releases", () => {
+    expect(isStandaloneExecutable({ main: "/$bunfs/root/routstrd" })).toBe(true);
+  });
+
+  test("does not classify a normal Bun entrypoint as standalone", () => {
+    expect(isStandaloneExecutable({ main: "/workspace/src/index.ts" })).toBe(false);
+  });
+});
 
 describe("daemonSpawnCommand", () => {
   test("relaunches a standalone executable directly", () => {

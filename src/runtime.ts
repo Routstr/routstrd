@@ -1,9 +1,17 @@
 export const DAEMON_COMMAND = "daemon";
 
-export function isStandaloneExecutable(): boolean {
+type BunRuntime = {
+  isStandaloneExecutable?: boolean;
+  main: string;
+};
+
+export function isStandaloneExecutable(
+  runtime: BunRuntime = Bun as unknown as BunRuntime,
+): boolean {
   return (
-    Bun as unknown as { isStandaloneExecutable?: boolean }
-  ).isStandaloneExecutable === true;
+    runtime.isStandaloneExecutable === true ||
+    runtime.main.startsWith("/$bunfs/")
+  );
 }
 
 type RuntimeExecutable = {
