@@ -39,5 +39,9 @@ graphify-out/
 findings/
 routstrd-findings.zip
 
-# Standalone prototype scripts
-index.ts
+# Standalone prototype scripts (root-level only)
+/index.ts
+
+# npm artifacts (repo uses bun/bun.lock)
+package-lock.json
+npm-shrinkwrap.json

@@ -1712,15 +1712,20 @@ export function createDaemonRequestHandler(deps: {
     // limit. Without this, the SDK prices at the provider's worst-case
     // max_completion_cost, which varies widely across providers (2.3× for
     // kimi-k3) and balloons during provider failover. Chat/completions use
-    // max_tokens; the OpenAI Responses API uses max_output_tokens.
+    // max_completion_tokens (the OpenAI-standard field; legacy max_tokens is
+    // deprecated and rejected by reasoning models); the Responses API uses
+    // max_output_tokens.
     if (deps.maxTokens > 0) {
       const isResponsesPath = url.pathname.includes("/responses");
       if (isResponsesPath) {
         if (typeof bodyObj.max_output_tokens !== "number") {
           bodyObj.max_output_tokens = deps.maxTokens;
         }
-      } else if (typeof bodyObj.max_tokens !== "number") {
-        bodyObj.max_tokens = deps.maxTokens;
+      } else if (
+        typeof bodyObj.max_completion_tokens !== "number" &&
+        typeof bodyObj.max_tokens !== "number"
+      ) {
+        bodyObj.max_completion_tokens = deps.maxTokens;
       }
     }
 

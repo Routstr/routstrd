@@ -1,12 +1,18 @@
 {
   "name": "routstrd",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
   "bin": {
     "routstrd": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "SECURITY.md"
+  ],
   "scripts": {
     "start": "bun src/index.ts start",
     "stop": "bun src/index.ts stop",
@@ -27,7 +33,7 @@
     "@cashu/cashu-ts": "^4.3.0",
     "@cashu/coco-core": "^1.0.1",
     "@cashu/coco-sqlite-bun": "^1.0.1",
-    "@routstr/sdk": "^0.4.1",
+    "@routstr/sdk": "^0.4.2",
     "@scure/bip39": "^2.2.0",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",
