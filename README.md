@@ -103,6 +103,17 @@ Test connection:
 routstrd ping
 ```
 
+Refresh models and client integrations on demand:
+```sh
+routstrd clients --manual-refresh   # same as `routstrd refresh`
+```
+
+Turn the daemon's scheduled refresh on or off (no restart needed):
+```sh
+routstrd clients --disable-automatic-refresh
+routstrd clients --enable-automatic-refresh
+```
+
 Stop the daemon:
 ```sh
 routstrd stop
@@ -138,6 +149,20 @@ The daemon exposes an HTTP server (default port 8008) with the following endpoin
 ```
 GET /health
 ```
+
+#### Automatic Refresh Settings
+```
+POST /settings/auto-refresh
+```
+
+Request body:
+```json
+{ "enabled": false }
+```
+
+Enables or disables the scheduled refresh job. Persisted to the daemon's
+`config.json` as `autoRefresh.enabled` and picked up on the next tick, so no
+daemon restart is required.
 
 #### Route Request
 ```
@@ -186,9 +211,17 @@ Configuration is stored in `~/.routstrd/config.json`:
   "port": 8008,
   "host": "127.0.0.1",
   "provider": null,
-  "cocodPath": null
+  "cocodPath": null,
+  "autoRefresh": { "enabled": true }
 }
 ```
+
+`autoRefresh.enabled` (default `true`) controls the daemon's scheduled refresh
+job, which re-fetches Nostr events, routstr21 models, and client integrations
+every 21 minutes. Set it to `false` (or run
+`routstrd clients --disable-automatic-refresh`) to turn the schedule off and
+refresh manually with `routstrd clients --manual-refresh`. `autoRefresh.intervalMs`
+overrides the 21-minute interval.
 
 ### Environment Variables
 

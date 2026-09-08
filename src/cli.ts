@@ -15,6 +15,8 @@ import {
   listClientsAction,
   deleteClientAction,
   addClientAction,
+  refreshModelsAndClientsAction,
+  setAutomaticRefreshAction,
 } from "./utils/clients";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
@@ -28,7 +30,7 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { COCO_LOGS_DIR, logger } from "./utils/logger";
-import { setupIntegration, runIntegrationsForClients, type IntegrationKey } from "./integrations";
+import { setupIntegration, type IntegrationKey } from "./integrations";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
@@ -48,7 +50,6 @@ import {
   walletDir as defaultWalletDir,
   walletPidPath,
 } from "./daemon/wallet/paths";
-import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
@@ -858,26 +859,7 @@ program
   .description("Refresh routstr21 models and client integrations")
   .action(async () => {
     await ensureDaemonRunning();
-    const config = await loadConfig();
-
-    // Refresh models via daemon API
-    console.log("Refreshing routstr21 models...");
-    const result = await callDaemon("/v1/models?refresh=true");
-    if (result.error) {
-      console.log(`Model refresh failed: ${result.error}`);
-      process.exit(1);
-    }
-    console.log("Models refreshed.");
-
-    // Refresh integrations for all clients
-    const clients = await getClientsList();
-    if (clients.length > 0) {
-      console.log(`Refreshing ${clients.length} client integration(s)...`);
-      await runIntegrationsForClients(clients, config);
-      console.log("Client integrations refreshed.");
-    } else {
-      console.log("No clients to refresh.");
-    }
+    await refreshModelsAndClientsAction();
   });
 
 // Models - list routstr21 models
@@ -1256,7 +1238,54 @@ providersCmd
 // Clients - list and manage clients
 const clientsCmd = program
   .command("clients")
-  .description("List and manage clients");
+  .description("List and manage clients")
+  .option(
+    "--manual-refresh",
+    "Refresh routstr21 models and all client integrations now",
+    false,
+  )
+  .option(
+    "--disable-automatic-refresh",
+    "Disable the daemon's scheduled refresh job",
+    false,
+  )
+  .option(
+    "--enable-automatic-refresh",
+    "Re-enable the daemon's scheduled refresh job",
+    false,
+  )
+  .action(
+    async (options: {
+      manualRefresh: boolean;
+      disableAutomaticRefresh: boolean;
+      enableAutomaticRefresh: boolean;
+    }) => {
+      if (options.disableAutomaticRefresh && options.enableAutomaticRefresh) {
+        console.error(
+          "error: --disable-automatic-refresh and --enable-automatic-refresh are mutually exclusive.",
+        );
+        process.exit(1);
+      }
+
+      if (
+        !options.manualRefresh &&
+        !options.disableAutomaticRefresh &&
+        !options.enableAutomaticRefresh
+      ) {
+        clientsCmd.help({ error: true });
+        return;
+      }
+
+      if (options.manualRefresh) {
+        await ensureDaemonRunning();
+        await refreshModelsAndClientsAction();
+      }
+
+      if (options.disableAutomaticRefresh || options.enableAutomaticRefresh) {
+        await setAutomaticRefreshAction(options.enableAutomaticRefresh);
+      }
+    },
+  );
 
 clientsCmd
   .command("list")

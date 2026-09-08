@@ -785,6 +785,27 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Scheduled refresh job (Nostr events, models, client integrations).
+    // The job re-reads this on every tick, so no daemon restart is needed.
+    if (req.method === "POST" && url.pathname === "/settings/auto-refresh") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const enabled = body.enabled === true || body.enabled === "true";
+
+        const config = await loadDaemonConfig();
+        config.autoRefresh = { ...config.autoRefresh, enabled };
+        saveDaemonConfig(config);
+
+        return {
+          output: {
+            message: `Automatic refresh ${enabled ? "enabled" : "disabled"}.`,
+            autoRefresh: config.autoRefresh,
+          },
+        };
+      });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/models") {
       try {
         const forceRefresh =

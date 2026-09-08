@@ -107,6 +107,20 @@ routstrd providers enable 0 2 5
 
 List and manage API clients (subcommand required).
 
+| Option | Description |
+|--------|-------------|
+| `--manual-refresh` | Refresh routstr21 models and all client integrations now |
+| `--disable-automatic-refresh` | Disable the daemon's scheduled refresh job |
+| `--enable-automatic-refresh` | Re-enable the daemon's scheduled refresh job |
+
+The daemon refreshes models and client integrations on a schedule (every 21 minutes by default). Use `--manual-refresh` to do it on demand, and `--disable-automatic-refresh` to stop the scheduled job — the setting is stored in the daemon's `config.json` (`autoRefresh.enabled`) and takes effect without a restart.
+
+```sh
+routstrd clients --manual-refresh              # refresh models + integrations now
+routstrd clients --disable-automatic-refresh   # no scheduled refresh
+routstrd clients --enable-automatic-refresh    # scheduled refresh back on
+```
+
 #### `routstrd clients list`
 
 List all registered clients with their ID, name, API key, and creation date.
@@ -157,7 +171,7 @@ routstrd remote https://your-remote-daemon.com
 
 ### `routstrd refresh`
 
-Refresh routstr21 models from Nostr and re-run integrations for all registered clients.
+Refresh routstr21 models from Nostr and re-run integrations for all registered clients. Equivalent to `routstrd clients --manual-refresh`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -167,6 +181,7 @@ Refresh routstr21 models from Nostr and re-run integrations for all registered c
 | `nsec` | string\|null | null | Nostr secret key for NIP-98 auth |
 | `cocodPath` | string\|null | null | Custom path to cocod executable |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
+| `autoRefresh` | object | `{ enabled: true }` | Scheduled refresh job settings (`enabled`, `intervalMs`) |
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -293,6 +308,7 @@ Config file: `~/.routstrd/config.json`
 | `provider` | string\|null | null | Default provider URL |
 | `cocodPath` | string\|null | null | Custom path to cocod executable |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
+| `autoRefresh` | object | `{ enabled: true }` | Scheduled refresh job settings (`enabled`, `intervalMs`) |
 
 ### Environment Variables
 
