@@ -137,14 +137,15 @@ Delete a registered client by its ID.
 
 ### `routstrd npubs`
 
-
-Manage admin npubs (subcommand required).
+Manage registered npubs and their roles/names (subcommand required). Management commands route through the auth proxy (`--auth-url`) and use NIP-98 auth.
 
 | Command | Description |
 |---------|-------------|
-| `routstrd npubs list` | List configured admin npubs |
-| `routstrd npubs add <npub>` | Add an admin npub (accepts hex or npub1...) |
-| `routstrd npubs delete <npub>` | Delete an admin npub |
+| `routstrd npubs list` | List registered npubs with role and display name |
+| `routstrd npubs register [--name <name>]` | Register yourself as the first admin (bootstrap only) |
+| `routstrd npubs add <npub> [--role <role>] [--name <name>]` | Add an npub (accepts hex or npub1...) |
+| `routstrd npubs update <npub> [--role <role>] [--name <name>]` | Update role and/or name (admin only) |
+| `routstrd npubs delete <npub>` | Delete an npub |
 
 ### `routstrd remote <url>`
 

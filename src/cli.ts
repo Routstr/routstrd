@@ -1301,12 +1301,23 @@ const npubsCmd = program
 
 type NpubEntry = {
   npub: string;
+  name: string | null;
   role: string;
 };
 
+/** Normalize a user-supplied npub display name: trim whitespace and cap at 64 chars. */
+function parseNpubName(raw: string | undefined): { name?: string | null; error?: string } {
+  if (raw === undefined) return {};
+  const trimmed = raw.trim();
+  if ([...trimmed].length > 64) {
+    return { error: "Invalid name. Maximum length is 64 characters." };
+  }
+  return { name: trimmed === "" ? null : trimmed };
+}
+
 npubsCmd
   .command("list")
-  .description("List configured npubs with their roles")
+  .description("List configured npubs with their roles and names")
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -1322,7 +1333,7 @@ npubsCmd
       : result;
     const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
-      console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
+      console.log("No npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
       return;
     }
     console.log(`Npubs (${npubs.length}):`);
@@ -1330,12 +1341,13 @@ npubsCmd
     for (const entry of npubs) {
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
-      console.log(`- ${entry.npub} [${entry.role}]${marker}`);
+      const name = entry.name ? ` "${entry.name}"` : "";
+      console.log(`- ${entry.npub} [${entry.role}]${name}${marker}`);
     }
     if (userNpub && !found) {
       console.log("");
       console.log(
-        "Your npub is not in the admin list. Ask the admin to add your npub:",
+        "Your npub is not in the npub list. Ask an admin to add your npub:",
       );
       console.log(`  ${userNpub}`);
     }
@@ -1344,7 +1356,8 @@ npubsCmd
 npubsCmd
   .command("register")
   .description("Register yourself as the first admin (only when no admins exist)")
-  .action(async () => {
+  .option("-n, --name <name>", "Display name for this npub (optional)")
+  .action(async (options: { name?: string }) => {
     await ensureDaemonRunning();
     const config = await loadConfig();
     const userNpub = getUserNpub(config);
@@ -1372,19 +1385,27 @@ npubsCmd
       console.error("Failed to normalize user npub.");
       process.exit(1);
     }
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = { npub: npubFromPubkey(normalized) };
+    if (name.name !== undefined) body.name = name.name;
     const addResult = await callAuth("/npubs", {
       method: "POST",
-      body: { npub: npubFromPubkey(normalized) },
+      body,
     });
     if (addResult.error) {
       console.log(addResult.error);
       process.exit(1);
     }
     const output = addResult.output as
-      | { npub?: string; added?: boolean; error?: string }
+      | { npub?: string; name?: string | null; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
-      console.log(`Successfully registered as first admin npub: ${output.npub}`);
+      const nameSuffix = output.name ? ` ("${output.name}")` : "";
+      console.log(`Successfully registered as first admin npub: ${output.npub}${nameSuffix}`);
     } else {
       console.log(`Successfully registered as first admin npub: ${userNpub}`);
     }
@@ -1394,7 +1415,8 @@ npubsCmd
   .command("add <npub>")
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
-  .action(async (npubArg: string, options: { role: string }) => {
+  .option("-n, --name <name>", "Display name for the npub (optional)")
+  .action(async (npubArg: string, options: { role: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -1405,7 +1427,16 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const body: Record<string, string> = { npub: npubFromPubkey(normalized), role: options.role };
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+      role: options.role,
+    };
+    if (name.name !== undefined) body.name = name.name;
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -1415,44 +1446,63 @@ npubsCmd
       process.exit(1);
     }
     const output = result.output as
-      | { npub?: string; role?: string; added?: boolean; error?: string }
+      | { npub?: string; name?: string | null; role?: string; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
+      const nameSuffix = output.name ? ` ("${output.name}")` : "";
       console.log(
-        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}`,
       );
     }
   });
 
 npubsCmd
   .command("update <npub>")
-  .description("Update the role of an existing npub (requires admin)")
-  .requiredOption("-r, --role <role>", "New role: 'admin' or 'user'")
-  .action(async (npubArg: string, options: { role: string }) => {
+  .description("Update the role and/or name of an existing npub (requires admin)")
+  .option("-r, --role <role>", "New role: 'admin' or 'user'")
+  .option("-n, --name <name>", "New display name (empty string clears it)")
+  .action(async (npubArg: string, options: { role?: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
       console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
       process.exit(1);
     }
-    if (options.role !== "admin" && options.role !== "user") {
+    if (options.role !== undefined && options.role !== "admin" && options.role !== "user") {
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
+    if (options.role === undefined && options.name === undefined) {
+      console.error("Provide '--role' and/or '--name' to update.");
+      process.exit(1);
+    }
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+    };
+    if (options.role !== undefined) body.role = options.role;
+    if (name.name !== undefined) body.name = name.name;
     const result = await callAuth("/npubs", {
       method: "PATCH",
-      body: { npub: npubFromPubkey(normalized), role: options.role },
+      body,
     });
     if (result.error) {
       console.log(result.error);
       process.exit(1);
     }
-    // PATCH /npubs returns { npub, pubkey, role } at the top level, not wrapped in { output }
+    // PATCH /npubs returns { npub, pubkey, name, role } at the top level, not wrapped in { output }
     const data = (result.output ?? result) as
-      | { npub?: string; pubkey?: string; role?: string; error?: string }
+      | { npub?: string; pubkey?: string; name?: string | null; role?: string; error?: string }
       | undefined;
     if (data?.npub) {
-      console.log(`Updated npub ${data.npub} role to '${data.role}'.`);
+      const parts: string[] = [];
+      if (data.role) parts.push(`role='${data.role}'`);
+      parts.push(`name=${data.name ? `"${data.name}"` : "(none)"}`);
+      console.log(`Updated npub ${data.npub} (${parts.join(", ")}).`);
     } else {
       console.log("Npub not found or update failed.");
     }
