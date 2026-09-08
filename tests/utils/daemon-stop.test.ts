@@ -69,7 +69,24 @@ describe("waitForDaemonToExit", () => {
       runningPids: [5923],
     });
     await promise;
-    expect(logs).toEqual(["  Finishing all ongoing requests..."]);
+    expect(logs).toEqual([
+      "  Finishing all ongoing requests... (run 'kill -9 5923' to force stop)",
+    ]);
+  });
+
+  test("re-reports how to force stop while ongoing requests are still finishing", async () => {
+    const { logs, promise } = runWith(
+      { health: [], lockPids: [5923, 5923, null], runningPids: [5923] },
+      // Report on every drain poll, so the heartbeat follows the announce.
+      { drainHeartbeatMs: 0 },
+    );
+    await promise;
+    expect(logs).toEqual([
+      "  Finishing all ongoing requests... (run 'kill -9 5923' to force stop)",
+      expect.stringMatching(
+        /^  Still finishing ongoing requests \(\d+s elapsed\)\.\.\. \(run 'kill -9 5923' to force stop\)$/,
+      ),
+    ]);
   });
 
   test("stays silent when the lock is released within the grace window", async () => {
@@ -106,7 +123,7 @@ describe("waitForDaemonToExit", () => {
       { drainTimeoutMs: 0 },
     );
     await expect(promise).rejects.toThrow(
-      /PID 5923.*did not finish its ongoing requests.*kill 5923/s,
+      /PID 5923.*did not finish its ongoing requests.*kill -9 5923/s,
     );
   });
 
@@ -129,7 +146,9 @@ describe("waitForDaemonToExit", () => {
       drainGraceMs: 0,
       pollIntervalMs: 1,
     });
-    expect(logs).toEqual(["  Finishing all ongoing requests..."]);
+    expect(logs).toEqual([
+      "  Finishing all ongoing requests... (run 'kill -9 1234' to force stop)",
+    ]);
   });
 
   test("treats an unparseable lock file as released", async () => {

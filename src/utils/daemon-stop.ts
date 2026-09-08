@@ -13,7 +13,8 @@ import { formatElapsed } from "../start-daemon";
  * exit. Spawning a replacement before the lock is released makes it abort
  * with "Cannot claim the routstrd wallet lock", so restarts must wait for
  * the old process to fully exit — telling the user why it is taking a
- * while ("Finishing all ongoing requests...") instead of racing ahead.
+ * while ("Finishing all ongoing requests...") and how to force it
+ * ("run 'kill -9 <PID>' to force stop") instead of racing ahead.
  */
 export interface WaitForDaemonToExitOptions {
   /** Wallet PID lock file held by the running daemon. */
@@ -33,6 +34,8 @@ export interface WaitForDaemonToExitOptions {
   drainGraceMs?: number;
   /** How long to wait for the old daemon to exit and release the lock. */
   drainTimeoutMs?: number;
+  /** How often to re-report that ongoing requests are still finishing. */
+  drainHeartbeatMs?: number;
   /** Interval between health and lock polls. */
   pollIntervalMs?: number;
 }
@@ -64,6 +67,7 @@ export async function waitForDaemonToExit(
     healthTimeoutMs = 10_000,
     drainGraceMs = 1_000,
     drainTimeoutMs = 10 * 60_000,
+    drainHeartbeatMs = DRAIN_HEARTBEAT_MS,
     pollIntervalMs = 100,
   } = options;
 
@@ -81,7 +85,9 @@ export async function waitForDaemonToExit(
 
   // Phase 2: the process stays alive while it finishes ongoing requests and
   // disposes of the wallet. The wallet PID lock is released only right before
-  // the process exits, so wait for it (or for the recorded PID to die).
+  // the process exits, so wait for it (or for the recorded PID to die). Both
+  // progress messages offer 'kill -9 <PID>': only SIGKILL interrupts a stuck
+  // drain — a plain SIGTERM just re-runs the same graceful shutdown.
   const drainStartedAt = Date.now();
   const drainDeadline = drainStartedAt + drainTimeoutMs;
   let drainAnnounced = false;
@@ -96,19 +102,22 @@ export async function waitForDaemonToExit(
       throw new Error(
         `the previous daemon (PID ${lockPid}) did not finish its ongoing requests within ` +
           `${formatElapsed(drainTimeoutMs)} and still holds the wallet lock at ${pidFilePath}. ` +
-          `Wait for it to exit and try again, or run 'kill ${lockPid}' to force it.`,
+          `Wait for it to exit and try again, or run 'kill -9 ${lockPid}' to force it.`,
       );
     }
 
     if (!drainAnnounced && now - drainStartedAt >= drainGraceMs) {
       drainAnnounced = true;
-      log("  Finishing all ongoing requests...");
-      nextHeartbeatAt = now + DRAIN_HEARTBEAT_MS;
+      log(
+        `  Finishing all ongoing requests... (run 'kill -9 ${lockPid}' to force stop)`,
+      );
+      nextHeartbeatAt = now + drainHeartbeatMs;
     } else if (drainAnnounced && now >= nextHeartbeatAt) {
       log(
-        `  Still finishing ongoing requests (${formatElapsed(now - drainStartedAt)} elapsed)...`,
+        `  Still finishing ongoing requests (${formatElapsed(now - drainStartedAt)} elapsed)... ` +
+          `(run 'kill -9 ${lockPid}' to force stop)`,
       );
-      nextHeartbeatAt += DRAIN_HEARTBEAT_MS;
+      nextHeartbeatAt += drainHeartbeatMs;
     }
 
     await sleep(pollIntervalMs);
