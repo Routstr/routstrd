@@ -175,9 +175,38 @@ export function initializeWallet(walletDir = defaultWalletDir()): void {
   console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
+type PidFileDeps = {
+  readFile(path: string): string;
+  isProcessRunning(pid: number): boolean;
+};
+
+export function getLivePidFileOwner(
+  path: string,
+  deps: PidFileDeps = {
+    readFile: (pidPath) => readFileSync(pidPath, "utf8"),
+    isProcessRunning: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    },
+  },
+): number | null {
+  try {
+    const contents = deps.readFile(path).trim();
+    if (!/^\d+$/.test(contents)) return null;
+    const pid = Number.parseInt(contents, 10);
+    return pid > 0 && deps.isProcessRunning(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Restart the routstrd daemon after an update so the new binary takes
- * effect immediately.  Failures are collected and reported but never
+ * effect immediately. Failures are collected and reported but never
  * roll back the update itself.
  *
  * Note: cocod is no longer a separate process — the wallet now runs
@@ -197,14 +226,22 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
       if (!wasRunning) {
         console.log("\nroutstrd daemon was not running — skipping restart.");
       } else {
-        console.log("\nRestarting routstrd daemon...");
+        const pidFilePath = walletPidPath();
+        const ownerPid = getLivePidFileOwner(pidFilePath);
+        if (ownerPid === null) {
+          throw new Error(
+            `Refusing to stop the process at ${getDaemonBaseUrl(config)} because ` +
+              `no live routstrd owner was found in ${pidFilePath}`,
+          );
+        }
 
+        console.log(`\nRestarting routstrd daemon (PID: ${ownerPid})...`);
         await callDaemon("/stop", { method: "POST" });
 
         // Wait for the old daemon to fully exit: it keeps serving ongoing
         // requests before it releases the wallet lock and the new daemon can
         // safely claim it.
-        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+        await waitForDaemonToExit({ pidFilePath });
         console.log("routstrd daemon stopped.");
 
         await stopLegacyCocod();
