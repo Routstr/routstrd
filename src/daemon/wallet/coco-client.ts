@@ -260,7 +260,8 @@ export function isZombieProcess(
   }
 }
 
-function defaultIsProcessRunning(pid: number): boolean {
+/** Test whether a PID is alive; dead-but-unreaped zombies count as dead. */
+export function defaultIsProcessRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
   } catch (error) {

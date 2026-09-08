@@ -88,7 +88,8 @@ function printStartupProgress(offset: number): {
   }
 }
 
-function formatElapsed(elapsedMs: number): string {
+/** Format an elapsed duration as "45s" or "2m 5s". */
+export function formatElapsed(elapsedMs: number): string {
   const seconds = Math.floor(elapsedMs / 1000);
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;

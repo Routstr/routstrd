@@ -11,6 +11,7 @@ import {
   getDaemonBaseUrl,
   getUserNpub,
 } from "./utils/daemon-client";
+import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
   deleteClientAction,
@@ -160,18 +161,10 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
 
         await callDaemon("/stop", { method: "POST" });
 
-        // Wait for HTTP health check to fail AND wallet lock to be released.
-        const pidFilePath = walletPidPath();
-        for (let i = 0; i < 100; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          const healthDown = !(await isDaemonRunning());
-          const pidFileReleased = !existsSync(pidFilePath);
-          if (healthDown && pidFileReleased) break;
-        }
-
-        if (await isDaemonRunning()) {
-          throw new Error("routstrd did not stop within 10 seconds");
-        }
+        // Wait for the old daemon to fully exit: it keeps serving ongoing
+        // requests before it releases the wallet lock and the new daemon can
+        // safely claim it.
+        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
         console.log("routstrd daemon stopped.");
 
         await stopLegacyCocod();
@@ -2081,7 +2074,21 @@ program
   .command("stop")
   .description("Stop the background daemon")
   .action(async () => {
-    await handleDaemonCommand("/stop", { method: "POST" });
+    if (!(await isDaemonRunning())) {
+      console.log("Daemon was not running.");
+      return;
+    }
+    await callDaemon("/stop", { method: "POST" });
+
+    // The daemon exits only after ongoing requests finish; wait for it so
+    // the wallet lock is actually free when this command returns.
+    try {
+      await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+    console.log("Daemon stopped.");
   });
 
 // Service - PM2 management
@@ -2194,19 +2201,12 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      // Wait for HTTP health check to fail AND wallet lock to be released.
-      const pidFilePath = walletPidPath();
-      for (let i = 0; i < 100; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const healthDown = !(await isDaemonRunning());
-        const pidFileReleased = !existsSync(pidFilePath);
-        if (healthDown && pidFileReleased) {
-          break;
-        }
-      }
-
-      if (await isDaemonRunning()) {
-        logger.error("Daemon failed to stop within 10 seconds");
+      // Wait for the old daemon to fully exit so the wallet lock is free
+      // before a new daemon is spawned.
+      try {
+        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
         process.exit(1);
       }
       console.log("Daemon stopped.");
@@ -2285,15 +2285,12 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      for (let i = 0; i < 50; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        if (!(await isDaemonRunning())) {
-          break;
-        }
-      }
-
-      if (await isDaemonRunning()) {
-        logger.error("Daemon failed to stop within 5 seconds");
+      // Wait for the old daemon to fully exit so the wallet lock is free
+      // before a new daemon is spawned.
+      try {
+        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
         process.exit(1);
       }
       console.log("Daemon stopped.");
