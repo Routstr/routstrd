@@ -33,8 +33,8 @@ Download the archive for your operating system and architecture from the
 Release archives are available for Linux and macOS on x64 and arm64.
 
 ```sh
-grep "routstrd-v0.5.0-linux-x64.tar.gz" SHA256SUMS | shasum -a 256 -c -
-tar -xzf routstrd-v0.5.0-linux-x64.tar.gz
+grep "routstrd-v0.4.9-linux-x64.tar.gz" SHA256SUMS | shasum -a 256 -c -
+tar -xzf routstrd-v0.4.9-linux-x64.tar.gz
 mkdir -p "$HOME/.local/bin"
 install -m 755 routstrd "$HOME/.local/bin/routstrd"
 ```
