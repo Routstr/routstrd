@@ -8,10 +8,13 @@
     "routstrd": "./dist/index.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
     "src",
+    "!src/**/*.test.ts",
+    "!src/daemon/wallet/fixtures",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "SKILL.md"
   ],
   "scripts": {
     "start": "bun src/index.ts start",
