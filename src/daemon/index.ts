@@ -235,39 +235,94 @@ async function main(): Promise<void> {
     // Ignore
   }
 
-  const REFRESH_INTERVAL_MS = 21 * 60 * 1000; // 21 mins
+  const DEFAULT_REFRESH_INTERVAL_MS = 21 * 60 * 1000; // 21 mins
+  // While the job is disabled we keep a light poll running so `clients
+  // --enable-automatic-refresh` takes effect without a daemon restart.
+  const DISABLED_REFRESH_POLL_MS = 60 * 1000;
+
+  /**
+   * Read autoRefresh from disk on every tick (like the NWC auto-refill
+   * getter) so CLI/config changes apply immediately without a restart.
+   */
+  const readAutoRefreshSettings = (): {
+    enabled: boolean;
+    intervalMs: number;
+  } => {
+    const autoRefresh = loadDaemonConfigSync().autoRefresh;
+    const intervalMs =
+      typeof autoRefresh?.intervalMs === "number" && autoRefresh.intervalMs > 0
+        ? autoRefresh.intervalMs
+        : DEFAULT_REFRESH_INTERVAL_MS;
+    return { enabled: autoRefresh?.enabled !== false, intervalMs };
+  };
 
   // Recurring job to refresh routstr21 models
-  let refreshInterval: ReturnType<typeof setInterval> | null = null;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let refreshJobActive = false;
+  let disabledNoticeLogged = false;
+
+  const runScheduledRefresh = async (): Promise<void> => {
+    logger.log("Running scheduled Nostr event refresh...");
+    try {
+      await modelManager.refreshNostrEvents();
+    } catch (error) {
+      logger.error("Scheduled Nostr event refresh failed:", error);
+    }
+
+    logger.log("Running scheduled model refresh...");
+    try {
+      await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
+    } catch (error) {
+      logger.error("Scheduled model refresh failed:", error);
+    }
+  };
+
+  const scheduleNextRefresh = (): void => {
+    if (!refreshJobActive) return;
+
+    const { enabled, intervalMs } = readAutoRefreshSettings();
+    if (!enabled) {
+      if (!disabledNoticeLogged) {
+        logger.log(
+          "Scheduled refresh job is disabled (autoRefresh.enabled=false). Polling for re-enable every 60s.",
+        );
+        disabledNoticeLogged = true;
+      }
+      refreshTimer = setTimeout(
+        scheduleNextRefresh,
+        Math.min(intervalMs, DISABLED_REFRESH_POLL_MS),
+      );
+      return;
+    }
+
+    if (disabledNoticeLogged) {
+      logger.log("Scheduled refresh job re-enabled.");
+      disabledNoticeLogged = false;
+    }
+
+    refreshTimer = setTimeout(() => {
+      void runScheduledRefresh()
+        .catch((error) => logger.error("Model refresh interval escaped:", error))
+        .finally(() => scheduleNextRefresh());
+    }, intervalMs);
+  };
 
   const startModelRefreshJob = () => {
+    refreshJobActive = true;
+    const { enabled, intervalMs } = readAutoRefreshSettings();
     logger.log(
-      `Starting recurring model refresh job (every ${REFRESH_INTERVAL_MS / 1000 / 60 / 60} hours)`,
+      enabled
+        ? `Starting recurring model refresh job (every ${Math.round(intervalMs / 60_000)} minutes)`
+        : "Recurring model refresh job is disabled (autoRefresh.enabled=false).",
     );
-
-    refreshInterval = setInterval(() => {
-      (async () => {
-        logger.log("Running scheduled Nostr event refresh...");
-        try {
-          await modelManager.refreshNostrEvents();
-        } catch (error) {
-          logger.error("Scheduled Nostr event refresh failed:", error);
-        }
-
-        logger.log("Running scheduled model refresh...");
-        try {
-          await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
-        } catch (error) {
-          logger.error("Scheduled model refresh failed:", error);
-        }
-      })().catch((error) => logger.error("Model refresh interval escaped:", error));
-    }, REFRESH_INTERVAL_MS);
+    scheduleNextRefresh();
   };
 
   const stopModelRefreshJob = () => {
-    if (refreshInterval) {
-      clearInterval(refreshInterval);
-      refreshInterval = null;
+    refreshJobActive = false;
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
       logger.log("Stopped recurring model refresh job.");
     }
   };
@@ -381,9 +436,16 @@ async function main(): Promise<void> {
 
         startModelRefreshJob();
         startRefundJob();
-        // Run an immediate refresh to populate models right away
-        logger.log("Running initial model refresh...");
-        await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Initial");
+        // Run an immediate refresh to populate models right away. Client
+        // integrations are skipped when the scheduled job is disabled, so a
+        // restart does not overwrite hand-edited client configs.
+        if (readAutoRefreshSettings().enabled) {
+          logger.log("Running initial model refresh...");
+          await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Initial");
+        } else {
+          logger.log("Running initial model refresh (client integrations skipped)...");
+          await getRoutstr21Models(true);
+        }
       })
       .catch((error) => {
         logger.error("Initial model refresh failed:", error);

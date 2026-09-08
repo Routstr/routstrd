@@ -6,7 +6,11 @@ import {
   ensureDaemonRunning,
 } from "./daemon-client";
 import { logger } from "./logger";
-import { CLIENT_INTEGRATIONS, CLIENT_CONFIGS } from "../integrations/registry";
+import {
+  CLIENT_INTEGRATIONS,
+  CLIENT_CONFIGS,
+  runIntegrationsForClients,
+} from "../integrations/registry";
 
 export interface ClientEntry {
   clientId: string;
@@ -123,6 +127,75 @@ export async function addDaemonClient(
   }
 
   return { message: output.message, client: output.client, created: true };
+}
+
+/**
+ * Refresh routstr21 models from Nostr, then re-run every registered client
+ * integration so local client configs pick up new models and API keys.
+ *
+ * Shared by `routstrd refresh` and `routstrd clients --manual-refresh` — the
+ * same work the daemon performs on its scheduled refresh.
+ */
+export async function refreshModelsAndClientsAction(): Promise<void> {
+  const config = await loadConfig();
+
+  console.log("Refreshing routstr21 models...");
+  const result = await callDaemon("/v1/models?refresh=true");
+  if (result.error) {
+    console.log(`Model refresh failed: ${result.error}`);
+    process.exit(1);
+  }
+  console.log("Models refreshed.");
+
+  const clients = await getClientsList();
+  if (clients.length === 0) {
+    console.log("No clients to refresh.");
+    return;
+  }
+
+  console.log(`Refreshing ${clients.length} client integration(s)...`);
+  await runIntegrationsForClients(clients, config);
+  console.log("Client integrations refreshed.");
+}
+
+/**
+ * Toggle the daemon's scheduled refresh job. Routed through the daemon so it
+ * also works against a remote daemon, where the config lives on the host.
+ */
+export async function setAutomaticRefreshAction(
+  enabled: boolean,
+): Promise<void> {
+  await ensureDaemonRunning();
+
+  const result = await callDaemon("/settings/auto-refresh", {
+    method: "POST",
+    body: { enabled },
+  });
+
+  if (result.error) {
+    console.log(result.error);
+    process.exit(1);
+  }
+
+  const output = result.output as { message?: string } | undefined;
+  console.log(
+    output?.message ?? `Automatic refresh ${enabled ? "enabled" : "disabled"}.`,
+  );
+
+  if (enabled) {
+    console.log(
+      "The daemon will keep refreshing models and client integrations on a schedule.",
+    );
+    return;
+  }
+
+  console.log(
+    "The daemon will stop the scheduled refresh of models and client integrations.",
+  );
+  console.log("Run 'routstrd clients --manual-refresh' to refresh on demand.");
+  console.log(
+    "Run 'routstrd clients --enable-automatic-refresh' to turn it back on.",
+  );
 }
 
 export async function listClientsAction(): Promise<void> {
