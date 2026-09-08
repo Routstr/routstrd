@@ -1383,7 +1383,7 @@ export async function createCocoClient(
       }
     },
 
-    async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
+    async receiveBolt11(amount: number, mintUrl?: string) {
       await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
@@ -1399,7 +1399,20 @@ export async function createCocoClient(
       if (!("request" in op)) {
         throw new Error("mint prepare did not return a payment request");
       }
-      return op.request as string;
+      return { invoice: op.request as string, operationId: op.id };
+    },
+
+    async getMintQuote(operationId: string) {
+      const op = await coco.ops.mint.get(operationId);
+      if (!op || op.state === "init") return null;
+      return {
+        operationId: op.id,
+        state: op.state,
+        mintState: op.lastObservedRemoteState,
+        amount: op.amount,
+        mintUrl: op.mintUrl,
+        error: op.error,
+      };
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {

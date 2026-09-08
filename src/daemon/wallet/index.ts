@@ -189,7 +189,7 @@ export async function createWalletAdapter(
 
         // Step 2: Create a BOLT-11 invoice via cocod
         logger.log(`[nwc] Creating ${amount}-sat Lightning invoice via cocod...`);
-        const invoice = await client.receiveBolt11(amount, mintUrl);
+        const { invoice } = await client.receiveBolt11(amount, mintUrl);
         logger.log(`[nwc]   Invoice: ${invoice}`);
 
         // Step 3: Pay it via NWC

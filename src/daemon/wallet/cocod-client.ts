@@ -109,13 +109,29 @@ export class CocodHttpError extends Error {
   }
 }
 
+/** Progress of a Lightning top-up created with `receiveBolt11`. */
+export interface MintQuoteStatus {
+  operationId: string;
+  state: "pending" | "executing" | "finalized" | "failed";
+  /** Last quote state reported by the mint (UNPAID, PAID, ISSUED). */
+  mintState?: string;
+  amount: number;
+  mintUrl: string;
+  error?: string;
+}
+
 export interface CocodClient {
   ping(): Promise<boolean>;
   getStatus(): Promise<CocodState>;
   unlock(passphrase: string): Promise<string>;
   getBalances(): Promise<Record<string, number>>;
   receiveCashu(token: string): Promise<string>;
-  receiveBolt11(amount: number, mintUrl?: string): Promise<string>;
+  receiveBolt11(
+    amount: number,
+    mintUrl?: string,
+  ): Promise<{ invoice: string; operationId?: string }>;
+  /** Progress of a top-up, when the wallet tracks mint operations. */
+  getMintQuote?(operationId: string): Promise<MintQuoteStatus | null>;
   sendCashu(amount: number, mintUrl?: string): Promise<string>;
   sendBolt11(invoice: string, mintUrl?: string): Promise<string>;
   listMints(): Promise<string[]>;
@@ -421,8 +437,8 @@ export function createCocodClient(
       logger.debug(`[receiveCashu] Full response.output:`, message);
       return message;
     },
-    async receiveBolt11(amount: number, mintUrl?: string): Promise<string> {
-      return post<string>("/receive/bolt11", { amount, mintUrl });
+    async receiveBolt11(amount: number, mintUrl?: string) {
+      return { invoice: await post<string>("/receive/bolt11", { amount, mintUrl }) };
     },
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
       return post<string>("/send/cashu", { amount, mintUrl });
