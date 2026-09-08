@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
@@ -8,10 +8,14 @@
     "routstrd": "./dist/index.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/daemon/index.js",
     "src",
+    "!src/**/*.test.ts",
+    "!src/daemon/wallet/fixtures",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    "SKILL.md"
   ],
   "scripts": {
     "start": "bun src/index.ts start",
@@ -20,6 +24,7 @@
     "lint": "tsc --noEmit",
     "test": "bun test",
     "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
+    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts --outfile=dist/routstrd",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {

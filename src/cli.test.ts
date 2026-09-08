@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   collectRecentRequestsFromLines,
+  getLivePidFileOwner,
   initializeWallet,
   parseStructuredLogLine,
 } from "./cli";
@@ -24,6 +25,47 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("getLivePidFileOwner", () => {
+  test("returns a live owner from a valid PID file", () => {
+    expect(
+      getLivePidFileOwner("/wallet/wallet.pid", {
+        readFile: () => "4242\n",
+        isProcessRunning: (pid) => pid === 4242,
+      }),
+    ).toBe(4242);
+  });
+
+  test("rejects missing, malformed, dead, and non-positive owners", () => {
+    const running = () => true;
+    expect(
+      getLivePidFileOwner("/missing", {
+        readFile: () => {
+          throw new Error("ENOENT");
+        },
+        isProcessRunning: running,
+      }),
+    ).toBeNull();
+    expect(
+      getLivePidFileOwner("/malformed", {
+        readFile: () => "not-a-pid",
+        isProcessRunning: running,
+      }),
+    ).toBeNull();
+    expect(
+      getLivePidFileOwner("/zero", {
+        readFile: () => "0",
+        isProcessRunning: running,
+      }),
+    ).toBeNull();
+    expect(
+      getLivePidFileOwner("/dead", {
+        readFile: () => "4242",
+        isProcessRunning: () => false,
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("parseStructuredLogLine", () => {

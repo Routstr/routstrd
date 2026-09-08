@@ -56,12 +56,17 @@ import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
-import packageJson from "../package.json" with { type: "json" };
 import {
   compareVersions,
   getGlobalPackageVersion,
   getLatestNpmVersion,
 } from "./utils/update-checker.ts";
+import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
+import { VERSION } from "./version";
+import {
+  getLatestStandaloneRelease,
+  installStandaloneRelease,
+} from "./utils/standalone-update";
 
 type RoutstrModel = {
   id: string;
@@ -170,9 +175,38 @@ export function initializeWallet(walletDir = defaultWalletDir()): void {
   console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
+type PidFileDeps = {
+  readFile(path: string): string;
+  isProcessRunning(pid: number): boolean;
+};
+
+export function getLivePidFileOwner(
+  path: string,
+  deps: PidFileDeps = {
+    readFile: (pidPath) => readFileSync(pidPath, "utf8"),
+    isProcessRunning: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    },
+  },
+): number | null {
+  try {
+    const contents = deps.readFile(path).trim();
+    if (!/^\d+$/.test(contents)) return null;
+    const pid = Number.parseInt(contents, 10);
+    return pid > 0 && deps.isProcessRunning(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Restart the routstrd daemon after an update so the new binary takes
- * effect immediately.  Failures are collected and reported but never
+ * effect immediately. Failures are collected and reported but never
  * roll back the update itself.
  *
  * Note: cocod is no longer a separate process — the wallet now runs
@@ -192,14 +226,22 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
       if (!wasRunning) {
         console.log("\nroutstrd daemon was not running — skipping restart.");
       } else {
-        console.log("\nRestarting routstrd daemon...");
+        const pidFilePath = walletPidPath();
+        const ownerPid = getLivePidFileOwner(pidFilePath);
+        if (ownerPid === null) {
+          throw new Error(
+            `Refusing to stop the process at ${getDaemonBaseUrl(config)} because ` +
+              `no live routstrd owner was found in ${pidFilePath}`,
+          );
+        }
 
+        console.log(`\nRestarting routstrd daemon (PID: ${ownerPid})...`);
         await callDaemon("/stop", { method: "POST" });
 
         // Wait for the old daemon to fully exit: it keeps serving ongoing
         // requests before it releases the wallet lock and the new daemon can
         // safely claim it.
-        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+        await waitForDaemonToExit({ pidFilePath });
         console.log("routstrd daemon stopped.");
 
         await stopLegacyCocod();
@@ -318,12 +360,26 @@ async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
 program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
-  .version(packageJson.version, "--version", "output the version number");
+  .version(VERSION, "--version", "output the version number");
 
 program
   .command("update")
   .description("Update routstrd to the latest version")
   .action(async () => {
+    if (isStandaloneExecutable()) {
+      const release = await getLatestStandaloneRelease();
+      if ((compareVersions(VERSION, release.version) ?? -1) >= 0) {
+        console.log(`routstrd is already up to date (v${VERSION}).`);
+        return;
+      }
+
+      console.log(`Updating routstrd from v${VERSION} to v${release.version}...`);
+      await installStandaloneRelease(release);
+      console.log("routstrd updated successfully.\n");
+      await restartDaemonsAfterUpdate();
+      return;
+    }
+
     const packages = [{ name: "routstrd", label: "routstrd" }];
 
     let updatedAny = false;
@@ -664,6 +720,22 @@ program
       }
     },
   );
+
+program
+  .command("daemon")
+  .description("Run the daemon in the foreground")
+  .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address")
+  .option("-p, --provider <provider>", "Default provider to use")
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
+    await requireLocalDaemon();
+    const argv = ["routstrd", "daemon"];
+    if (options.port) argv.push("--port", options.port);
+    if (options.host) argv.push("--host", options.host);
+    if (options.provider) argv.push("--provider", options.provider);
+    const { runDaemon } = await import("./daemon/index");
+    await runDaemon(argv);
+  });
 
 // Start - start the background daemon
 program
@@ -2221,6 +2293,12 @@ serviceCmd
     try {
       execSync("pm2 -v", { stdio: "ignore" });
     } catch (e) {
+      if (isStandaloneExecutable()) {
+        console.error(
+          "PM2 is optional and is not bundled with routstrd. Install PM2 separately before using 'routstrd service install'.",
+        );
+        process.exit(1);
+      }
       console.log("PM2 not found. Installing PM2 globally with bun...");
       try {
         execSync("bun install -g pm2", { stdio: "inherit" });
@@ -2232,37 +2310,15 @@ serviceCmd
       }
     }
 
-    // 2. Resolve the path to the daemon
-    // In a global install, we want the bundled daemon in dist/daemon/index.js
-    let daemonPath: string;
-    try {
-      // Try to resolve relative to this file first (works in dev and global)
-      daemonPath = Bun.resolveSync("./daemon/index.js", import.meta.url);
-    } catch (e) {
-      // Fallback for some bundling scenarios
-      const path = require("path");
-      daemonPath = path.join(
-        path.dirname(import.meta.url).replace("file://", ""),
-        "daemon",
-        "index.js",
-      );
-    }
-
-    if (!existsSync(daemonPath)) {
-      console.error(
-        `Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`,
-      );
-      process.exit(1);
-    }
-
     console.log("Starting routstrd via PM2...");
     try {
       await stopLegacyCocod();
 
-      // Use --interpreter bun to ensure it runs with bun
-      execSync(`pm2 start "${daemonPath}" --name routstrd --interpreter bun`, {
-        stdio: "inherit",
+      const proc = Bun.spawn(["pm2", ...pm2DaemonArgs()], {
+        stdout: "inherit",
+        stderr: "inherit",
       });
+      if ((await proc.exited) !== 0) throw new Error("PM2 exited with an error");
 
       console.log("\n✅ routstrd is now managed by PM2.");
       console.log("\nTo ensure it starts on system reboot, run:");
@@ -2702,5 +2758,5 @@ program
   );
 
 export function cli(args: string[]) {
-  program.parse(args);
+  return program.parseAsync(args);
 }

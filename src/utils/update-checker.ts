@@ -1,3 +1,7 @@
+import { isStandaloneExecutable } from "../runtime";
+import { VERSION } from "../version";
+import { getLatestStandaloneRelease } from "./standalone-update";
+
 const NPM_REGISTRY = "https://registry.npmjs.org";
 
 /** Packages that `routstrd update` manages. */
@@ -53,30 +57,65 @@ export async function getGlobalPackageVersion(
   }
 }
 
+type ParsedVersion = {
+  core: [number, number, number];
+  prerelease: string[] | null;
+};
+
+function parseVersion(version: string): ParsedVersion | null {
+  const match = version.match(
+    /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+  );
+  if (!match?.[1] || !match[2] || !match[3]) return null;
+  return {
+    core: [
+      Number.parseInt(match[1], 10),
+      Number.parseInt(match[2], 10),
+      Number.parseInt(match[3], 10),
+    ],
+    prerelease: match[4]?.split(".") ?? null,
+  };
+}
+
+function comparePrerelease(a: string[] | null, b: string[] | null): number {
+  if (!a && !b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const left = a[index];
+    const right = b[index];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) {
+      return Number.parseInt(left, 10) - Number.parseInt(right, 10);
+    }
+    if (leftNumeric) return -1;
+    if (rightNumeric) return 1;
+    return left < right ? -1 : 1;
+  }
+  return 0;
+}
+
 /**
  * Compare two semver version strings.
  * Returns a positive number if `a` is newer, negative if `b` is newer,
  * 0 if equal, or null if either value is not parseable semver.
  */
 export function compareVersions(a: string, b: string): number | null {
-  const parse = (v: string): [number, number, number] | null => {
-    const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
-    if (!match?.[1] || !match[2] || !match[3]) return null;
-    return [
-      parseInt(match[1], 10),
-      parseInt(match[2], 10),
-      parseInt(match[3], 10),
-    ];
-  };
-  const va = parse(a);
-  const vb = parse(b);
-  if (!va || !vb) return null;
-  const [a1, a2, a3] = va;
-  const [b1, b2, b3] = vb;
-  if (a1 !== b1) return a1 - b1;
-  if (a2 !== b2) return a2 - b2;
-  if (a3 !== b3) return a3 - b3;
-  return 0;
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  if (!left || !right) return null;
+
+  for (let index = 0; index < left.core.length; index++) {
+    const difference = left.core[index]! - right.core[index]!;
+    if (difference !== 0) return difference;
+  }
+  return comparePrerelease(left.prerelease, right.prerelease);
 }
 
 export interface PackageUpdate {
@@ -97,6 +136,30 @@ export interface UpdateCheckResult {
  * Returns a result with per-package details and an overall `hasUpdate` flag.
  */
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  if (isStandaloneExecutable()) {
+    let latest: string | null = null;
+    try {
+      latest = (await getLatestStandaloneRelease()).version;
+    } catch {
+      // Update checks are best-effort and must not disrupt the TUI.
+    }
+    const hasUpdate = !!(
+      latest && (compareVersions(VERSION, latest) ?? -1) < 0
+    );
+    return {
+      hasUpdate,
+      packages: [
+        {
+          name: "routstrd",
+          label: "routstrd",
+          current: VERSION,
+          latest,
+          hasUpdate,
+        },
+      ],
+    };
+  }
+
   const packages = await Promise.all(
     UPDATE_PACKAGES.map(async ({ name, label }) => {
       const [current, latest] = await Promise.all([
