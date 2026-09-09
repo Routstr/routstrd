@@ -125,3 +125,22 @@ export function globalInstallCommand(
     ? ["deno", "install", "-gAf", `npm:${packageName}`]
     : ["bun", "install", "-g", packageName];
 }
+
+/**
+ * Command that installs PM2 globally.
+ *
+ * PM2 cannot be installed with `deno install`: the resulting shim runs PM2
+ * itself under Deno, where it first trips over `Object.prototype.__proto__`
+ * (disabled by default) and then, even with `--unstable-unsafe-proto`, dies in
+ * Deno's `node:net` polyfill with `EINVAL` when its RPC daemon connects to
+ * pm2_home's unix sockets. PM2 has to run under Node, so install it with npm
+ * and leave Deno to act only as the interpreter PM2 spawns for the daemon
+ * (see `pm2DaemonArgs`).
+ */
+export function pm2InstallCommand(
+  runtime: RuntimeName = RUNTIME,
+): string[] {
+  return runtime === "deno"
+    ? ["npm", "install", "-g", "pm2"]
+    : globalInstallCommand("pm2", runtime);
+}

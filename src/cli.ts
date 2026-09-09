@@ -62,7 +62,13 @@ import {
   getGlobalPackageVersion,
   getLatestNpmVersion,
 } from "./utils/update-checker.ts";
-import { globalInstallCommand, isStandaloneExecutable, pm2DaemonArgs } from "./runtime.ts";
+import {
+  globalInstallCommand,
+  isStandaloneExecutable,
+  pm2DaemonArgs,
+  pm2InstallCommand,
+  RUNTIME,
+} from "./runtime.ts";
 import { readFileRange } from "./utils/spawn.ts";
 import { VERSION } from "./version.ts";
 import {
@@ -2283,6 +2289,17 @@ program
   });
 
 // Service - PM2 management
+
+/** Whether npm is on PATH, i.e. whether PM2 can be installed for Node. */
+function hasNpm(): boolean {
+  try {
+    execSync("npm --version", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const serviceCmd = program
   .command("service")
   .description("Manage routstrd as a system service using PM2");
@@ -2302,7 +2319,18 @@ serviceCmd
         );
         process.exit(1);
       }
-      const pm2Install = globalInstallCommand("pm2").join(" ");
+      const pm2Install = pm2InstallCommand().join(" ");
+      // PM2 has to run under Node, so on Deno we shell out to npm rather than
+      // `deno install`. Without npm on PATH there is nothing to fall back to.
+      if (RUNTIME === "deno" && !hasNpm()) {
+        console.error(
+          "PM2 is a Node.js program and cannot be installed with `deno install`.\n" +
+            "Install Node.js, then run:\n\n" +
+            "  npm install -g pm2\n\n" +
+            "and re-run 'routstrd service install'.",
+        );
+        process.exit(1);
+      }
       console.log(`PM2 not found. Installing PM2 globally (${pm2Install})...`);
       try {
         execSync(pm2Install, { stdio: "inherit" });

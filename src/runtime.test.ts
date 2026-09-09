@@ -4,6 +4,7 @@ import {
   globalInstallCommand,
   isStandaloneExecutable,
   pm2DaemonArgs,
+  pm2InstallCommand,
 } from "./runtime.ts";
 
 describe("isStandaloneExecutable", () => {
@@ -95,5 +96,17 @@ describe("globalInstallCommand", () => {
       "-gAf",
       "npm:routstrd",
     ]);
+  });
+});
+
+describe("pm2InstallCommand", () => {
+  // PM2 must run under Node: a `deno install` shim crashes on __proto__ and,
+  // past that, on Deno's node:net unix sockets. So Deno installs it via npm.
+  test("installs PM2 with npm on deno, never with `deno install`", () => {
+    expect(pm2InstallCommand("deno")).toEqual(["npm", "install", "-g", "pm2"]);
+  });
+
+  test("keeps bun's own global install", () => {
+    expect(pm2InstallCommand("bun")).toEqual(["bun", "install", "-g", "pm2"]);
   });
 });
