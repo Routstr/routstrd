@@ -64,11 +64,17 @@ writeFileSync(
 );
 
 const entrypoint = new URL("../../src/daemon/index.ts", import.meta.url).pathname;
-const command = RUNTIME === "deno"
+// SMOKE_BIN points the test at a compiled standalone binary instead of the
+// source tree, which is the only way to prove the runtime-shimmed SQLite paths
+// survived `bun build --compile` / `deno compile` -- `--version` never touches them.
+const binary = process.env.SMOKE_BIN;
+const command = binary
+  ? [binary, "daemon", "--port", String(PORT)]
+  : RUNTIME === "deno"
   ? [process.execPath, "run", "-A", entrypoint, "--port", String(PORT)]
   : [process.execPath, entrypoint, "--port", String(PORT)];
 
-log(`booting daemon on port ${PORT} in ${root}`);
+log(`booting ${binary ?? "daemon"} on port ${PORT} in ${root}`);
 const child = spawn(command[0]!, command.slice(1), {
   env: {
     ...process.env,
@@ -99,8 +105,11 @@ try {
   log("/health responded");
 
   // Proves the SQLite shim, coco repositories and SDK drivers all initialized.
+  // The event store finishes opening slightly after /health starts answering,
+  // so poll rather than sampling once.
   for (const file of ["routstr.db", "events.db", join("wallet", "coco.db")]) {
-    if (!existsSync(join(root, file))) fail(`expected ${file} to exist after boot`);
+    await poll(`${file} to exist`, 60_000, async () =>
+      existsSync(join(root, file)) || null);
   }
   log("sqlite databases created (routstr.db, events.db, wallet/coco.db)");
 

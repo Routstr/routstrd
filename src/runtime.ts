@@ -16,6 +16,27 @@ type BunRuntime = {
   main: string;
 };
 
+type DenoRuntime = {
+  build?: { standalone?: boolean };
+  mainModule?: string;
+};
+
+/**
+ * Normalise whichever runtime we are on into the Bun-shaped record
+ * `isStandaloneExecutable()` inspects.
+ */
+function standaloneMarker(): BunRuntime | undefined {
+  if (RUNTIME === "deno") {
+    const deno = (globalThis as { Deno?: DenoRuntime }).Deno;
+    return {
+      // Set on `deno compile` binaries, false under `deno run`.
+      isStandaloneExecutable: deno?.build?.standalone === true,
+      main: deno?.mainModule ?? "",
+    };
+  }
+  return (globalThis as unknown as { Bun: BunRuntime }).Bun;
+}
+
 /**
  * Path of the entry module.
  *
@@ -32,15 +53,11 @@ export function mainModule(): string {
 }
 
 /**
- * Whether this process is a `bun build --compile` standalone binary.
- *
- * Always false on Deno: standalone binaries are only produced by Bun, so a Deno
- * process is by definition running from source or from an installed script.
+ * Whether this process is a compiled standalone binary, from either
+ * `bun build --compile` or `deno compile`.
  */
 export function isStandaloneExecutable(
-  runtime: BunRuntime | undefined = RUNTIME === "deno"
-    ? undefined
-    : (globalThis as unknown as { Bun: BunRuntime }).Bun,
+  runtime: BunRuntime | undefined = standaloneMarker(),
 ): boolean {
   if (!runtime) return false;
   return (

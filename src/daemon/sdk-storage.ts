@@ -94,8 +94,30 @@ export function createSqliteUsageTrackingDriver(options: {
   });
 }
 
+type PersistentEventDatabaseFactory = (dbPath: string) => unknown;
+
+let eventDatabaseOverride: PersistentEventDatabaseFactory | undefined;
+
+/**
+ * Override how the persistent Nostr event store is opened.
+ *
+ * `bun build --compile` cannot follow the computed specifiers below, so the
+ * standalone Bun binary would silently lose its event store and fall back to
+ * HTTP model discovery. Its entrypoint (`src/index.bun.ts`) registers the class
+ * through a real static import instead, which is what gets it into the binary.
+ * Every other way of running -- from source, from the npm bundle, or from the
+ * `deno compile` binary -- resolves the import dynamically, so this stays
+ * optional.
+ */
+export function setPersistentEventDatabaseFactory(
+  factory: PersistentEventDatabaseFactory,
+): void {
+  eventDatabaseOverride = factory;
+}
+
 /** Persistent Nostr event store, backed by whichever SQLite the runtime has. */
 async function createPersistentEventDatabase(dbPath: string) {
+  if (eventDatabaseOverride) return eventDatabaseOverride(dbPath);
   if (isDeno) {
     const specifier = "applesauce-sqlite/deno";
     const { NativeSqliteEventDatabase } = await import(specifier);

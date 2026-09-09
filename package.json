@@ -24,7 +24,7 @@
     "lint": "tsc --noEmit",
     "test": "bun test",
     "build": "bun build src/index.ts --target=node --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=node --outfile=dist/daemon/index.js --external better-sqlite3",
-    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts --outfile=dist/routstrd",
+    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.bun.ts --outfile=dist/routstrd",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {

@@ -80,6 +80,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.0
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - run: bun install --frozen-lockfile
       - name: Build standalone executable
         run: >-
@@ -87,18 +90,36 @@ jobs:
           --target=${{ matrix.target }}
           --no-compile-autoload-dotenv
           --no-compile-autoload-bunfig
-          src/index.ts
+          src/index.bun.ts
           --outfile=build/routstrd
-      - name: Smoke test executable
+      # Via the task so CI and `deno task compile` cannot drift apart. Deno's
+      # compiler runs natively on each matrix runner, so there is no --target.
+      - name: Build Deno standalone executable
+        run: |
+          deno task compile
+          mkdir -p build-deno
+          mv dist/routstrd-deno build-deno/routstrd
+      - name: Smoke test executables
         run: |
           package_version="$(bun -p "require('./package.json').version")"
-          test "$(build/routstrd --version)" = "${package_version}"
-          build/routstrd --help >/dev/null
-      - name: Package executable
+          for binary in build/routstrd build-deno/routstrd; do
+            test "$("${binary}" --version)" = "${package_version}"
+            "${binary}" --help >/dev/null
+          done
+      # --version never touches SQLite, so boot each binary for real: this is
+      # what catches a runtime-specific module that failed to get compiled in.
+      - name: Boot test executables
+        run: |
+          SMOKE_PORT=18201 SMOKE_BIN=build/routstrd bun scripts/smoke/daemon-boot.ts
+          SMOKE_PORT=18202 SMOKE_BIN=build-deno/routstrd bun scripts/smoke/daemon-boot.ts
+      - name: Package executables
         run: |
           package_version="$(bun -p "require('./package.json').version")"
           tar -C build -czf \
             "routstrd-v${package_version}-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" \
+            routstrd
+          tar -C build-deno -czf \
+            "routstrd-v${package_version}-${{ matrix.platform }}-${{ matrix.arch }}-deno.tar.gz" \
             routstrd
       - uses: actions/upload-artifact@v4
         with:
