@@ -2300,6 +2300,50 @@ function hasNpm(): boolean {
   }
 }
 
+/** Absolute path to npm's global `bin` directory, if npm is available. */
+function npmGlobalBin(): string | null {
+  try {
+    const prefix = execSync("npm prefix -g", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    return prefix ? join(prefix, "bin") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether this pm2 executable actually runs (a `deno install` shim does not). */
+function pm2Works(bin: string): boolean {
+  try {
+    execSync(`${JSON.stringify(bin)} -v`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate a PM2 that actually runs.
+ *
+ * PATH cannot be trusted here. A previous `routstrd service install` on Deno
+ * left a `deno install` shim at ~/.deno/bin/pm2 which crashes on startup, and
+ * that directory usually precedes npm's global bin on PATH — so a working
+ * npm-installed PM2 stays shadowed by the broken one. Probe each candidate by
+ * running it, and prefer whichever responds.
+ */
+function resolvePm2(): { bin: string; shadowed: boolean } | null {
+  if (pm2Works("pm2")) return { bin: "pm2", shadowed: false };
+  const globalBin = npmGlobalBin();
+  if (globalBin) {
+    const candidate = join(globalBin, "pm2");
+    // `shadowed` when a non-working `pm2` is on PATH ahead of this one.
+    if (pm2Works(candidate)) return { bin: candidate, shadowed: true };
+  }
+  return null;
+}
+
 const serviceCmd = program
   .command("service")
   .description("Manage routstrd as a system service using PM2");
@@ -2309,10 +2353,9 @@ serviceCmd
   .description("Install and start routstrd using PM2 for persistence")
   .action(async () => {
     await requireLocalDaemon();
-    // 1. Check if PM2 is installed
-    try {
-      execSync("pm2 -v", { stdio: "ignore" });
-    } catch (e) {
+    // 1. Find a PM2 that runs, installing one if there is none.
+    let pm2 = resolvePm2();
+    if (!pm2) {
       if (isStandaloneExecutable()) {
         console.error(
           "PM2 is optional and is not bundled with routstrd. Install PM2 separately before using 'routstrd service install'.",
@@ -2340,13 +2383,31 @@ serviceCmd
         );
         process.exit(1);
       }
+      pm2 = resolvePm2();
+      if (!pm2) {
+        console.error(
+          "PM2 was installed but still does not run. If a broken `deno install`\n" +
+            "shim is shadowing it, remove it with:\n\n" +
+            "  deno uninstall -g pm2\n",
+        );
+        process.exit(1);
+      }
+    }
+
+    if (pm2.shadowed) {
+      console.warn(
+        "Warning: the `pm2` on your PATH does not run — it is most likely a\n" +
+          "`deno install` shim, which cannot work because PM2 requires Node.\n" +
+          `Using ${pm2.bin} instead. To clean this up, run:\n\n` +
+          "  deno uninstall -g pm2\n",
+      );
     }
 
     console.log("Starting routstrd via PM2...");
     try {
       await stopLegacyCocod();
 
-      const proc = spawn("pm2", pm2DaemonArgs(), { stdio: "inherit" });
+      const proc = spawn(pm2.bin, pm2DaemonArgs(), { stdio: "inherit" });
       const pm2Code = await new Promise<number>((resolve) => {
         proc.on("error", () => resolve(1));
         proc.on("exit", (value) => resolve(value ?? 0));
@@ -2370,7 +2431,9 @@ serviceCmd
   .description("Stop and remove routstrd from PM2")
   .action(() => {
     try {
-      execSync("pm2 delete routstrd", { stdio: "inherit" });
+      execSync(`${JSON.stringify(resolvePm2()?.bin ?? "pm2")} delete routstrd`, {
+        stdio: "inherit",
+      });
       console.log("✅ routstrd service removed from PM2.");
     } catch (e) {
       console.error(
@@ -2384,7 +2447,9 @@ serviceCmd
   .description("View PM2 logs for routstrd")
   .action(() => {
     try {
-      execSync("pm2 logs routstrd", { stdio: "inherit" });
+      execSync(`${JSON.stringify(resolvePm2()?.bin ?? "pm2")} logs routstrd`, {
+        stdio: "inherit",
+      });
     } catch (e) {
       // Ignored
     }
