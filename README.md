@@ -4,7 +4,7 @@ Routstr daemon - A CLI tool for managing routstr processes, similar to `cocod` (
 
 ## Overview
 
-routstrd is a Bun-based CLI tool that provides a background daemon for the Routstr protocol. It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
+routstrd is a CLI tool that provides a background daemon for the Routstr protocol. It runs on both [Bun](https://bun.sh) and [Deno](https://deno.com) (v2). It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
 
 ## Routstr for Teams
 
@@ -19,8 +19,10 @@ For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-
 
 ## Requirements
 
-The standalone release does not require Bun, Node.js, or npm. Installing from
-npm or running from source requires the [Bun](https://bun.sh) runtime.
+The standalone release does not require any runtime to be installed — there is a
+binary built with each runtime, so pick whichever runs on your system.
+Installing from npm or running from source requires either [Bun](https://bun.sh)
+or [Deno](https://deno.com) v2; routstrd supports both equally.
 
 ## Installation
 
@@ -32,9 +34,31 @@ Download the archive for your operating system and architecture from the
 [latest GitHub Release](https://github.com/Routstr/routstrd/releases/latest).
 Release archives are available for Linux and macOS on x64 and arm64.
 
+Each platform ships two equivalent binaries — eight archives in total:
+
+| Archive | Compiled with |
+| --- | --- |
+| `routstrd-v<version>-<os>-<arch>.tar.gz` | Bun |
+| `routstrd-v<version>-<os>-<arch>-deno.tar.gz` | Deno |
+
+Both are fully self-contained, take the same arguments, and use the same
+`~/.routstrd` directory — neither needs Bun or Deno installed. Take the default
+unless the Bun binary does not run on your system, in which case use the `-deno`
+one. `routstrd update` keeps you on the flavour you downloaded.
+
 ```sh
+# Bun-built (default)
 grep "routstrd-v0.4.9-linux-x64.tar.gz" SHA256SUMS | shasum -a 256 -c -
 tar -xzf routstrd-v0.4.9-linux-x64.tar.gz
+
+# Deno-built
+grep "routstrd-v0.4.9-linux-x64-deno.tar.gz" SHA256SUMS | shasum -a 256 -c -
+tar -xzf routstrd-v0.4.9-linux-x64-deno.tar.gz
+```
+
+Either archive extracts a single executable named `routstrd`:
+
+```sh
 mkdir -p "$HOME/.local/bin"
 install -m 755 routstrd "$HOME/.local/bin/routstrd"
 ```
@@ -47,13 +71,36 @@ downloaded, and ensure `$HOME/.local/bin` is on `PATH`.
 bun i -g routstrd
 ```
 
-**OR - From source:**
+**Global with deno:**
+```sh
+deno install -gAf npm:routstrd
+```
+
+This installs the npm package and puts a `routstrd` shim in Deno's install root
+(`~/.deno/bin` by default, or `$DENO_INSTALL_ROOT/bin`); make sure that
+directory is on `PATH`. Re-run the same command to upgrade — it is idempotent,
+which is why `routstrd update` reinstalls rather than comparing versions on
+Deno.
+
+**OR - From source (bun):**
 ```sh
 git clone https://github.com/routstr/routstrd.git
 cd routstrd
 bun install
 bun link
 ```
+
+**OR - From source (deno):**
+```sh
+git clone https://github.com/routstr/routstrd.git
+cd routstrd
+deno install                                  # fetch dependencies
+deno install -gAf -n routstrd ./src/index.ts  # global shim pointing at the checkout
+```
+
+To run from the checkout without installing anything globally, use the tasks
+instead: `deno task start`, `deno task stop`, `deno task monitor`. Any other
+subcommand works with `deno run -A src/index.ts <command>`.
 
 ### Step 2: Setup & Fund
 
@@ -244,32 +291,63 @@ overrides the 21-minute interval.
 
 ## Development
 
-Install dependencies:
-```sh
-bun install
-```
+routstrd runs on both Bun and Deno v2 from the same source tree. Bun is the
+development runtime — it runs the test suite — but every command has a Deno
+equivalent:
 
-Run CLI:
-```sh
-bun run start
-```
+| Task | Bun | Deno |
+| --- | --- | --- |
+| Install dependencies | `bun install` | `deno install` |
+| Run the CLI / daemon | `bun run start` | `deno task start` |
+| Stop the daemon | `bun run stop` | `deno task stop` |
+| Monitor | `bun run monitor` | `deno task monitor` |
+| Type-check | `bun run lint` | `deno task check` |
+| Boot smoke test | `bun scripts/smoke/daemon-boot.ts` | `deno task smoke` |
+| Build a standalone binary | `bun run build:binary` | `deno task compile` |
+| Smoke-test that binary | `SMOKE_BIN=dist/routstrd bun scripts/smoke/daemon-boot.ts` | `deno task smoke:binary` |
 
-Run daemon:
-```sh
-bun run start
-```
+`deno task` with no arguments lists them. Any subcommand that has no task runs
+directly: `deno run -A src/index.ts <command>`.
 
-Build a standalone executable for the current platform:
+The unit tests (`bun test`) run under Bun only. Deno is covered instead by the
+boot smoke test, which starts the daemon under whichever runtime invokes it,
+exercises the SQLite, wallet, and HTTP paths, and shuts it down cleanly. Point
+it at a compiled binary with `SMOKE_BIN` — `--version` never touches SQLite, so
+booting is the only way to prove a binary was compiled correctly.
 
-```sh
-bun run build:binary
-./dist/routstrd --version
-```
+Binaries are roughly 100 MB (Bun) and 300 MB (Deno) — the Deno one is larger
+because `deno compile` embeds npm dependencies unbundled; `--bundle` is not an option,
+as it cannot resolve the SDK's `bun:sqlite` import. Release builds run
+`deno task compile` directly, so the flags in `deno.json` are the only
+definition of how the Deno binary is produced.
+
+The Bun binary is compiled from `src/index.bun.ts` rather than `src/index.ts`.
+That entrypoint differs only in statically importing `applesauce-sqlite/bun`:
+the shared code reaches it through a computed dynamic import so Deno never has
+to resolve `bun:sqlite`, and a computed specifier is invisible to Bun's bundler
+too, so without the static import the binary would boot with no persistent
+Nostr event store. `deno compile` covers the same gap with
+`--include npm:applesauce-sqlite`.
 
 Standalone installations update directly from GitHub Releases with
-`routstrd update`. npm installations continue to update through Bun. PM2 is an
-optional external dependency used only by `routstrd service`; normal daemon
-operation does not require it.
+`routstrd update`. npm installations update through the package manager that
+installed them (`bun install -g` or `deno install -gAf`). PM2 is an optional
+external dependency used only by `routstrd service`; normal daemon operation
+does not require it.
+
+### Runtime compatibility notes
+
+Bun-specific APIs are confined to two seams, so the rest of the code is plain
+`node:` builtins that both runtimes implement:
+
+- `src/utils/sqlite.ts` — Bun has `bun:sqlite`, Deno has `node:sqlite`; this
+  exposes the `bun:sqlite` shape over whichever is available. (`better-sqlite3`
+  is not an option: Deno cannot load it at all.)
+- `src/runtime.ts` — runtime detection, entrypoint path, standalone-binary
+  detection, and the per-runtime global-install command.
+
+`src/daemon/sdk-storage.ts` builds the Routstr SDK's storage drivers on top of
+that shim, because the SDK's own entrypoints are Bun-only or Node-only.
 
 When an update finds a process on the configured daemon port, it only stops that
 process if the wallet PID file confirms a live daemon owned by the same routstrd
@@ -284,11 +362,6 @@ CLI entrypoint and remove its legacy path dependency:
 routstrd service uninstall
 routstrd service install
 pm2 save
-```
-
-Typecheck:
-```sh
-bun run lint
 ```
 
 ### Manual chat-completions smoke test
@@ -309,14 +382,14 @@ not part of `bun test`.
 
 1. Set a new `package.json` version and commit it. The release tag must be the
    same version prefixed with `v`, and the tag must not already exist.
-2. Push the tag. The release workflow runs lint and tests, builds Linux and
-   macOS executables for x64 and arm64, smoke-tests them, and publishes the
-   archives with `SHA256SUMS`.
-3. Verify all four archives appear in the GitHub Release and validate each
-   checksum before announcing it.
+2. Push the tag. The release workflow runs lint and tests, builds Bun and Deno
+   executables for Linux and macOS on x64 and arm64, boots each one, and
+   publishes the archives with `SHA256SUMS`.
+3. Verify all eight archives appear in the GitHub Release (four Bun, four
+   `-deno`) and validate each checksum before announcing it.
 4. In disposable environments for each platform, test `--version`, `--help`,
    foreground startup failure, and background `start`, `status`, and `stop`
-   without Bun on `PATH`.
+   with neither Bun nor Deno on `PATH`, for both flavours.
 5. Test `routstrd service install` and restart behavior with PM2 in a disposable
    environment. Never run release/update lifecycle tests against a production
    daemon. When isolation is needed, use both a separate `ROUTSTRD_DIR` and a

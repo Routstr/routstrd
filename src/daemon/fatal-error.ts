@@ -1,4 +1,4 @@
-import { logger } from "../utils/logger";
+import { logger } from "../utils/logger.ts";
 
 /**
  * Report an unrecoverable error, then exit.

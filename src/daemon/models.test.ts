@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { SdkStore } from "@routstr/sdk";
-import { createModelService } from "./models";
+import { createModelService } from "./models.ts";
 
 /**
  * `ensureProvidersBootstrapped` must mirror the review-disabled provider set

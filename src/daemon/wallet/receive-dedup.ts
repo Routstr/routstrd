@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import type { ReceiveOperation } from "@cashu/coco-core";
-import type { Database } from "bun:sqlite";
+import type { SqliteDatabase as Database } from "../../utils/sqlite.ts";
 
 const TOKEN_TABLE = "routstrd_receive_tokens";
 const MAINTENANCE_TABLE = "routstrd_wallet_maintenance";

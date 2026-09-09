@@ -1,6 +1,8 @@
-import { isStandaloneExecutable } from "../runtime";
-import { VERSION } from "../version";
-import { getLatestStandaloneRelease } from "./standalone-update";
+import { spawnCapture } from "./spawn.ts";
+import { RUNTIME } from "../runtime.ts";
+import { isStandaloneExecutable } from "../runtime.ts";
+import { VERSION } from "../version.ts";
+import { getLatestStandaloneRelease } from "./standalone-update.ts";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
 
@@ -30,19 +32,21 @@ export async function getLatestNpmVersion(
 }
 
 /**
- * Get the version of a globally-installed bun package.
+ * Get the version of a globally-installed package.
  * Returns null when the package is not installed globally or the version
  * cannot be parsed as semver (e.g. installed from a git URL).
+ *
+ * Deno has no equivalent of `bun pm ls -g`, so it always returns null there.
+ * Callers treat an unknown installed version as "reinstall", which is correct:
+ * `deno install -gAf` is idempotent.
  */
 export async function getGlobalPackageVersion(
   packageName: string,
 ): Promise<string | null> {
+  if (RUNTIME === "deno") return null;
   try {
-    const proc = Bun.spawn(["bun", "pm", "ls", "-g"], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const output = await new Response(proc.stdout).text();
+    const proc = spawnCapture("bun", ["pm", "ls", "-g"], { stderr: "ignore" });
+    const output = await proc.stdout;
     await proc.exited;
     // Lines look like:  ├── routstrd@0.3.10   or   └── @routstr/cocod@0.0.24
     const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

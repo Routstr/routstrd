@@ -1,6 +1,6 @@
 import { program } from "commander";
-import { startDaemon } from "./start-daemon";
-import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
+import { startDaemon } from "./start-daemon.ts";
+import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store.ts";
 import {
   handleDaemonCommand,
   callDaemon,
@@ -10,17 +10,18 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getUserNpub,
-} from "./utils/daemon-client";
-import { waitForDaemonToExit } from "./utils/daemon-stop";
+} from "./utils/daemon-client.ts";
+import { waitForDaemonToExit } from "./utils/daemon-stop.ts";
 import {
   listClientsAction,
   deleteClientAction,
   addClientAction,
   refreshModelsAndClientsAction,
   setAutomaticRefreshAction,
-} from "./utils/clients";
+} from "./utils/clients.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
+import { createInterface } from "node:readline";
 import { dirname, join } from "path";
 import {
   CONFIG_DIR,
@@ -29,30 +30,30 @@ import {
   DEFAULT_CONFIG,
   LOGS_DIR,
   type RoutstrdConfig,
-} from "./utils/config";
-import { COCO_LOGS_DIR, logger } from "./utils/logger";
-import { setupIntegration, type IntegrationKey } from "./integrations";
+} from "./utils/config.ts";
+import { COCO_LOGS_DIR, logger } from "./utils/logger.ts";
+import { setupIntegration, type IntegrationKey } from "./integrations/index.ts";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   stopLegacyCocod,
-} from "./daemon/wallet/coco-client";
-import { migrateLegacyWallet } from "./daemon/wallet/migration";
+} from "./daemon/wallet/coco-client.ts";
+import { migrateLegacyWallet } from "./daemon/wallet/migration.ts";
 import {
   diagnoseWallets,
   renderWalletDoctor,
   summarizeWalletDirectory,
   WalletMigrationConflictError,
-} from "./daemon/wallet/diagnostics";
+} from "./daemon/wallet/diagnostics.ts";
 import {
   legacyCocodDir,
   legacyCocodPidPath,
   legacyCocodSocketPath,
   walletDir as defaultWalletDir,
   walletPidPath,
-} from "./daemon/wallet/paths";
+} from "./daemon/wallet/paths.ts";
 import * as QRCode from "qrcode";
-import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98.ts";
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
@@ -61,12 +62,19 @@ import {
   getGlobalPackageVersion,
   getLatestNpmVersion,
 } from "./utils/update-checker.ts";
-import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
-import { VERSION } from "./version";
+import {
+  globalInstallCommand,
+  isStandaloneExecutable,
+  pm2DaemonArgs,
+  pm2InstallCommand,
+  RUNTIME,
+} from "./runtime.ts";
+import { readFileRange } from "./utils/spawn.ts";
+import { VERSION } from "./version.ts";
 import {
   getLatestStandaloneRelease,
   installStandaloneRelease,
-} from "./utils/standalone-update";
+} from "./utils/standalone-update.ts";
 
 type RoutstrModel = {
   id: string;
@@ -403,11 +411,12 @@ program
       const toPart = latest ? ` to v${latest}` : "";
       console.log(`Updating ${label}${fromPart}${toPart}...`);
 
-      const proc = Bun.spawn(["bun", "install", "-g", name], {
-        stdout: "inherit",
-        stderr: "inherit",
+      const [installCommand, ...installArgs] = globalInstallCommand(name);
+      const proc = spawn(installCommand as string, installArgs, { stdio: "inherit" });
+      const code = await new Promise<number>((resolve) => {
+        proc.on("error", () => resolve(1));
+        proc.on("exit", (value) => resolve(value ?? 0));
       });
-      const code = await proc.exited;
       if (code !== 0) {
         console.error(`Failed to update ${label}.`);
         process.exit(1);
@@ -733,7 +742,7 @@ program
     if (options.port) argv.push("--port", options.port);
     if (options.host) argv.push("--host", options.host);
     if (options.provider) argv.push("--provider", options.provider);
-    const { runDaemon } = await import("./daemon/index");
+    const { runDaemon } = await import("./daemon/index.ts");
     await runDaemon(argv);
   });
 
@@ -1915,7 +1924,7 @@ walletCmd
       }
 
       if (!options.dryRun && !options.yes) {
-        const rl = require("readline").createInterface({
+        const rl = createInterface({
           input: process.stdin,
           output: process.stdout,
         });
@@ -2162,7 +2171,7 @@ nwcCmd
   .action(async (connectionString?: string) => {
     if (!connectionString) {
       // Interactive mode: prompt for connection string
-      const rl = require("readline").createInterface({
+      const rl = createInterface({
         input: process.stdin,
         output: process.stdout,
       });
@@ -2280,6 +2289,61 @@ program
   });
 
 // Service - PM2 management
+
+/** Whether npm is on PATH, i.e. whether PM2 can be installed for Node. */
+function hasNpm(): boolean {
+  try {
+    execSync("npm --version", { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Absolute path to npm's global `bin` directory, if npm is available. */
+function npmGlobalBin(): string | null {
+  try {
+    const prefix = execSync("npm prefix -g", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    return prefix ? join(prefix, "bin") : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether this pm2 executable actually runs (a `deno install` shim does not). */
+function pm2Works(bin: string): boolean {
+  try {
+    execSync(`${JSON.stringify(bin)} -v`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Locate a PM2 that actually runs.
+ *
+ * PATH cannot be trusted here. A previous `routstrd service install` on Deno
+ * left a `deno install` shim at ~/.deno/bin/pm2 which crashes on startup, and
+ * that directory usually precedes npm's global bin on PATH — so a working
+ * npm-installed PM2 stays shadowed by the broken one. Probe each candidate by
+ * running it, and prefer whichever responds.
+ */
+function resolvePm2(): { bin: string; shadowed: boolean } | null {
+  if (pm2Works("pm2")) return { bin: "pm2", shadowed: false };
+  const globalBin = npmGlobalBin();
+  if (globalBin) {
+    const candidate = join(globalBin, "pm2");
+    // `shadowed` when a non-working `pm2` is on PATH ahead of this one.
+    if (pm2Works(candidate)) return { bin: candidate, shadowed: true };
+  }
+  return null;
+}
+
 const serviceCmd = program
   .command("service")
   .description("Manage routstrd as a system service using PM2");
@@ -2289,36 +2353,66 @@ serviceCmd
   .description("Install and start routstrd using PM2 for persistence")
   .action(async () => {
     await requireLocalDaemon();
-    // 1. Check if PM2 is installed
-    try {
-      execSync("pm2 -v", { stdio: "ignore" });
-    } catch (e) {
+    // 1. Find a PM2 that runs, installing one if there is none.
+    let pm2 = resolvePm2();
+    if (!pm2) {
       if (isStandaloneExecutable()) {
         console.error(
           "PM2 is optional and is not bundled with routstrd. Install PM2 separately before using 'routstrd service install'.",
         );
         process.exit(1);
       }
-      console.log("PM2 not found. Installing PM2 globally with bun...");
-      try {
-        execSync("bun install -g pm2", { stdio: "inherit" });
-      } catch (err) {
+      const pm2Install = pm2InstallCommand().join(" ");
+      // PM2 has to run under Node, so on Deno we shell out to npm rather than
+      // `deno install`. Without npm on PATH there is nothing to fall back to.
+      if (RUNTIME === "deno" && !hasNpm()) {
         console.error(
-          "Failed to install PM2. Please install it manually: bun install -g pm2",
+          "PM2 is a Node.js program and cannot be installed with `deno install`.\n" +
+            "Install Node.js, then run:\n\n" +
+            "  npm install -g pm2\n\n" +
+            "and re-run 'routstrd service install'.",
         );
         process.exit(1);
       }
+      console.log(`PM2 not found. Installing PM2 globally (${pm2Install})...`);
+      try {
+        execSync(pm2Install, { stdio: "inherit" });
+      } catch (err) {
+        console.error(
+          `Failed to install PM2. Please install it manually: ${pm2Install}`,
+        );
+        process.exit(1);
+      }
+      pm2 = resolvePm2();
+      if (!pm2) {
+        console.error(
+          "PM2 was installed but still does not run. If a broken `deno install`\n" +
+            "shim is shadowing it, remove it with:\n\n" +
+            "  deno uninstall -g pm2\n",
+        );
+        process.exit(1);
+      }
+    }
+
+    if (pm2.shadowed) {
+      console.warn(
+        "Warning: the `pm2` on your PATH does not run — it is most likely a\n" +
+          "`deno install` shim, which cannot work because PM2 requires Node.\n" +
+          `Using ${pm2.bin} instead. To clean this up, run:\n\n` +
+          "  deno uninstall -g pm2\n",
+      );
     }
 
     console.log("Starting routstrd via PM2...");
     try {
       await stopLegacyCocod();
 
-      const proc = Bun.spawn(["pm2", ...pm2DaemonArgs()], {
-        stdout: "inherit",
-        stderr: "inherit",
+      const proc = spawn(pm2.bin, pm2DaemonArgs(), { stdio: "inherit" });
+      const pm2Code = await new Promise<number>((resolve) => {
+        proc.on("error", () => resolve(1));
+        proc.on("exit", (value) => resolve(value ?? 0));
       });
-      if ((await proc.exited) !== 0) throw new Error("PM2 exited with an error");
+      if (pm2Code !== 0) throw new Error("PM2 exited with an error");
 
       console.log("\n✅ routstrd is now managed by PM2.");
       console.log("\nTo ensure it starts on system reboot, run:");
@@ -2337,7 +2431,9 @@ serviceCmd
   .description("Stop and remove routstrd from PM2")
   .action(() => {
     try {
-      execSync("pm2 delete routstrd", { stdio: "inherit" });
+      execSync(`${JSON.stringify(resolvePm2()?.bin ?? "pm2")} delete routstrd`, {
+        stdio: "inherit",
+      });
       console.log("✅ routstrd service removed from PM2.");
     } catch (e) {
       console.error(
@@ -2351,7 +2447,9 @@ serviceCmd
   .description("View PM2 logs for routstrd")
   .action(() => {
     try {
-      execSync("pm2 logs routstrd", { stdio: "inherit" });
+      execSync(`${JSON.stringify(resolvePm2()?.bin ?? "pm2")} logs routstrd`, {
+        stdio: "inherit",
+      });
     } catch (e) {
       // Ignored
     }
@@ -2418,7 +2516,7 @@ program
     const modes: Array<"apikeys" | "xcashu"> = ["apikeys", "xcashu"];
 
     const selectedIndex = await new Promise<number>((resolve) => {
-      const rl = require("readline").createInterface({
+      const rl = createInterface({
         input: process.stdin,
         output: process.stdout,
       });
@@ -2517,7 +2615,7 @@ async function followLogFile(file: string, lines: number): Promise<void> {
       continue;
     }
 
-    const text = await Bun.file(file).slice(position, size).text();
+    const text = readFileRange(file, position, size);
     process.stdout.write(text);
     position = size;
   }

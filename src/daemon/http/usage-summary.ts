@@ -3,7 +3,7 @@ import type {
   UsageTrackingDriver,
   UsageTrackingEntry,
 } from "@routstr/sdk/storage";
-import type { ClientEntry } from "../../utils/clients";
+import type { ClientEntry } from "../../utils/clients.ts";
 
 // ─── Public shape ────────────────────────────────────────────────────────────
 

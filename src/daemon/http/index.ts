@@ -7,20 +7,20 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
-import type { RequestResponseLogSink } from "../request-response-log-sink";
+import type { RequestResponseLogSink } from "../request-response-log-sink.ts";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
-import { logger } from "../../utils/logger";
-import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
+import { logger } from "../../utils/logger.ts";
+import { loadDaemonConfig, saveDaemonConfig } from "../config-store.ts";
 import {
   CocodHttpError,
   type CocodClient,
   type CocodState,
   type WalletRecoveryProgress,
-} from "../wallet/cocod-client";
-import { receiveCashuToken } from "../wallet";
-import { getClientsFromStore } from "../../utils/clients";
-import { getUsageSummary } from "./usage-summary";
+} from "../wallet/cocod-client.ts";
+import { receiveCashuToken } from "../wallet/index.ts";
+import { getClientsFromStore } from "../../utils/clients.ts";
+import { getUsageSummary } from "./usage-summary.ts";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's

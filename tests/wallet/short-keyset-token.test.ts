@@ -7,8 +7,8 @@ import {
 import {
   createWalletAdapter,
   decodeCashuTokenAmount,
-} from "../../src/daemon/wallet";
-import type { CocodClient } from "../../src/daemon/wallet/cocod-client";
+} from "../../src/daemon/wallet/index.ts";
+import type { CocodClient } from "../../src/daemon/wallet/cocod-client.ts";
 
 // A full modern keyset ID with the same format as Minibits' post-migration
 // active keyset. getEncodedToken stores only its first eight bytes in TokenV4.

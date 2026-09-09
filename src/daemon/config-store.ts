@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { mkdir } from "fs/promises";
 import {
   chmodSync,
@@ -13,8 +14,8 @@ import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
   type RoutstrdConfig,
-} from "../utils/config";
-import { logger } from "../utils/logger";
+} from "../utils/config.ts";
+import { logger } from "../utils/logger.ts";
 
 export const REQUESTS_DIR = `${CONFIG_DIR}/requests`;
 
@@ -86,7 +87,7 @@ export async function loadDaemonConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {
       repairConfigPermissions();
-      const content = await Bun.file(CONFIG_FILE).text();
+      const content = await readFile(CONFIG_FILE, "utf8");
       return { ...DEFAULT_CONFIG, ...JSON.parse(content), ...envConfigOverrides() };
     }
   } catch (error) {

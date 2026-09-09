@@ -4,7 +4,7 @@ import {
   daemonSpawnCommand,
   isStandaloneExecutable,
   pm2DaemonArgs,
-} from "../src/runtime";
+} from "../src/runtime.ts";
 
 describe("isStandaloneExecutable", () => {
   test("uses Bun's explicit standalone flag when available", () => {

@@ -7,16 +7,16 @@ import {
   rmSync,
   statSync,
 } from "fs";
-import { Database } from "bun:sqlite";
+import { Database } from "../../utils/sqlite.ts";
 import { basename, dirname, join } from "path";
-import { legacyCocodDir, walletDir } from "./paths";
+import { legacyCocodDir, walletDir } from "./paths.ts";
 import {
   summarizeWalletDirectory,
   verifyDatabase,
   WalletMigrationConflictError,
   type WalletSummary,
-} from "./diagnostics";
-import { classifyWalletMigration } from "./wallet-state";
+} from "./diagnostics.ts";
+import { classifyWalletMigration } from "./wallet-state.ts";
 
 export type WalletMigrationResult =
   | { status: "fresh" }

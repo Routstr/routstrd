@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
 import type { UsageTrackingEntry } from "@routstr/sdk/storage";
-import type { ClientEntry } from "../../utils/clients";
-import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summary";
+import type { ClientEntry } from "../../utils/clients.ts";
+import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summary.ts";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 //

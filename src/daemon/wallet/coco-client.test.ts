@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { gunzipSync } from "bun";
+import { gunzipSync } from "node:zlib";
 import {
   existsSync,
   mkdtempSync,
@@ -21,9 +21,9 @@ import {
   type ExpiredMintQuoteSource,
   type PendingMintQuoteSource,
   type PendingMintSweepState,
-} from "./coco-client";
+} from "./coco-client.ts";
 import { OperationInProgressError } from "@cashu/coco-core";
-import { logger } from "../../utils/logger";
+import { logger } from "../../utils/logger.ts";
 
 type GuardOptions = NonNullable<
   Parameters<typeof assertLegacyCocodNotRunning>[0]
@@ -200,7 +200,7 @@ describe("legacy cocod wallet migration", () => {
     // this test from accidentally creating its "legacy" database with the
     // same current adapter that createCocoClient uses to read it.
     const fixture = readFileSync(
-      join(import.meta.dir, "fixtures", "cocod-0.0.24-wallet.db.gz"),
+      join(import.meta.dirname, "fixtures", "cocod-0.0.24-wallet.db.gz"),
     );
     writeFileSync(join(walletDir, "coco.db"), gunzipSync(fixture));
 

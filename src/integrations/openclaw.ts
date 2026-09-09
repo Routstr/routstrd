@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
-import type { RoutstrdConfig } from "../utils/config";
-import type { IntegrationConfig, RoutstrModel } from "./registry";
-import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
+import type { RoutstrdConfig } from "../utils/config.ts";
+import type { IntegrationConfig, RoutstrModel } from "./registry.ts";
+import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client.ts";
 
 const OPENCLAW_PROVIDER_ID = "routstr";
 const OPENCLAW_DEFAULT_PRIMARY_MODEL = "routstr/minimax-m2.5";

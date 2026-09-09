@@ -1,0 +1,18 @@
+{
+  "nodeModulesDir": "auto",
+  "compilerOptions": {
+    "lib": ["deno.window", "ESNext"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "tasks": {
+    "start": "deno run -A src/index.ts start",
+    "stop": "deno run -A src/index.ts stop",
+    "monitor": "deno run -A src/index.ts monitor",
+    "check": "deno check src/index.ts src/daemon/index.ts",
+    "smoke": "deno run -A scripts/smoke/daemon-boot.ts",
+    "compile": "deno compile -A --node-modules-dir=none --exclude-unused-npm --include npm:applesauce-sqlite --output dist/routstrd-deno src/index.ts",
+    "smoke:binary": "SMOKE_BIN=dist/routstrd-deno deno run -A scripts/smoke/daemon-boot.ts"
+  },
+  "exclude": ["dist", "node_modules"]
+}

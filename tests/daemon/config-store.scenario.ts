@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "fs";
 
-const { CONFIG_DIR, CONFIG_FILE } = await import("../../src/utils/config");
+const { CONFIG_DIR, CONFIG_FILE } = await import("../../src/utils/config.ts");
 const {
   ensureDirs,
   ensureDirsSync,
@@ -16,7 +16,7 @@ const {
   loadDaemonConfigSync,
   saveDaemonConfig,
   REQUESTS_DIR,
-} = await import("../../src/daemon/config-store");
+} = await import("../../src/daemon/config-store.ts");
 
 const modeOf = (p: string): number => statSync(p).mode & 0o777;
 

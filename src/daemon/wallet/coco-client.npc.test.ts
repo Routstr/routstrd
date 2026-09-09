@@ -38,8 +38,8 @@ mock.module("coco-cashu-plugin-npc", () => ({
   NPCPlugin: MockNPCPlugin,
 }));
 
-const { createCocoClient } = await import("./coco-client");
-const { createCocodClient, CocodHttpError } = await import("./cocod-client");
+const { createCocoClient } = await import("./coco-client.ts");
+const { createCocodClient, CocodHttpError } = await import("./cocod-client.ts");
 
 const TEST_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";

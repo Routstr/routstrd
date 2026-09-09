@@ -11,6 +11,8 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
+import { RUNTIME, type RuntimeName } from "../runtime.ts";
+import { spawnCapture } from "./spawn.ts";
 
 const RELEASES_API = "https://api.github.com/repos/Routstr/routstrd/releases/latest";
 const FETCH_TIMEOUT_MS = 30_000;
@@ -38,10 +40,19 @@ function normalizeVersion(version: string): string {
   return version.replace(/^v/, "");
 }
 
+/**
+ * Name of the release asset for a build.
+ *
+ * Releases carry one archive per platform/arch for each runtime the binary was
+ * compiled with, so a Deno-compiled binary updates to another Deno-compiled
+ * binary rather than silently swapping itself for the Bun one (the whole point
+ * of the Deno flavour is machines where the Bun binary does not run).
+ */
 export function releaseArchiveName(
   version: string,
   platform: NodeJS.Platform,
   arch: string,
+  flavor: RuntimeName = RUNTIME,
 ): string {
   if (platform !== "linux" && platform !== "darwin") {
     throw new Error(`Standalone updates are not supported on ${platform}.`);
@@ -49,7 +60,8 @@ export function releaseArchiveName(
   if (arch !== "x64" && arch !== "arm64") {
     throw new Error(`Standalone updates are not supported on ${platform}-${arch}.`);
   }
-  return `routstrd-v${normalizeVersion(version)}-${platform}-${arch}.tar.gz`;
+  const suffix = flavor === "deno" ? "-deno" : "";
+  return `routstrd-v${normalizeVersion(version)}-${platform}-${arch}${suffix}.tar.gz`;
 }
 
 async function fetchOrThrow(
@@ -99,6 +111,7 @@ export async function getLatestStandaloneRelease(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
   fetchImpl: typeof fetch = fetch,
+  flavor: RuntimeName = RUNTIME,
 ): Promise<StandaloneRelease> {
   const response = await fetchOrThrow(RELEASES_API, fetchImpl);
   const release = (await response.json()) as GithubRelease;
@@ -107,7 +120,7 @@ export async function getLatestStandaloneRelease(
     throw new Error("The latest GitHub Release has an invalid version tag.");
   }
 
-  const archiveName = releaseArchiveName(version, platform, arch);
+  const archiveName = releaseArchiveName(version, platform, arch, flavor);
   const archive = release.assets.find((asset) => asset.name === archiveName);
   const checksums = release.assets.find((asset) => asset.name === "SHA256SUMS");
   if (!archive || !checksums) {
@@ -129,14 +142,11 @@ export function sha256(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 async function verifyCandidate(path: string, version: string): Promise<void> {
-  const proc = Bun.spawn([path, "--version"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = spawnCapture(path, ["--version"]);
   const [code, outputText, errorText] = await Promise.all([
     waitForExit(proc, "Downloaded binary validation"),
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    proc.stdout,
+    proc.stderr,
   ]);
   const output = outputText.trim();
   const error = errorText.trim();
@@ -182,13 +192,12 @@ export async function installStandaloneRelease(
     }
     writeFileSync(archivePath, new Uint8Array(archiveBytes));
 
-    const extract = Bun.spawn(["tar", "-xzf", archivePath, "-C", tempDir], {
+    const extract = spawnCapture("tar", ["-xzf", archivePath, "-C", tempDir], {
       stdout: "ignore",
-      stderr: "pipe",
     });
     const [extractCode, extractErrorText] = await Promise.all([
       waitForExit(extract, "Archive extraction"),
-      new Response(extract.stderr).text(),
+      extract.stderr,
     ]);
     const extractError = extractErrorText.trim();
     if (extractCode !== 0) {

@@ -1,6 +1,6 @@
 import { ModelManager, ProviderManager, type SdkStore } from "@routstr/sdk";
-import type { ExposedModel } from "./types";
-import { logger } from "../utils/logger";
+import type { ExposedModel } from "./types.ts";
+import { logger } from "../utils/logger.ts";
 
 export type ModelProviderInfo = {
   baseUrl: string;

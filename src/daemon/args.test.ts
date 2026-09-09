@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseArgs } from "./args";
+import { parseArgs } from "./args.ts";
 
 describe("parseArgs", () => {
   test("leaves port unset when no CLI override is provided", () => {

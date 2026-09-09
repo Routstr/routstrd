@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { waitForDaemonToExit, type WaitForDaemonToExitOptions } from "../../src/utils/daemon-stop";
+import { waitForDaemonToExit, type WaitForDaemonToExitOptions } from "../../src/utils/daemon-stop.ts";
 
 const PID_FILE = "/tmp/routstrd-test/wallet.pid";
 const tempDirs: string[] = [];

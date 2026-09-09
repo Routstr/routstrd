@@ -2,9 +2,9 @@ import { getTokenMetadata } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
-import { logger } from "../../utils/logger";
-import { createCocodClient, type CocodClient } from "./cocod-client";
-import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
+import { logger } from "../../utils/logger.ts";
+import { createCocodClient, type CocodClient } from "./cocod-client.ts";
+import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill.ts";
 
 export function decodeCashuTokenAmount(token: string): {
   amount: number;
