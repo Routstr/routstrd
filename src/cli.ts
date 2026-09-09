@@ -11,10 +11,13 @@ import {
   getDaemonBaseUrl,
   getUserNpub,
 } from "./utils/daemon-client";
+import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
   deleteClientAction,
   addClientAction,
+  refreshModelsAndClientsAction,
+  setAutomaticRefreshAction,
 } from "./utils/clients";
 import { existsSync, mkdirSync, readFileSync, statSync } from "fs";
 import { execSync } from "child_process";
@@ -28,7 +31,7 @@ import {
   type RoutstrdConfig,
 } from "./utils/config";
 import { COCO_LOGS_DIR, logger } from "./utils/logger";
-import { setupIntegration, runIntegrationsForClients } from "./integrations";
+import { setupIntegration, type IntegrationKey } from "./integrations";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
@@ -48,17 +51,21 @@ import {
   walletDir as defaultWalletDir,
   walletPidPath,
 } from "./daemon/wallet/paths";
-import { getClientsList } from "./utils/clients";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { initializeWalletDirectory, readWalletMnemonic } from "./daemon/wallet/config";
-import packageJson from "../package.json" with { type: "json" };
 import {
   compareVersions,
   getGlobalPackageVersion,
   getLatestNpmVersion,
 } from "./utils/update-checker.ts";
+import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
+import { VERSION } from "./version";
+import {
+  getLatestStandaloneRelease,
+  installStandaloneRelease,
+} from "./utils/standalone-update";
 
 type RoutstrModel = {
   id: string;
@@ -104,6 +111,40 @@ async function printLightningInvoice(invoice: string): Promise<void> {
   console.log(`${qr}\nInvoice:\n${invoice}`);
 }
 
+/** Block until the daemon has minted the paid invoice, then show the credit. */
+async function waitForMintQuote(operationId: string): Promise<void> {
+  console.log(
+    "\nWaiting for payment... (Ctrl+C stops waiting; the daemon keeps checking)",
+  );
+  for (;;) {
+    const result = await callDaemon(
+      `/wallet/receive/bolt11/${encodeURIComponent(operationId)}`,
+    );
+    const quote = result.output as
+      | { state?: string; amount?: number; error?: string }
+      | undefined;
+    if (quote?.state === "finalized" && quote.error) {
+      // The mint issued the quote but the wallet could not restore the proofs.
+      console.error(`Payment reached the mint but could not be credited: ${quote.error}`);
+      process.exit(1);
+    }
+    if (quote?.state === "finalized") {
+      const balance = await callDaemon("/wallet/balance");
+      const balances =
+        (balance.output as { balances?: Record<string, number> } | undefined)
+          ?.balances ?? {};
+      const total = Object.values(balances).reduce((sum, sats) => sum + sats, 0);
+      console.log(`Received ${quote.amount} sat. Balance: ${total} sat`);
+      return;
+    }
+    if (quote?.state === "failed") {
+      console.error(`Invoice failed: ${quote.error ?? "unknown reason"}`);
+      process.exit(1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 export function initializeWallet(walletDir = defaultWalletDir()): void {
   const result = initializeWalletDirectory(walletDir);
   if (!result.created) {
@@ -114,9 +155,38 @@ export function initializeWallet(walletDir = defaultWalletDir()): void {
   console.log("IMPORTANT: Write down this mnemonic and keep it safe!");
 }
 
+type PidFileDeps = {
+  readFile(path: string): string;
+  isProcessRunning(pid: number): boolean;
+};
+
+export function getLivePidFileOwner(
+  path: string,
+  deps: PidFileDeps = {
+    readFile: (pidPath) => readFileSync(pidPath, "utf8"),
+    isProcessRunning: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "EPERM";
+      }
+    },
+  },
+): number | null {
+  try {
+    const contents = deps.readFile(path).trim();
+    if (!/^\d+$/.test(contents)) return null;
+    const pid = Number.parseInt(contents, 10);
+    return pid > 0 && deps.isProcessRunning(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Restart the routstrd daemon after an update so the new binary takes
- * effect immediately.  Failures are collected and reported but never
+ * effect immediately. Failures are collected and reported but never
  * roll back the update itself.
  *
  * Note: cocod is no longer a separate process — the wallet now runs
@@ -136,22 +206,22 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
       if (!wasRunning) {
         console.log("\nroutstrd daemon was not running — skipping restart.");
       } else {
-        console.log("\nRestarting routstrd daemon...");
+        const pidFilePath = walletPidPath();
+        const ownerPid = getLivePidFileOwner(pidFilePath);
+        if (ownerPid === null) {
+          throw new Error(
+            `Refusing to stop the process at ${getDaemonBaseUrl(config)} because ` +
+              `no live routstrd owner was found in ${pidFilePath}`,
+          );
+        }
 
+        console.log(`\nRestarting routstrd daemon (PID: ${ownerPid})...`);
         await callDaemon("/stop", { method: "POST" });
 
-        // Wait for HTTP health check to fail AND wallet lock to be released.
-        const pidFilePath = walletPidPath();
-        for (let i = 0; i < 100; i++) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-          const healthDown = !(await isDaemonRunning());
-          const pidFileReleased = !existsSync(pidFilePath);
-          if (healthDown && pidFileReleased) break;
-        }
-
-        if (await isDaemonRunning()) {
-          throw new Error("routstrd did not stop within 10 seconds");
-        }
+        // Wait for the old daemon to fully exit: it keeps serving ongoing
+        // requests before it releases the wallet lock and the new daemon can
+        // safely claim it.
+        await waitForDaemonToExit({ pidFilePath });
         console.log("routstrd daemon stopped.");
 
         await stopLegacyCocod();
@@ -195,7 +265,7 @@ async function requireLocalDaemon(): Promise<void> {
   }
 }
 
-async function initDaemon(): Promise<void> {
+async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
   console.log("Initializing routstrd...");
 
   // Create config directory (0700, correcting existing installs too)
@@ -253,7 +323,7 @@ async function initDaemon(): Promise<void> {
 
   await startDaemon({ port: String(config.port || 8008), host: config.host || undefined });
 
-  await setupIntegration(config);
+  await setupIntegration(config, integrationKey);
 
   console.log("\nInitialization complete!");
   console.log(
@@ -270,12 +340,26 @@ async function initDaemon(): Promise<void> {
 program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
-  .version(packageJson.version, "--version", "output the version number");
+  .version(VERSION, "--version", "output the version number");
 
 program
   .command("update")
   .description("Update routstrd to the latest version")
   .action(async () => {
+    if (isStandaloneExecutable()) {
+      const release = await getLatestStandaloneRelease();
+      if ((compareVersions(VERSION, release.version) ?? -1) >= 0) {
+        console.log(`routstrd is already up to date (v${VERSION}).`);
+        return;
+      }
+
+      console.log(`Updating routstrd from v${VERSION} to v${release.version}...`);
+      await installStandaloneRelease(release);
+      console.log("routstrd updated successfully.\n");
+      await restartDaemonsAfterUpdate();
+      return;
+    }
+
     const packages = [{ name: "routstrd", label: "routstrd" }];
 
     let updatedAny = false;
@@ -554,19 +638,83 @@ program
   .description(
     "Initialize routstrd (creates config directory and initializes wallet)",
   )
-  .action(async () => {
-    await requireLocalDaemon();
-    try {
-      await initDaemon();
-    } catch (error) {
-      // An expected, user-actionable refusal — print the structured message
-      // without Bun's unhandled-rejection source snippet and stack trace.
-      if (error instanceof WalletMigrationConflictError) {
-        console.error(error.message);
+  .option("--opencode", "Set up OpenCode integration (non-interactive)")
+  .option("--openclaw", "Set up OpenClaw integration (non-interactive)")
+  .option("--pi-agent", "Set up Pi Agent integration (non-interactive)")
+  .option("--claude-code", "Set up Claude Code integration (non-interactive)")
+  .option("--hermes", "Set up Hermes integration (non-interactive)")
+  .option("--skip-integration", "Skip integration setup")
+  .action(
+    async (options: {
+      opencode?: boolean;
+      openclaw?: boolean;
+      piAgent?: boolean;
+      claudeCode?: boolean;
+      hermes?: boolean;
+      skipIntegration?: boolean;
+    }) => {
+      await requireLocalDaemon();
+
+      const integrationFlags: Record<string, boolean | undefined> = {
+        opencode: options.opencode,
+        openclaw: options.openclaw,
+        "pi-agent": options.piAgent,
+        "claude-code": options.claudeCode,
+        hermes: options.hermes,
+      };
+      const selectedIntegrations = Object.keys(integrationFlags).filter(
+        (key) => integrationFlags[key],
+      );
+
+      if (selectedIntegrations.length > 1) {
+        console.error(
+          "Error: use only one integration flag, or use 'routstrd clients add' for multiple clients.",
+        );
         process.exit(1);
       }
-      throw error;
-    }
+
+      if (options.skipIntegration && selectedIntegrations.length > 0) {
+        console.error(
+          "Error: --skip-integration cannot be combined with an integration flag.",
+        );
+        process.exit(1);
+      }
+
+      let integrationKey: IntegrationKey | undefined;
+      if (options.skipIntegration) {
+        integrationKey = "skip";
+      } else if (selectedIntegrations.length === 1) {
+        integrationKey = selectedIntegrations[0];
+      }
+
+      try {
+        await initDaemon(integrationKey);
+      } catch (error) {
+        // An expected, user-actionable refusal — print the structured message
+        // without Bun's unhandled-rejection source snippet and stack trace.
+        if (error instanceof WalletMigrationConflictError) {
+          console.error(error.message);
+          process.exit(1);
+        }
+        throw error;
+      }
+    },
+  );
+
+program
+  .command("daemon")
+  .description("Run the daemon in the foreground")
+  .option("--port <port>", "Port to listen on")
+  .option("--host <host>", "Bind address")
+  .option("-p, --provider <provider>", "Default provider to use")
+  .action(async (options: { port?: string; host?: string; provider?: string }) => {
+    await requireLocalDaemon();
+    const argv = ["routstrd", "daemon"];
+    if (options.port) argv.push("--port", options.port);
+    if (options.host) argv.push("--host", options.host);
+    if (options.provider) argv.push("--provider", options.provider);
+    const { runDaemon } = await import("./daemon/index");
+    await runDaemon(argv);
   });
 
 // Start - start the background daemon
@@ -806,26 +954,7 @@ program
   .description("Refresh routstr21 models and client integrations")
   .action(async () => {
     await ensureDaemonRunning();
-    const config = await loadConfig();
-
-    // Refresh models via daemon API
-    console.log("Refreshing routstr21 models...");
-    const result = await callDaemon("/v1/models?refresh=true");
-    if (result.error) {
-      console.log(`Model refresh failed: ${result.error}`);
-      process.exit(1);
-    }
-    console.log("Models refreshed.");
-
-    // Refresh integrations for all clients
-    const clients = await getClientsList();
-    if (clients.length > 0) {
-      console.log(`Refreshing ${clients.length} client integration(s)...`);
-      await runIntegrationsForClients(clients, config);
-      console.log("Client integrations refreshed.");
-    } else {
-      console.log("No clients to refresh.");
-    }
+    await refreshModelsAndClientsAction();
   });
 
 // Models - list routstr21 models
@@ -1204,7 +1333,54 @@ providersCmd
 // Clients - list and manage clients
 const clientsCmd = program
   .command("clients")
-  .description("List and manage clients");
+  .description("List and manage clients")
+  .option(
+    "--manual-refresh",
+    "Refresh routstr21 models and all client integrations now",
+    false,
+  )
+  .option(
+    "--disable-automatic-refresh",
+    "Disable the daemon's scheduled refresh job",
+    false,
+  )
+  .option(
+    "--enable-automatic-refresh",
+    "Re-enable the daemon's scheduled refresh job",
+    false,
+  )
+  .action(
+    async (options: {
+      manualRefresh: boolean;
+      disableAutomaticRefresh: boolean;
+      enableAutomaticRefresh: boolean;
+    }) => {
+      if (options.disableAutomaticRefresh && options.enableAutomaticRefresh) {
+        console.error(
+          "error: --disable-automatic-refresh and --enable-automatic-refresh are mutually exclusive.",
+        );
+        process.exit(1);
+      }
+
+      if (
+        !options.manualRefresh &&
+        !options.disableAutomaticRefresh &&
+        !options.enableAutomaticRefresh
+      ) {
+        clientsCmd.help({ error: true });
+        return;
+      }
+
+      if (options.manualRefresh) {
+        await ensureDaemonRunning();
+        await refreshModelsAndClientsAction();
+      }
+
+      if (options.disableAutomaticRefresh || options.enableAutomaticRefresh) {
+        await setAutomaticRefreshAction(options.enableAutomaticRefresh);
+      }
+    },
+  );
 
 clientsCmd
   .command("list")
@@ -1249,12 +1425,23 @@ const npubsCmd = program
 
 type NpubEntry = {
   npub: string;
+  name: string | null;
   role: string;
 };
 
+/** Normalize a user-supplied npub display name: trim whitespace and cap at 64 chars. */
+function parseNpubName(raw: string | undefined): { name?: string | null; error?: string } {
+  if (raw === undefined) return {};
+  const trimmed = raw.trim();
+  if ([...trimmed].length > 64) {
+    return { error: "Invalid name. Maximum length is 64 characters." };
+  }
+  return { name: trimmed === "" ? null : trimmed };
+}
+
 npubsCmd
   .command("list")
-  .description("List configured npubs with their roles")
+  .description("List configured npubs with their roles and names")
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -1270,7 +1457,7 @@ npubsCmd
       : result;
     const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
     if (npubs.length === 0) {
-      console.log("No admin npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
+      console.log("No npubs configured. Run 'routstrd npubs register' to register yourself as the first admin.");
       return;
     }
     console.log(`Npubs (${npubs.length}):`);
@@ -1278,12 +1465,13 @@ npubsCmd
     for (const entry of npubs) {
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
-      console.log(`- ${entry.npub} [${entry.role}]${marker}`);
+      const name = entry.name ? ` "${entry.name}"` : "";
+      console.log(`- ${entry.npub} [${entry.role}]${name}${marker}`);
     }
     if (userNpub && !found) {
       console.log("");
       console.log(
-        "Your npub is not in the admin list. Ask the admin to add your npub:",
+        "Your npub is not in the npub list. Ask an admin to add your npub:",
       );
       console.log(`  ${userNpub}`);
     }
@@ -1292,7 +1480,8 @@ npubsCmd
 npubsCmd
   .command("register")
   .description("Register yourself as the first admin (only when no admins exist)")
-  .action(async () => {
+  .option("-n, --name <name>", "Display name for this npub (optional)")
+  .action(async (options: { name?: string }) => {
     await ensureDaemonRunning();
     const config = await loadConfig();
     const userNpub = getUserNpub(config);
@@ -1320,19 +1509,27 @@ npubsCmd
       console.error("Failed to normalize user npub.");
       process.exit(1);
     }
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = { npub: npubFromPubkey(normalized) };
+    if (name.name !== undefined) body.name = name.name;
     const addResult = await callAuth("/npubs", {
       method: "POST",
-      body: { npub: npubFromPubkey(normalized) },
+      body,
     });
     if (addResult.error) {
       console.log(addResult.error);
       process.exit(1);
     }
     const output = addResult.output as
-      | { npub?: string; added?: boolean; error?: string }
+      | { npub?: string; name?: string | null; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
-      console.log(`Successfully registered as first admin npub: ${output.npub}`);
+      const nameSuffix = output.name ? ` ("${output.name}")` : "";
+      console.log(`Successfully registered as first admin npub: ${output.npub}${nameSuffix}`);
     } else {
       console.log(`Successfully registered as first admin npub: ${userNpub}`);
     }
@@ -1342,7 +1539,8 @@ npubsCmd
   .command("add <npub>")
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
-  .action(async (npubArg: string, options: { role: string }) => {
+  .option("-n, --name <name>", "Display name for the npub (optional)")
+  .action(async (npubArg: string, options: { role: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -1353,7 +1551,16 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const body: Record<string, string> = { npub: npubFromPubkey(normalized), role: options.role };
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+      role: options.role,
+    };
+    if (name.name !== undefined) body.name = name.name;
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -1363,44 +1570,63 @@ npubsCmd
       process.exit(1);
     }
     const output = result.output as
-      | { npub?: string; role?: string; added?: boolean; error?: string }
+      | { npub?: string; name?: string | null; role?: string; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
+      const nameSuffix = output.name ? ` ("${output.name}")` : "";
       console.log(
-        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}`,
       );
     }
   });
 
 npubsCmd
   .command("update <npub>")
-  .description("Update the role of an existing npub (requires admin)")
-  .requiredOption("-r, --role <role>", "New role: 'admin' or 'user'")
-  .action(async (npubArg: string, options: { role: string }) => {
+  .description("Update the role and/or name of an existing npub (requires admin)")
+  .option("-r, --role <role>", "New role: 'admin' or 'user'")
+  .option("-n, --name <name>", "New display name (empty string clears it)")
+  .action(async (npubArg: string, options: { role?: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
       console.error("Invalid npub value. Use npub1... or 64-char hex pubkey.");
       process.exit(1);
     }
-    if (options.role !== "admin" && options.role !== "user") {
+    if (options.role !== undefined && options.role !== "admin" && options.role !== "user") {
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
+    if (options.role === undefined && options.name === undefined) {
+      console.error("Provide '--role' and/or '--name' to update.");
+      process.exit(1);
+    }
+    const name = parseNpubName(options.name);
+    if (name.error) {
+      console.error(name.error);
+      process.exit(1);
+    }
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+    };
+    if (options.role !== undefined) body.role = options.role;
+    if (name.name !== undefined) body.name = name.name;
     const result = await callAuth("/npubs", {
       method: "PATCH",
-      body: { npub: npubFromPubkey(normalized), role: options.role },
+      body,
     });
     if (result.error) {
       console.log(result.error);
       process.exit(1);
     }
-    // PATCH /npubs returns { npub, pubkey, role } at the top level, not wrapped in { output }
+    // PATCH /npubs returns { npub, pubkey, name, role } at the top level, not wrapped in { output }
     const data = (result.output ?? result) as
-      | { npub?: string; pubkey?: string; role?: string; error?: string }
+      | { npub?: string; pubkey?: string; name?: string | null; role?: string; error?: string }
       | undefined;
     if (data?.npub) {
-      console.log(`Updated npub ${data.npub} role to '${data.role}'.`);
+      const parts: string[] = [];
+      if (data.role) parts.push(`role='${data.role}'`);
+      parts.push(`name=${data.name ? `"${data.name}"` : "(none)"}`);
+      console.log(`Updated npub ${data.npub} (${parts.join(", ")}).`);
     } else {
       console.log("Npub not found or update failed.");
     }
@@ -1597,11 +1823,14 @@ program
         });
 
         const output = result.output as
-          | { invoice?: string; amount?: number; mintUrl?: string }
+          | { invoice?: string; operationId?: string; amount?: number; mintUrl?: string }
           | undefined;
 
         if (typeof output?.invoice === "string" && output.invoice) {
           await printLightningInvoice(output.invoice);
+          if (typeof output.operationId === "string") {
+            await waitForMintQuote(output.operationId);
+          }
           return;
         }
 
@@ -2038,7 +2267,21 @@ program
   .command("stop")
   .description("Stop the background daemon")
   .action(async () => {
-    await handleDaemonCommand("/stop", { method: "POST" });
+    if (!(await isDaemonRunning())) {
+      console.log("Daemon was not running.");
+      return;
+    }
+    await callDaemon("/stop", { method: "POST" });
+
+    // The daemon exits only after ongoing requests finish; wait for it so
+    // the wallet lock is actually free when this command returns.
+    try {
+      await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+    console.log("Daemon stopped.");
   });
 
 // Service - PM2 management
@@ -2055,6 +2298,12 @@ serviceCmd
     try {
       execSync("pm2 -v", { stdio: "ignore" });
     } catch (e) {
+      if (isStandaloneExecutable()) {
+        console.error(
+          "PM2 is optional and is not bundled with routstrd. Install PM2 separately before using 'routstrd service install'.",
+        );
+        process.exit(1);
+      }
       console.log("PM2 not found. Installing PM2 globally with bun...");
       try {
         execSync("bun install -g pm2", { stdio: "inherit" });
@@ -2066,37 +2315,15 @@ serviceCmd
       }
     }
 
-    // 2. Resolve the path to the daemon
-    // In a global install, we want the bundled daemon in dist/daemon/index.js
-    let daemonPath: string;
-    try {
-      // Try to resolve relative to this file first (works in dev and global)
-      daemonPath = Bun.resolveSync("./daemon/index.js", import.meta.url);
-    } catch (e) {
-      // Fallback for some bundling scenarios
-      const path = require("path");
-      daemonPath = path.join(
-        path.dirname(import.meta.url).replace("file://", ""),
-        "daemon",
-        "index.js",
-      );
-    }
-
-    if (!existsSync(daemonPath)) {
-      console.error(
-        `Could not find daemon at ${daemonPath}. Did you run 'bun run build'?`,
-      );
-      process.exit(1);
-    }
-
     console.log("Starting routstrd via PM2...");
     try {
       await stopLegacyCocod();
 
-      // Use --interpreter bun to ensure it runs with bun
-      execSync(`pm2 start "${daemonPath}" --name routstrd --interpreter bun`, {
-        stdio: "inherit",
+      const proc = Bun.spawn(["pm2", ...pm2DaemonArgs()], {
+        stdout: "inherit",
+        stderr: "inherit",
       });
+      if ((await proc.exited) !== 0) throw new Error("PM2 exited with an error");
 
       console.log("\n✅ routstrd is now managed by PM2.");
       console.log("\nTo ensure it starts on system reboot, run:");
@@ -2151,19 +2378,12 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      // Wait for HTTP health check to fail AND wallet lock to be released.
-      const pidFilePath = walletPidPath();
-      for (let i = 0; i < 100; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const healthDown = !(await isDaemonRunning());
-        const pidFileReleased = !existsSync(pidFilePath);
-        if (healthDown && pidFileReleased) {
-          break;
-        }
-      }
-
-      if (await isDaemonRunning()) {
-        logger.error("Daemon failed to stop within 10 seconds");
+      // Wait for the old daemon to fully exit so the wallet lock is free
+      // before a new daemon is spawned.
+      try {
+        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
         process.exit(1);
       }
       console.log("Daemon stopped.");
@@ -2242,15 +2462,12 @@ program
       console.log("Stopping daemon...");
       await callDaemon("/stop", { method: "POST" });
 
-      for (let i = 0; i < 50; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        if (!(await isDaemonRunning())) {
-          break;
-        }
-      }
-
-      if (await isDaemonRunning()) {
-        logger.error("Daemon failed to stop within 5 seconds");
+      // Wait for the old daemon to fully exit so the wallet lock is free
+      // before a new daemon is spawned.
+      try {
+        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
         process.exit(1);
       }
       console.log("Daemon stopped.");
@@ -2546,5 +2763,5 @@ program
   );
 
 export function cli(args: string[]) {
-  program.parse(args);
+  return program.parseAsync(args);
 }

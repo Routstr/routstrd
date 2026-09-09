@@ -1,12 +1,22 @@
 {
   "name": "routstrd",
-  "version": "0.4.5",
+  "version": "0.4.9",
   "module": "src/index.ts",
   "type": "module",
   "private": false,
   "bin": {
     "routstrd": "./dist/index.js"
   },
+  "files": [
+    "dist/index.js",
+    "dist/daemon/index.js",
+    "src",
+    "!src/**/*.test.ts",
+    "!src/daemon/wallet/fixtures",
+    "README.md",
+    "SECURITY.md",
+    "SKILL.md"
+  ],
   "scripts": {
     "start": "bun src/index.ts start",
     "stop": "bun src/index.ts stop",
@@ -14,6 +24,7 @@
     "lint": "tsc --noEmit",
     "test": "bun test",
     "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
+    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts --outfile=dist/routstrd",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
@@ -27,7 +38,7 @@
     "@cashu/cashu-ts": "^4.3.0",
     "@cashu/coco-core": "^1.0.1",
     "@cashu/coco-sqlite-bun": "^1.0.1",
-    "@routstr/sdk": "^0.4.1",
+    "@routstr/sdk": "^0.4.3",
     "@scure/bip39": "^2.2.0",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",

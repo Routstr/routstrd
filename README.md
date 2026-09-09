@@ -19,15 +19,28 @@ For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-
 
 ## Requirements
 
-- [Bun](https://bun.sh) runtime
-
-```sh
-curl -fsSL https://bun.com/install | bash
-```
+The standalone release does not require Bun, Node.js, or npm. Installing from
+npm or running from source requires the [Bun](https://bun.sh) runtime.
 
 ## Installation
 
 ### Step 1: Install
+
+**Standalone binary:**
+
+Download the archive for your operating system and architecture from the
+[latest GitHub Release](https://github.com/Routstr/routstrd/releases/latest).
+Release archives are available for Linux and macOS on x64 and arm64.
+
+```sh
+grep "routstrd-v0.4.9-linux-x64.tar.gz" SHA256SUMS | shasum -a 256 -c -
+tar -xzf routstrd-v0.4.9-linux-x64.tar.gz
+mkdir -p "$HOME/.local/bin"
+install -m 755 routstrd "$HOME/.local/bin/routstrd"
+```
+
+Substitute the version, platform, and architecture for the archive you
+downloaded, and ensure `$HOME/.local/bin` is on `PATH`.
 
 **Global with bun:**
 ```sh
@@ -238,6 +251,17 @@ Test connection:
 routstrd ping
 ```
 
+Refresh models and client integrations on demand:
+```sh
+routstrd clients --manual-refresh   # same as `routstrd refresh`
+```
+
+Turn the daemon's scheduled refresh on or off (no restart needed):
+```sh
+routstrd clients --disable-automatic-refresh
+routstrd clients --enable-automatic-refresh
+```
+
 Stop the daemon:
 ```sh
 routstrd stop
@@ -273,6 +297,20 @@ The daemon exposes an HTTP server (default port 8008) with the following endpoin
 ```
 GET /health
 ```
+
+#### Automatic Refresh Settings
+```
+POST /settings/auto-refresh
+```
+
+Request body:
+```json
+{ "enabled": false }
+```
+
+Enables or disables the scheduled refresh job. Persisted to the daemon's
+`config.json` as `autoRefresh.enabled` and picked up on the next tick, so no
+daemon restart is required.
 
 #### Route Request
 ```
@@ -321,9 +359,17 @@ Configuration is stored in `~/.routstrd/config.json`:
   "port": 8008,
   "host": "127.0.0.1",
   "provider": null,
-  "cocodPath": null
+  "cocodPath": null,
+  "autoRefresh": { "enabled": true }
 }
 ```
+
+`autoRefresh.enabled` (default `true`) controls the daemon's scheduled refresh
+job, which re-fetches Nostr events, routstr21 models, and client integrations
+every 21 minutes. Set it to `false` (or run
+`routstrd clients --disable-automatic-refresh`) to turn the schedule off and
+refresh manually with `routstrd clients --manual-refresh`. `autoRefresh.intervalMs`
+overrides the 21-minute interval.
 
 ### Environment Variables
 
@@ -350,6 +396,33 @@ Run daemon:
 bun run start
 ```
 
+Build a standalone executable for the current platform:
+
+```sh
+bun run build:binary
+./dist/routstrd --version
+```
+
+Standalone installations update directly from GitHub Releases with
+`routstrd update`. npm installations continue to update through Bun. PM2 is an
+optional external dependency used only by `routstrd service`; normal daemon
+operation does not require it.
+
+When an update finds a process on the configured daemon port, it only stops that
+process if the wallet PID file confirms a live daemon owned by the same routstrd
+configuration. Otherwise the update remains installed, but automatic restart is
+refused so an unrelated daemon is not interrupted.
+
+Existing PM2 registrations created by routstrd 0.4.x continue to work through a
+compatibility daemon entrypoint. Recreate the registration to use the unified
+CLI entrypoint and remove its legacy path dependency:
+
+```sh
+routstrd service uninstall
+routstrd service install
+pm2 save
+```
+
 Typecheck:
 ```sh
 bun run lint
@@ -368,6 +441,23 @@ ROUTSTRD_API_KEY=<api-key> scripts/smoke/chat-completions.sh <model> [model ...]
 Set `ROUTSTRD_BASE_URL` to test a daemon at a different address. The script
 makes live provider requests that may spend wallet funds, so it is intentionally
 not part of `bun test`.
+
+### Publishing a standalone release
+
+1. Set a new `package.json` version and commit it. The release tag must be the
+   same version prefixed with `v`, and the tag must not already exist.
+2. Push the tag. The release workflow runs lint and tests, builds Linux and
+   macOS executables for x64 and arm64, smoke-tests them, and publishes the
+   archives with `SHA256SUMS`.
+3. Verify all four archives appear in the GitHub Release and validate each
+   checksum before announcing it.
+4. In disposable environments for each platform, test `--version`, `--help`,
+   foreground startup failure, and background `start`, `status`, and `stop`
+   without Bun on `PATH`.
+5. Test `routstrd service install` and restart behavior with PM2 in a disposable
+   environment. Never run release/update lifecycle tests against a production
+   daemon. When isolation is needed, use both a separate `ROUTSTRD_DIR` and a
+   non-production port in that configuration.
 
 ## Project Structure
 

@@ -22,6 +22,18 @@ export interface NwcAutoRefillConfig {
   cooldownMs: number;
 }
 
+/**
+ * Scheduled background refresh job (Nostr events, routstr21 models, and client
+ * integrations). Missing values mean "enabled" with the default interval, so
+ * older config files keep working unchanged.
+ */
+export interface AutoRefreshConfig {
+  /** Run the recurring refresh job. Defaults to true. */
+  enabled?: boolean;
+  /** Milliseconds between refreshes. Defaults to 21 minutes. */
+  intervalMs?: number;
+}
+
 /** NWC configuration section */
 export interface NwcConfig {
   /** NWC mode: "funding_source" = NWC funds the cocod Cashu wallet */
@@ -66,6 +78,8 @@ export interface RoutstrdConfig {
     /** Register the npubx.cash NPC plugin. */
     enableNpc?: boolean;
   };
+  /** Scheduled refresh job settings (see AutoRefreshConfig). */
+  autoRefresh?: AutoRefreshConfig;
   /**
    * Default max_tokens (chat/completions) and max_output_tokens (responses)
    * injected into proxied requests when the client does not supply one.
