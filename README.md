@@ -1,10 +1,10 @@
 # routstrd
 
-Routstr daemon - A CLI tool for managing routstr processes, similar to `cocod` (a Cashu wallet daemon).
+Routstr daemon - A CLI tool for managing routstr processes, with a built-in Cashu wallet.
 
 ## Overview
 
-routstrd is a Bun-based CLI tool that provides a background daemon for the Routstr protocol. It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
+routstrd is a Bun-based CLI tool that provides a background daemon for the Routstr protocol. It carries an in-process Cashu wallet (coco) for payments and uses the Routstr SDK to handle provider routing and model discovery.
 
 ## Routstr for Teams
 
@@ -13,7 +13,7 @@ For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-
 ## Features
 
 - **Daemon Mode**: Run routstrd as a background HTTP server
-- **Wallet Integration**: Works with cocod for Cashu token management
+- **Wallet Integration**: In-process Cashu wallet, with Lightning, NWC, and NPC support
 - **Provider Routing**: Automatically discovers and routes requests to available providers
 - **Config Management**: Stores configuration in `~/.routstrd/`
 
@@ -74,6 +74,9 @@ routstrd clients add --claude-code  # or --pi-agent / --opencode
 > **Tip:** You can also install the [routstrd skill](https://github.com/Routstr/routstrd/blob/main/SKILL.md) so the agent can manage routstrd for you.
 
 ## More Commands
+
+[`SKILL.md`](SKILL.md) is the complete per-command reference — every command,
+subcommand, and flag. The sections below cover the common ones.
 ### Start Daemon
 
 Start the background daemon:
@@ -179,8 +182,12 @@ daemon restart is required.
 
 #### Route Request
 ```
-POST /
+POST /v1/chat/completions
 ```
+
+Any unmatched `POST` path is proxied to the selected provider with the incoming
+path preserved, so `POST /v1/messages` (Anthropic Messages API) and
+`POST /v1/responses` (OpenAI Responses API) work in their own formats too.
 
 Request body:
 ```json
@@ -241,6 +248,8 @@ overrides the 21-minute interval.
 - `ROUTSTRD_DIR` - Config directory (default: `~/.routstrd`)
 - `ROUTSTRD_SOCKET` - Socket path (default: `~/.routstrd/routstrd.sock`)
 - `ROUTSTRD_PID` - PID file path (default: `~/.routstrd/routstrd.pid`)
+- `ROUTSTRD_WALLET_DIR` - Wallet data directory (default: `~/.routstrd/wallet`)
+- `COCOD_DIR` - Legacy external cocod directory, used only for migration and exclusion (default: `~/.cocod`)
 
 ## Development
 
@@ -249,14 +258,19 @@ Install dependencies:
 bun install
 ```
 
-Run CLI:
+Run the CLI from source:
+```sh
+bun src/index.ts <command>
+```
+
+Run the daemon:
 ```sh
 bun run start
 ```
 
-Run daemon:
+Run the tests:
 ```sh
-bun run start
+bun test
 ```
 
 Build a standalone executable for the current platform:
@@ -298,7 +312,7 @@ more current model IDs to the smoke script:
 
 ```sh
 routstrd clients add --name smoke-test
-ROUTSTRD_API_KEY=<api-key> scripts/smoke/chat-completions.sh <model> [model ...]
+ROUTSTRD_API_KEY=<api-key> bun run smoke <model> [model ...]
 ```
 
 Set `ROUTSTRD_BASE_URL` to test a daemon at a different address. The script
@@ -327,12 +341,17 @@ not part of `bun test`.
 ```
 routstrd/
 ├── src/
-│   ├── index.ts       # Entry point with shebang
-│   ├── cli.ts         # Commander CLI commands
-│   ├── cli-shared.ts  # IPC utilities
-│   ├── daemon.ts      # HTTP server daemon
-│   └── utils/
-│       └── config.ts  # Path configuration
+│   ├── index.ts        # CLI entry point with shebang
+│   ├── cli.ts          # Commander CLI commands
+│   ├── daemon.ts       # Compatibility daemon entrypoint (legacy PM2 registrations)
+│   ├── start-daemon.ts # Daemon process launcher
+│   ├── daemon/         # HTTP server, wallet, provider routing
+│   ├── integrations/   # Client integrations (Claude Code, pi, OpenCode, ...)
+│   ├── tui/            # Interactive usage monitor (`routstrd monitor`)
+│   └── utils/          # Config, paths, daemon client, update checker
+├── tests/              # Integration tests (unit tests sit beside their source)
+├── scripts/smoke/      # Manual end-to-end smoke test
+├── docs/plans/         # Design/migration plans not yet executed
 ├── package.json
 └── tsconfig.json
 ```
