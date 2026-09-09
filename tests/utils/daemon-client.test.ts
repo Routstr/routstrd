@@ -3,8 +3,8 @@ import {
   getDaemonBaseUrl,
   urlHost,
   urlHosts,
-} from "../../src/utils/daemon-client";
-import type { RoutstrdConfig } from "../../src/utils/config";
+} from "../../src/utils/daemon-client.ts";
+import type { RoutstrdConfig } from "../../src/utils/config.ts";
 
 function config(host: string): RoutstrdConfig {
   return {

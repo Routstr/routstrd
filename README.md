@@ -4,7 +4,7 @@ Routstr daemon - A CLI tool for managing routstr processes, similar to `cocod` (
 
 ## Overview
 
-routstrd is a Bun-based CLI tool that provides a background daemon for the Routstr protocol. It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
+routstrd is a CLI tool that provides a background daemon for the Routstr protocol. It runs on both [Bun](https://bun.sh) and [Deno](https://deno.com) (v2). It integrates with `cocod` for wallet management and uses the Routstr SDK to handle provider routing and model discovery.
 
 ## Routstr for Teams
 
@@ -19,8 +19,9 @@ For team-based routing, see [routstrd-auth](https://github.com/Routstr/routstrd-
 
 ## Requirements
 
-The standalone release does not require Bun, Node.js, or npm. Installing from
-npm or running from source requires the [Bun](https://bun.sh) runtime.
+The standalone release does not require any runtime to be installed. Installing
+from npm or running from source requires either [Bun](https://bun.sh) or
+[Deno](https://deno.com) v2 — routstrd supports both.
 
 ## Installation
 
@@ -47,12 +48,25 @@ downloaded, and ensure `$HOME/.local/bin` is on `PATH`.
 bun i -g routstrd
 ```
 
-**OR - From source:**
+**Global with deno:**
+```sh
+deno install -gAf npm:routstrd
+```
+
+**OR - From source (bun):**
 ```sh
 git clone https://github.com/routstr/routstrd.git
 cd routstrd
 bun install
 bun link
+```
+
+**OR - From source (deno):**
+```sh
+git clone https://github.com/routstr/routstrd.git
+cd routstrd
+deno install
+deno install -gAf -n routstrd ./src/index.ts
 ```
 
 ### Step 2: Setup & Fund
@@ -244,19 +258,32 @@ overrides the 21-minute interval.
 
 ## Development
 
+routstrd runs on both Bun and Deno v2 from the same source tree. Bun is the
+development runtime — it runs the test suite and builds the release binaries —
+but every command below has a Deno equivalent.
+
 Install dependencies:
 ```sh
-bun install
+bun install     # or: deno install
 ```
 
-Run CLI:
+Run CLI / daemon:
 ```sh
-bun run start
+bun run start           # or: deno task start
 ```
 
-Run daemon:
+Type-check:
 ```sh
-bun run start
+bun run lint            # or: deno task check
+```
+
+Tests run under Bun (`bun test`). Deno support is covered by a cross-runtime
+smoke test that boots the daemon, exercises the SQLite, wallet, and HTTP paths,
+and shuts it down cleanly:
+
+```sh
+bun scripts/smoke/daemon-boot.ts
+deno task smoke
 ```
 
 Build a standalone executable for the current platform:
@@ -266,10 +293,28 @@ bun run build:binary
 ./dist/routstrd --version
 ```
 
+Standalone executables are produced by `bun build --compile` only; there is no
+Deno-compiled binary. Deno users install from npm or run from source.
+
 Standalone installations update directly from GitHub Releases with
-`routstrd update`. npm installations continue to update through Bun. PM2 is an
-optional external dependency used only by `routstrd service`; normal daemon
-operation does not require it.
+`routstrd update`. npm installations update through the package manager that
+installed them (`bun install -g` or `deno install -gAf`). PM2 is an optional
+external dependency used only by `routstrd service`; normal daemon operation
+does not require it.
+
+### Runtime compatibility notes
+
+Bun-specific APIs are confined to two seams, so the rest of the code is plain
+`node:` builtins that both runtimes implement:
+
+- `src/utils/sqlite.ts` — Bun has `bun:sqlite`, Deno has `node:sqlite`; this
+  exposes the `bun:sqlite` shape over whichever is available. (`better-sqlite3`
+  is not an option: Deno cannot load it at all.)
+- `src/runtime.ts` — runtime detection, entrypoint path, standalone-binary
+  detection, and the per-runtime global-install command.
+
+`src/daemon/sdk-storage.ts` builds the Routstr SDK's storage drivers on top of
+that shim, because the SDK's own entrypoints are Bun-only or Node-only.
 
 When an update finds a process on the configured daemon port, it only stops that
 process if the wallet PID file confirms a live daemon owned by the same routstrd

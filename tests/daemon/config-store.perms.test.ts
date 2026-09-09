@@ -9,7 +9,7 @@ import { tmpdir } from "os";
 // first — so each scenario runs in an isolated bun subprocess where the env
 // is guaranteed to be in place before module evaluation.
 
-const SCENARIO = join(import.meta.dir, "config-store.scenario.ts");
+const SCENARIO = join(import.meta.dirname, "config-store.scenario.ts");
 
 function runScenario(name: string): { code: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), `routstrd-cfg-${name}-`));

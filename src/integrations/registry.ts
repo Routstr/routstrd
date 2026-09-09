@@ -1,10 +1,10 @@
 import { join } from "path";
-import type { RoutstrdConfig } from "../utils/config";
-import { installOpencodeIntegration } from "./opencode";
-import { installPiIntegration } from "./pi";
-import { installOpenClawIntegration } from "./openclaw";
-import { installClaudeCodeIntegration } from "./claudecode";
-import { installHermesIntegration } from "./hermes";
+import type { RoutstrdConfig } from "../utils/config.ts";
+import { installOpencodeIntegration } from "./opencode.ts";
+import { installPiIntegration } from "./pi.ts";
+import { installOpenClawIntegration } from "./openclaw.ts";
+import { installClaudeCodeIntegration } from "./claudecode.ts";
+import { installHermesIntegration } from "./hermes.ts";
 
 const HOME = process.env.HOME || process.env.USERPROFILE || "";
 

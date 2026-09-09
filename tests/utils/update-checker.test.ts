@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compareVersions } from "../../src/utils/update-checker";
+import { compareVersions } from "../../src/utils/update-checker.ts";
 
 describe("compareVersions", () => {
   test("compares stable semantic versions", () => {

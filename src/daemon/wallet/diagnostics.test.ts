@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { Database } from "bun:sqlite";
+import { Database } from "../../utils/sqlite.ts";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -9,7 +9,7 @@ import {
   renderWalletDoctor,
   summarizeWalletDirectory,
   WalletMigrationConflictError,
-} from "./diagnostics";
+} from "./diagnostics.ts";
 
 const roots: string[] = [];
 function root(): string {

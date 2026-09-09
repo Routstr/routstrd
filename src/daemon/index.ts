@@ -1,15 +1,10 @@
 import { createServer } from "http";
-import { existsSync, unlinkSync } from "fs";
+import { existsSync, unlinkSync, writeFileSync } from "fs";
 import {
   ProviderManager,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
-// ModelManager must come from the bun entrypoint so persistent Nostr event
-// storage (eventStoreDbPath) gets its SQLite-backed factory. The default
-// "@routstr/sdk" export is browser-safe and throws without that factory
-// (SDK 0.3.7+ browser-safe entrypoint split).
-import { ModelManager } from "@routstr/sdk/bun";
 import type { SdkLogger } from "@routstr/sdk";
 import {
   CONFIG_DIR,
@@ -17,8 +12,8 @@ import {
   SOCKET_PATH,
   PID_FILE,
   REQUEST_RESPONSE_LOGS_DIR,
-} from "../utils/config";
-import { logger } from "../utils/logger";
+} from "../utils/config.ts";
+import { logger } from "../utils/logger.ts";
 
 
 function makeSdkLogger(prefix?: string): SdkLogger {
@@ -40,19 +35,23 @@ function startupProgress(message: string): void {
   console.log(`${STARTUP_LOG_PREFIX} ${message}`);
 }
 
-import { parseArgs } from "./args";
-import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store";
+import { parseArgs } from "./args.ts";
+import { ensureDirs, loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "./config-store.ts";
+import { createShardedDiscoveryAdapter } from "@routstr/sdk/storage";
+// The SDK's own SQLite entrypoints are Bun-only (bun:sqlite) or Node-only
+// (better-sqlite3, which Deno cannot load); these build the same drivers on
+// top of the cross-runtime SQLite shim instead.
 import {
-  createBunSqliteDriver,
-  createBunSqliteUsageTrackingDriver,
-  createShardedDiscoveryAdapter,
-} from "@routstr/sdk/storage/bun";
-import { createWalletAdapter } from "./wallet";
-import type { AutoRefillConfig } from "./wallet/auto-refill";
-import { createModelService } from "./models";
-import { createDaemonRequestHandler } from "./http";
-import { FileRequestResponseLogSink } from "./request-response-log-sink";
-import { refreshModelsAndIntegrations } from "../integrations";
+  createDaemonModelManager,
+  createSqliteStorageDriver,
+  createSqliteUsageTrackingDriver,
+} from "./sdk-storage.ts";
+import { createWalletAdapter } from "./wallet/index.ts";
+import type { AutoRefillConfig } from "./wallet/auto-refill.ts";
+import { createModelService } from "./models.ts";
+import { createDaemonRequestHandler } from "./http/index.ts";
+import { FileRequestResponseLogSink } from "./request-response-log-sink.ts";
+import { refreshModelsAndIntegrations } from "../integrations/index.ts";
 import { RoutstrClient } from "@routstr/sdk";
 import { mkdirSync } from "fs";
 import { dirname } from "path";
@@ -61,13 +60,13 @@ import {
   claimLegacyCocodPidFile,
   createCocoClient,
   stopLegacyCocod,
-} from "./wallet/coco-client";
-import { migrateLegacyWallet } from "./wallet/migration";
+} from "./wallet/coco-client.ts";
+import { migrateLegacyWallet } from "./wallet/migration.ts";
 import {
   legacyCocodPidPath,
   legacyCocodSocketPath,
-} from "./wallet/paths";
-import { installGlobalErrorHandlers } from "./fatal-error";
+} from "./wallet/paths.ts";
+import { installGlobalErrorHandlers } from "./fatal-error.ts";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -112,10 +111,10 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   saveDaemonConfig(updatedConfig);
 
   startupProgress("Opening Routstr databases...");
-  const sqliteDriver = await createBunSqliteDriver(DB_PATH, { logger: daemonSdkLogger });
+  const sqliteDriver = createSqliteStorageDriver(DB_PATH, { logger: daemonSdkLogger });
   const { store, hydrate } = createSdkStore({ driver: sqliteDriver });
   await hydrate;
-  const usageTrackingDriver = await createBunSqliteUsageTrackingDriver({
+  const usageTrackingDriver = createSqliteUsageTrackingDriver({
     dbPath: DB_PATH,
     legacyStorageDriver: sqliteDriver,
   });
@@ -123,7 +122,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
   startupProgress("Routstr databases ready.");
-  const modelManager = new ModelManager(discoveryAdapter, {
+  const modelManager = createDaemonModelManager(discoveryAdapter, {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
     routstrPubkey: config.routstrPubkey,
@@ -197,6 +196,15 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   );
 
   const server = createServer();
+
+  // Number of requests currently being served. Shutdown waits for this to reach
+  // zero before dropping the remaining (idle keep-alive) sockets.
+  let inFlightRequests = 0;
+  server.on("request", (req, res) => {
+    inFlightRequests++;
+    res.on("close", () => { inFlightRequests--; });
+  });
+
   server.on(
     "request",
     createDaemonRequestHandler({
@@ -224,7 +232,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     }),
   );
 
-  Bun.write(PID_FILE, String(process.pid));
+  writeFileSync(PID_FILE, String(process.pid));
 
   try {
     if (existsSync(SOCKET_PATH)) {
@@ -406,6 +414,23 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     server.close(() => {
       void disposeWallet().finally(() => process.exit(0));
     });
+
+    // close() stops accepting new connections but waits for existing ones, and
+    // an idle keep-alive socket does not close on its own — under Deno it is
+    // held until the 60s keep-alive timeout, stranding the wallet lock for a
+    // minute. closeIdleConnections() is the documented fix but does not cover
+    // pooled client sockets on every runtime, so once no request is actually
+    // being served, drop what is left. In-flight requests still drain fully,
+    // which is what `routstrd stop` waits on.
+    const dropIdleSockets = () => {
+      server.closeIdleConnections();
+      if (inFlightRequests > 0) {
+        setTimeout(dropIdleSockets, 250).unref?.();
+        return;
+      }
+      server.closeAllConnections();
+    };
+    dropIdleSockets();
   };
 
   // Without this a listen failure only reaches uncaughtException, which logs and

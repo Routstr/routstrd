@@ -44,4 +44,8 @@ routstrd-findings.zip
 
 # npm artifacts (repo uses bun/bun.lock)
 package-lock.json
+
+# Deno resolves npm deps through node_modules from bun.lock, so its own
+# lockfile is a local artifact and would only drift from bun.lock.
+deno.lock
 npm-shrinkwrap.json

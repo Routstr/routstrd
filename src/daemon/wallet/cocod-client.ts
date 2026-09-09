@@ -1,8 +1,10 @@
 import { existsSync } from "fs";
+import { spawn } from "node:child_process";
 import { createHash } from "crypto";
 import { isAbsolute } from "path";
-import { logger } from "../../utils/logger";
-import { withCrossProcessLock } from "../../utils/process-lock";
+import { logger } from "../../utils/logger.ts";
+import { withCrossProcessLock } from "../../utils/process-lock.ts";
+import { unixFetch, type UnixRequestInit } from "../../utils/unix-request.ts";
 import type { HistoryEntry } from "@cashu/coco-core";
 
 const DEFAULT_CONFIG_DIR =
@@ -10,17 +12,14 @@ const DEFAULT_CONFIG_DIR =
 const DEFAULT_SOCKET_PATH =
   process.env.COCOD_SOCKET || `${DEFAULT_CONFIG_DIR}/cocod.sock`;
 
-type UnixRequestInit = RequestInit & { unix: string };
+
 
 type CommandResponse<T> = {
   output?: T;
   error?: string;
 };
 
-type CocodFetch = (
-  input: string | URL | Request,
-  init?: UnixRequestInit,
-) => Promise<Response>;
+type CocodFetch = (input: string | URL, init: UnixRequestInit) => Promise<Response>;
 
 type SpawnedProcess = {
   exited: Promise<number>;
@@ -176,12 +175,11 @@ export async function isCocodInstalled(
 
   try {
     const command = process.platform === "win32" ? "where.exe" : "which";
-    const proc = Bun.spawn({
-      cmd: [command, executable],
-      stdout: "ignore",
-      stderr: "ignore",
+    const proc = spawn(command, [executable], { stdio: "ignore" });
+    return await new Promise<boolean>((resolve) => {
+      proc.on("error", () => resolve(false));
+      proc.on("exit", (code) => resolve(code === 0));
     });
-    return (await proc.exited) === 0;
   } catch {
     return false;
   }
@@ -244,22 +242,24 @@ export function createCocodClient(
   const executable = resolveCocodExecutable(options.cocodPath);
   const socketPath = options.socketPath || DEFAULT_SOCKET_PATH;
   const startupLockPath = `${socketPath}.startup.lock`;
-  const fetchImpl = options.fetchImpl || (fetch as CocodFetch);
+  const fetchImpl = options.fetchImpl || unixFetch;
   const pollIntervalMs = options.pollIntervalMs ?? 100;
   const startupTimeoutMs = options.startupTimeoutMs ?? 5000;
 
   const spawnDaemon: SpawnDaemon =
     options.spawnDaemon ||
     ((args, env) => {
-      const proc = Bun.spawn(args, {
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
+      const [command, ...commandArgs] = args;
+      const proc = spawn(command as string, commandArgs, {
+        stdio: "ignore",
         detached: true,
         env,
       });
       proc.unref();
-      return proc;
+      return {
+        exited: new Promise<number>((resolve) => proc.on("exit", (code) => resolve(code ?? 0))),
+        unref: () => proc.unref(),
+      };
     });
 
   let startPromise: Promise<void> | null = null;

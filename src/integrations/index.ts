@@ -1,18 +1,18 @@
-import type { RoutstrdConfig } from "../utils/config";
-import { logger } from "../utils/logger";
+import type { RoutstrdConfig } from "../utils/config.ts";
+import { logger } from "../utils/logger.ts";
 import {
   addDaemonClient,
   type DaemonClient,
-} from "../utils/clients";
-import { getClientsList } from "../utils/clients";
-import { installOpencodeIntegration } from "./opencode";
-import { installOpenClawIntegration } from "./openclaw";
-import { installPiIntegration } from "./pi";
-import { installClaudeCodeIntegration } from "./claudecode";
-import { installHermesIntegration } from "./hermes";
-import type { IntegrationConfig } from "./registry";
-import { CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
-export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
+} from "../utils/clients.ts";
+import { getClientsList } from "../utils/clients.ts";
+import { installOpencodeIntegration } from "./opencode.ts";
+import { installOpenClawIntegration } from "./openclaw.ts";
+import { installPiIntegration } from "./pi.ts";
+import { installClaudeCodeIntegration } from "./claudecode.ts";
+import { installHermesIntegration } from "./hermes.ts";
+import type { IntegrationConfig } from "./registry.ts";
+import { CLIENT_CONFIGS, runIntegrationsForClients } from "./registry.ts";
+export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry.ts";
 
 /**
  * Refresh routstr21 models and then run integrations for all registered clients.

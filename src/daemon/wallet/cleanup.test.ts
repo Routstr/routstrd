@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { selectCleanupOperations } from "./cleanup";
+import { selectCleanupOperations } from "./cleanup.ts";
 
 const NOW_MS = 1_800_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;

@@ -1,16 +1,17 @@
+import { readFile } from "node:fs/promises";
 import { existsSync } from "fs";
-import { startDaemon } from "../start-daemon";
+import { startDaemon } from "../start-daemon.ts";
 import {
   CONFIG_FILE,
   DEFAULT_CONFIG,
   type RoutstrdConfig,
-} from "./config";
+} from "./config.ts";
 import {
   createNIP98Authorization,
   parseSecretKey,
   npubFromSecretKey,
   type HttpMethod,
-} from "./nip98";
+} from "./nip98.ts";
 
 export interface CommandResponse {
   output?: unknown;
@@ -20,7 +21,7 @@ export interface CommandResponse {
 export async function loadConfig(): Promise<RoutstrdConfig> {
   try {
     if (existsSync(CONFIG_FILE)) {
-      const content = await Bun.file(CONFIG_FILE).text();
+      const content = await readFile(CONFIG_FILE, "utf8");
       return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
     }
   } catch (error) {

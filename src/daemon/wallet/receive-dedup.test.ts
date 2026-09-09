@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { ReceiveOperation } from "@cashu/coco-core";
-import { Database } from "bun:sqlite";
+import { Database } from "../../utils/sqlite.ts";
 import {
   clearInterruptedReceiveReservations,
   deleteReceiveTokenReservation,
@@ -12,7 +12,7 @@ import {
   reserveReceiveToken,
   updateReceiveToken,
   type ReceiveReconcileSource,
-} from "./receive-dedup";
+} from "./receive-dedup.ts";
 
 function operation(
   id: string,

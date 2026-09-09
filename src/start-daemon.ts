@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -5,11 +6,11 @@ import {
   openSync,
   readSync,
 } from "fs";
-import { logger } from "./utils/logger";
-import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
-import { withCrossProcessLock } from "./utils/process-lock";
-import { urlHosts } from "./utils/daemon-client";
-import { daemonSpawnCommand } from "./runtime";
+import { logger } from "./utils/logger.ts";
+import { CONFIG_DIR, LOGS_DIR } from "./utils/config.ts";
+import { withCrossProcessLock } from "./utils/process-lock.ts";
+import { urlHosts } from "./utils/daemon-client.ts";
+import { daemonSpawnCommand } from "./runtime.ts";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
 const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;
@@ -157,10 +158,9 @@ async function startDaemonUnlocked(
     : 0;
   const debugLogFd = openSync(DEBUG_LOG_PATH, "a");
 
-  const proc = Bun.spawn(daemonSpawnCommand(args), {
-    stdout: debugLogFd,
-    stderr: debugLogFd,
-    stdin: "ignore",
+  const [command, ...commandArgs] = daemonSpawnCommand(args);
+  const proc = spawn(command as string, commandArgs, {
+    stdio: ["ignore", debugLogFd, debugLogFd],
     detached: true,
   });
 
@@ -170,7 +170,7 @@ async function startDaemonUnlocked(
   // leave a detached process holding the wallet locks. `detached` makes it a group leader.
   const killSpawnedDaemon = (): void => {
     try {
-      process.kill(-proc.pid, "SIGTERM");
+      if (proc.pid !== undefined) process.kill(-proc.pid, "SIGTERM");
     } catch {
       // Already exited.
     }
@@ -183,8 +183,8 @@ async function startDaemonUnlocked(
   process.once("SIGTERM", abandonOnSignal);
 
   let exitCode: number | null = null;
-  proc.exited.then((code) => {
-    exitCode = code;
+  proc.on("exit", (code) => {
+    exitCode = code ?? 0;
   });
 
   const startedAt = Date.now();

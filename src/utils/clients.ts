@@ -4,13 +4,13 @@ import {
   getDaemonBaseUrl,
   getUserNpub,
   ensureDaemonRunning,
-} from "./daemon-client";
-import { logger } from "./logger";
+} from "./daemon-client.ts";
+import { logger } from "./logger.ts";
 import {
   CLIENT_INTEGRATIONS,
   CLIENT_CONFIGS,
   runIntegrationsForClients,
-} from "../integrations/registry";
+} from "../integrations/registry.ts";
 
 export interface ClientEntry {
   clientId: string;

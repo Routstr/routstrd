@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "routstrd",
@@ -11,6 +12,7 @@
         "@scure/bip39": "^2.2.0",
         "applesauce-core": "^5.1.0",
         "applesauce-relay": "^5.1.0",
+        "applesauce-sqlite": "^6.0.0",
         "applesauce-wallet-connect": "^6.0.0",
         "coco-cashu-core": "1.1.2-rc.50",
         "coco-cashu-plugin-npc": "2.4.1",

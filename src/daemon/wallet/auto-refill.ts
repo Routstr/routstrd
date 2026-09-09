@@ -4,9 +4,9 @@
 //
 // Uses applesauce-wallet-connect (same approach as nwc_integration/pay_invoice.mts).
 
-import type { CocodClient } from "./cocod-client";
+import type { CocodClient } from "./cocod-client.ts";
 import type { WalletConnect } from "applesauce-wallet-connect";
-import { logger } from "../../utils/logger";
+import { logger } from "../../utils/logger.ts";
 
 export interface AutoRefillConfig {
   /** Minimum sats balance before triggering a refill */

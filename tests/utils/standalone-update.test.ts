@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   mkdirSync,
@@ -15,7 +16,7 @@ import {
   installStandaloneRelease,
   releaseArchiveName,
   sha256,
-} from "../../src/utils/standalone-update";
+} from "../../src/utils/standalone-update.ts";
 
 const tempDirs: string[] = [];
 
@@ -107,15 +108,8 @@ describe("installStandaloneRelease", () => {
     writeFileSync(candidate, "#!/bin/sh\necho 0.5.0\n");
     chmodSync(current, 0o755);
     chmodSync(candidate, 0o755);
-    const tar = Bun.spawnSync([
-      "tar",
-      "-C",
-      archiveRoot,
-      "-czf",
-      archivePath,
-      "routstrd",
-    ]);
-    expect(tar.exitCode).toBe(0);
+    const tar = spawnSync("tar", ["-C", archiveRoot, "-czf", archivePath, "routstrd"]);
+    expect(tar.status).toBe(0);
 
     const archiveBytes = readFileSync(archivePath);
     const checksum = sha256(archiveBytes);
@@ -141,8 +135,8 @@ describe("installStandaloneRelease", () => {
       fetchImpl,
     );
 
-    const version = Bun.spawnSync([current, "--version"]);
-    expect(version.exitCode).toBe(0);
+    const version = spawnSync(current, ["--version"]);
+    expect(version.status).toBe(0);
     expect(version.stdout.toString().trim()).toBe("0.5.0");
   });
 

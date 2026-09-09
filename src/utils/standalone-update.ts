@@ -11,6 +11,7 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { basename, join } from "path";
+import { spawnCapture } from "./spawn.ts";
 
 const RELEASES_API = "https://api.github.com/repos/Routstr/routstrd/releases/latest";
 const FETCH_TIMEOUT_MS = 30_000;
@@ -129,14 +130,11 @@ export function sha256(bytes: ArrayBuffer | Uint8Array): string {
 }
 
 async function verifyCandidate(path: string, version: string): Promise<void> {
-  const proc = Bun.spawn([path, "--version"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const proc = spawnCapture(path, ["--version"]);
   const [code, outputText, errorText] = await Promise.all([
     waitForExit(proc, "Downloaded binary validation"),
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    proc.stdout,
+    proc.stderr,
   ]);
   const output = outputText.trim();
   const error = errorText.trim();
@@ -182,13 +180,12 @@ export async function installStandaloneRelease(
     }
     writeFileSync(archivePath, new Uint8Array(archiveBytes));
 
-    const extract = Bun.spawn(["tar", "-xzf", archivePath, "-C", tempDir], {
+    const extract = spawnCapture("tar", ["-xzf", archivePath, "-C", tempDir], {
       stdout: "ignore",
-      stderr: "pipe",
     });
     const [extractCode, extractErrorText] = await Promise.all([
       waitForExit(extract, "Archive extraction"),
-      new Response(extract.stderr).text(),
+      extract.stderr,
     ]);
     const extractError = extractErrorText.trim();
     if (extractCode !== 0) {

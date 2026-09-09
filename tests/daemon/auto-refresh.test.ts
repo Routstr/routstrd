@@ -8,7 +8,7 @@ import { tmpdir } from "os";
 // loaded, so it runs in an isolated bun subprocess (same approach as
 // config-store.perms.test.ts).
 
-const SCENARIO = join(import.meta.dir, "auto-refresh.scenario.ts");
+const SCENARIO = join(import.meta.dirname, "auto-refresh.scenario.ts");
 
 function runScenario(name: string): { code: number; out: string } {
   const dir = mkdtempSync(join(tmpdir(), `routstrd-auto-refresh-${name}-`));

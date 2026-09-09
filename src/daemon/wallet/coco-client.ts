@@ -11,7 +11,7 @@ import type {
   Plugin as CocoPlugin,
 } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
-import { Database } from "bun:sqlite";
+import { Database, type SqliteDatabase } from "../../utils/sqlite.ts";
 import { NPCPlugin, type PluginApi as NpcPluginApi } from "coco-cashu-plugin-npc";
 import { privateKeyFromSeedWords } from "nostr-tools/nip06";
 import { finalizeEvent, nip19, type EventTemplate } from "nostr-tools";
@@ -35,8 +35,9 @@ import type {
   WalletCleanupOptions,
   WalletCleanupResult,
   WalletRecoveryProgress,
-} from "./cocod-client";
-import { selectCleanupOperations } from "./cleanup";
+} from "./cocod-client.ts";
+import { selectCleanupOperations } from "./cleanup.ts";
+import { unixFetch, type UnixRequestInit } from "../../utils/unix-request.ts";
 import {
   clearInterruptedReceiveReservations,
   deleteReceiveTokenReservation,
@@ -50,29 +51,26 @@ import {
   setReceiveReconcileBackup,
   updateReceiveToken,
   type ReceiveReconcileSource,
-} from "./receive-dedup";
-import { cocoLogger, logger } from "../../utils/logger";
+} from "./receive-dedup.ts";
+import { cocoLogger, logger } from "../../utils/logger.ts";
 import {
   legacyCocodPidPath,
   legacyCocodSocketPath,
   walletDir as defaultWalletDir,
   walletPidPath as defaultWalletPidPath,
-} from "./paths";
+} from "./paths.ts";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
 
 const STALE_SOCKET_ERROR_CODES = new Set([
   "ECONNREFUSED",
   "ENOENT",
-  // Bun's Unix-socket fetch error for an abandoned socket inode.
+  // Bun's Unix-socket fetch error for an abandoned socket inode. Retained so
+  // callers that still inject a Bun fetch (e.g. older tests) keep working.
   "FailedToOpenSocket",
 ]);
 
-type UnixRequestInit = RequestInit & { unix: string };
-type LegacyCocodFetch = (
-  input: string | URL | Request,
-  init: UnixRequestInit,
-) => Promise<Response>;
+type LegacyCocodFetch = (input: string | URL, init: UnixRequestInit) => Promise<Response>;
 
 export interface LegacyCocodGuardOptions {
   socketPath?: string;
@@ -316,7 +314,7 @@ export async function assertLegacyCocodNotRunning(
 
   if (!pathExists(socketPath)) return;
 
-  const fetchImpl = options.fetchImpl || (fetch as LegacyCocodFetch);
+  const fetchImpl = options.fetchImpl || unixFetch;
   const timeoutMs = options.timeoutMs ?? 1_000;
 
   try {
@@ -365,7 +363,7 @@ export async function stopLegacyCocod(
   const readFile =
     options.readFile || ((path: string) => readFileSync(path, "utf-8"));
   const isProcessRunning = options.isProcessRunning || defaultIsProcessRunning;
-  const fetchImpl = options.fetchImpl || (fetch as LegacyCocodFetch);
+  const fetchImpl = options.fetchImpl || unixFetch;
   const killProcess =
     options.killProcess || ((pid, signal) => process.kill(pid, signal));
   const timeoutMs = options.timeoutMs ?? 30_000;
@@ -1135,7 +1133,7 @@ export async function createCocoClient(
     throw error;
   }
 
-  let database: Database | undefined;
+  let database: SqliteDatabase | undefined;
   let coco: Manager | undefined;
   let findFinalizedReceiveSibling: (
     operation: ReceiveOperation | null,
@@ -1165,7 +1163,10 @@ export async function createCocoClient(
     const mnemonic = walletConfig.mnemonic;
     const seed = mnemonicToSeedSync(mnemonic);
     database = new Database(dbPath);
-    const repo = new SqliteRepositories({ database });
+    // SqliteRepositories is typed against bun:sqlite's Database, but at runtime
+    // it only calls prepare()/exec()/close() — the surface our cross-runtime
+    // shim provides on both Bun and Deno.
+    const repo = new SqliteRepositories({ database: database as never });
     await repo.init();
     initReceiveDedupSchema(database);
     const interruptedReservations = clearInterruptedReceiveReservations(database);

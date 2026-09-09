@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
-import type { RoutstrdConfig } from "../utils/config";
-import type { IntegrationConfig, RoutstrModel } from "./registry";
-import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
+import type { RoutstrdConfig } from "../utils/config.ts";
+import type { IntegrationConfig, RoutstrModel } from "./registry.ts";
+import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client.ts";
 
 export async function installClaudeCodeIntegration(
   config: RoutstrdConfig,

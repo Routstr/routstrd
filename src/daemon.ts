@@ -1,1 +1,1 @@
-export * from "./daemon/index";
+export * from "./daemon/index.ts";

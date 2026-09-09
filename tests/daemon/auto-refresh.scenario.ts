@@ -4,8 +4,8 @@
 import { createServer } from "http";
 import type { AddressInfo } from "net";
 
-const { createDaemonRequestHandler } = await import("../../src/daemon/http/index");
-const { loadDaemonConfigSync } = await import("../../src/daemon/config-store");
+const { createDaemonRequestHandler } = await import("../../src/daemon/http/index.ts");
+const { loadDaemonConfigSync } = await import("../../src/daemon/config-store.ts");
 
 function assert(cond: unknown, msg: string): void {
   if (!cond) {

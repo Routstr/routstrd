@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { parse } from "yaml";
-import { mergeHermesConfig } from "../../src/integrations/hermes";
+import { mergeHermesConfig } from "../../src/integrations/hermes.ts";
 
 const ROUTSTR = {
   baseUrl: "http://localhost:8008/v1",

@@ -1,6 +1,6 @@
 import { program } from "commander";
-import { startDaemon } from "./start-daemon";
-import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
+import { startDaemon } from "./start-daemon.ts";
+import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store.ts";
 import {
   handleDaemonCommand,
   callDaemon,
@@ -10,17 +10,18 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getUserNpub,
-} from "./utils/daemon-client";
-import { waitForDaemonToExit } from "./utils/daemon-stop";
+} from "./utils/daemon-client.ts";
+import { waitForDaemonToExit } from "./utils/daemon-stop.ts";
 import {
   listClientsAction,
   deleteClientAction,
   addClientAction,
   refreshModelsAndClientsAction,
   setAutomaticRefreshAction,
-} from "./utils/clients";
+} from "./utils/clients.ts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
+import { createInterface } from "node:readline";
 import { dirname, join } from "path";
 import {
   CONFIG_DIR,
@@ -29,30 +30,30 @@ import {
   DEFAULT_CONFIG,
   LOGS_DIR,
   type RoutstrdConfig,
-} from "./utils/config";
-import { COCO_LOGS_DIR, logger } from "./utils/logger";
-import { setupIntegration, type IntegrationKey } from "./integrations";
+} from "./utils/config.ts";
+import { COCO_LOGS_DIR, logger } from "./utils/logger.ts";
+import { setupIntegration, type IntegrationKey } from "./integrations/index.ts";
 import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   stopLegacyCocod,
-} from "./daemon/wallet/coco-client";
-import { migrateLegacyWallet } from "./daemon/wallet/migration";
+} from "./daemon/wallet/coco-client.ts";
+import { migrateLegacyWallet } from "./daemon/wallet/migration.ts";
 import {
   diagnoseWallets,
   renderWalletDoctor,
   summarizeWalletDirectory,
   WalletMigrationConflictError,
-} from "./daemon/wallet/diagnostics";
+} from "./daemon/wallet/diagnostics.ts";
 import {
   legacyCocodDir,
   legacyCocodPidPath,
   legacyCocodSocketPath,
   walletDir as defaultWalletDir,
   walletPidPath,
-} from "./daemon/wallet/paths";
+} from "./daemon/wallet/paths.ts";
 import * as QRCode from "qrcode";
-import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98.ts";
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
@@ -61,12 +62,13 @@ import {
   getGlobalPackageVersion,
   getLatestNpmVersion,
 } from "./utils/update-checker.ts";
-import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
-import { VERSION } from "./version";
+import { globalInstallCommand, isStandaloneExecutable, pm2DaemonArgs } from "./runtime.ts";
+import { readFileRange } from "./utils/spawn.ts";
+import { VERSION } from "./version.ts";
 import {
   getLatestStandaloneRelease,
   installStandaloneRelease,
-} from "./utils/standalone-update";
+} from "./utils/standalone-update.ts";
 
 type RoutstrModel = {
   id: string;
@@ -403,11 +405,12 @@ program
       const toPart = latest ? ` to v${latest}` : "";
       console.log(`Updating ${label}${fromPart}${toPart}...`);
 
-      const proc = Bun.spawn(["bun", "install", "-g", name], {
-        stdout: "inherit",
-        stderr: "inherit",
+      const [installCommand, ...installArgs] = globalInstallCommand(name);
+      const proc = spawn(installCommand as string, installArgs, { stdio: "inherit" });
+      const code = await new Promise<number>((resolve) => {
+        proc.on("error", () => resolve(1));
+        proc.on("exit", (value) => resolve(value ?? 0));
       });
-      const code = await proc.exited;
       if (code !== 0) {
         console.error(`Failed to update ${label}.`);
         process.exit(1);
@@ -733,7 +736,7 @@ program
     if (options.port) argv.push("--port", options.port);
     if (options.host) argv.push("--host", options.host);
     if (options.provider) argv.push("--provider", options.provider);
-    const { runDaemon } = await import("./daemon/index");
+    const { runDaemon } = await import("./daemon/index.ts");
     await runDaemon(argv);
   });
 
@@ -1915,7 +1918,7 @@ walletCmd
       }
 
       if (!options.dryRun && !options.yes) {
-        const rl = require("readline").createInterface({
+        const rl = createInterface({
           input: process.stdin,
           output: process.stdout,
         });
@@ -2162,7 +2165,7 @@ nwcCmd
   .action(async (connectionString?: string) => {
     if (!connectionString) {
       // Interactive mode: prompt for connection string
-      const rl = require("readline").createInterface({
+      const rl = createInterface({
         input: process.stdin,
         output: process.stdout,
       });
@@ -2299,12 +2302,13 @@ serviceCmd
         );
         process.exit(1);
       }
-      console.log("PM2 not found. Installing PM2 globally with bun...");
+      const pm2Install = globalInstallCommand("pm2").join(" ");
+      console.log(`PM2 not found. Installing PM2 globally (${pm2Install})...`);
       try {
-        execSync("bun install -g pm2", { stdio: "inherit" });
+        execSync(pm2Install, { stdio: "inherit" });
       } catch (err) {
         console.error(
-          "Failed to install PM2. Please install it manually: bun install -g pm2",
+          `Failed to install PM2. Please install it manually: ${pm2Install}`,
         );
         process.exit(1);
       }
@@ -2314,11 +2318,12 @@ serviceCmd
     try {
       await stopLegacyCocod();
 
-      const proc = Bun.spawn(["pm2", ...pm2DaemonArgs()], {
-        stdout: "inherit",
-        stderr: "inherit",
+      const proc = spawn("pm2", pm2DaemonArgs(), { stdio: "inherit" });
+      const pm2Code = await new Promise<number>((resolve) => {
+        proc.on("error", () => resolve(1));
+        proc.on("exit", (value) => resolve(value ?? 0));
       });
-      if ((await proc.exited) !== 0) throw new Error("PM2 exited with an error");
+      if (pm2Code !== 0) throw new Error("PM2 exited with an error");
 
       console.log("\n✅ routstrd is now managed by PM2.");
       console.log("\nTo ensure it starts on system reboot, run:");
@@ -2418,7 +2423,7 @@ program
     const modes: Array<"apikeys" | "xcashu"> = ["apikeys", "xcashu"];
 
     const selectedIndex = await new Promise<number>((resolve) => {
-      const rl = require("readline").createInterface({
+      const rl = createInterface({
         input: process.stdin,
         output: process.stdout,
       });
@@ -2517,7 +2522,7 @@ async function followLogFile(file: string, lines: number): Promise<void> {
       continue;
     }
 
-    const text = await Bun.file(file).slice(position, size).text();
+    const text = readFileRange(file, position, size);
     process.stdout.write(text);
     position = size;
   }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cli } from "./cli";
+import { cli } from "./cli.ts";
 
 try {
   await cli(process.argv);

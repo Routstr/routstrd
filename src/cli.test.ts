@@ -7,7 +7,7 @@ import {
   getLivePidFileOwner,
   initializeWallet,
   parseStructuredLogLine,
-} from "./cli";
+} from "./cli.ts";
 
 const tempDirs: string[] = [];
 

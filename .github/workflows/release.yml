@@ -28,9 +28,30 @@ jobs:
           test "${GITHUB_REF_NAME}" = "v${package_version}"
       - run: bun run lint
       - run: bun test
+      - name: Smoke test under Bun
+        run: bun scripts/smoke/daemon-boot.ts
+
+  validate-deno:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      # node_modules comes from the bun lockfile so both runtimes resolve the
+      # same dependency tree.
+      - run: bun install --frozen-lockfile
+      - run: deno task check
+      - name: Smoke test under Deno
+        run: deno task smoke
 
   build:
-    needs: validate
+    needs: [validate, validate-deno]
     strategy:
       fail-fast: false
       matrix:

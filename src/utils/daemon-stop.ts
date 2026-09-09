@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from "fs";
-import { isDaemonRunning } from "./daemon-client";
-import { defaultIsProcessRunning } from "../daemon/wallet/coco-client";
-import { walletPidPath } from "../daemon/wallet/paths";
-import { formatElapsed } from "../start-daemon";
+import { isDaemonRunning } from "./daemon-client.ts";
+import { defaultIsProcessRunning } from "../daemon/wallet/coco-client.ts";
+import { walletPidPath } from "../daemon/wallet/paths.ts";
+import { formatElapsed } from "../start-daemon.ts";
 
 /**
  * Wait for a daemon that was asked to stop (POST /stop) to fully exit.

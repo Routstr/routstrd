@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { unlinkSync } from "fs";
+import { unlinkSync, writeFileSync } from "fs";
+import { spawnCapture } from "../utils/spawn.ts";
 import { tmpdir } from "os";
 import { join } from "path";
-import { exitOnUncaughtException } from "./fatal-error";
+import { exitOnUncaughtException } from "./fatal-error.ts";
 
-const fatalErrorModule = JSON.stringify(join(import.meta.dir, "fatal-error.ts"));
+const fatalErrorModule = JSON.stringify(join(import.meta.dirname, "fatal-error.ts"));
 
 const fixturePaths: string[] = [];
 
@@ -29,16 +30,13 @@ async function runFixture(source: string): Promise<{
     `routstrd-fatal-error-fixture-${crypto.randomUUID()}.ts`,
   );
   fixturePaths.push(scriptPath);
-  await Bun.write(scriptPath, source);
-  const proc = Bun.spawn(["bun", scriptPath], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  writeFileSync(scriptPath, source);
+  const proc = spawnCapture("bun", [scriptPath]);
+  const [stdout, stderr, exitCode] = await Promise.all([
+    proc.stdout,
+    proc.stderr,
+    proc.exited,
   ]);
-  const exitCode = await proc.exited;
   return { exitCode, stdout, stderr };
 }
 

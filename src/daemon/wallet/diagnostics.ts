@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "fs";
-import { Database } from "bun:sqlite";
+import { Database, type SqliteDatabase } from "../../utils/sqlite.ts";
 import { join } from "path";
 import {
   classifyWalletMigration,
   type WalletMigrationClass,
-} from "./wallet-state";
+} from "./wallet-state.ts";
 
 /**
  * Wallet diagnostics for the cocod → routstrd wallet-directory migration.
@@ -40,7 +40,7 @@ export const SUMMARY_QUERIES: Record<string, string> = {
  * Verify a database is healthy and return a wallet summary. Throws on corrupt
  * databases because the migration must never proceed over them.
  */
-export function verifyDatabase(database: Database, label: string): WalletSummary {
+export function verifyDatabase(database: SqliteDatabase, label: string): WalletSummary {
   const checks = database.query("PRAGMA quick_check").values() as unknown[][];
   if (checks.length !== 1 || checks[0]?.[0] !== "ok") {
     throw new Error(`${label} failed PRAGMA quick_check: ${JSON.stringify(checks)}`);
@@ -115,7 +115,7 @@ export function mnemonicFingerprint(mnemonic: string): string {
 export function summarizeDbReadonly(
   dbPath: string,
 ): { summary?: DbDiagnosticSummary; error?: string } {
-  let database: Database | undefined;
+  let database: SqliteDatabase | undefined;
   try {
     database = new Database(dbPath, { readonly: true });
     const raw = verifyDatabase(database, "Wallet database");
