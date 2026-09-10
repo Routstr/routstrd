@@ -92,18 +92,40 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           pattern: routstrd-*
           merge-multiple: true
       - name: Create checksums
         run: shasum -a 256 routstrd-*.tar.gz > SHA256SUMS
+      - name: Serve artifacts for installer smoke test
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p "serve/v${version}"
+          cp "routstrd-v${version}-linux-x64.tar.gz" SHA256SUMS "serve/v${version}/"
+      - name: Smoke test install.sh against the built artifacts
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 -m http.server 8137 --bind 127.0.0.1 --directory serve &
+          server_pid=$!
+          trap 'kill "${server_pid}"' EXIT
+          sleep 1
+          sh install.sh \
+            --version "${version}" \
+            --platform linux \
+            --arch x64 \
+            --dir /tmp/routstrd-install-smoke \
+            --download-base-url http://127.0.0.1:8137
+          test "$(/tmp/routstrd-install-smoke/routstrd --version)" = "${version}"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release create "${GITHUB_REF_NAME}"
-          routstrd-*.tar.gz SHA256SUMS
+          routstrd-*.tar.gz SHA256SUMS install.sh
           --repo "${GITHUB_REPOSITORY}"
           --verify-tag
           --generate-notes
