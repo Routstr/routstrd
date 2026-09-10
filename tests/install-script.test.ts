@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { releaseArchiveName } from "../src/utils/standalone-update";
@@ -93,6 +93,25 @@ function runInstaller(args: string[], env: Record<string, string> = {}) {
   });
 }
 
+/**
+ * The fake release server lives in this process, so tests that download from it
+ * must not block the event loop: Bun.spawnSync would deadlock on the request the
+ * child makes back into this process. Always await the child instead.
+ */
+async function runInstallerAsync(args: string[], env: Record<string, string> = {}) {
+  const proc = Bun.spawn(["sh", INSTALL_SCRIPT, ...args], {
+    env: { ...process.env, ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+}
+
 describe("install.sh", () => {
   test("is valid POSIX shell", () => {
     const result = Bun.spawnSync(["sh", "-n", INSTALL_SCRIPT], { stderr: "pipe" });
@@ -144,7 +163,7 @@ describe("install.sh", () => {
     }
   });
 
-  test("installs the executable from a release archive", () => {
+  test("installs the executable from a release archive", async () => {
     const dir = tempDir("routstrd-install-e2e-");
     const installDir = join(dir, "bin");
     const asset = releaseArchiveName(VERSION, process.platform, process.arch);
@@ -155,7 +174,7 @@ describe("install.sh", () => {
       checksums: `${sha256Hex(archive)}  ${asset}\n`,
     });
 
-    const result = runInstaller([
+    const result = await runInstallerAsync([
       "--dir",
       installDir,
       "--api-base-url",
@@ -164,7 +183,7 @@ describe("install.sh", () => {
       `${origin}/dl`,
     ]);
 
-    expect(result.stderr.toString()).toContain(`Installed routstrd v${VERSION}`);
+    expect(result.stderr).toContain(`Installed routstrd v${VERSION}`);
     expect(result.exitCode).toBe(0);
 
     const target = join(installDir, "routstrd");
@@ -173,7 +192,7 @@ describe("install.sh", () => {
     expect(version.stdout.toString().trim()).toBe(VERSION);
   });
 
-  test("installs a specific version without querying the API", () => {
+  test("installs a specific version without querying the API", async () => {
     const dir = tempDir("routstrd-install-pinned-");
     const installDir = join(dir, "bin");
     const asset = releaseArchiveName(VERSION, process.platform, process.arch);
@@ -184,7 +203,7 @@ describe("install.sh", () => {
       checksums: `${sha256Hex(archive)}  ${asset}\n`,
     });
 
-    const result = runInstaller([
+    const result = await runInstallerAsync([
       "--version",
       VERSION,
       "--dir",
@@ -199,7 +218,7 @@ describe("install.sh", () => {
     expect(statSync(join(installDir, "routstrd")).isFile()).toBe(true);
   });
 
-  test("refuses to install when the checksum does not match", () => {
+  test("refuses to install when the checksum does not match", async () => {
     const dir = tempDir("routstrd-install-tampered-");
     const installDir = join(dir, "bin");
     const asset = releaseArchiveName(VERSION, process.platform, process.arch);
@@ -210,7 +229,7 @@ describe("install.sh", () => {
       checksums: `${sha256Hex(new TextEncoder().encode("tampered"))}  ${asset}\n`,
     });
 
-    const result = runInstaller([
+    const result = await runInstallerAsync([
       "--dir",
       installDir,
       "--api-base-url",
@@ -220,18 +239,18 @@ describe("install.sh", () => {
     ]);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("checksum mismatch");
+    expect(result.stderr).toContain("checksum mismatch");
     expect(() => statSync(join(installDir, "routstrd"))).toThrow();
   });
 
-  test("reports a missing asset for the current platform", () => {
+  test("reports a missing asset for the current platform", async () => {
     const dir = tempDir("routstrd-install-missing-");
     const origin = serveFakeRelease({
       asset: releaseArchiveName(VERSION, process.platform, process.arch),
       omitAsset: true,
     });
 
-    const result = runInstaller([
+    const result = await runInstallerAsync([
       "--dir",
       join(dir, "bin"),
       "--api-base-url",
@@ -241,16 +260,16 @@ describe("install.sh", () => {
     ]);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("may not include a build");
+    expect(result.stderr).toContain("may not include a build");
   });
 
-  test("reports a release without SHA256SUMS", () => {
+  test("reports a release without SHA256SUMS", async () => {
     const dir = tempDir("routstrd-install-nosums-");
     const asset = releaseArchiveName(VERSION, process.platform, process.arch);
     const archive = buildArchive(dir, VERSION);
     const origin = serveFakeRelease({ asset, archive, checksums: "" });
 
-    const result = runInstaller([
+    const result = await runInstallerAsync([
       "--dir",
       join(dir, "bin"),
       "--api-base-url",
@@ -260,10 +279,10 @@ describe("install.sh", () => {
     ]);
 
     expect(result.exitCode).not.toBe(0);
-    expect(result.stderr.toString()).toContain("does not contain");
+    expect(result.stderr).toContain("does not contain");
   });
 
-  test("honours ROUTSTRD_INSTALL_DIR when --dir is absent", () => {
+  test("honours ROUTSTRD_INSTALL_DIR when --dir is absent", async () => {
     const dir = tempDir("routstrd-install-env-");
     const installDir = join(dir, "bin");
     const asset = releaseArchiveName(VERSION, process.platform, process.arch);
@@ -274,7 +293,7 @@ describe("install.sh", () => {
       checksums: `${sha256Hex(archive)}  ${asset}\n`,
     });
 
-    const result = runInstaller(
+    const result = await runInstallerAsync(
       [
         "--api-base-url",
         origin,
@@ -286,7 +305,7 @@ describe("install.sh", () => {
 
     expect(result.exitCode).toBe(0);
     const installed = join(installDir, "routstrd");
-    chmodSync(installed, 0o755);
     expect(statSync(installed).isFile()).toBe(true);
+    expect(statSync(installed).mode & 0o111).not.toBe(0);
   });
 });
