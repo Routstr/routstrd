@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { releaseArchiveName } from "../src/utils/standalone-update";
@@ -51,6 +51,8 @@ type FakeReleaseOptions = {
   archive?: Uint8Array;
   checksums?: string;
   omitAsset?: boolean;
+  /** Delays the archive response so a test can signal while the download is in flight. */
+  assetDelayMs?: number;
 };
 
 /**
@@ -62,7 +64,7 @@ function serveFakeRelease(options: FakeReleaseOptions = {}): string {
   const asset = options.asset ?? releaseArchiveName(version, "linux", "x64");
   const server = Bun.serve({
     port: 0,
-    fetch(request) {
+    async fetch(request) {
       const { pathname } = new URL(request.url);
       if (pathname === `/repos/${REPO}/releases/latest`) {
         return Response.json({
@@ -75,6 +77,7 @@ function serveFakeRelease(options: FakeReleaseOptions = {}): string {
       }
       if (pathname === `/dl/v${version}/${asset}`) {
         if (options.omitAsset) return new Response("not found", { status: 404 });
+        if (options.assetDelayMs) await Bun.sleep(options.assetDelayMs);
         return new Response(options.archive ?? new Uint8Array());
       }
       return new Response("not found", { status: 404 });
@@ -308,4 +311,150 @@ describe("install.sh", () => {
     expect(statSync(installed).isFile()).toBe(true);
     expect(statSync(installed).mode & 0o111).not.toBe(0);
   });
+
+  test("prints the asset without curl, wget or HOME", () => {
+    // --print-asset performs no install and, with --version, no network access,
+    // so it must not require an HTTP client or an install directory. /bin/sh is
+    // addressed absolutely because PATH is deliberately stripped.
+    const result = Bun.spawnSync(
+      [
+        "/bin/sh",
+        INSTALL_SCRIPT,
+        "--print-asset",
+        "--version",
+        VERSION,
+        "--platform",
+        "linux",
+        "--arch",
+        "x64",
+      ],
+      { env: { PATH: "/nonexistent" }, stdout: "pipe", stderr: "pipe" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString().trim()).toBe(releaseArchiveName(VERSION, "linux", "x64"));
+  });
+
+  test("refuses a release whose binary reports the wrong version", async () => {
+    const dir = tempDir("routstrd-install-wrong-version-");
+    const installDir = join(dir, "bin");
+    mkdirSync(installDir, { recursive: true });
+    writeFileSync(join(installDir, "routstrd"), "#!/bin/sh\necho old\n");
+    const asset = releaseArchiveName(VERSION, process.platform, process.arch);
+    const archive = buildArchive(dir, "0.0.1");
+    const origin = serveFakeRelease({
+      asset,
+      archive,
+      checksums: `${sha256Hex(archive)}  ${asset}\n`,
+    });
+
+    const result = await runInstallerAsync([
+      "--dir",
+      installDir,
+      "--api-base-url",
+      origin,
+      "--download-base-url",
+      `${origin}/dl`,
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("reported version");
+    // The previous install must survive a rejected update.
+    expect(readFileSync(join(installDir, "routstrd"), "utf8")).toContain("old");
+  });
+
+  test("accepts a staged binary that reports a v-prefixed version", async () => {
+    const dir = tempDir("routstrd-install-vprefixed-binary-");
+    const installDir = join(dir, "bin");
+    const asset = releaseArchiveName(VERSION, process.platform, process.arch);
+    const archive = buildArchive(dir, `v${VERSION}`);
+    const origin = serveFakeRelease({
+      asset,
+      archive,
+      checksums: `${sha256Hex(archive)}  ${asset}\n`,
+    });
+
+    const result = await runInstallerAsync([
+      "--dir",
+      installDir,
+      "--api-base-url",
+      origin,
+      "--download-base-url",
+      `${origin}/dl`,
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(statSync(join(installDir, "routstrd")).isFile()).toBe(true);
+  });
+
+  test("rejects an oversized SHA256SUMS", async () => {
+    const dir = tempDir("routstrd-install-big-sums-");
+    const asset = releaseArchiveName(VERSION, process.platform, process.arch);
+    const archive = buildArchive(dir, VERSION);
+    const origin = serveFakeRelease({
+      asset,
+      archive,
+      checksums: `${sha256Hex(archive)}  ${asset}\n${"a".repeat(2 * 1024 * 1024)}\n`,
+    });
+
+    const result = await runInstallerAsync([
+      "--dir",
+      join(dir, "bin"),
+      "--api-base-url",
+      origin,
+      "--download-base-url",
+      `${origin}/dl`,
+    ]);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("SHA256SUMS is unexpectedly large");
+  });
+
+  test(
+    "exits without installing when interrupted mid-download",
+    async () => {
+      const dir = tempDir("routstrd-install-interrupt-");
+      const installDir = join(dir, "bin");
+      const tmpParent = join(dir, "tmp");
+      mkdirSync(tmpParent, { recursive: true });
+      const asset = releaseArchiveName(VERSION, process.platform, process.arch);
+      const archive = buildArchive(dir, VERSION);
+      const origin = serveFakeRelease({
+        asset,
+        archive,
+        checksums: `${sha256Hex(archive)}  ${asset}\n`,
+        assetDelayMs: 2000,
+      });
+
+      const proc = Bun.spawn(
+        [
+          "sh",
+          INSTALL_SCRIPT,
+          "--dir",
+          installDir,
+          "--api-base-url",
+          origin,
+          "--download-base-url",
+          `${origin}/dl`,
+        ],
+        { env: { ...process.env, TMPDIR: tmpParent }, stdout: "pipe", stderr: "pipe" },
+      );
+
+      // Signal while the archive download is still in flight. The installer must
+      // report the interrupt, exit non-zero and clean up after itself, rather
+      // than resuming into a misleading follow-on failure (or an install).
+      await Bun.sleep(300);
+      proc.kill();
+
+      const [exitCode, stderr] = await Promise.all([
+        Promise.race([proc.exited, Bun.sleep(8000).then(() => -1)]),
+        new Response(proc.stderr).text(),
+      ]);
+      expect(exitCode).toBe(1);
+      expect(stderr).toContain("Interrupted.");
+      expect(readdirSync(tmpParent)).toEqual([]);
+      expect(() => statSync(join(installDir, "routstrd"))).toThrow();
+    },
+    15000,
+  );
 });

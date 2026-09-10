@@ -44,7 +44,8 @@ curl -fsSL https://github.com/Routstr/routstrd/releases/latest/download/install.
 ```
 
 The installer downloads the release archive, verifies it against the release
-`SHA256SUMS`, and only replaces `routstrd` after the checksum matches.
+`SHA256SUMS`, and only replaces an existing `routstrd` once the checksum matches
+and the extracted binary reports the expected version.
 
 <details>
 <summary>Manual install</summary>
