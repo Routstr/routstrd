@@ -26,7 +26,29 @@ npm or running from source requires the [Bun](https://bun.sh) runtime.
 
 ### Step 1: Install
 
-**Standalone binary:**
+**Standalone binary (recommended):**
+
+Installs the standalone executable for Linux or macOS (x64 or arm64) into
+`$HOME/.local/bin`. No Bun, Node.js, or npm required.
+
+```sh
+curl -fsSL https://github.com/Routstr/routstrd/releases/latest/download/install.sh | sh
+```
+
+Pin a version, change the install directory, or print the resolved asset without
+installing anything:
+
+```sh
+curl -fsSL https://github.com/Routstr/routstrd/releases/latest/download/install.sh \
+  | sh -s -- --version 0.4.9 --dir /usr/local/bin
+```
+
+The installer downloads the release archive, verifies it against the release
+`SHA256SUMS`, and only replaces an existing `routstrd` once the checksum matches
+and the extracted binary reports the expected version.
+
+<details>
+<summary>Manual install</summary>
 
 Download the archive for your operating system and architecture from the
 [latest GitHub Release](https://github.com/Routstr/routstrd/releases/latest).
@@ -41,6 +63,12 @@ install -m 755 routstrd "$HOME/.local/bin/routstrd"
 
 Substitute the version, platform, and architecture for the archive you
 downloaded, and ensure `$HOME/.local/bin` is on `PATH`.
+
+</details>
+
+Installing the standalone binary is preferred over the npm package: the npm
+package runs through the Bun runtime, while the standalone executable has no
+runtime dependency.
 
 **Global with bun:**
 ```sh
@@ -310,10 +338,11 @@ not part of `bun test`.
 1. Set a new `package.json` version and commit it. The release tag must be the
    same version prefixed with `v`, and the tag must not already exist.
 2. Push the tag. The release workflow runs lint and tests, builds Linux and
-   macOS executables for x64 and arm64, smoke-tests them, and publishes the
-   archives with `SHA256SUMS`.
-3. Verify all four archives appear in the GitHub Release and validate each
-   checksum before announcing it.
+   macOS executables for x64 and arm64, smoke-tests them, verifies the archives
+   through `install.sh` itself, and publishes the archives with `SHA256SUMS` and
+   `install.sh`.
+3. Verify all four archives and `install.sh` appear in the GitHub Release and
+   validate each checksum before announcing it.
 4. In disposable environments for each platform, test `--version`, `--help`,
    foreground startup failure, and background `start`, `status`, and `stop`
    without Bun on `PATH`.
