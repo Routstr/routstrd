@@ -3,7 +3,8 @@ import type { Tab } from "./types.ts";
 import {
   formatNumber,
   formatTime,
-  type NpubEntry,
+  resolveClientLabel,
+  type ClientNaming,
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
@@ -503,13 +504,12 @@ export function renderClients(stats: UsageStats, width: number): string {
   return output;
 }
 
-export function renderNpubs(stats: UsageStats, npubs: NpubEntry[], width: number): string {
+export function renderNpubs(stats: UsageStats, naming: ClientNaming, width: number): string {
   const npubStats = stats.summary.npubs;
   if (npubStats.length === 0) return renderBox(["No npub data available"], width, "Npub Breakdown");
 
   // Index configured npubs by their npub so usage rows can show names/roles.
-  const configured = new Map<string, NpubEntry>();
-  for (const entry of npubs) configured.set(entry.npub, entry);
+  const configured = new Map(naming.npubs.map((entry) => [entry.npub, entry]));
 
   const totalCost = stats.totalSatsCost;
   const maxCost = npubStats[0]!.satsCost;
@@ -585,22 +585,38 @@ function truncateNpub(npub: string): string {
   return npub.slice(0, 10) + "…" + npub.slice(-6);
 }
 
-export function renderRecent(stats: UsageStats, width: number): string {
+export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
   const recentEntries = stats.entries.slice(0, 50);
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
-  const clientCol = 14;
+  const timeCol = 10;
+  const modelCol = 18;
   const tokensCol = 18;
   const costCol = 18;
-  const providerCol = Math.max(16, width - 4 - 10 - 18 - tokensCol - costCol - clientCol - 5);
+
+  // Remote mode: `Alice (claude-code)` — owner display name + the client id
+  // with the `-<npub tail>` suffix stripped. Local mode (no owner/name data)
+  // keeps the previous behaviour: the raw id in a fixed 14-col cell.
+  const hasOwnerInfo = naming.npubs.length > 0 || naming.ownersByClientId.size > 0;
+  const clientLabels = recentEntries.map((entry) =>
+    hasOwnerInfo ? resolveClientLabel(entry.client, naming) : entry.client || "unknown"
+  );
+  const maxLabelLen = clientLabels.reduce((max, label) => Math.max(max, label.length), 6);
+  const clientCol = hasOwnerInfo ? Math.min(32, Math.max(14, maxLabelLen)) : 14;
+
+  // Budget: time + model + tokens + cost + provider + client + 5 separators.
+  const innerWidth = Math.max(0, width - 4);
+  const providerCol = Math.max(12, innerWidth - timeCol - modelCol - tokensCol - costCol - 5 - clientCol);
+
   const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}${"TIME".padEnd(10)} ${"MODEL".padEnd(18)} ${"I/CR/CW/O".padEnd(tokensCol)} ${"I/O/T in sats".padEnd(costCol)} ${"BASE:PROVIDER".padEnd(providerCol)} ${"CLIENT".slice(0, clientCol)}${COLORS.reset}`);
+  lines.push(`${COLORS.bold}${["TIME".padEnd(timeCol), "MODEL".padEnd(modelCol), "I/CR/CW/O".padEnd(tokensCol), "I/O/T in sats".padEnd(costCol), "BASE:PROVIDER".padEnd(providerCol), "CLIENT".padEnd(clientCol)].join(" ")}${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
 
-  for (const entry of recentEntries) {
+  for (let i = 0; i < recentEntries.length; i++) {
+    const entry = recentEntries[i]!;
     const time = formatTime(entry.timestamp).slice(0, 8);
-    const model = entry.modelId.slice(0, 18).padEnd(18);
+    const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
     const tokens = [
       entry.promptTokens,
       entry.cacheReadInputTokens || 0,
@@ -615,16 +631,16 @@ export function renderRecent(stats: UsageStats, width: number): string {
     ].join("/");
     const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
     const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
-    const clientName = (entry.client || "unknown").slice(0, clientCol - 1);
+    const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
-    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(tokensCol)} ${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientName}${COLORS.reset}`);
+    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(tokensCol)} ${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientLabel}${COLORS.reset}`);
   }
 
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, npubs: NpubEntry[] = []): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width);
     case "today": return renderToday(stats, width);
@@ -632,8 +648,8 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "providers": return renderProviders(stats, width);
     case "tokens": return renderTokens(stats, width);
     case "clients": return renderClients(stats, width);
-    case "npubs": return renderNpubs(stats, npubs, width);
-    case "recent": return renderRecent(stats, width);
+    case "npubs": return renderNpubs(stats, naming, width);
+    case "recent": return renderRecent(stats, width, naming);
     default: return "Unknown tab";
   }
 }

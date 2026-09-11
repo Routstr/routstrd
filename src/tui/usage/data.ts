@@ -172,3 +172,86 @@ export async function fetchNpubs(): Promise<NpubEntry[]> {
     return [];
   }
 }
+
+/** Number of trailing npub characters the auth proxy folds into a client id. */
+export const NPUB_SUFFIX_LENGTH = 7;
+
+/**
+ * Lookup tables for turning a raw usage `client` id (e.g.
+ * `claude-code-a1b2c3d`) back into a human label (e.g. `Alice (claude-code)`).
+ *
+ * All maps are empty in local mode, so {@link resolveClientLabel} falls back to
+ * the raw id with no behaviour change there.
+ */
+export interface ClientNaming {
+  /** Configured npubs (names + roles) from the auth proxy. */
+  npubs: NpubEntry[];
+  /** bare clientId -> owner npub, from `GET /clients`. */
+  ownersByClientId: Map<string, string>;
+  /** npub -> display name (null when unset). */
+  npubNames: Map<string, string | null>;
+  /** trailing npub suffix -> npub. */
+  npubsBySuffix: Map<string, string>;
+}
+
+export function buildClientNaming(clients: ClientInfo[], npubs: NpubEntry[]): ClientNaming {
+  const ownersByClientId = new Map<string, string>();
+  for (const c of clients) {
+    if (c.ownerNpub) ownersByClientId.set(c.clientId, c.ownerNpub);
+  }
+
+  const npubNames = new Map<string, string | null>();
+  const npubsBySuffix = new Map<string, string>();
+  const remember = (npub: string) => npubsBySuffix.set(npub.slice(-NPUB_SUFFIX_LENGTH), npub);
+
+  for (const n of npubs) {
+    npubNames.set(n.npub, n.name ?? null);
+    remember(n.npub);
+  }
+  // `GET /clients` also carries owner npubs, which covers entries whose owner
+  // isn't present in the (possibly filtered) `/npubs` response.
+  for (const owner of ownersByClientId.values()) remember(owner);
+
+  return { npubs, ownersByClientId, npubNames, npubsBySuffix };
+}
+
+/** Configured display name for an npub, or null when unset/blank. */
+function npubDisplayName(naming: ClientNaming, npub: string): string | null {
+  const name = naming.npubNames.get(npub)?.trim();
+  return name && name.length > 0 ? name : null;
+}
+
+/** `Alice (claude-code)` when the owner has a name, else the bare client id. */
+function formatClientLabel(naming: ClientNaming, bareId: string, ownerNpub: string): string {
+  const name = npubDisplayName(naming, ownerNpub);
+  return name ? `${name} (${bareId})` : bareId;
+}
+
+/**
+ * Render a usage entry's `client` value as `Name (client-id)`, where `Name` is
+ * the owner npub's display name and the `-<npub tail>` suffix is stripped.
+ * Falls back to the raw id when no owner/name can be resolved (local mode).
+ */
+export function resolveClientLabel(clientId: string | undefined, naming: ClientNaming): string {
+  const raw = clientId && clientId.length > 0 ? clientId : "unknown";
+
+  // Exact match: the raw id is a known bare clientId or its suffixed form.
+  for (const [bareId, ownerNpub] of naming.ownersByClientId) {
+    const suffixed = `${bareId}-${ownerNpub.slice(-NPUB_SUFFIX_LENGTH)}`;
+    if (raw !== bareId && raw !== suffixed) continue;
+    return formatClientLabel(naming, bareId, ownerNpub);
+  }
+
+  // Fallback: strip a trailing `-<npub tail>` that matches a known npub.
+  for (const [suffix, npub] of naming.npubsBySuffix) {
+    const marker = `-${suffix}`;
+    if (raw.length <= marker.length || !raw.endsWith(marker)) continue;
+    return formatClientLabel(naming, raw.slice(0, -marker.length), npub);
+  }
+
+  return raw;
+}
+
+export function emptyClientNaming(): ClientNaming {
+  return buildClientNaming([], []);
+}

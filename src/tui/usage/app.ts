@@ -1,6 +1,6 @@
 import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
-import { fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type NpubEntry, type StatusInfo } from "./data.ts";
+import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -49,6 +49,7 @@ export async function runUsageTui(): Promise<void> {
   let status: StatusInfo | null = null;
   let clients: ClientInfo[] = [];
   let npubs: NpubEntry[] = [];
+  let naming: ClientNaming = emptyClientNaming();
   let visibleTabs: Tab[] = getVisibleTabs(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let autoRefresh = true;
@@ -153,6 +154,10 @@ export async function runUsageTui(): Promise<void> {
           const newNpubs = await fetchNpubs();
           if (newNpubs.length > 0) npubs = newNpubs;
         }
+
+        // Owner info (for "Name (client-id)" labels in the Recent tab) comes
+        // from /clients + /npubs; both are empty in local mode.
+        naming = buildClientNaming(clients, npubs);
       }
       render();
     } finally {
@@ -179,7 +184,7 @@ export async function runUsageTui(): Promise<void> {
       return;
     }
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, npubs);
+    const content = renderTabContent(currentTab, stats, balance, status, width, naming);
     const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
     const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
