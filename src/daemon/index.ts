@@ -68,6 +68,8 @@ import {
   legacyCocodSocketPath,
 } from "./wallet/paths";
 import { installGlobalErrorHandlers } from "./fatal-error";
+import { initializeWalletDirectory } from "./wallet/config";
+import { walletDir } from "./wallet/paths";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
@@ -162,7 +164,17 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     for (const warning of migration.cleanupWarnings) logger.warn(warning);
   }
 
-  const walletClient = await createCocoClient();
+  const walletInitialization = initializeWalletDirectory(walletDir());
+  if (walletInitialization.created) {
+    logger.warn(
+      "Created a new wallet. Back up its recovery mnemonic with 'routstrd wallet backup'.",
+    );
+  }
+
+  const walletClient = await createCocoClient({
+    initializeDefaultMint: config.wallet?.initializeDefaultMint,
+    enableNpc: config.wallet?.enableNpc,
+  });
 
   // ── Auto-refill configuration ────────────────────────────────
   // Uses a getter that reads config from disk each cycle, so

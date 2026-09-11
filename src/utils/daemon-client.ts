@@ -1,10 +1,6 @@
-import { existsSync } from "fs";
 import { startDaemon } from "../start-daemon";
-import {
-  CONFIG_FILE,
-  DEFAULT_CONFIG,
-  type RoutstrdConfig,
-} from "./config";
+import { type RoutstrdConfig } from "./config";
+import { loadDaemonConfig } from "../daemon/config-store";
 import {
   createNIP98Authorization,
   parseSecretKey,
@@ -18,15 +14,7 @@ export interface CommandResponse {
 }
 
 export async function loadConfig(): Promise<RoutstrdConfig> {
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      const content = await Bun.file(CONFIG_FILE).text();
-      return { ...DEFAULT_CONFIG, ...JSON.parse(content) };
-    }
-  } catch (error) {
-    console.error("Failed to load config:", error);
-  }
-  return DEFAULT_CONFIG;
+  return loadDaemonConfig();
 }
 
 /** Format a bind address for use as a URL host. */

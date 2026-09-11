@@ -8,6 +8,7 @@ import {
   initializeWallet,
   parseStructuredLogLine,
 } from "./cli";
+import { readWalletMnemonic } from "./daemon/wallet/config";
 
 const tempDirs: string[] = [];
 
@@ -215,6 +216,7 @@ describe("initializeWallet", () => {
     expect(config.encrypted).toBe(false);
     expect(typeof config.mnemonic).toBe("string");
     expect(config.mnemonic.length).toBeGreaterThan(0);
+    expect(readWalletMnemonic(walletDir)).toBe(config.mnemonic);
   });
 
   test("repairs permissions without replacing an existing wallet", () => {

@@ -105,6 +105,44 @@ switch (scenario) {
     break;
   }
 
+  case "config-layers": {
+    ensureDirsSync();
+    writeFileSync(
+      CONFIG_FILE,
+      JSON.stringify({
+        ...baseConfig,
+        port: 7000,
+        nwc: {
+          mode: "funding_source",
+          connectionString: "runtime-secret",
+          autoRefill: { enabled: true, threshold: 50, amount: 1000, cooldownMs: 300000 },
+        },
+      }),
+    );
+    writeFileSync(
+      process.env.ROUTSTRD_CONFIG_FILE!,
+      JSON.stringify({ port: 9000, nwc: { autoRefill: { threshold: 100 } } }),
+    );
+    writeFileSync(
+      process.env.ROUTSTRD_SECRET_CONFIG_FILE!,
+      JSON.stringify({ nwc: { connectionString: "managed-secret" } }),
+    );
+
+    const loaded = loadDaemonConfigSync();
+    assert(loaded.port === 9000, "managed port did not override runtime");
+    assert(loaded.nwc?.connectionString === "managed-secret", "secret layer did not override runtime");
+    assert(loaded.nwc?.autoRefill?.threshold === 100, "nested managed value did not override runtime");
+    assert(loaded.nwc?.autoRefill?.amount === 1000, "nested runtime value was not preserved");
+
+    saveDaemonConfig(loaded);
+    const runtime = JSON.parse(await Bun.file(CONFIG_FILE).text());
+    assert(runtime.port === undefined, "managed port leaked into runtime config");
+    assert(runtime.nwc?.connectionString === undefined, "secret leaked into runtime config");
+    assert(runtime.nwc?.autoRefill?.threshold === undefined, "managed nested value leaked into runtime config");
+    assert(runtime.nwc?.autoRefill?.amount === 1000, "runtime nested value was removed");
+    break;
+  }
+
   default:
     console.error(`unknown scenario: ${scenario}`);
     process.exit(2);

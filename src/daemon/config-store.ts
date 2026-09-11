@@ -12,6 +12,8 @@ import {
   CONFIG_DIR,
   CONFIG_FILE,
   DEFAULT_CONFIG,
+  MANAGED_CONFIG_FILE,
+  SECRET_CONFIG_FILE,
   type RoutstrdConfig,
 } from "../utils/config";
 import { logger } from "../utils/logger";
@@ -82,30 +84,83 @@ function envConfigOverrides(): Partial<RoutstrdConfig> {
   return overrides;
 }
 
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function mergeConfig(...values: JsonObject[]): RoutstrdConfig {
+  const merged: JsonObject = {};
+  for (const value of values) {
+    for (const [key, next] of Object.entries(value)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+      const current = merged[key];
+      merged[key] = isJsonObject(current) && isJsonObject(next)
+        ? mergeConfig(current, next)
+        : next;
+    }
+  }
+  return merged as unknown as RoutstrdConfig;
+}
+
+function readConfigFileSync(path?: string): JsonObject {
+  if (!path || !existsSync(path)) return {};
+  const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  if (!isJsonObject(parsed)) throw new Error(`Configuration at ${path} must be a JSON object`);
+  return parsed;
+}
+
+function removeManagedValues(value: JsonObject, managed: JsonObject): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, current] of Object.entries(value)) {
+    if (!(key in managed)) {
+      result[key] = current;
+      continue;
+    }
+    const managedValue = managed[key];
+    if (isJsonObject(current) && isJsonObject(managedValue)) {
+      const nested = removeManagedValues(current, managedValue);
+      if (Object.keys(nested).length > 0) result[key] = nested;
+    }
+  }
+  return result;
+}
+
+function configLayers(): {
+  runtime: JsonObject;
+  managed: JsonObject;
+  secret: JsonObject;
+  environment: JsonObject;
+} {
+  return {
+    runtime: readConfigFileSync(CONFIG_FILE),
+    managed: readConfigFileSync(MANAGED_CONFIG_FILE),
+    secret: readConfigFileSync(SECRET_CONFIG_FILE),
+    environment: envConfigOverrides() as JsonObject,
+  };
+}
+
 export async function loadDaemonConfig(): Promise<RoutstrdConfig> {
   try {
-    if (existsSync(CONFIG_FILE)) {
-      repairConfigPermissions();
-      const content = await Bun.file(CONFIG_FILE).text();
-      return { ...DEFAULT_CONFIG, ...JSON.parse(content), ...envConfigOverrides() };
-    }
+    repairConfigPermissions();
+    const { runtime, managed, secret, environment } = configLayers();
+    return mergeConfig(DEFAULT_CONFIG as unknown as JsonObject, runtime, managed, secret, environment);
   } catch (error) {
     logger.error("Failed to load config:", error);
   }
-  return { ...DEFAULT_CONFIG, ...envConfigOverrides() };
+  return mergeConfig(DEFAULT_CONFIG as unknown as JsonObject, envConfigOverrides() as JsonObject);
 }
 
 export function loadDaemonConfigSync(): RoutstrdConfig {
   try {
-    if (existsSync(CONFIG_FILE)) {
-      repairConfigPermissions();
-      const content = readFileSync(CONFIG_FILE, "utf-8");
-      return { ...DEFAULT_CONFIG, ...JSON.parse(content), ...envConfigOverrides() };
-    }
+    repairConfigPermissions();
+    const { runtime, managed, secret, environment } = configLayers();
+    return mergeConfig(DEFAULT_CONFIG as unknown as JsonObject, runtime, managed, secret, environment);
   } catch (error) {
     logger.error("Failed to load config:", error);
   }
-  return { ...DEFAULT_CONFIG, ...envConfigOverrides() };
+  return mergeConfig(DEFAULT_CONFIG as unknown as JsonObject, envConfigOverrides() as JsonObject);
 }
 
 /**
@@ -116,9 +171,15 @@ export function loadDaemonConfigSync(): RoutstrdConfig {
  */
 export function saveDaemonConfig(config: RoutstrdConfig): void {
   ensureDirsSync();
+  const managed = mergeConfig(
+    readConfigFileSync(MANAGED_CONFIG_FILE),
+    readConfigFileSync(SECRET_CONFIG_FILE),
+    envConfigOverrides() as JsonObject,
+  ) as unknown as JsonObject;
+  const runtimeConfig = removeManagedValues(config as unknown as JsonObject, managed);
   const temporaryFile = `${CONFIG_FILE}.${process.pid}.tmp`;
   try {
-    writeFileSync(temporaryFile, JSON.stringify(config, null, 2), {
+    writeFileSync(temporaryFile, JSON.stringify(runtimeConfig, null, 2), {
       mode: 0o600,
     });
     renameSync(temporaryFile, CONFIG_FILE);
