@@ -3,19 +3,24 @@ import type { SdkStore } from "@routstr/sdk";
 import { createModelService } from "./models";
 
 /**
- * `ensureProvidersBootstrapped` must mirror the review-disabled provider set
- * (kind 38425) into the SdkStore. The SDK applies review disables to the
- * discovery adapter during bootstrap, but `providers list` and per-model
- * provider views read the store — if the store is not kept in sync, a fresh
- * install reports "0 disabled" while routing silently excludes them.
+ * `ensureProvidersBootstrapped` must mirror discovery into the SdkStore:
+ *
+ * - the review-disabled provider set (kind 38425), because `providers list`
+ *   and the per-model provider views read the store, so without this a fresh
+ *   install reports "0 disabled" while routing silently excludes them;
+ * - the discovered base URL list, because the CLI lists providers from the
+ *   store. It is replaced rather than merged, so a shrinking discovery result
+ *   cannot leave URLs visible that routing no longer uses.
  */
 describe("createModelService.ensureProvidersBootstrapped", () => {
   function makeStore(initialBaseUrls: string[] = []) {
     const disabledCalls: string[][] = [];
+    const baseUrlCalls: string[][] = [];
     const state: Record<string, unknown> = {
       baseUrlsList: initialBaseUrls,
       setBaseUrlsList: (urls: string[]) => {
         state.baseUrlsList = urls;
+        baseUrlCalls.push(urls);
       },
       disabledProviders: [],
       setDisabledProviders: (urls: string[]) => {
@@ -29,6 +34,7 @@ describe("createModelService.ensureProvidersBootstrapped", () => {
     return {
       store: { getState: () => state } as unknown as SdkStore,
       state,
+      baseUrlCalls,
       disabledCalls,
     };
   }
@@ -77,5 +83,69 @@ describe("createModelService.ensureProvidersBootstrapped", () => {
 
     expect(disabledCalls).toEqual([]);
     expect(state.disabledProviders).toEqual([]);
+  });
+
+  it("adds discovered providers to the store list", async () => {
+    const { store, state, baseUrlCalls } = makeStore(["https://ok.example/"]);
+    const modelManager = makeModelManager(
+      ["https://ok.example/", "https://new.example/"],
+      null,
+    );
+    const service = createModelService(
+      modelManager as never,
+      {} as never,
+      store,
+    );
+
+    await service.ensureProvidersBootstrapped();
+
+    expect(baseUrlCalls).toEqual([
+      ["https://ok.example/", "https://new.example/"],
+    ]);
+    expect(state.baseUrlsList).toEqual([
+      "https://ok.example/",
+      "https://new.example/",
+    ]);
+  });
+
+  it("replaces a stale store list instead of merging into it", async () => {
+    // A bootstrap regression (or a provider unpublishing) shrinking the
+    // discovered set must not leave the dropped URLs in `providers list`.
+    const { store, state, baseUrlCalls } = makeStore([
+      "https://gone.example/",
+      "https://stale.example/",
+      "https://ok.example/",
+    ]);
+    const modelManager = makeModelManager(["https://ok.example/"], []);
+    const service = createModelService(
+      modelManager as never,
+      {} as never,
+      store,
+    );
+
+    await service.ensureProvidersBootstrapped();
+
+    expect(baseUrlCalls).toEqual([["https://ok.example/"]]);
+    expect(state.baseUrlsList).toEqual(["https://ok.example/"]);
+  });
+
+  it("does not rewrite the store list when discovery already matches", async () => {
+    const { store, baseUrlCalls } = makeStore([
+      "https://a.example/",
+      "https://b.example/",
+    ]);
+    const modelManager = makeModelManager(
+      ["https://b.example/", "https://a.example/"],
+      [],
+    );
+    const service = createModelService(
+      modelManager as never,
+      {} as never,
+      store,
+    );
+
+    await service.ensureProvidersBootstrapped();
+
+    expect(baseUrlCalls).toEqual([]);
   });
 });
