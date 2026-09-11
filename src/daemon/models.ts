@@ -87,22 +87,25 @@ export function createModelService(
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
 
-        // Sync discovered providers into the store so `providers list` reflects
-        // the same set that the model manager knows about.
+        // Mirror discovery into the store so `providers list` reports the same
+        // set that the model manager polls and routes to. The list is
+        // *replaced*, not merged: an add-only merge keeps URLs discovery no
+        // longer reports (e.g. after a bootstrap regression or a provider
+        // unpublishing) visible to the CLI and to per-model views while
+        // routing silently ignores them.
         const {
           baseUrlsList,
           setBaseUrlsList,
           setDisabledProviders,
         } = store.getState();
-        const existing = new Set(baseUrlsList);
-        const merged = [
-          ...baseUrlsList,
-          ...providers.filter((url) => !existing.has(url)),
-        ];
-        if (merged.length !== baseUrlsList.length) {
-          setBaseUrlsList(merged);
+        const known = new Set(baseUrlsList);
+        const inSync =
+          known.size === providers.length &&
+          providers.every((url) => known.has(url));
+        if (!inSync) {
+          setBaseUrlsList(providers);
           logger.log(
-            `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
+            `Synced ${providers.length} discovered provider(s) into store (was ${baseUrlsList.length})`,
           );
         }
 
