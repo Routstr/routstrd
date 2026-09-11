@@ -1,5 +1,6 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
 import {
+  callAuth,
   callDaemon,
   getDaemonBaseUrl,
   isDaemonRunning,
@@ -144,4 +145,30 @@ export async function fetchClients(): Promise<ClientInfo[]> {
 
 export function hasAnyNpubs(clients: ClientInfo[]): boolean {
   return clients.some((c) => !!c.ownerNpub);
+}
+
+/** A configured npub as returned by the auth proxy (`/npubs`). */
+export interface NpubEntry {
+  npub: string;
+  name: string | null;
+  role: string;
+}
+
+/**
+ * Fetch the configured npubs (with their display names and roles) from the
+ * auth proxy. Returns an empty list when the endpoint is unavailable — e.g. a
+ * local daemon that doesn't route `/npubs` — so the TUI degrades gracefully.
+ */
+export async function fetchNpubs(): Promise<NpubEntry[]> {
+  try {
+    const result = await callAuth("/npubs");
+    if (result.error) return [];
+
+    // Handle both wrapped { output: { npubs } } and direct { npubs } responses.
+    const direct = (result as { npubs?: NpubEntry[] }).npubs;
+    const wrapped = (result.output as { npubs?: NpubEntry[] } | undefined)?.npubs;
+    return direct ?? wrapped ?? [];
+  } catch {
+    return [];
+  }
 }

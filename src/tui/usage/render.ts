@@ -3,7 +3,7 @@ import type { Tab } from "./types.ts";
 import {
   formatNumber,
   formatTime,
-  type ClientInfo,
+  type NpubEntry,
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
@@ -503,20 +503,24 @@ export function renderClients(stats: UsageStats, width: number): string {
   return output;
 }
 
-export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: number): string {
+export function renderNpubs(stats: UsageStats, npubs: NpubEntry[], width: number): string {
   const npubStats = stats.summary.npubs;
   if (npubStats.length === 0) return renderBox(["No npub data available"], width, "Npub Breakdown");
+
+  // Index configured npubs by their npub so usage rows can show names/roles.
+  const configured = new Map<string, NpubEntry>();
+  for (const entry of npubs) configured.set(entry.npub, entry);
 
   const totalCost = stats.totalSatsCost;
   const maxCost = npubStats[0]!.satsCost;
   const lines: string[] = [];
 
-  const col1 = 24; // Npub (truncated)
+  const col1 = 24; // Name (or truncated npub)
   const col2 = 12; // Requests
   const col3 = 24; // Cost
   const col4 = 12; // Tokens
 
-  const hNpub = "Npub".padEnd(col1);
+  const hNpub = "Name".padEnd(col1);
   const hReqs = "Requests".padEnd(col2);
   const hCost = "Cost".padEnd(col3);
   const hTok = "Tokens".padEnd(col4);
@@ -527,9 +531,11 @@ export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: num
   for (const npub of npubStats) {
     const pct = totalCost > 0 ? ((npub.satsCost / totalCost) * 100).toFixed(1) : "0.0";
     const avgCostFormatted = formatCost(npub.requests > 0 ? npub.satsCost / npub.requests : 0);
-    const shortNpub = truncateNpub(npub.npub);
+    const entry = configured.get(npub.npub);
+    const name = entry?.name?.trim();
+    const label = name || truncateNpub(npub.npub);
 
-    const dNpub = shortNpub.padEnd(col1);
+    const dNpub = label.slice(0, col1 - 1).padEnd(col1);
     const dReqs = formatReqs(npub.requests).padEnd(col2);
     const dCost = `${formatCost(npub.satsCost)} sats (${pct}%)`.padEnd(col3);
     const dTok = formatNumber(npub.totalTokens).padEnd(col4);
@@ -541,8 +547,9 @@ export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: num
       `${COLORS.green}${dCost}${COLORS.reset}` +
       `${COLORS.dim}${dTok}${dAvg}${COLORS.reset}`
     );
-    // Full npub on its own line for copy-ability
-    lines.push(`  ${COLORS.dim}${npub.npub}${COLORS.reset}`);
+    // Full npub (and role when known) on its own line for copy-ability.
+    const roleSuffix = entry?.role ? ` [${entry.role}]` : "";
+    lines.push(`  ${COLORS.dim}${npub.npub}${roleSuffix}${COLORS.reset}`);
     lines.push(`  ${renderBarChart("", npub.satsCost, maxCost, width - 6, COLORS.magenta, Number(pct), "npub-detail")}`);
     lines.push("");
   }
@@ -555,7 +562,9 @@ export function renderNpubs(stats: UsageStats, clients: ClientInfo[], width: num
     // Use pre-aggregated topModels from summary
     for (const topNpub of stats.summary.npubs.slice(0, 5)) {
       if (topNpub.topModels.length === 0) continue;
-      npubModelLines.push(`${COLORS.bold}${truncateNpub(topNpub.npub)}${COLORS.reset} (${formatReqs(topNpub.requests)} reqs, ${formatCost(topNpub.satsCost)} sats)`);
+      const name = configured.get(topNpub.npub)?.name?.trim();
+      const label = name || truncateNpub(topNpub.npub);
+      npubModelLines.push(`${COLORS.bold}${label}${COLORS.reset} (${formatReqs(topNpub.requests)} reqs, ${formatCost(topNpub.satsCost)} sats)`);
       for (const m of topNpub.topModels) {
         npubModelLines.push(`  ${(MODEL_COLORS[m.modelId] || MODEL_COLORS.default)}${m.modelId.padEnd(18)}${COLORS.reset} ${formatNumber(m.totalTokens).padEnd(8)} tokens  ${formatCost(m.satsCost)} sats`);
       }
@@ -615,7 +624,7 @@ export function renderRecent(stats: UsageStats, width: number): string {
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, clients: ClientInfo[] = []): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, npubs: NpubEntry[] = []): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width);
     case "today": return renderToday(stats, width);
@@ -623,7 +632,7 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "providers": return renderProviders(stats, width);
     case "tokens": return renderTokens(stats, width);
     case "clients": return renderClients(stats, width);
-    case "npubs": return renderNpubs(stats, clients, width);
+    case "npubs": return renderNpubs(stats, npubs, width);
     case "recent": return renderRecent(stats, width);
     default: return "Unknown tab";
   }
