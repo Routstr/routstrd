@@ -1,4 +1,3 @@
-## SECURITY.md
 # Security Policy
 
 ## Reporting a Vulnerability
