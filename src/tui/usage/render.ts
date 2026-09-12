@@ -688,7 +688,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
   const timeCol = 8;
-  const costCol = 15;
+  const costCol = 11;
   // Width reserved right of each token bar for `input/output` token counts.
   const inOutCol = 13;
   const minBarWidth = 8;
@@ -731,13 +731,12 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   const tokensCol = barWidth + 1 + inOutCol;
 
-  const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
   const header = [
     "TIME".padEnd(timeCol),
     "MODEL".padEnd(modelCol),
     `${"TOKENS".padEnd(tokensCol - inOutCol)}${"IN/OUT".padStart(inOutCol)}`,
-    "I/O/T in sats".padEnd(costCol),
+    "TOTAL SATS".padEnd(costCol),
     ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
     "CLIENT".padEnd(clientCol),
   ];
@@ -768,11 +767,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     ], barWidth);
     const tokens = `${bar} ${`${formatNumber(segments.input)}/${formatNumber(segments.output)}`.padStart(inOutCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
-    const cost = [
-      formatCost(msatsToSats(entry.inputMsats)),
-      formatCost(msatsToSats(entry.outputMsats)),
-      formatCost(totalSats),
-    ].join("/");
+    const cost = formatCost(totalSats);
     const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
     const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
     const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);

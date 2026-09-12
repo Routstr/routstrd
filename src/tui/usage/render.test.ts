@@ -203,6 +203,9 @@ describe("renderRecent token bars", () => {
         requestId: "r1",
         cost: 0,
         satsCost: 1,
+        inputMsats: 1000,
+        outputMsats: 2000,
+        totalMsats: 3000,
         promptTokens: 10_000,
         completionTokens: 2500,
         totalTokens: 12_500,
@@ -222,6 +225,15 @@ describe("renderRecent token bars", () => {
     expect(out).not.toContain(COLORS.blue + "█");
     expect(stripAnsi(out)).toContain("10.0K/2.5K");
     expect(stripAnsi(out)).toContain("bars: █ cache read  █ input (cache write + uncached)");
+  });
+
+  test("shows only the total sats cost, not the input/output breakdown", () => {
+    const out = stripAnsi(renderRecent(stats, 120, buildClientNaming([], [])));
+
+    expect(out).toContain("TOTAL SATS");
+    // 3000 total msats -> 3.00 sats; the 1.00/2.00 input/output split is gone.
+    expect(out).toContain("3.00");
+    expect(out).not.toContain("1.00/2.00");
   });
 
   test("keeps every row the same visible width as the box", () => {
