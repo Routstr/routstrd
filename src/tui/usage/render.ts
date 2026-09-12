@@ -585,14 +585,107 @@ function truncateNpub(npub: string): string {
   return npub.slice(0, 10) + "…" + npub.slice(-6);
 }
 
+/**
+ * Token composition of a single request, split the way the TUI colours it:
+ * uncached input (fresh), cache read, cache write and output.
+ */
+export interface TokenSegments {
+  fresh: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  total: number;
+}
+
+/**
+ * Split a usage entry into colour-coded token segments.
+ *
+ * Providers report prompt tokens inconsistently: OpenAI-style `prompt_tokens`
+ * already includes the cached subsets, while Anthropic-style `input_tokens`
+ * reports them alongside. If the prompt is at least as large as the cached
+ * counts it is treated as containing them (OpenAI); otherwise the cached
+ * counts are extra and the whole prompt is fresh input (Anthropic). `total`
+ * describes what the bar actually draws rather than trusting a possibly
+ * under-counted `totalTokens`.
+ */
+export function tokenSegments(entry: {
+  promptTokens?: number;
+  completionTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+}): TokenSegments {
+  const cacheRead = Math.max(0, entry.cacheReadInputTokens || 0);
+  const cacheWrite = Math.max(0, entry.cacheCreationInputTokens || 0);
+  const prompt = Math.max(0, entry.promptTokens || 0);
+  const output = Math.max(0, entry.completionTokens || 0);
+  const cached = cacheRead + cacheWrite;
+  const fresh = prompt >= cached ? prompt - cached : prompt;
+  return { fresh, cacheRead, cacheWrite, output, total: fresh + cacheRead + cacheWrite + output };
+}
+
+/** One coloured slice of a {@link renderStackedBar}. */
+export interface BarSegment {
+  /** Segment magnitude; negatives are treated as zero. */
+  value: number;
+  /** ANSI escape applied to this segment's cells. */
+  color: string;
+}
+
+/**
+ * Render a fixed-width stacked bar: `trackWidth` cells split between the
+ * segments in proportion to their values, so the bar conveys *composition*
+ * (magnitude is reported separately, e.g. as the token total beside it).
+ *
+ * Cell counts use largest-remainder rounding, so the segments always fill
+ * exactly `trackWidth` cells. A row with no tokens renders as an empty track.
+ */
+export function renderStackedBar(segments: BarSegment[], trackWidth: number): string {
+  const track = Math.max(0, Math.floor(trackWidth));
+  if (track === 0) return "";
+
+  const values = segments.map((segment) => Math.max(0, segment.value));
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return " ".repeat(track);
+
+  const exact = values.map((value) => (value / total) * track);
+  const cells = exact.map((value) => Math.floor(value));
+  let remaining = track - cells.reduce((sum, value) => sum + value, 0);
+
+  // Largest-remainder: leftover cells go to the biggest fractional parts.
+  const remainders = exact
+    .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+    .sort((a, b) => b.frac - a.frac);
+  for (let i = 0; i < remainders.length && remaining > 0; i++, remaining--) {
+    cells[remainders[i]!.index]! += 1;
+  }
+
+  const bar = segments
+    .map((segment, i) => (cells[i]! > 0 ? `${segment.color}${"█".repeat(cells[i]!)}` : ""))
+    .join("");
+  return bar.length > 0 ? bar + COLORS.reset : " ".repeat(track);
+}
+
+/** Colour coding shared by the Recent tab's token bars and its legend. */
+const TOKEN_BAR_COLORS = {
+  fresh: COLORS.yellow,
+  cacheRead: COLORS.green,
+  cacheWrite: COLORS.red,
+  output: COLORS.blue,
+};
+
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
   const recentEntries = stats.entries.slice(0, 50);
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
-  const timeCol = 10;
-  const modelCol = 18;
-  const tokensCol = 18;
-  const costCol = 18;
+  const timeCol = 8;
+  const costCol = 15;
+  // Width reserved right of each token bar for the row's total token count.
+  const totalCol = 7;
+  const minBarWidth = 8;
+  const maxBarWidth = 20;
+  const minProviderCol = 12;
+  const minModelCol = 10;
+  const minClientCol = 6;
 
   // Remote mode: `Alice (claude-code)` — owner display name + the client id
   // with the `-<npub tail>` suffix stripped. Local mode (no owner/name data)
@@ -602,27 +695,75 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     hasOwnerInfo ? resolveClientLabel(entry.client, naming) : entry.client || "unknown"
   );
   const maxLabelLen = clientLabels.reduce((max, label) => Math.max(max, label.length), 6);
-  const clientCol = hasOwnerInfo ? Math.min(32, Math.max(14, maxLabelLen)) : 14;
 
-  // Budget: time + model + tokens + cost + provider + client + 5 separators.
+  // Lay out the columns against the box's inner width: start from the widest
+  // layout, hand the slack to the provider column, then give space back in
+  // priority order (bar, provider, model, client) until everything fits.
   const innerWidth = Math.max(0, width - 4);
-  const providerCol = Math.max(12, innerWidth - timeCol - modelCol - tokensCol - costCol - 5 - clientCol);
+  let modelCol = 18;
+  let clientCol = hasOwnerInfo ? Math.min(32, Math.max(14, maxLabelLen)) : 14;
+  let barWidth = maxBarWidth;
+  let showProvider = false;
+  let providerCol = 0;
+  // Column widths plus one separator between each visible column.
+  const usedWidth = () =>
+    timeCol + modelCol + (barWidth + 1 + totalCol) + costCol + clientCol +
+    (showProvider ? providerCol + 1 : 0) + 4;
+
+  if (innerWidth - usedWidth() > minProviderCol + 1) {
+    showProvider = true;
+    providerCol = innerWidth - usedWidth();
+  }
+  while (usedWidth() > innerWidth && barWidth > minBarWidth) barWidth -= 1;
+  while (usedWidth() > innerWidth && providerCol > minProviderCol) providerCol -= 1;
+  while (usedWidth() > innerWidth && modelCol > minModelCol) modelCol -= 1;
+  while (usedWidth() > innerWidth && clientCol > minClientCol) clientCol -= 1;
+
+  const tokensCol = barWidth + 1 + totalCol;
 
   const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
-  lines.push(`${COLORS.bold}${["TIME".padEnd(timeCol), "MODEL".padEnd(modelCol), "I/CR/CW/O".padEnd(tokensCol), "I/O/T in sats".padEnd(costCol), "BASE:PROVIDER".padEnd(providerCol), "CLIENT".padEnd(clientCol)].join(" ")}${COLORS.reset}`);
-  lines.push(COLORS.dim + "─".repeat(width - 4) + COLORS.reset);
+  const header = [
+    "TIME".padEnd(timeCol),
+    "MODEL".padEnd(modelCol),
+    `${"TOKENS".padEnd(tokensCol - totalCol)}${"TOTAL".padStart(totalCol)}`,
+    "I/O/T in sats".padEnd(costCol),
+    ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
+    "CLIENT".padEnd(clientCol),
+  ];
+  lines.push(`${COLORS.bold}${header.join(" ")}${COLORS.reset}`);
+  lines.push(COLORS.dim + "─".repeat(innerWidth) + COLORS.reset);
+
+  // Legend for the stacked bars, dropping entries that don't fit the width.
+  const legendPrefix = "bars: ";
+  const legendParts: string[] = [];
+  let legendLen = legendPrefix.length;
+  for (const [color, label] of [
+    [TOKEN_BAR_COLORS.fresh, "uncached input"],
+    [TOKEN_BAR_COLORS.cacheRead, "cache read"],
+    [TOKEN_BAR_COLORS.cacheWrite, "cache write"],
+    [TOKEN_BAR_COLORS.output, "output"],
+  ] as Array<[string, string]>) {
+    // Joiner + "█ " + label.
+    const partLen = (legendParts.length > 0 ? 2 : 0) + label.length + 2;
+    if (legendLen + partLen > innerWidth) break;
+    legendParts.push(`${color}█${COLORS.reset}${COLORS.dim} ${label}${COLORS.reset}`);
+    legendLen += partLen;
+  }
+  lines.push(`${COLORS.dim}${legendPrefix}${COLORS.reset}${legendParts.join("  ")}`);
 
   for (let i = 0; i < recentEntries.length; i++) {
     const entry = recentEntries[i]!;
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
-    const tokens = [
-      entry.promptTokens,
-      entry.cacheReadInputTokens || 0,
-      entry.cacheCreationInputTokens || 0,
-      entry.completionTokens,
-    ].map(formatNumber).join("/");
+    const segments = tokenSegments(entry);
+    const bar = renderStackedBar([
+      { value: segments.fresh, color: TOKEN_BAR_COLORS.fresh },
+      { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
+      { value: segments.cacheWrite, color: TOKEN_BAR_COLORS.cacheWrite },
+      { value: segments.output, color: TOKEN_BAR_COLORS.output },
+    ], barWidth);
+    const tokens = `${bar} ${formatNumber(segments.total).padStart(totalCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
     const cost = [
       formatCost(msatsToSats(entry.inputMsats)),
@@ -634,7 +775,14 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;
-    lines.push(`${COLORS.dim}${time}${COLORS.reset} ${modelColor}${model}${COLORS.reset} ${tokens.padEnd(tokensCol)} ${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset} ${COLORS.dim}${provider}${COLORS.reset} ${clientColor}${clientLabel}${COLORS.reset}`);
+    lines.push([
+      `${COLORS.dim}${time}${COLORS.reset}`,
+      `${modelColor}${model}${COLORS.reset}`,
+      tokens,
+      `${COLORS.green}${cost.padEnd(costCol)}${COLORS.reset}`,
+      ...(showProvider ? [`${COLORS.dim}${provider}${COLORS.reset}`] : []),
+      `${clientColor}${clientLabel}${COLORS.reset}`,
+    ].join(" "));
   }
 
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
