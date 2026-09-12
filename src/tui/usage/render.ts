@@ -739,7 +739,9 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     "TIME".padEnd(timeCol),
     "MODEL".padEnd(modelCol),
     "CACHE HIT".padEnd(tokensCol - inOutCol) + "IN".padEnd(inputCol) + " - " + "OUT".padStart(outputCol),
-    "COST".padEnd(costCol),
+    // Right-aligned like the values below it, so the column's right edge is
+    // shared by the header and every `n sats` cell.
+    "COST".padStart(costCol),
     ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
     "CLIENT".padEnd(clientCol),
   ];

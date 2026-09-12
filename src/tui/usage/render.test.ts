@@ -239,6 +239,12 @@ describe("renderRecent token bars", () => {
     expect(out).toContain("3.00 sats");
     expect(out).not.toContain("1.00 sats");
     expect(out).not.toContain("2.00 sats");
+
+    // The header is right-aligned: it ends at the same column as the values.
+    const lines = out.split("\n");
+    const headerEnd = lines[1]!.indexOf("COST") + "COST".length;
+    const valueEnd = lines[3]!.indexOf("3.00 sats") + "3.00 sats".length;
+    expect(headerEnd).toBe(valueEnd);
   });
 
   test("keeps every row the same visible width as the box", () => {
