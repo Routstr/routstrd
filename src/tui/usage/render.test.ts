@@ -170,18 +170,23 @@ describe("renderStackedBar", () => {
 });
 
 describe("tokenSegments", () => {
-  test("splits prompt tokens into cache read, cache write and fresh input", () => {
+  test("splits the prompt into cache read and everything that was not cached", () => {
     expect(tokenSegments({ promptTokens: 10_000, completionTokens: 2500, cacheReadInputTokens: 9000, cacheCreationInputTokens: 1000 }))
-      .toEqual({ fresh: 0, cacheRead: 9000, cacheWrite: 1000, output: 2500, total: 12_500 });
+      .toEqual({ cacheRead: 9000, notCached: 1000, input: 10_000, output: 2500, total: 12_500 });
   });
 
-  test("treats the whole prompt as fresh input when the cached counts cannot be part of it", () => {
-    expect(tokenSegments({ promptTokens: 100, completionTokens: 20, cacheReadInputTokens: 5000 }))
-      .toEqual({ fresh: 100, cacheRead: 5000, cacheWrite: 0, output: 20, total: 5120 });
+  test("counts uncached input alongside cache writes when the cache counts are extra", () => {
+    expect(tokenSegments({ promptTokens: 100, completionTokens: 20, cacheReadInputTokens: 5000, cacheCreationInputTokens: 300 }))
+      .toEqual({ cacheRead: 5000, notCached: 400, input: 5400, output: 20, total: 5420 });
+  });
+
+  test("reports a fully cache-read prompt with no not-cached input", () => {
+    expect(tokenSegments({ promptTokens: 128_000, completionTokens: 42, cacheReadInputTokens: 128_000 }))
+      .toEqual({ cacheRead: 128_000, notCached: 0, input: 128_000, output: 42, total: 128_042 });
   });
 
   test("tolerates entries without cache or token fields", () => {
-    expect(tokenSegments({})).toEqual({ fresh: 0, cacheRead: 0, cacheWrite: 0, output: 0, total: 0 });
+    expect(tokenSegments({})).toEqual({ cacheRead: 0, notCached: 0, input: 0, output: 0, total: 0 });
   });
 });
 
@@ -208,14 +213,15 @@ describe("renderRecent token bars", () => {
     ],
   } as unknown as UsageStats;
 
-  test("draws a coloured bar per row with the token total beside it", () => {
+  test("draws a green/red bar per row with input/output tokens beside it", () => {
     const out = renderRecent(stats, 120, buildClientNaming([], []));
 
-    // 9000 / 1000 / 2500 out of 12.5K on a 20-cell track -> 14/2/4 cells.
-    expect(out).toContain(COLORS.green + "█".repeat(14) + COLORS.red + "█".repeat(2) + COLORS.blue + "█".repeat(4) + COLORS.reset);
-    // Total tokens to the right of the bar, plus the colour legend.
-    expect(stripAnsi(out)).toContain("12.5K");
-    expect(stripAnsi(out)).toContain("bars: █ uncached input  █ cache read  █ cache write  █ output");
+    // 9000 cache read / 1000 not cached out of 10K input on a 20-cell track.
+    expect(out).toContain(COLORS.green + "█".repeat(18) + COLORS.red + "█".repeat(2) + COLORS.reset);
+    // No blue (output) segment: output is reported as the second number.
+    expect(out).not.toContain(COLORS.blue + "█");
+    expect(stripAnsi(out)).toContain("10.0K/2.5K");
+    expect(stripAnsi(out)).toContain("bars: █ cache read  █ input (cache write + uncached)");
   });
 
   test("keeps every row the same visible width as the box", () => {

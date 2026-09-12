@@ -586,27 +586,31 @@ function truncateNpub(npub: string): string {
 }
 
 /**
- * Token composition of a single request, split the way the TUI colours it:
- * uncached input (fresh), cache read, cache write and output.
+ * Token breakdown of a single request, split the way the TUI colours it:
+ * input read from the prompt cache (green) vs input that was not (red,
+ * i.e. cache writes plus uncached input), plus output tokens.
  */
 export interface TokenSegments {
-  fresh: number;
+  /** Input tokens served from the prompt cache. */
   cacheRead: number;
-  cacheWrite: number;
+  /** Input tokens that were not served from the cache. */
+  notCached: number;
+  /** Total input tokens, cached and not. */
+  input: number;
   output: number;
+  /** Input + output. */
   total: number;
 }
 
 /**
- * Split a usage entry into colour-coded token segments.
+ * Split a usage entry into cache read / not-cached input and output tokens.
  *
  * Providers report prompt tokens inconsistently: OpenAI-style `prompt_tokens`
  * already includes the cached subsets, while Anthropic-style `input_tokens`
  * reports them alongside. If the prompt is at least as large as the cached
  * counts it is treated as containing them (OpenAI); otherwise the cached
- * counts are extra and the whole prompt is fresh input (Anthropic). `total`
- * describes what the bar actually draws rather than trusting a possibly
- * under-counted `totalTokens`.
+ * counts are extra (Anthropic). `input` is the sum of what is drawn rather
+ * than a possibly under-counted `totalTokens`.
  */
 export function tokenSegments(entry: {
   promptTokens?: number;
@@ -619,8 +623,10 @@ export function tokenSegments(entry: {
   const prompt = Math.max(0, entry.promptTokens || 0);
   const output = Math.max(0, entry.completionTokens || 0);
   const cached = cacheRead + cacheWrite;
-  const fresh = prompt >= cached ? prompt - cached : prompt;
-  return { fresh, cacheRead, cacheWrite, output, total: fresh + cacheRead + cacheWrite + output };
+  const uncachedInput = prompt >= cached ? prompt - cached : prompt;
+  const notCached = cacheWrite + uncachedInput;
+  const input = cacheRead + notCached;
+  return { cacheRead, notCached, input, output, total: input + output };
 }
 
 /** One coloured slice of a {@link renderStackedBar}. */
@@ -667,11 +673,15 @@ export function renderStackedBar(segments: BarSegment[], trackWidth: number): st
 
 /** Colour coding shared by the Recent tab's token bars and its legend. */
 const TOKEN_BAR_COLORS = {
-  fresh: COLORS.yellow,
   cacheRead: COLORS.green,
-  cacheWrite: COLORS.red,
-  output: COLORS.blue,
+  notCached: COLORS.red,
 };
+
+/** Legend labels, in bar order: cache read (green) then everything else (red). */
+const TOKEN_BAR_LEGEND: Array<[string, string]> = [
+  [TOKEN_BAR_COLORS.cacheRead, "cache read"],
+  [TOKEN_BAR_COLORS.notCached, "input (cache write + uncached)"],
+];
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
   const recentEntries = stats.entries.slice(0, 50);
@@ -679,8 +689,8 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   const timeCol = 8;
   const costCol = 15;
-  // Width reserved right of each token bar for the row's total token count.
-  const totalCol = 7;
+  // Width reserved right of each token bar for `input/output` token counts.
+  const inOutCol = 13;
   const minBarWidth = 8;
   const maxBarWidth = 20;
   const minProviderCol = 12;
@@ -707,7 +717,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   let providerCol = 0;
   // Column widths plus one separator between each visible column.
   const usedWidth = () =>
-    timeCol + modelCol + (barWidth + 1 + totalCol) + costCol + clientCol +
+    timeCol + modelCol + (barWidth + 1 + inOutCol) + costCol + clientCol +
     (showProvider ? providerCol + 1 : 0) + 4;
 
   if (innerWidth - usedWidth() > minProviderCol + 1) {
@@ -719,14 +729,14 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   while (usedWidth() > innerWidth && modelCol > minModelCol) modelCol -= 1;
   while (usedWidth() > innerWidth && clientCol > minClientCol) clientCol -= 1;
 
-  const tokensCol = barWidth + 1 + totalCol;
+  const tokensCol = barWidth + 1 + inOutCol;
 
   const msatsToSats = (msats?: number) => typeof msats === "number" ? msats / 1000 : 0;
   const lines: string[] = [];
   const header = [
     "TIME".padEnd(timeCol),
     "MODEL".padEnd(modelCol),
-    `${"TOKENS".padEnd(tokensCol - totalCol)}${"TOTAL".padStart(totalCol)}`,
+    `${"TOKENS".padEnd(tokensCol - inOutCol)}${"IN/OUT".padStart(inOutCol)}`,
     "I/O/T in sats".padEnd(costCol),
     ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
     "CLIENT".padEnd(clientCol),
@@ -738,12 +748,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   const legendPrefix = "bars: ";
   const legendParts: string[] = [];
   let legendLen = legendPrefix.length;
-  for (const [color, label] of [
-    [TOKEN_BAR_COLORS.fresh, "uncached input"],
-    [TOKEN_BAR_COLORS.cacheRead, "cache read"],
-    [TOKEN_BAR_COLORS.cacheWrite, "cache write"],
-    [TOKEN_BAR_COLORS.output, "output"],
-  ] as Array<[string, string]>) {
+  for (const [color, label] of TOKEN_BAR_LEGEND) {
     // Joiner + "█ " + label.
     const partLen = (legendParts.length > 0 ? 2 : 0) + label.length + 2;
     if (legendLen + partLen > innerWidth) break;
@@ -758,12 +763,10 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
     const segments = tokenSegments(entry);
     const bar = renderStackedBar([
-      { value: segments.fresh, color: TOKEN_BAR_COLORS.fresh },
       { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
-      { value: segments.cacheWrite, color: TOKEN_BAR_COLORS.cacheWrite },
-      { value: segments.output, color: TOKEN_BAR_COLORS.output },
+      { value: segments.notCached, color: TOKEN_BAR_COLORS.notCached },
     ], barWidth);
-    const tokens = `${bar} ${formatNumber(segments.total).padStart(totalCol)}`;
+    const tokens = `${bar} ${`${formatNumber(segments.input)}/${formatNumber(segments.output)}`.padStart(inOutCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
     const cost = [
       formatCost(msatsToSats(entry.inputMsats)),
