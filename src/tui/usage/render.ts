@@ -671,17 +671,11 @@ export function renderStackedBar(segments: BarSegment[], trackWidth: number): st
   return bar.length > 0 ? bar + COLORS.reset : " ".repeat(track);
 }
 
-/** Colour coding shared by the Recent tab's token bars and its legend. */
+/** Colour coding for the Recent tab's cache-hit bars. */
 const TOKEN_BAR_COLORS = {
   cacheRead: COLORS.green,
   notCached: COLORS.red,
 };
-
-/** Legend labels, in bar order: cache read (green) then everything else (red). */
-const TOKEN_BAR_LEGEND: Array<[string, string]> = [
-  [TOKEN_BAR_COLORS.cacheRead, "cache read"],
-  [TOKEN_BAR_COLORS.notCached, "input (cache write + uncached)"],
-];
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
   const recentEntries = stats.entries.slice(0, 50);
@@ -691,7 +685,9 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   const costCol = 11;
   // Width reserved right of each token bar for `input/output` token counts.
   const inOutCol = 13;
-  const minBarWidth = 8;
+  // Width reserved left of the token counts for the cache-hit bar. `CACHE HIT`
+  // is the header drawn over the bar, so the bar can never be narrower.
+  const minBarWidth = "CACHE HIT".length;
   const maxBarWidth = 20;
   const minProviderCol = 12;
   const minModelCol = 10;
@@ -735,26 +731,13 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   const header = [
     "TIME".padEnd(timeCol),
     "MODEL".padEnd(modelCol),
-    `${"TOKENS".padEnd(tokensCol - inOutCol)}${"IN/OUT".padStart(inOutCol)}`,
+    `${"CACHE HIT".padEnd(tokensCol - inOutCol)}${"IN/OUT".padStart(inOutCol)}`,
     "TOTAL SATS".padEnd(costCol),
     ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
     "CLIENT".padEnd(clientCol),
   ];
   lines.push(`${COLORS.bold}${header.join(" ")}${COLORS.reset}`);
   lines.push(COLORS.dim + "─".repeat(innerWidth) + COLORS.reset);
-
-  // Legend for the stacked bars, dropping entries that don't fit the width.
-  const legendPrefix = "bars: ";
-  const legendParts: string[] = [];
-  let legendLen = legendPrefix.length;
-  for (const [color, label] of TOKEN_BAR_LEGEND) {
-    // Joiner + "█ " + label.
-    const partLen = (legendParts.length > 0 ? 2 : 0) + label.length + 2;
-    if (legendLen + partLen > innerWidth) break;
-    legendParts.push(`${color}█${COLORS.reset}${COLORS.dim} ${label}${COLORS.reset}`);
-    legendLen += partLen;
-  }
-  lines.push(`${COLORS.dim}${legendPrefix}${COLORS.reset}${legendParts.join("  ")}`);
 
   for (let i = 0; i < recentEntries.length; i++) {
     const entry = recentEntries[i]!;

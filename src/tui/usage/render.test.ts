@@ -224,7 +224,9 @@ describe("renderRecent token bars", () => {
     // No blue (output) segment: output is reported as the second number.
     expect(out).not.toContain(COLORS.blue + "█");
     expect(stripAnsi(out)).toContain("10.0K/2.5K");
-    expect(stripAnsi(out)).toContain("bars: █ cache read  █ input (cache write + uncached)");
+    // The bar is labelled `CACHE HIT` and no longer carries a legend line.
+    expect(stripAnsi(out)).toContain("CACHE HIT");
+    expect(stripAnsi(out)).not.toContain("bars:");
   });
 
   test("shows only the total sats cost, not the input/output breakdown", () => {
