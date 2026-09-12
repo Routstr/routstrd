@@ -223,19 +223,22 @@ describe("renderRecent token bars", () => {
     expect(out).toContain(COLORS.green + "█".repeat(18) + COLORS.red + "█".repeat(2) + COLORS.reset);
     // No blue (output) segment: output is reported as the second number.
     expect(out).not.toContain(COLORS.blue + "█");
-    expect(stripAnsi(out)).toContain("10.0K/2.5K");
+    // IN and OUT are pinned to opposite ends of the column.
+    expect(stripAnsi(out)).toContain("10.0K - 2.5K");
+    expect(stripAnsi(out)).toContain("IN    -  OUT");
     // The bar is labelled `CACHE HIT` and no longer carries a legend line.
     expect(stripAnsi(out)).toContain("CACHE HIT");
     expect(stripAnsi(out)).not.toContain("bars:");
   });
 
-  test("shows only the total sats cost, not the input/output breakdown", () => {
+  test("shows only the total cost in sats, not the input/output breakdown", () => {
     const out = stripAnsi(renderRecent(stats, 120, buildClientNaming([], [])));
 
-    expect(out).toContain("TOTAL SATS");
+    expect(out).toContain("COST");
     // 3000 total msats -> 3.00 sats; the 1.00/2.00 input/output split is gone.
-    expect(out).toContain("3.00");
-    expect(out).not.toContain("1.00/2.00");
+    expect(out).toContain("3.00 sats");
+    expect(out).not.toContain("1.00 sats");
+    expect(out).not.toContain("2.00 sats");
   });
 
   test("keeps every row the same visible width as the box", () => {

@@ -682,9 +682,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
 
   const timeCol = 8;
-  const costCol = 11;
-  // Width reserved right of each token bar for `input/output` token counts.
-  const inOutCol = 13;
+  const costCol = 12;
   // Width reserved left of the token counts for the cache-hit bar. `CACHE HIT`
   // is the header drawn over the bar, so the bar can never be narrower.
   const minBarWidth = "CACHE HIT".length;
@@ -701,6 +699,15 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     hasOwnerInfo ? resolveClientLabel(entry.client, naming) : entry.client || "unknown"
   );
   const maxLabelLen = clientLabels.reduce((max, label) => Math.max(max, label.length), 6);
+
+  // Token counts are drawn as `IN - OUT` with IN pinned to the left edge of the
+  // column and OUT to the right, so both halves need the widest value on show.
+  const tokenRows = recentEntries.map((entry) => tokenSegments(entry));
+  const inputTexts = tokenRows.map((row) => formatNumber(row.input));
+  const outputTexts = tokenRows.map((row) => formatNumber(row.output));
+  const inputCol = Math.max(...inputTexts.map((text) => text.length));
+  const outputCol = Math.max(...outputTexts.map((text) => text.length));
+  const inOutCol = inputCol + outputCol + " - ".length;
 
   // Lay out the columns against the box's inner width: start from the widest
   // layout, hand the slack to the provider column, then give space back in
@@ -731,8 +738,8 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   const header = [
     "TIME".padEnd(timeCol),
     "MODEL".padEnd(modelCol),
-    `${"CACHE HIT".padEnd(tokensCol - inOutCol)}${"IN/OUT".padStart(inOutCol)}`,
-    "TOTAL SATS".padEnd(costCol),
+    "CACHE HIT".padEnd(tokensCol - inOutCol) + "IN".padEnd(inputCol) + " - " + "OUT".padStart(outputCol),
+    "COST".padEnd(costCol),
     ...(showProvider ? ["BASE:PROVIDER".padEnd(providerCol)] : []),
     "CLIENT".padEnd(clientCol),
   ];
@@ -743,14 +750,15 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const entry = recentEntries[i]!;
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
-    const segments = tokenSegments(entry);
+    const segments = tokenRows[i]!;
     const bar = renderStackedBar([
       { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
       { value: segments.notCached, color: TOKEN_BAR_COLORS.notCached },
     ], barWidth);
-    const tokens = `${bar} ${`${formatNumber(segments.input)}/${formatNumber(segments.output)}`.padStart(inOutCol)}`;
+    const tokens = `${bar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
-    const cost = formatCost(totalSats);
+    // Right-aligned so the `sats` unit ends at the same column on every row.
+    const cost = `${formatCost(totalSats)} sats`.padStart(costCol);
     const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
     const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
     const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);
