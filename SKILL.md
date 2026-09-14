@@ -216,7 +216,7 @@ Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`. Wallet-engine (Cashu/
 
 ## Wallet Commands
 
-New wallets automatically trust `https://mint.cubabitcoin.org` as their default mint. The default is used when a wallet command does not include `--mint-url`.
+New wallets trust two mints out of the box: `https://mint.cubabitcoin.org` and `https://mint.minibits.cash/Bitcoin`. `https://mint.cubabitcoin.org` is the default mint, and the default is used when a wallet command does not include `--mint-url`. An existing wallet keeps whatever default it already has; the shipped mints are only added as trusted, never as the default. Use `routstrd wallet mints add <url>` to trust another mint.
 
 ### `routstrd wallet status`
 
@@ -260,7 +260,7 @@ Pay a Lightning invoice.
 
 ### `routstrd wallet mints list`
 
-List configured wallet mints.
+List configured wallet mints. Includes the mints trusted by default (`https://mint.cubabitcoin.org`, `https://mint.minibits.cash/Bitcoin`) plus any added manually.
 
 ### `routstrd wallet mints add <url>`
 
