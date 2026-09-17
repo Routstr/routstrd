@@ -70,10 +70,19 @@ export async function installPiIntegration(
     // Rebuild every model entry from scratch from the daemon, so the generated
     // models.json is always a faithful projection of the daemon's state. The only
     // exception is thinking/reasoning config (reasoning, thinkingLevelMap, compat),
-    // which the daemon does not provide and the user curates by hand — preserve it.
+    // which the daemon does not provide and the user curates by hand — preserve it
+    // (except for the deepseek* compat pin below, which is managed for the user).
     const existingModels = new Map<string, PiModelEntry>(
       (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
     );
+
+    // DeepSeek-backed models reject the `developer` role (OpenAI's newer
+    // spelling of `system`) on strict upstreams with a hard 400. Pi sends
+    // `developer` for reasoning models on unrecognized providers because its
+    // provider heuristics only see the local daemon URL and can't know
+    // DeepSeek sits behind it — force the universally-accepted `system`
+    // spelling for every deepseek* model.
+    const isDeepSeekModel = (id: string): boolean => id.startsWith("deepseek");
 
     const providerModels: PiModelEntry[] = models.map((model) => {
       const previous = existingModels.get(model.id);
@@ -97,7 +106,13 @@ export async function installPiIntegration(
       // Preserve user-curated thinking fields from the previous entry.
       if (previous?.reasoning !== undefined) entry.reasoning = previous.reasoning;
       if (previous?.thinkingLevelMap !== undefined) entry.thinkingLevelMap = previous.thinkingLevelMap;
-      if (previous?.compat !== undefined) entry.compat = previous.compat;
+      if (isDeepSeekModel(model.id)) {
+        // Authoritative for deepseek* models: keep any other user-set compat
+        // keys, but always pin supportsDeveloperRole to false.
+        entry.compat = { ...(previous?.compat ?? {}), supportsDeveloperRole: false };
+      } else if (previous?.compat !== undefined) {
+        entry.compat = previous.compat;
+      }
 
       return entry;
     });
