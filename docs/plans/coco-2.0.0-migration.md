@@ -1,5 +1,11 @@
 # Coco 2.0.0 migration plan
 
+> **Status:** not started as of routstrd v0.4.9.
+> Verified against `package.json`: still on `@cashu/coco-core ^1.0.1`,
+> `@cashu/coco-sqlite-bun ^1.0.1`, `coco-cashu-core 1.1.2-rc.50`,
+> `coco-cashu-plugin-npc 2.4.1`. The NPC compatibility gate in section 1 is
+> unresolved.
+
 ## Objectives
 
 The migration must accomplish four things safely:
