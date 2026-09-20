@@ -14,6 +14,19 @@ export interface IntegrationConfig {
   configPath: string;
 }
 
+/**
+ * Per-model reasoning metadata as published by routstr-core (OpenRouter shape).
+ * Models with no reasoning support omit the whole object, and models whose
+ * upstream publishes no effort allowlist carry only `mandatory`.
+ */
+export type RoutstrReasoning = {
+  mandatory?: boolean | null;
+  default_enabled?: boolean | null;
+  supported_efforts?: string[] | null;
+  default_effort?: string | null;
+  supports_max_tokens?: boolean | null;
+};
+
 export type RoutstrModel = {
   id: string;
   name?: string;
@@ -27,6 +40,7 @@ export type RoutstrModel = {
     context_length?: number;
     max_completion_tokens?: number;
   };
+  reasoning?: RoutstrReasoning | null;
 };
 
 export type IntegrationFn = (
