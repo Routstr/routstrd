@@ -14,6 +14,7 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  DEFAULT_TRUSTED_MINT_URLS,
   isZombieProcess,
   settleExpiredMintQuotes,
   settlePendingMintQuotes,
@@ -64,7 +65,7 @@ async function waitForWalletUnlocked(
 }
 
 describe("default mint functionality", () => {
-  it("automatically adds default mint when no mints exist", async () => {
+  it("automatically adds the shipped trusted mints when no mints exist", async () => {
     const walletDir = join(makeTempDir(), "wallet");
     mkdirSync(walletDir, { recursive: true });
     writeFileSync(
@@ -90,9 +91,12 @@ describe("default mint functionality", () => {
         String(process.pid),
       );
 
+      // Every shipped mint is trusted, so each one is usable without an
+      // explicit `wallet mints add`.
       const mints = await client.listMints();
-      expect(mints).toContain("https://mint.cubabitcoin.org");
+      expect(mints).toEqual(expect.arrayContaining([...DEFAULT_TRUSTED_MINT_URLS]));
 
+      // Cuba still owns the default slot even though minibits is trusted too.
       const defaultMint = await client.getDefaultMint();
       expect(defaultMint).toBe("https://mint.cubabitcoin.org");
     } finally {

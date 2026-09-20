@@ -89,6 +89,8 @@ export function deriveThinkingFields(
   return { reasoning: true, thinkingLevelMap };
 }
 
+const isDeepSeekModel = (id: string): boolean => id.startsWith("deepseek");
+
 /** Project one daemon model onto a pi config entry. */
 export function buildPiModelEntry(
   model: RoutstrModel,
@@ -124,8 +126,19 @@ export function buildPiModelEntry(
     }
   }
 
-  // `compat` is never published by the daemon; it stays user-curated.
-  if (previous?.compat !== undefined) entry.compat = previous.compat;
+  // `compat` is never published by the daemon; it stays user-curated — except
+  // for deepseek* models, where the role spelling below is authoritative.
+  if (isDeepSeekModel(model.id)) {
+    // DeepSeek-backed models reject the `developer` role (OpenAI's newer
+    // spelling of `system`) on strict upstreams with a hard 400. Pi sends
+    // `developer` for reasoning models on unrecognized providers because its
+    // provider heuristics only see the local daemon URL and can't know
+    // DeepSeek sits behind it — force the universally-accepted `system`
+    // spelling for every deepseek* model, keeping any other user-set keys.
+    entry.compat = { ...(previous?.compat ?? {}), supportsDeveloperRole: false };
+  } else if (previous?.compat !== undefined) {
+    entry.compat = previous.compat;
+  }
 
   return entry;
 }
@@ -185,6 +198,7 @@ export async function installPiIntegration(
     // models.json is always a faithful projection of the daemon's state.
     // Thinking fields are derived from the model's published reasoning allowlist;
     // when the daemon has none, the user's hand-curated values are preserved.
+    // `compat` stays user-curated, except for the deepseek* pin applied below.
     const existingModels = new Map<string, PiModelEntry>(
       (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
     );
