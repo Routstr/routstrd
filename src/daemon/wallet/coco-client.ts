@@ -58,6 +58,9 @@ import {
   walletDir as defaultWalletDir,
   walletPidPath as defaultWalletPidPath,
 } from "./paths";
+import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
+
+export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
 
@@ -117,7 +120,6 @@ interface CocodConfig {
 }
 
 const STARTUP_LOG_PREFIX = "[routstrd:start]";
-export const DEFAULT_MINT_URL = "https://mint.cubabitcoin.org";
 
 function startupProgress(message: string): void {
   logger.info(message);
@@ -1293,10 +1295,23 @@ export async function createCocoClient(
       configuredDefault || trustedMints[0]?.mintUrl || DEFAULT_MINT_URL,
     );
 
-    if (!trustedMints.some((mint) => mint.mintUrl === defaultMintUrl)) {
-      startupProgress(`Adding default mint: ${defaultMintUrl}`);
-      await coco.mint.addMint(defaultMintUrl, { trusted: true });
-    }
+    // Seeds the mints we ship as trusted. The default mint is strict (see
+    // seedTrustedMints); extra seeds only warn, so an unreachable mint that is
+    // not the default cannot stop the daemon from starting.
+    await seedTrustedMints(
+      {
+        trustedMints: trustedMints.map((mint) => mint.mintUrl),
+        addMint: (mintUrl) => coco!.mint.addMint(mintUrl, { trusted: true }),
+      },
+      defaultMintUrl,
+      {
+        onProgress: startupProgress,
+        onError: (message, error) =>
+          logger.warn(message, {
+            error: error instanceof Error ? error.message : String(error),
+          }),
+      },
+    );
 
     // Persist only after the mint was successfully fetched and trusted. A failed
     // network request must not leave config pointing at an unusable default.
