@@ -21,6 +21,7 @@ import {
 import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
+import { applyDefaultOutputTokenLimit } from "./request-body";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's
@@ -1747,17 +1748,10 @@ export function createDaemonRequestHandler(deps: {
     // limit. Without this, the SDK prices at the provider's worst-case
     // max_completion_cost, which varies widely across providers (2.3× for
     // kimi-k3) and balloons during provider failover. Chat/completions use
-    // max_tokens; the OpenAI Responses API uses max_output_tokens.
-    if (deps.maxTokens > 0) {
-      const isResponsesPath = url.pathname.includes("/responses");
-      if (isResponsesPath) {
-        if (typeof bodyObj.max_output_tokens !== "number") {
-          bodyObj.max_output_tokens = deps.maxTokens;
-        }
-      } else if (typeof bodyObj.max_tokens !== "number") {
-        bodyObj.max_tokens = deps.maxTokens;
-      }
-    }
+    // max_tokens; the OpenAI Responses API uses max_output_tokens. Endpoints
+    // that do not define those fields (e.g. /v1/systemone) are forwarded
+    // verbatim — injecting one makes a strict upstream answer 400.
+    applyDefaultOutputTokenLimit(url.pathname, bodyObj, deps.maxTokens);
 
     const forcedProvider: string | undefined =
       url.searchParams.get("provider") ||
