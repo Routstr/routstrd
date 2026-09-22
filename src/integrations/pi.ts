@@ -18,6 +18,7 @@ export type ThinkingLevelMap = Partial<Record<PiThinkingLevel, string | null>>;
 
 export type PiModelEntry = {
   id: string;
+  api?: string;
   contextWindow?: number;
   name?: string;
   input?: string[];
@@ -90,6 +91,7 @@ export function deriveThinkingFields(
 }
 
 const isDeepSeekModel = (id: string): boolean => id.startsWith("deepseek");
+const isGptModel = (id: string): boolean => id.startsWith("gpt-");
 
 /** Project one daemon model onto a pi config entry. */
 export function buildPiModelEntry(
@@ -112,6 +114,15 @@ export function buildPiModelEntry(
   if (mods.includes("text")) input.push("text");
   if (mods.includes("image")) input.push("image");
   entry.input = input;
+
+  // gpt-* models are served through OpenAI's Responses API; the provider-level
+  // `api: "openai-completions"` stays the default for everything else. For
+  // non-gpt models keep whatever per-model api the user curated.
+  if (isGptModel(model.id)) {
+    entry.api = "openai-responses";
+  } else if (previous?.api !== undefined) {
+    entry.api = previous.api;
+  }
 
   const derived = deriveThinkingFields(model);
   if (derived) {
