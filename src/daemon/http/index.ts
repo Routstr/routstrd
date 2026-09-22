@@ -1286,6 +1286,89 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/providers/nostr-sync") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const indices = body.indices as number[] | undefined;
+
+        if (!Array.isArray(indices)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: "Missing or invalid 'indices' field (expected number[]).",
+            }),
+          );
+          return;
+        }
+
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+        // Clearing both manual lists returns the provider to the
+        // review-based state: the effective disabled set is the union of
+        // disabledProviders (kind-38425 review sync) and the manual lists,
+        // so with no manual entries the Nostr review verdict applies again.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
+        ];
+
+        const synced: string[] = [];
+        for (const idx of indices) {
+          if (
+            typeof idx === "number" &&
+            idx >= 0 &&
+            idx < baseUrlsList.length
+          ) {
+            const baseUrl = baseUrlsList[idx]!;
+            const disabledPos = manuallyDisabledProviders.indexOf(baseUrl);
+            if (disabledPos !== -1) {
+              manuallyDisabledProviders.splice(disabledPos, 1);
+            }
+            const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+            if (enabledPos !== -1) {
+              manuallyEnabledProviders.splice(enabledPos, 1);
+            }
+            synced.push(baseUrl);
+          }
+        }
+
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+
+        // Report each synced provider's resulting state so the CLI can show
+        // whether Nostr reviews now have it enabled or disabled. Read from
+        // the discovery adapter (the source the router uses) after the
+        // writes above; with both manual lists cleared, its disabled set is
+        // exactly the review-based set.
+        const reviewDisabled = new Set(
+          deps.discoveryAdapter.getDisabledProviders() || [],
+        );
+        const resulting = synced.map((baseUrl) => ({
+          baseUrl,
+          disabled: reviewDisabled.has(baseUrl),
+        }));
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: `Reverted ${synced.length} provider(s) to Nostr review-based state`,
+              providers: resulting,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
     // Client management endpoints
     if (req.method === "GET" && url.pathname === "/clients") {
       try {
@@ -1490,6 +1573,9 @@ export function createDaemonRequestHandler(deps: {
         const manuallyEnabled = new Set(
           state.manuallyEnabledProviders || [],
         );
+        const manuallyDisabled = new Set(
+          state.manuallyDisabledProviders || [],
+        );
         const disabledProviders: string[] = [
           ...new Set([
             ...(state.disabledProviders || []),
@@ -1501,6 +1587,8 @@ export function createDaemonRequestHandler(deps: {
           index,
           baseUrl,
           disabled: disabledProviders.includes(baseUrl),
+          manuallyDisabled: manuallyDisabled.has(baseUrl),
+          manuallyEnabled: manuallyEnabled.has(baseUrl),
         }));
 
         // Only count disabled providers that are actually in the current list

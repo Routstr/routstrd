@@ -1152,6 +1152,8 @@ providersCmd
             index: number;
             baseUrl: string;
             disabled: boolean;
+            manuallyDisabled?: boolean;
+            manuallyEnabled?: boolean;
           }>;
           disabledCount: number;
           totalCount: number;
@@ -1167,7 +1169,13 @@ providersCmd
       `Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`,
     );
     for (const provider of output.providers) {
-      const status = provider.disabled ? "DISABLED" : "enabled ";
+      const status = provider.manuallyDisabled
+        ? "DISABLED (manual)         "
+        : provider.disabled
+          ? "DISABLED (nostr review)   "
+          : provider.manuallyEnabled
+            ? "enabled  (manual override)"
+            : "enabled                   ";
       console.log(`  [${provider.index}] ${status}  ${provider.baseUrl}`);
     }
   });
@@ -1242,6 +1250,49 @@ providersCmd
       console.log(output.message);
       for (const url of output.enabled) {
         console.log(`  - ${url}`);
+      }
+    }
+  });
+
+providersCmd
+  .command("nostr-sync <indices...>")
+  .description(
+    "Remove manual enable/disable overrides and return providers to their Nostr review-based state (e.g., routstrd providers nostr-sync 0 2 5)",
+  )
+  .action(async (indices: string[]) => {
+    await ensureDaemonRunning();
+
+    const indexNums = indices
+      .map((s) => parseInt(s, 10))
+      .filter((n) => Number.isFinite(n));
+    if (indexNums.length === 0) {
+      console.log("No valid indices provided.");
+      process.exit(1);
+    }
+
+    const result = await callDaemon("/providers/nostr-sync", {
+      method: "POST",
+      body: { indices: indexNums },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          message: string;
+          providers: Array<{ baseUrl: string; disabled: boolean }>;
+        }
+      | undefined;
+    if (output) {
+      console.log(output.message);
+      for (const provider of output.providers) {
+        const status = provider.disabled
+          ? "DISABLED (nostr review)"
+          : "enabled";
+        console.log(`  - ${provider.baseUrl} -> ${status}`);
       }
     }
   });
