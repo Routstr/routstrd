@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -10,12 +10,16 @@ import {
   buildPiModelEntry,
   deriveThinkingFields,
   installPiIntegration,
+  type PiIntegrationDeps,
   type PiModelEntry,
 } from "../../src/integrations/pi";
 import type { RoutstrdConfig } from "../../src/utils/config";
 
-// Install the mock before importing modules that pull it in transitively.
-mock.module("../../src/utils/daemon-client", () => ({
+// Injected I/O instead of mock.module: bun's mock.module overrides leak
+// across test files for the rest of the run and made tests/utils/
+// daemon-client.test.ts fail non-deterministically depending on worker
+// scheduling (see CI run 35723560562).
+const MOCK_DEPS: Partial<PiIntegrationDeps> = {
   callDaemon: async () => ({
     output: {
       models: [
@@ -36,7 +40,7 @@ mock.module("../../src/utils/daemon-client", () => ({
   }),
   getDaemonBaseUrl: (config: RoutstrdConfig) =>
     `http://127.0.0.1:${config.port}`,
-}));
+};
 
 const CONFIG: RoutstrdConfig = { port: 8008 } as RoutstrdConfig;
 
@@ -55,7 +59,7 @@ describe("installPiIntegration", () => {
   it("pins supportsDeveloperRole=false for deepseek* models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
 
     const provider = await readProvider(configPath);
     const deepseek = provider.models.find((m) => m.id === "deepseek-v4.1-flash");
@@ -65,7 +69,7 @@ describe("installPiIntegration", () => {
   it("leaves non-deepseek models without a compat block", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
 
     const provider = await readProvider(configPath);
     const glm = provider.models.find((m) => m.id === "glm-5.3");
@@ -75,7 +79,7 @@ describe("installPiIntegration", () => {
   it("preserves user compat keys on deepseek* models while pinning the role", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
 
     // Simulate a user-curated refresh: seed reasoning/compat, run again.
     const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as {
@@ -89,7 +93,7 @@ describe("installPiIntegration", () => {
     const { writeFileSync } = await import("fs");
     writeFileSync(configPath, JSON.stringify(parsed));
 
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
     const provider = await readProvider(configPath);
     const updated = provider.models.find((m) => m.id === "deepseek-v4.1-flash");
     expect(updated?.compat).toEqual({
@@ -102,7 +106,7 @@ describe("installPiIntegration", () => {
   it("preserves compat untouched for non-deepseek models across refreshes", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
 
     const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as {
       providers: Record<string, { models: Array<Record<string, unknown>> }>;
@@ -112,7 +116,7 @@ describe("installPiIntegration", () => {
     const { writeFileSync } = await import("fs");
     writeFileSync(configPath, JSON.stringify(parsed));
 
-    await installPiIntegration(CONFIG, "key", makeIntegration(configPath));
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
     const provider = await readProvider(configPath);
     const updated = provider.models.find((m) => m.id === "glm-5.3");
     expect(updated?.compat).toEqual({ supportsDeveloperRole: true });

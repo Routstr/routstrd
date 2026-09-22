@@ -1132,6 +1132,24 @@ const providersCmd = program
   .command("providers")
   .description("List and manage providers");
 
+// Strict index parsing: parseInt accepts garbage like "3abc" (-> 3) or
+// "0x5" (-> 0), which would silently act on the wrong provider.
+const parseProviderIndices = (raw: string[]): number[] => {
+  const valid: number[] = [];
+  const invalid: string[] = [];
+  for (const s of raw) {
+    if (/^\d+$/.test(s)) {
+      valid.push(parseInt(s, 10));
+    } else {
+      invalid.push(s);
+    }
+  }
+  if (invalid.length > 0) {
+    console.log(`Ignoring invalid index argument(s): ${invalid.join(", ")}`);
+  }
+  return valid;
+};
+
 providersCmd
   .command("list")
   .description("List all providers with their enabled/disabled status")
@@ -1152,6 +1170,8 @@ providersCmd
             index: number;
             baseUrl: string;
             disabled: boolean;
+            manuallyDisabled?: boolean;
+            manuallyEnabled?: boolean;
           }>;
           disabledCount: number;
           totalCount: number;
@@ -1167,7 +1187,13 @@ providersCmd
       `Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`,
     );
     for (const provider of output.providers) {
-      const status = provider.disabled ? "DISABLED" : "enabled ";
+      const status = provider.manuallyDisabled
+        ? "DISABLED (manual)         "
+        : provider.disabled
+          ? "DISABLED (nostr review)   "
+          : provider.manuallyEnabled
+            ? "enabled  (manual override)"
+            : "enabled                   ";
       console.log(`  [${provider.index}] ${status}  ${provider.baseUrl}`);
     }
   });
@@ -1180,9 +1206,7 @@ providersCmd
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
+    const indexNums = parseProviderIndices(indices);
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -1217,9 +1241,7 @@ providersCmd
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
+    const indexNums = parseProviderIndices(indices);
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -1242,6 +1264,51 @@ providersCmd
       console.log(output.message);
       for (const url of output.enabled) {
         console.log(`  - ${url}`);
+      }
+    }
+  });
+
+providersCmd
+  .command("nostr-sync <indices...>")
+  .description(
+    "Remove manual enable/disable overrides and return providers to their Nostr review-based state (e.g., routstrd providers nostr-sync 0 2 5)",
+  )
+  .action(async (indices: string[]) => {
+    await ensureDaemonRunning();
+
+    const indexNums = parseProviderIndices(indices);
+    if (indexNums.length === 0) {
+      console.log("No valid indices provided.");
+      process.exit(1);
+    }
+
+    const result = await callDaemon("/providers/nostr-sync", {
+      method: "POST",
+      body: { indices: indexNums },
+    });
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | {
+          message: string;
+          providers: Array<{ baseUrl: string; disabled: boolean }>;
+          skipped?: unknown[];
+        }
+      | undefined;
+    if (output) {
+      console.log(output.message);
+      for (const provider of output.providers) {
+        const status = provider.disabled
+          ? "DISABLED (nostr review)"
+          : "enabled";
+        console.log(`  - ${provider.baseUrl} -> ${status}`);
+      }
+      if (output.skipped && output.skipped.length > 0) {
+        console.log(`Skipped invalid indices: ${output.skipped.join(", ")}`);
       }
     }
   });
