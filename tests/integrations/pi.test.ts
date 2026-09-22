@@ -246,6 +246,7 @@ describe("buildPiModelEntry", () => {
 
     expect(entry).toEqual({
       id: "gpt-5.6-sol",
+      api: "openai-responses",
       name: "OpenAI: GPT-5.6 Sol",
       contextWindow: 1050000,
       input: ["text", "image"],
@@ -312,5 +313,24 @@ describe("buildPiModelEntry", () => {
     expect(entry).toEqual({ id: "gemma-4-uncensored", input: [] });
     expect("reasoning" in entry).toBe(false);
     expect("thinkingLevelMap" in entry).toBe(false);
+  });
+
+  it("pins api=openai-responses for gpt-* models, overriding any curated value", () => {
+    const previous: PiModelEntry = { id: "gpt-5.6-sol", api: "openai-completions" };
+
+    const entry = buildPiModelEntry(model({ id: "gpt-5.6-sol" }), previous);
+
+    expect(entry.api).toBe("openai-responses");
+  });
+
+  it("preserves a user-curated api on non-gpt models and omits it otherwise", () => {
+    const curated = buildPiModelEntry(
+      model({ id: "glm-5.3" }),
+      { id: "glm-5.3", api: "openai-responses" },
+    );
+    expect(curated.api).toBe("openai-responses");
+
+    const plain = buildPiModelEntry(model({ id: "glm-5.3" }));
+    expect("api" in plain).toBe(false);
   });
 });
