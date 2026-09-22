@@ -165,17 +165,27 @@ type PiConfig = {
   providers?: Record<string, PiProviderConfig>;
 };
 
+export type PiIntegrationDeps = {
+  callDaemon: typeof callDaemon;
+  getDaemonBaseUrl: typeof getDaemonBaseUrl;
+};
+
 export async function installPiIntegration(
   config: RoutstrdConfig,
   apiKey: string,
   integrationConfig: IntegrationConfig,
+  // Injectable I/O so tests don't need mock.module, whose overrides leak
+  // across test files for the rest of the run under bun's runner.
+  deps: Partial<PiIntegrationDeps> = {},
 ): Promise<void> {
   const { name, configPath } = integrationConfig;
+  const callDaemonFn = deps.callDaemon ?? callDaemon;
+  const getDaemonBaseUrlFn = deps.getDaemonBaseUrl ?? getDaemonBaseUrl;
 
   console.log("\nInstalling routstr models in pi models.json...");
   console.log(`Using API key for ${name}`);
 
-  const baseUrl = `${getDaemonBaseUrl(config)}/v1`;
+  const baseUrl = `${getDaemonBaseUrlFn(config)}/v1`;
 
   let piConfig: PiConfig = {};
 
@@ -197,7 +207,7 @@ export async function installPiIntegration(
     // Ensure directory exists
     mkdirSync(dirname(configPath), { recursive: true });
 
-    const data = await callDaemon("/models");
+    const data = await callDaemonFn("/models");
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
