@@ -1132,6 +1132,24 @@ const providersCmd = program
   .command("providers")
   .description("List and manage providers");
 
+// Strict index parsing: parseInt accepts garbage like "3abc" (-> 3) or
+// "0x5" (-> 0), which would silently act on the wrong provider.
+const parseProviderIndices = (raw: string[]): number[] => {
+  const valid: number[] = [];
+  const invalid: string[] = [];
+  for (const s of raw) {
+    if (/^\d+$/.test(s)) {
+      valid.push(parseInt(s, 10));
+    } else {
+      invalid.push(s);
+    }
+  }
+  if (invalid.length > 0) {
+    console.log(`Ignoring invalid index argument(s): ${invalid.join(", ")}`);
+  }
+  return valid;
+};
+
 providersCmd
   .command("list")
   .description("List all providers with their enabled/disabled status")
@@ -1188,9 +1206,7 @@ providersCmd
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
+    const indexNums = parseProviderIndices(indices);
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -1225,9 +1241,7 @@ providersCmd
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
+    const indexNums = parseProviderIndices(indices);
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -1262,9 +1276,7 @@ providersCmd
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = indices
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isFinite(n));
+    const indexNums = parseProviderIndices(indices);
     if (indexNums.length === 0) {
       console.log("No valid indices provided.");
       process.exit(1);
@@ -1284,6 +1296,7 @@ providersCmd
       | {
           message: string;
           providers: Array<{ baseUrl: string; disabled: boolean }>;
+          skipped?: unknown[];
         }
       | undefined;
     if (output) {
@@ -1293,6 +1306,9 @@ providersCmd
           ? "DISABLED (nostr review)"
           : "enabled";
         console.log(`  - ${provider.baseUrl} -> ${status}`);
+      }
+      if (output.skipped && output.skipped.length > 0) {
+        console.log(`Skipped invalid indices: ${output.skipped.join(", ")}`);
       }
     }
   });
