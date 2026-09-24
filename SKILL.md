@@ -165,6 +165,30 @@ routstrd providers enable 0 2 5
 
 Show all known providers with their stored review events and event IDs.
 
+### `routstrd cooldowns`
+
+List every provider and model the router is currently skipping because of a
+cooldown. Cooldowns are scoped: a provider-wide entry blocks every model on
+that provider, a model-scoped entry blocks only that model. Entries lift
+automatically once the cooldown window (210s) elapses — nothing needs to be
+cleared by hand.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--json` | false | Print the raw daemon response (timestamps and remaining ms per entry) |
+
+```
+Cooldowns (210s window)
+
+  2 active across 2 providers:
+
+  PROVIDER  https://api.nonkycai.com/  expires in 3m 20s
+  MODEL     https://ai.redsh1ft.com/   deepseek-v4.1-flash  expires in 2m 30s
+```
+
+Reads `GET /cooldowns` from the daemon; a daemon built before this command
+existed has no such endpoint and must be restarted on a newer build.
+
 ### `routstrd clients`
 
 List and manage API clients (subcommand required).

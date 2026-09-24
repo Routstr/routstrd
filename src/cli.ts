@@ -10,7 +10,12 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getUserNpub,
+  type CommandResponse,
 } from "./utils/daemon-client";
+import {
+  formatCooldowns,
+  type CooldownsOutput,
+} from "./utils/cooldowns";
 import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
@@ -1399,6 +1404,52 @@ providersCmd
         console.log(`          at:     ${created}`);
       }
     }
+  });
+
+// Cooldowns - providers/models the router is currently skipping
+program
+  .command("cooldowns")
+  .description(
+    "List providers and models currently on cooldown (temporarily skipped by the router)",
+  )
+  .option("--json", "Print the raw daemon response as JSON", false)
+  .action(async (options: { json: boolean }) => {
+    await ensureDaemonRunning();
+
+    let result: CommandResponse;
+    try {
+      result = await callDaemon("/cooldowns");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // A daemon built before this command existed has no /cooldowns route:
+      // it either 404s or falls through to the "POST only" catch-all.
+      if (message.includes("404") || message === "Only POST is supported.") {
+        console.error(
+          "The running daemon has no /cooldowns endpoint, so it cannot report cooldowns. " +
+            "Restart it on a newer build (routstrd service restart) and try again.",
+        );
+        process.exit(1);
+      }
+      throw error;
+    }
+
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as CooldownsOutput | undefined;
+    if (options.json) {
+      console.log(JSON.stringify(output ?? {}, null, 2));
+      return;
+    }
+
+    if (!output) {
+      console.log("No cooldown data returned by the daemon.");
+      return;
+    }
+
+    console.log(formatCooldowns(output));
   });
 
 // Clients - list and manage clients

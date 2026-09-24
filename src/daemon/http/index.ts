@@ -22,6 +22,10 @@ import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
+import {
+  buildCooldownsOutput,
+  type StoredCooldownEntry,
+} from "../../utils/cooldowns";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's
@@ -1652,6 +1656,23 @@ export function createDaemonRequestHandler(deps: {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(error) }));
       }
+      return;
+    }
+
+    // Providers/models the router is currently skipping. Cooldown state lives
+    // in the SdkStore (written by the SDK's ProviderManager); entries that have
+    // already expired are filtered out by buildCooldownsOutput.
+    if (req.method === "GET" && url.pathname === "/cooldowns") {
+      await respond(res, async () => {
+        const state = deps.store.getState();
+        const stored: StoredCooldownEntry[] = state.providersOnCooldown || [];
+        return {
+          output: buildCooldownsOutput(
+            stored,
+            deps.providerManager.getCooldownDurationMs(),
+          ),
+        };
+      });
       return;
     }
 

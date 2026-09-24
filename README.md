@@ -163,6 +163,12 @@ Stop the daemon:
 routstrd stop
 ```
 
+See which providers/models the router is currently skipping (cooldowns):
+```sh
+routstrd cooldowns
+routstrd cooldowns --json
+```
+
 ### NPC (Lightning Address)
 
 The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
@@ -193,6 +199,16 @@ The daemon exposes an HTTP server (default port 8008) with the following endpoin
 ```
 GET /health
 ```
+
+#### Cooldowns
+```
+GET /cooldowns
+```
+
+Providers and models the router is currently skipping. Each entry reports its
+scope (`provider` blocks every model on that provider, `model` blocks one),
+when the cooldown started, and when it lifts. Expired entries are filtered out,
+and the cooldown window comes from the SDK (`cooldownDurationMs`).
 
 #### Automatic Refresh Settings
 ```
