@@ -1,4 +1,11 @@
-import { ModelManager, ProviderManager, type SdkStore } from "@routstr/sdk";
+import {
+  canonicalIdForModel,
+  findModelForId,
+  ModelManager,
+  ProviderManager,
+  type Model,
+  type SdkStore,
+} from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
 
@@ -66,13 +73,16 @@ export function createModelService(
 
       for (const model of models as PricedModel[]) {
         if (!model.sats_pricing) continue;
-        const existing = bestById.get(model.id);
+        // Group by canonical id so providers serving the same model under a
+        // mapped variant id or alias fold into one aggregate entry.
+        const canonicalId = canonicalIdForModel(model as Model);
+        const existing = bestById.get(canonicalId);
         if (
           !existing ||
           (model.sats_pricing.completion ?? 0) <
             (existing.sats_pricing?.completion ?? 0)
         ) {
-          bestById.set(model.id, model);
+          bestById.set(canonicalId, model);
         }
       }
     }
@@ -201,18 +211,35 @@ export function createModelService(
       return null;
     }
 
-    // Get model metadata from first (cheapest) provider
+    // Get model metadata. Prefer a provider that serves the requested
+    // canonical id natively (nicest name/description); fall back to the
+    // cheapest provider matched through the SDK's model mappings, since it
+    // may only know the model under a mapped variant id or alias.
     const cheapest = providers[0]!;
     const allModels = modelManager.getAllCachedModels();
-    const firstProvider = allModels[cheapest.baseUrl];
-    const modelInfo = firstProvider?.find((m: { id: string }) => m.id === modelId);
+    let modelInfo: Model | undefined;
+    for (const p of providers) {
+      const exact = (allModels[p.baseUrl] as Model[] | undefined)?.find(
+        (m) => m.id === modelId,
+      );
+      if (exact) {
+        modelInfo = exact;
+        break;
+      }
+    }
+    if (!modelInfo) {
+      const firstProvider = allModels[cheapest.baseUrl];
+      modelInfo = firstProvider
+        ? findModelForId(firstProvider as Model[], modelId)
+        : undefined;
+    }
 
     if (!modelInfo) {
       return null;
     }
 
     return {
-      id: modelInfo.id,
+      id: modelId,
       name: modelInfo.name,
       description: modelInfo.description,
       context_length: modelInfo.context_length,
