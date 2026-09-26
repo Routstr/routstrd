@@ -165,11 +165,19 @@ export function createModelService(
       );
     }
 
-    const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
-
+    // Resolve each routstr21 id against the aggregated provider models. The
+    // aggregation folds providers' mapped variant ids/aliases into one entry
+    // per canonical id, but the surviving entry is the provider's raw model,
+    // whose `.id` may be the variant (e.g. z-ai-glm-5-3-flash) — while still
+    // carrying the full metadata (context_length, architecture, reasoning).
+    // A plain id map would miss and degrade the entry to a bare stub, so
+    // resolve through the SDK's model mappings (exact native id wins, same as
+    // getModelProviders) and always expose the requested canonical id.
     return routstr21ModelIds.map((modelId) => {
-      const model = modelsById.get(modelId);
-      return model || { id: modelId, name: modelId };
+      const model = findModelForId(discoveredModels as Model[], modelId);
+      return model
+        ? { ...model, id: modelId }
+        : { id: modelId, name: modelId };
     });
   };
 
