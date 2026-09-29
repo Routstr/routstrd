@@ -48,6 +48,8 @@ export interface RoutstrdConfig {
   provider: string | null;
   cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
+  /** Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash. Disabled by default; requires daemon restart after changing. */
+  autoModelPath?: boolean;
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {
     /** Enable raw request/response file logging. */
@@ -87,5 +89,6 @@ export const DEFAULT_CONFIG: RoutstrdConfig = {
   provider: null,
   cocodPath: null,
   mode: "apikeys",
+  autoModelPath: false,
   maxTokens: 64000,
 };

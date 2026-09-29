@@ -276,6 +276,7 @@ Configuration is stored in `~/.routstrd/config.json`:
   "host": "127.0.0.1",
   "provider": null,
   "cocodPath": null,
+  "autoModelPath": false,
   "autoRefresh": { "enabled": true }
 }
 ```
@@ -286,6 +287,11 @@ every 21 minutes. Set it to `false` (or run
 `routstrd clients --disable-automatic-refresh`) to turn the schedule off and
 refresh manually with `routstrd clients --manual-refresh`. `autoRefresh.intervalMs`
 overrides the 21-minute interval.
+
+`autoModelPath` defaults to `false`. Set it to `true` to let the SDK automatically
+choose and pin an advertised model path for `deepseek-v4.1-flash` requests.
+Explicit `x-routstr-model-path` request headers work independently of this
+setting and take precedence. Restart the daemon after changing `autoModelPath`.
 
 ### Environment Variables
 

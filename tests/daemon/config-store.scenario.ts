@@ -38,8 +38,10 @@ const scenario = process.argv[2];
 
 switch (scenario) {
   case "fresh-install": {
+    assert(loadDaemonConfigSync().autoModelPath === false, "autoModelPath must default to false");
     saveDaemonConfig({
       ...baseConfig,
+      autoModelPath: true,
       nsec: "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
     });
     assert(modeOf(CONFIG_DIR) === 0o700, `dir mode ${modeOf(CONFIG_DIR).toString(8)} != 700`);
@@ -54,6 +56,7 @@ switch (scenario) {
       "nsec round-trip failed",
     );
     assert(loaded.port === 8008, "port round-trip failed");
+    assert(loaded.autoModelPath === true, "autoModelPath round-trip failed");
 
     await ensureDirs();
     assert(modeOf(CONFIG_DIR) === 0o700, "ensureDirs dir mode");

@@ -392,6 +392,8 @@ export function createDaemonRequestHandler(deps: {
   mode?: "xcashu" | "apikeys";
   /** Default max_tokens/max_output_tokens to inject when the client omits one. */
   maxTokens: number;
+  /** Enable SDK automatic DeepSeek V4.1 Flash model-path selection. */
+  autoModelPath?: boolean;
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
@@ -1932,6 +1934,7 @@ export function createDaemonRequestHandler(deps: {
         requestBody,
         path: url.pathname,
         forcedProvider,
+        autoModelPath: deps.autoModelPath === true,
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
