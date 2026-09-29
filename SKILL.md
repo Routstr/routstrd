@@ -322,8 +322,8 @@ Manage routstrd as a system service using PM2, so it survives reboots.
 
 ## Wallet Commands
 
-New wallets trust two mints out of the box: `https://mint.cubabitcoin.org` and
-`https://mint.minibits.cash/Bitcoin`. `https://mint.cubabitcoin.org` is the
+New wallets trust two mints out of the box: `https://mint.minibits.cash/Bitcoin`
+and `https://mint.cubabitcoin.org`. `https://mint.minibits.cash/Bitcoin` is the
 default mint, and the default is used when a wallet command does not include
 `--mint-url`. An existing wallet keeps whatever default it already has; the
 shipped mints are only added as trusted, never as the default. Use
@@ -400,7 +400,7 @@ Pay a Lightning invoice.
 
 ### `routstrd wallet mints list`
 
-List configured wallet mints. Includes the mints trusted by default (`https://mint.cubabitcoin.org`, `https://mint.minibits.cash/Bitcoin`) plus any added manually.
+List configured wallet mints. Includes the mints trusted by default (`https://mint.minibits.cash/Bitcoin`, `https://mint.cubabitcoin.org`) plus any added manually.
 
 ### `routstrd wallet mints add <url>`
 

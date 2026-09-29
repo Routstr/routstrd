@@ -5,7 +5,7 @@ import { normalizeMintUrl } from "@cashu/coco-core";
  * always trusted, and a wallet is never allowed to point its default at a mint
  * it could not fetch.
  */
-export const DEFAULT_MINT_URL = "https://mint.cubabitcoin.org";
+export const DEFAULT_MINT_URL = "https://mint.minibits.cash/Bitcoin";
 
 /**
  * Mints routstrd trusts out of the box. Every entry is added as a trusted mint
@@ -16,7 +16,7 @@ export const DEFAULT_MINT_URL = "https://mint.cubabitcoin.org";
  */
 export const DEFAULT_TRUSTED_MINT_URLS: readonly string[] = [
   DEFAULT_MINT_URL,
-  "https://mint.minibits.cash/Bitcoin",
+  "https://mint.cubabitcoin.org",
 ];
 
 export interface TrustedMintSeeder {

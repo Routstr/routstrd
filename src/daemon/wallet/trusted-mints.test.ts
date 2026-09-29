@@ -43,7 +43,7 @@ describe("seedTrustedMints", () => {
     expect(added).toEqual([...DEFAULT_TRUSTED_MINT_URLS]);
     expect(progress).toEqual([
       `Adding default mint: ${DEFAULT_MINT_URL}`,
-      "Adding trusted mint: https://mint.minibits.cash/Bitcoin",
+      "Adding trusted mint: https://mint.cubabitcoin.org",
     ]);
   });
 
@@ -60,7 +60,7 @@ describe("seedTrustedMints", () => {
   it("skips mints that are already trusted", async () => {
     const { wallet, added } = makeHarness([
       DEFAULT_MINT_URL,
-      "https://mint.minibits.cash/Bitcoin",
+      "https://mint.cubabitcoin.org",
     ]);
 
     await seedTrustedMints(wallet, DEFAULT_MINT_URL);
@@ -71,7 +71,7 @@ describe("seedTrustedMints", () => {
   it("treats a trailing slash on a stored mint as already trusted", async () => {
     const { wallet, added } = makeHarness([
       `${DEFAULT_MINT_URL}/`,
-      "https://mint.minibits.cash/Bitcoin/",
+      "https://mint.cubabitcoin.org/",
     ]);
 
     await seedTrustedMints(wallet, DEFAULT_MINT_URL);
@@ -114,7 +114,7 @@ describe("seedTrustedMints", () => {
   });
 
   it("keeps going when a non-default mint cannot be fetched", async () => {
-    const unavailable = "https://mint.minibits.cash/Bitcoin";
+    const unavailable = "https://mint.cubabitcoin.org";
     const { wallet, added, errors } = makeHarness([], [unavailable]);
 
     await seedTrustedMints(wallet, DEFAULT_MINT_URL, {
