@@ -56,6 +56,13 @@ class DaemonConnectionError extends Error {
   }
 }
 
+/**
+ * Upper bound for a single daemon request. The daemon bounds its own NWC
+ * operations, so this only guards against a wedged server; without it a hung
+ * request would block the CLI forever.
+ */
+export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
+
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
     return config.daemonUrl.replace(/\/$/, "");
@@ -100,14 +107,27 @@ async function _callUrl(
   if (bodyString) headers.set("Content-Type", "application/json");
 
   let response: Response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    DAEMON_REQUEST_TIMEOUT_MS,
+  );
   try {
     response = await fetch(url, {
       method,
       headers,
       body: bodyString,
+      signal: controller.signal,
     });
   } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(
+        `Daemon request timed out after ${DAEMON_REQUEST_TIMEOUT_MS / 1000}s`,
+      );
+    }
     throw new DaemonConnectionError(error);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response.ok) {

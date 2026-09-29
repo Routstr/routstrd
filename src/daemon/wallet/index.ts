@@ -3,8 +3,20 @@ import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
 import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
+import { withTimeout } from "../../utils/with-timeout";
 import { createCocodClient, type CocodClient } from "./cocod-client";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
+
+/**
+ * NWC reads (get_info/get_balance) should answer in a couple of seconds. If
+ * they don't, the long-lived relay subscription is presumed stale and the
+ * connection is rebuilt before one retry.
+ */
+const NWC_READ_TIMEOUT_MS = 15_000;
+/** Lightning payments can legitimately take a little longer to settle. */
+const NWC_PAY_TIMEOUT_MS = 45_000;
+
+type NwcPayment = { preimage?: string; fees_paid?: number };
 
 export function decodeCashuTokenAmount(token: string): {
   amount: number;
@@ -37,6 +49,10 @@ export interface WalletAdapterOptions {
   walletClient?: CocodClient;
   /** NWC connection string for Lightning funding (uses applesauce-wallet-connect) */
   nwcConnectionString?: string;
+  /** Override the NWC read timeout in milliseconds (test hook). */
+  nwcReadTimeoutMs?: number;
+  /** Override the NWC payment timeout in milliseconds (test hook). */
+  nwcPayTimeoutMs?: number;
   /** Auto-refill configuration (static, for startup only) */
   autoRefill?: AutoRefillConfig;
   /**
@@ -82,24 +98,122 @@ export async function createWalletAdapter(
 
   let wallet: WalletConnect | undefined;
   let pool: RelayPool | undefined;
+  let nwcConnectionString = options.nwcConnectionString;
+  const nwcReadTimeoutMs = options.nwcReadTimeoutMs ?? NWC_READ_TIMEOUT_MS;
+  const nwcPayTimeoutMs = options.nwcPayTimeoutMs ?? NWC_PAY_TIMEOUT_MS;
 
   // Getter for the current wallet instance (used by auto-refill loop)
   const getWallet = (): WalletConnect | undefined => wallet;
 
-  if (options.nwcConnectionString) {
-    pool = new RelayPool();
-    wallet = WalletConnect.fromConnectURI(options.nwcConnectionString, { pool });
+  /** Close the active relay pool, if any. */
+  function closeNwcPool(): void {
+    if (pool) {
+      for (const [url] of pool.relays) {
+        pool.remove(url, true);
+      }
+    }
+    pool = undefined;
+  }
+
+  /**
+   * (Re)create the relay pool + WalletConnect client for a connection string.
+   * Shared by interactive connects and self-healing recovery so both paths use
+   * identical setup.
+   */
+  function connectNwc(connectionString: string, reason: string): void {
+    const nextPool = new RelayPool();
+    const nextWallet = WalletConnect.fromConnectURI(connectionString, {
+      pool: nextPool,
+    });
+
+    pool = nextPool;
+    wallet = nextWallet;
+    nwcConnectionString = connectionString;
 
     // Connect in background (non-blocking)
-    wallet.waitForService()
+    nextWallet
+      .waitForService()
       .then(() => {
         logger.log(
-          `[nwc] NWC wallet connected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
+          `[nwc] NWC wallet ${reason}. Relay: ${nextWallet.relays[0]}, Service: ${nextWallet.service}`,
         );
       })
       .catch((err) => {
         logger.error(`[nwc] NWC connection failed: ${err.message}`);
       });
+  }
+
+  /**
+   * Rebuild the NWC connection in place after a request stalled. applesauce's
+   * request timeout only covers the response stream, so a stale relay
+   * subscription can leave `getInfo`/`getBalance` pending forever while it
+   * negotiates encryption. Recreating the pool gives the next call a fresh
+   * subscription.
+   */
+  function rebuildNwcConnection(reason: string): void {
+    if (!nwcConnectionString) return;
+    closeNwcPool();
+    wallet = undefined;
+    connectNwc(nwcConnectionString, reason);
+  }
+
+  /**
+   * Run an idempotent NWC read, bounding the wait and rebuilding the connection
+   * once if it stalls.
+   */
+  async function nwcRead<T>(
+    label: string,
+    operation: (w: WalletConnect) => Promise<T>,
+  ): Promise<T> {
+    const first = wallet;
+    if (!first?.service) {
+      throw new Error("NWC not connected");
+    }
+    try {
+      return await withTimeout(
+        operation(first),
+        nwcReadTimeoutMs,
+        `${label} timed out`,
+      );
+    } catch (error) {
+      if (!nwcConnectionString) throw error;
+      logger.warn(
+        `[nwc] ${label} failed (${(error as Error).message}); rebuilding NWC connection and retrying`,
+      );
+      rebuildNwcConnection("reconnected after timeout");
+      const retry = wallet;
+      if (!retry?.service) throw error;
+      return await withTimeout(
+        operation(retry),
+        nwcReadTimeoutMs,
+        `${label} timed out after reconnect`,
+      );
+    }
+  }
+
+  /**
+   * Pay a BOLT-11 invoice over NWC with a bounded wait. A timeout rebuilds the
+   * relay connection so later calls recover without a daemon restart. The
+   * payment is not retried here: the invoice itself is single-use, and the
+   * caller decides whether to attempt a fresh invoice.
+   */
+  async function payNwcInvoice(invoice: string): Promise<NwcPayment> {
+    const payer = wallet;
+    if (!payer?.service) throw new Error("NWC not connected");
+    try {
+      return await withTimeout(
+        payer.payInvoice(invoice),
+        nwcPayTimeoutMs,
+        "NWC payment timed out",
+      );
+    } catch (error) {
+      rebuildNwcConnection("reconnected after payment timeout");
+      throw error;
+    }
+  }
+
+  if (options.nwcConnectionString) {
+    connectNwc(options.nwcConnectionString, "connected");
   }
 
   const walletAdapter = {
@@ -108,35 +222,20 @@ export async function createWalletAdapter(
         `[nwc] Reconnecting NWC wallet... ${connectionString ? "new connection string provided" : "disconnecting"}`,
       );
 
-      // 1. Close existing relay pool connections
-      if (pool) {
-        for (const [url] of pool.relays) {
-          pool.remove(url, true);
-        }
-      }
-
-      // 2. Update wallet reference
+      // Close existing relay pool connections and update the wallet reference
+      closeNwcPool();
       wallet = undefined;
-      pool = undefined;
 
-      // 3. Create new wallet if connection string provided
       if (connectionString) {
-        pool = new RelayPool();
-        wallet = WalletConnect.fromConnectURI(connectionString, { pool });
-
-        // Connect in background (non-blocking)
-        wallet.waitForService()
-          .then(() => {
-            logger.log(
-              `[nwc] NWC wallet reconnected. Relay: ${wallet!.relays[0]}, Service: ${wallet!.service}`,
-            );
-          })
-          .catch((err) => {
-            logger.error(`[nwc] NWC reconnection failed: ${err.message}`);
-          });
+        connectNwc(connectionString, "reconnected");
       } else {
+        nwcConnectionString = undefined;
         logger.log("[nwc] NWC wallet disconnected.");
       }
+
+      // A connection added after startup previously never started the
+      // auto-refill loop, so it silently stayed disabled until a restart.
+      ensureAutoRefillLoop();
     },
 
     async getBalances(): Promise<Record<string, number>> {
@@ -192,9 +291,9 @@ export async function createWalletAdapter(
         const { invoice } = await client.receiveBolt11(amount, mintUrl);
         logger.log(`[nwc]   Invoice: ${invoice}`);
 
-        // Step 3: Pay it via NWC
+        // Step 3: Pay it via NWC (bounded — a stale relay must not hang the CLI)
         logger.log("[nwc] Paying invoice via NWC...");
-        const { preimage, fees_paid } = await wallet.payInvoice(invoice);
+        const { preimage, fees_paid } = await payNwcInvoice(invoice);
         logger.log(`[nwc]   ✅ Payment successful!`);
         logger.log(`[nwc]   Preimage: ${preimage}`);
         if (fees_paid !== undefined) {
@@ -244,10 +343,10 @@ export async function createWalletAdapter(
       }
 
       try {
-        const info = await wallet.getInfo();
+        const info = await nwcRead("get_info", (w) => w.getInfo());
         let balance: number | undefined;
         try {
-          const bal = await wallet.getBalance();
+          const bal = await nwcRead("get_balance", (w) => w.getBalance());
           balance = Math.floor(bal.balance / 1000); // msats → sats
         } catch {
           // Balance might not be available
@@ -326,21 +425,40 @@ export async function createWalletAdapter(
 
   let stopAutoRefill: (() => void) | undefined;
 
+  /**
+   * Start the auto-refill loop if it is not already running. Safe to call more
+   * than once; it becomes a no-op after the first call.
+   */
+  function ensureAutoRefillLoop(): void {
+    if (stopAutoRefill) return;
+    const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
+    stopAutoRefill = startAutoRefillLoop(
+      client,
+      getWallet,
+      getConfig,
+      5000,
+      payNwcInvoice,
+    );
+  }
+
   const autoRefillConfig = options.getAutoRefillConfig
     ? options.getAutoRefillConfig()
     : options.autoRefill;
 
-  if (autoRefillConfig && wallet) {
-    const getConfig = options.getAutoRefillConfig ?? (() => options.autoRefill);
-    stopAutoRefill = startAutoRefillLoop(client, getWallet, getConfig);
-    logger.log(
-      `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs / 60000} minutes`,
-    );
-  } else if (wallet && options.getAutoRefillConfig) {
-    // Wallet exists but auto-refill is not currently enabled.
-    // Start the loop anyway so it can pick up changes without a restart.
-    stopAutoRefill = startAutoRefillLoop(client, getWallet, options.getAutoRefillConfig);
-    logger.log("[wallet] Auto-refill loop started (currently disabled — enable via CLI to activate)");
+  if (options.getAutoRefillConfig || options.autoRefill) {
+    // Start the loop even when no wallet is connected yet: it reads the wallet
+    // and config fresh each cycle, so a later `nwc connect` activates refills
+    // without a daemon restart.
+    ensureAutoRefillLoop();
+    if (autoRefillConfig) {
+      logger.log(
+        `[wallet] Auto-refill enabled: threshold=${autoRefillConfig.threshold} sats, amount=${autoRefillConfig.amount} sats, cooldown=${autoRefillConfig.cooldownMs / 60000} minutes`,
+      );
+    } else {
+      logger.log(
+        "[wallet] Auto-refill loop started (currently disabled — enable via CLI to activate)",
+      );
+    }
   }
 
   try {
