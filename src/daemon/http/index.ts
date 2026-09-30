@@ -13,11 +13,11 @@ import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
-  CocodHttpError,
-  type CocodClient,
-  type CocodState,
+  WalletHttpError,
+  type WalletClient,
+  type WalletRuntimeState,
   type WalletRecoveryProgress,
-} from "../wallet/cocod-client";
+} from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
@@ -50,7 +50,7 @@ type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 type WalletStatusOutput = {
   daemon: "running";
   wallet: "connected" | "recovering" | "error";
-  walletState: CocodState;
+  walletState: WalletRuntimeState;
   balances?: Record<string, number>;
   mode: ClientMode;
   error?: string;
@@ -61,7 +61,7 @@ type DaemonDeps = {
   server: { close(cb?: () => void): void };
   shutdown?: () => void;
   store: any;
-  walletClient: CocodClient;
+  walletClient: WalletClient;
   walletAdapter: any;
   storageAdapter: any;
   discoveryAdapter: any;
@@ -132,7 +132,7 @@ async function readJsonBody(
   try {
     return JSON.parse(bodyText) as Record<string, unknown>;
   } catch {
-    throw new CocodHttpError(400, "Invalid JSON body.");
+    throw new WalletHttpError(400, "Invalid JSON body.");
   }
 }
 
@@ -200,7 +200,7 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function getWalletStateMessage(state: CocodState): string {
+function getWalletStateMessage(state: WalletRuntimeState): string {
   switch (state) {
     case "LOCKED":
       return "Wallet is locked. Unlock it before performing wallet operations.";
@@ -220,7 +220,7 @@ function respondWithError(
   error: unknown,
   fallbackStatus = 500,
 ): void {
-  if (error instanceof CocodHttpError) {
+  if (error instanceof WalletHttpError) {
     sendJson(res, error.status, { error: error.message });
     return;
   }
@@ -253,7 +253,7 @@ function getRequiredStringField(
 ): string {
   const value = requireStringField(body, field);
   if (!value) {
-    throw new CocodHttpError(400, `Missing required '${field}' field.`);
+    throw new WalletHttpError(400, `Missing required '${field}' field.`);
   }
   return value;
 }
@@ -272,7 +272,7 @@ function getRequiredPositiveNumberField(
       return parsed;
     }
   }
-  throw new CocodHttpError(400, `Missing required '${field}' field.`);
+  throw new WalletHttpError(400, `Missing required '${field}' field.`);
 }
 
 function optionalStringField(
@@ -293,7 +293,7 @@ function optionalStringArrayField(
     !Array.isArray(value) ||
     value.some((item) => typeof item !== "string" || !item.trim())
   ) {
-    throw new CocodHttpError(400, `'${field}' must be an array of non-empty strings.`);
+    throw new WalletHttpError(400, `'${field}' must be an array of non-empty strings.`);
   }
   return value.map((item: string) => item.trim());
 }
@@ -349,7 +349,7 @@ async function buildStatusOutput(
 }
 
 async function buildWalletDetails(deps: DaemonDeps): Promise<{
-  state: CocodState;
+  state: WalletRuntimeState;
   ready: boolean;
   balances?: Record<string, number>;
   unit?: "sat";
@@ -411,7 +411,7 @@ const HISTORY_TYPE_SCAN_PAGE_SIZE = 200;
  * scan pages until enough matches accumulate (or history is exhausted).
  */
 export async function getHistoryByTypes(
-  client: Pick<CocodClient, "getHistory">,
+  client: Pick<WalletClient, "getHistory">,
   types: string[],
   offset: number,
   limit: number,
@@ -435,7 +435,7 @@ export function createDaemonRequestHandler(deps: {
   server: { close(cb?: () => void): void };
   shutdown?: () => void;
   store: any;
-  walletClient: CocodClient;
+  walletClient: WalletClient;
   walletAdapter: any;
   storageAdapter: any;
   discoveryAdapter: any;
@@ -514,7 +514,7 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/wallet/cleanup") {
       await respond(res, async () => {
         if (!deps.walletClient.cleanupStuckOperations) {
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             501,
             "Wallet cleanup is not supported by this wallet client.",
           );
@@ -538,7 +538,7 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/wallet/recover") {
       await respond(res, async () => {
         if (!deps.walletClient.recoverMintQuotes) {
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             501,
             "Mint quote recovery is not supported by this wallet client.",
           );
@@ -547,7 +547,7 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const operationIds = optionalStringArrayField(body, "operationIds");
         if (body.includeFailed === true && !operationIds?.length) {
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             400,
             "'includeFailed' requires non-empty 'operationIds'.",
           );
@@ -557,7 +557,7 @@ export function createDaemonRequestHandler(deps: {
           (typeof body.timeoutMs !== "number" ||
             !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)
         ) {
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             400,
             "'timeoutMs' must be a positive finite number.",
           );
@@ -575,7 +575,7 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "POST" && url.pathname === "/wallet/recover/operations") {
       await respond(res, async () => {
         if (!deps.walletClient.recoverStuckOperations) {
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             501,
             "Stuck operation recovery is not supported by this wallet client.",
           );
@@ -615,7 +615,7 @@ export function createDaemonRequestHandler(deps: {
       const operationId = decodeURIComponent(mintQuoteMatch[1]);
       await respond(res, async () => {
         const quote = await deps.walletClient.getMintQuote?.(operationId);
-        if (!quote) throw new CocodHttpError(404, "Mint quote not found");
+        if (!quote) throw new WalletHttpError(404, "Mint quote not found");
         return { output: quote };
       });
       return;
@@ -759,12 +759,12 @@ export function createDaemonRequestHandler(deps: {
           const amount = typeof pr.amount === "number" ? pr.amount : 0;
           const mints = Array.isArray(pr.mints) ? pr.mints.join(", ") : "";
           if (confirm) {
-            throw new CocodHttpError(
+            throw new WalletHttpError(
               402,
               `Failed to set username. Required amount: ${amount} SATS. Required mints: ${mints}`,
             );
           }
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             402,
             `Payment required to set username: ${amount} SATS. ` +
               `Use 'routstrd wallet npc username ${username} --confirm' to proceed`,

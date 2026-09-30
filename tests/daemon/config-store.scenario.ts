@@ -24,7 +24,6 @@ const baseConfig = {
   port: 8008,
   host: "127.0.0.1",
   provider: null,
-  cocodPath: null,
 };
 
 function assert(cond: unknown, msg: string): void {
