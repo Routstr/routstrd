@@ -38,14 +38,6 @@ import type {
 } from "./cocod-client";
 import { selectCleanupOperations } from "./cleanup";
 import {
-  collectStuckOperations,
-  probeMintReachability,
-  runTargetedRecovery,
-  startRecoveryRecheck,
-  type SendRecoveryService,
-  type StuckOperation,
-} from "./recovery-probe";
-import {
   clearInterruptedReceiveReservations,
   deleteReceiveTokenReservation,
   getReceiveReconcileBackup,
@@ -1040,85 +1032,6 @@ interface RecoveryPhaseProgress {
 }
 
 /**
- * Coco keeps per-operation recovery private on its services; routstrd already
- * reaches into the Manager the same way for `mintOperationService`. Send is
- * the only family whose public `refresh()` cannot recover executing ops.
- */
-function sendRecoveryServiceOf(coco: Manager): SendRecoveryService {
-  return (coco as unknown as { sendOperationService: SendRecoveryService })
-    .sendOperationService;
-}
-
-/**
- * Gate for value-moving wallet operations while startup recovery runs.
- *
- * The gate is per mint: once recovery has enumerated stuck operations
- * (publishStuckMints), callers whose target mint has none proceed immediately
- * — a dead or slow mint must not stall spends from a healthy one. Callers
- * without a target mint, or whose mint has stuck operations, wait for the
- * full sweep. fail() poisons every caller; reads are never gated.
- */
-export interface RecoveryGate {
-  waitForRecovery(mintUrl?: string): Promise<void>;
-  publishStuckMints(mints: Set<string>): void;
-  complete(): void;
-  fail(error: string): void;
-}
-
-export function createRecoveryGate(): RecoveryGate {
-  let stuckMints: Set<string> | undefined;
-  let done = false;
-  let error: string | undefined;
-  let mintsResolve: (() => void) | undefined;
-  const mintsPromise = new Promise<void>((resolve) => {
-    mintsResolve = resolve;
-  });
-  let doneResolve: (() => void) | undefined;
-  const donePromise = new Promise<void>((resolve) => {
-    doneResolve = resolve;
-  });
-
-  return {
-    async waitForRecovery(mintUrl?: string): Promise<void> {
-      if (mintUrl) {
-        let normalized: string | undefined;
-        try {
-          normalized = normalizeMintUrl(mintUrl);
-        } catch {
-          // Unparseable URL falls back to the global gate.
-          normalized = undefined;
-        }
-        if (normalized) {
-          await mintsPromise;
-          if (!stuckMints?.has(normalized)) {
-            if (error) throw new Error(`Wallet is not ready: ${error}`);
-            return;
-          }
-        }
-      }
-      if (!done) await donePromise;
-      if (error) throw new Error(`Wallet is not ready: ${error}`);
-    },
-    publishStuckMints(mints: Set<string>): void {
-      if (stuckMints) return;
-      stuckMints = mints;
-      mintsResolve?.();
-    },
-    complete(): void {
-      done = true;
-      mintsResolve?.();
-      doneResolve?.();
-    },
-    fail(message: string): void {
-      done = true;
-      error = message;
-      mintsResolve?.();
-      doneResolve?.();
-    },
-  };
-}
-
-/**
  * Run the wallet recovery sweeps in order, reporting phase changes.
  *
  * Expired mint quotes are settled first: quotes their mint confirms as unpaid
@@ -1129,7 +1042,6 @@ async function runWalletRecovery(
   coco: Manager,
   onProgress: (progress: RecoveryPhaseProgress) => void,
   receiveOperationIds?: string[],
-  onStuckMintsKnown?: (mints: Set<string>) => void,
 ): Promise<void> {
   surfacingRecoveryProgress = true;
   let failedMintQuotes = 0;
@@ -1156,60 +1068,19 @@ async function runWalletRecovery(
     }
     onProgress({ phase: "Settled expired mint quotes", failedMintQuotes });
 
-    // Probe every mint that has stuck operations once, up front, so a dead
-    // mint costs a single short probe instead of a network timeout per
-    // operation per sweep. Healthy-mint operations are recovered per op;
-    // dead-mint operations stay parked exactly as coco's own "will retry
-    // later" path would leave them.
-    onProgress({ phase: "Probing mints", failedMintQuotes });
-    const stuckOperations = await collectStuckOperations(coco.ops);
-    // Value-moving operations gate per mint on this set (see waitForRecovery);
-    // publish it as soon as it is known so healthy mints unblock immediately.
-    onStuckMintsKnown?.(new Set(stuckOperations.map((op) => op.mintUrl)));
-    const unreachableMints = await probeMintReachability(
-      [...new Set(stuckOperations.map((op) => op.mintUrl))],
-    );
-    for (const mintUrl of unreachableMints) {
-      const count = stuckOperations.filter((op) => op.mintUrl === mintUrl).length;
-      startupProgress(
-        `Skipping recovery for unreachable mint: ${mintUrl} (${count} op${count === 1 ? "" : "s"})`,
-      );
-    }
-    const degraded = unreachableMints.size > 0;
-    const targeted = (kinds: Array<StuckOperation["kind"]>) =>
-      runTargetedRecovery(coco.ops, sendRecoveryServiceOf(coco), {
-        kinds,
-        stuckOperations,
-        unreachableMints,
-      });
-
-    // Happy path (every mint reachable) keeps coco's global sweeps: they also
-    // clean up init operations and orphaned proof reservations, which the
-    // per-op driver cannot enumerate. The targeted driver only runs when a
-    // dead mint would otherwise tax every stuck op with a network timeout.
     onProgress({ phase: "Send recovery", failedMintQuotes });
-    if (!degraded) await coco.ops.send.recovery.run();
-    else await targeted(["send"]);
+    await coco.ops.send.recovery.run();
 
     onProgress({ phase: "Melt recovery", failedMintQuotes });
-    if (!degraded) await coco.ops.melt.recovery.run();
-    else await targeted(["melt"]);
+    await coco.ops.melt.recovery.run();
 
     onProgress({ phase: "Receive recovery", failedMintQuotes });
     if (receiveOperationIds) {
       // The pre-check already classified every executing receive by unique
       // input set. Recover only the conclusive retained operations; unresolved
       // groups stay untouched instead of falling back to Coco 1's expensive
-      // per-row sweep on this startup. Operations at mints the probe found
-      // unreachable are skipped rather than costing their 15s timeout each.
-      const mintByOperation = new Map(
-        stuckOperations
-          .filter((op) => op.kind === "receive")
-          .map((op) => [op.id, op.mintUrl]),
-      );
+      // per-row sweep on this startup.
       for (const operationId of receiveOperationIds) {
-        const mintUrl = mintByOperation.get(operationId);
-        if (mintUrl && unreachableMints.has(mintUrl)) continue;
         try {
           await withTimeout(coco.ops.receive.refresh(operationId), 15_000);
         } catch (error) {
@@ -1219,15 +1090,12 @@ async function runWalletRecovery(
           });
         }
       }
-    } else if (!degraded) {
-      await coco.ops.receive.recovery.run();
     } else {
-      await targeted(["receive"]);
+      await coco.ops.receive.recovery.run();
     }
 
     onProgress({ phase: "Mint recovery", failedMintQuotes });
-    if (!degraded) await coco.recoverPendingMintOperations();
-    else await targeted(["mint"]);
+    await coco.recoverPendingMintOperations();
 
     onProgress({ phase: "done", failedMintQuotes });
   } finally {
@@ -1287,11 +1155,9 @@ export async function createCocoClient(
   };
   let recoveryResolve: (() => void) | undefined;
   let stopPendingMintSweep: (() => Promise<void>) | undefined;
-  let stopRecoveryRecheck: (() => Promise<void>) | undefined;
   const recoveryPromise = new Promise<void>((resolve) => {
     recoveryResolve = resolve;
   });
-  const recoveryGate = createRecoveryGate();
 
   try {
     startupProgress("Opening Cashu wallet database...");
@@ -1489,33 +1355,13 @@ export async function createCocoClient(
         }
       },
       receiveRecoveryOperationIds,
-      (mints) => recoveryGate.publishStuckMints(mints),
     )
       .then(async () => {
         await syncReceiveReservations();
         recoveryDone = true;
         recoveryPhase = "done";
-        recoveryGate.complete();
         recoveryResolve?.();
         startupProgress("Wallet recovery complete.");
-        // Re-check stuck operations periodically: a mint that comes back has
-        // its parked operations recovered without a daemon restart, and
-        // operations stuck mid-session are reconciled too. Receive stays
-        // startup-only because recovering competing receives safely requires
-        // the startup dedup classification (see receive-dedup.ts).
-        stopRecoveryRecheck = startRecoveryRecheck(
-          coco!.ops,
-          sendRecoveryServiceOf(coco!),
-          {
-            kinds: ["send", "melt", "mint"],
-            onMintDown: (mintUrl, opCount) =>
-              logger.warn(
-                `Mint ${mintUrl} is unreachable; ${opCount} stuck operation(s) will keep retrying`,
-              ),
-            onMintBack: (mintUrl) =>
-              logger.log(`Mint ${mintUrl} is reachable again; resumed recovering its operations`),
-          },
-        );
         stopPendingMintSweep = startPendingMintSweep({
           ops: coco!.ops,
           wallet: coco!.wallet,
@@ -1528,7 +1374,6 @@ export async function createCocoClient(
         recoveryDone = true;
         recoveryPhase = "error";
         recoveryError = error instanceof Error ? error.message : String(error);
-        recoveryGate.fail(recoveryError);
         recoveryResolve?.();
         startupProgress(`Wallet recovery failed: ${recoveryError}`);
       });
@@ -1553,11 +1398,16 @@ export async function createCocoClient(
 
   let disposed = false;
 
-  // Block a value-moving operation until background recovery has settled for
-  // its target mint (see createRecoveryGate). Reads stay ungated so the
-  // daemon can report balances/status immediately.
-  const waitForRecovery = (mintUrl?: string): Promise<void> =>
-    recoveryGate.waitForRecovery(mintUrl);
+  /**
+   * Block a value-moving operation until background recovery has settled.
+   * Reads stay ungated so the daemon can report balances/status immediately.
+   */
+  const waitForRecovery = async (): Promise<void> => {
+    if (!recoveryDone) await recoveryPromise;
+    if (recoveryError) {
+      throw new Error(`Wallet is not ready: ${recoveryError}`);
+    }
+  };
 
   return {
     async ping(): Promise<boolean> {
@@ -1737,13 +1587,13 @@ export async function createCocoClient(
     },
 
     async receiveBolt11(amount: number, mintUrl?: string) {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning invoice");
       }
-      await waitForRecovery(targetMint);
       const op = await coco.ops.mint.prepare({
         mintUrl: targetMint,
         amount,
@@ -1769,13 +1619,13 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for sending");
       }
-      await waitForRecovery(targetMint);
       const prepared = await coco.ops.send.prepare({
         mintUrl: targetMint,
         amount,
@@ -1785,13 +1635,13 @@ export async function createCocoClient(
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
+      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning payment");
       }
-      await waitForRecovery(targetMint);
       const prepared = await coco.ops.melt.prepare({
         mintUrl: targetMint,
         method: "bolt11",
@@ -1837,7 +1687,6 @@ export async function createCocoClient(
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
-      await stopRecoveryRecheck?.();
       try {
         // Let any in-flight recovery settle before closing the database from
         // underneath it. The recovery promise resolves on success or failure.

@@ -14,7 +14,6 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
-  createRecoveryGate,
   DEFAULT_TRUSTED_MINT_URLS,
   isZombieProcess,
   settleExpiredMintQuotes,
@@ -900,75 +899,5 @@ describe("settlePendingMintQuotes", () => {
 
     expect(attempted(refresh)[2]).toBe("paid");
     expect(logged.mock.calls[0]?.[0]).toContain("21 sat minted");
-  });
-});
-
-describe("createRecoveryGate", () => {
-  const HEALTHY = "https://healthy.example.com";
-  const STUCK = "https://stuck.example.com";
-
-  function settled(promise: Promise<unknown>): Promise<boolean> {
-    return Promise.race([
-      promise.then(() => true, () => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
-    ]);
-  }
-
-  it("lets a mint without stuck operations proceed while another mint recovers", async () => {
-    const gate = createRecoveryGate();
-    gate.publishStuckMints(new Set([STUCK]));
-    // Recovery is still running (complete() never called), yet the healthy
-    // mint must not be blocked by the stuck one.
-    await gate.waitForRecovery(HEALTHY);
-  });
-
-  it("holds a mint with stuck operations until recovery completes", async () => {
-    const gate = createRecoveryGate();
-    gate.publishStuckMints(new Set([STUCK]));
-    const waiting = gate.waitForRecovery(STUCK);
-    expect(await settled(waiting)).toBe(false);
-    gate.complete();
-    await waiting;
-  });
-
-  it("waits for the stuck-mint enumeration before deciding", async () => {
-    const gate = createRecoveryGate();
-    const waiting = gate.waitForRecovery(HEALTHY);
-    expect(await settled(waiting)).toBe(false);
-    gate.publishStuckMints(new Set([STUCK]));
-    await waiting;
-  });
-
-  it("holds callers without a target mint until recovery completes", async () => {
-    const gate = createRecoveryGate();
-    gate.publishStuckMints(new Set([STUCK]));
-    const waiting = gate.waitForRecovery();
-    expect(await settled(waiting)).toBe(false);
-    gate.complete();
-    await waiting;
-  });
-
-  it("poisons every caller after a recovery failure", async () => {
-    const gate = createRecoveryGate();
-    gate.publishStuckMints(new Set([STUCK]));
-    gate.fail("disk exploded");
-    await expect(gate.waitForRecovery(HEALTHY)).rejects.toThrow(
-      "Wallet is not ready: disk exploded",
-    );
-    await expect(gate.waitForRecovery(STUCK)).rejects.toThrow(
-      "Wallet is not ready: disk exploded",
-    );
-    await expect(gate.waitForRecovery()).rejects.toThrow(
-      "Wallet is not ready: disk exploded",
-    );
-  });
-
-  it("falls back to the global gate for unparseable mint URLs", async () => {
-    const gate = createRecoveryGate();
-    gate.publishStuckMints(new Set([STUCK]));
-    const waiting = gate.waitForRecovery("not a url");
-    expect(await settled(waiting)).toBe(false);
-    gate.complete();
-    await waiting;
   });
 });
