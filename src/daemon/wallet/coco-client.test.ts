@@ -14,12 +14,17 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  createRunQueue,
   DEFAULT_TRUSTED_MINT_URLS,
+  failExpiredMintQuoteIfUnpaid,
   isZombieProcess,
+  reopenFailedMintOperation,
+  runMintQuoteRecovery,
   settleExpiredMintQuotes,
   settlePendingMintQuotes,
   stopLegacyCocod,
   type ExpiredMintQuoteSource,
+  type MintQuoteRecoverySource,
   type PendingMintQuoteSource,
   type PendingMintSweepState,
 } from "./coco-client";
@@ -899,5 +904,665 @@ describe("settlePendingMintQuotes", () => {
 
     expect(attempted(refresh)[2]).toBe("paid");
     expect(logged.mock.calls[0]?.[0]).toContain("21 sat minted");
+  });
+});
+
+describe("createRunQueue", () => {
+  it("runs tasks strictly one after another", async () => {
+    const enqueue = createRunQueue();
+    const order: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const task = (name: string, delay: number) => async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      order.push(`${name}:start`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      order.push(`${name}:end`);
+      active--;
+      return name;
+    };
+
+    const results = await Promise.all([
+      enqueue(task("a", 20)),
+      enqueue(task("b", 1)),
+      enqueue(task("c", 1)),
+    ]);
+
+    expect(results).toEqual(["a", "b", "c"]);
+    expect(maxActive).toBe(1);
+    expect(order).toEqual([
+      "a:start",
+      "a:end",
+      "b:start",
+      "b:end",
+      "c:start",
+      "c:end",
+    ]);
+  });
+
+  it("keeps the chain alive after a rejected task", async () => {
+    const enqueue = createRunQueue();
+
+    const failed = enqueue(async () => {
+      throw new Error("boom");
+    });
+    const next = enqueue(async () => "ok");
+
+    await expect(failed).rejects.toThrow("boom");
+    expect(await next).toBe("ok");
+  });
+});
+
+describe("failExpiredMintQuoteIfUnpaid", () => {
+  function fakeMintService(observe: (id: string) => Promise<{ category: "waiting" | "ready" | "completed" | "terminal" }>) {
+    const failPendingOperation = mock(
+      async (
+        _op: { id: string },
+        _failure: { reason: string; retryable?: boolean; observedAt: number },
+      ) => ({}),
+    );
+    return {
+      mintService: {
+        observePendingOperation: mock(observe),
+        failPendingOperation,
+      },
+      failPendingOperation,
+    };
+  }
+
+  it("fails a quote its mint confirms unpaid", async () => {
+    const { mintService, failPendingOperation } = fakeMintService(async () => ({
+      category: "waiting",
+    }));
+
+    const result = await failExpiredMintQuoteIfUnpaid(mintService, "op-1", 1000);
+
+    expect(result.outcome).toBe("failed");
+    expect(failPendingOperation).toHaveBeenCalledTimes(1);
+    expect(failPendingOperation.mock.calls[0]?.[1]?.reason).toContain(
+      "confirmed unpaid by mint",
+    );
+  });
+
+  it.each(["ready", "completed", "terminal"] as const)(
+    "leaves a quote observed as %s for recovery",
+    async (category) => {
+      const { mintService, failPendingOperation } = fakeMintService(
+        async () => ({ category }),
+      );
+
+      const result = await failExpiredMintQuoteIfUnpaid(mintService, "op-1", 1000);
+
+      expect(result).toEqual({ outcome: "leftForRecovery", category });
+      expect(failPendingOperation).not.toHaveBeenCalled();
+    },
+  );
+
+  it("leaves a quote pending when the mint cannot be reached", async () => {
+    const { mintService, failPendingOperation } = fakeMintService(async () => {
+      throw new Error("Network request failed");
+    });
+
+    const result = await failExpiredMintQuoteIfUnpaid(mintService, "op-1", 1000);
+
+    expect(result.outcome).toBe("unobserved");
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("gives up waiting on a hung mint without failing the quote", async () => {
+    const { mintService, failPendingOperation } = fakeMintService(
+      () => new Promise(() => {}),
+    );
+
+    const result = await failExpiredMintQuoteIfUnpaid(mintService, "op-1", 20);
+
+    expect(result.outcome).toBe("unobserved");
+    expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("reopenFailedMintOperation", () => {
+  /**
+   * Mirrors coco's OperationIdLock, which is fail-fast: acquiring an id that is
+   * already locked throws OperationInProgressError instead of waiting.
+   */
+  function makeLock() {
+    let held = false;
+    return {
+      get held() {
+        return held;
+      },
+      async acquire() {
+        if (held) {
+          const error = new Error("Operation op-1 is already in progress");
+          error.name = "OperationInProgressError";
+          throw error;
+        }
+        held = true;
+        return () => {
+          held = false;
+        };
+      },
+    };
+  }
+
+  function fakeService(
+    current: Record<string, unknown> | null,
+    hooks: {
+      lock?: ReturnType<typeof makeLock>;
+      onWrite?: (lock: ReturnType<typeof makeLock>) => void;
+    } = {},
+  ) {
+    const lock = hooks.lock ?? makeLock();
+    const transitionToPending = mock(
+      async (_op: Record<string, unknown>, _error?: string) => {
+        hooks.onWrite?.(lock);
+        return {};
+      },
+    );
+    return {
+      service: {
+        acquireOperationLock: mock(async (_id: string) => lock.acquire()),
+        getOperation: mock(async (_id: string) => current),
+        transitionToPending,
+      },
+      transitionToPending,
+      lock,
+    };
+  }
+
+  it("re-opens a failed operation with the full persisted row", async () => {
+    // coco spreads whatever it is handed and the sqlite repository rewrites
+    // every column, so a partial object would erase the stored outputs.
+    const row = {
+      id: "op-1",
+      state: "failed",
+      mintUrl: "https://mint.example.com",
+      quoteId: "quote-1",
+      method: "bolt11",
+      amount: 210_000,
+      unit: "sat",
+      request: "lnbc...",
+      expiry: 1_800_000_000,
+      outputDataJson: "[{\"secret\":\"abc\"}]",
+      terminalFailure: { reason: "expired" },
+    };
+    const { service, transitionToPending } = fakeService(row);
+
+    const reopened = await reopenFailedMintOperation(service, "op-1");
+
+    expect(reopened).toBe(true);
+    expect(transitionToPending).toHaveBeenCalledTimes(1);
+    const passed = transitionToPending.mock.calls[0]?.[0];
+    expect(passed).toMatchObject({
+      id: "op-1",
+      quoteId: "quote-1",
+      amount: 210_000,
+      unit: "sat",
+      outputDataJson: "[{\"secret\":\"abc\"}]",
+    });
+    // The stale terminal marker must not survive the re-open.
+    expect(passed?.terminalFailure).toBeUndefined();
+  });
+
+  it("does nothing when the operation is no longer failed", async () => {
+    const { service, transitionToPending, lock } = fakeService({
+      id: "op-1",
+      state: "finalized",
+    });
+
+    expect(await reopenFailedMintOperation(service, "op-1")).toBe(false);
+    expect(transitionToPending).not.toHaveBeenCalled();
+    // The lock must be released even on the no-op path.
+    expect(lock.held).toBe(false);
+  });
+
+  it("throws when the operation is missing", async () => {
+    const { service, lock } = fakeService(null);
+
+    await expect(reopenFailedMintOperation(service, "op-1")).rejects.toThrow(
+      "not found",
+    );
+    expect(lock.held).toBe(false);
+  });
+
+  it("fails closed when coco no longer exposes the operation lock", async () => {
+    const transitionToPending = mock(
+      async (_op: Record<string, unknown>, _error?: string) => ({}),
+    );
+    const service = {
+      getOperation: mock(async () => ({ id: "op-1", state: "failed" })),
+      transitionToPending,
+    } as unknown as Parameters<typeof reopenFailedMintOperation>[0];
+
+    await expect(
+      reopenFailedMintOperation(service, "op-1"),
+    ).rejects.toThrow("acquireOperationLock");
+    expect(transitionToPending).not.toHaveBeenCalled();
+  });
+
+  it("holds the operation lock across read-check-write", async () => {
+    const lock = makeLock();
+    const order: string[] = [];
+    const service = {
+      acquireOperationLock: mock(async (_id: string) => {
+        order.push("lock");
+        const release = await lock.acquire();
+        return () => {
+          order.push("unlock");
+          release();
+        };
+      }),
+      getOperation: mock(async (_id: string) => {
+        expect(lock.held).toBe(true);
+        order.push("read");
+        return { id: "op-1", state: "failed", quoteId: "quote-1" };
+      }),
+      transitionToPending: mock(async () => {
+        expect(lock.held).toBe(true);
+        order.push("write");
+        return {};
+      }),
+    };
+
+    const reopened = await reopenFailedMintOperation(service, "op-1");
+
+    expect(reopened).toBe(true);
+    expect(order).toEqual(["lock", "read", "write", "unlock"]);
+    expect(lock.held).toBe(false);
+  });
+
+  it("refuses to re-open while the operation lock is held elsewhere", async () => {
+    const lock = makeLock();
+    const release = await lock.acquire();
+    const { service, transitionToPending } = fakeService(
+      { id: "op-1", state: "failed" },
+      { lock },
+    );
+
+    await expect(reopenFailedMintOperation(service, "op-1")).rejects.toThrow(
+      /in progress/,
+    );
+    expect(transitionToPending).not.toHaveBeenCalled();
+    release();
+  });
+});
+
+describe("runMintQuoteRecovery", () => {
+  function mintOp(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "op-1",
+      mintUrl: "https://mint.example.com",
+      quoteId: "quote-1",
+      state: "pending",
+      amount: 210_000,
+      expiry: 0,
+      ...overrides,
+    };
+  }
+
+  function fakeSource(
+    ops: Array<Record<string, unknown>>,
+    behavior: {
+      observe?: (id: string) => Promise<{
+        category: "waiting" | "ready" | "completed" | "terminal";
+      }>;
+      finalize?: (id: string) => Promise<unknown>;
+      reopen?: (id: string) => Promise<boolean>;
+    } = {},
+  ) {
+    const finalize = mock(
+      behavior.finalize ??
+        (async (_id: string) => ({ state: "finalized" })),
+    );
+    const observePendingOperation = mock(
+      behavior.observe ?? (async () => ({ category: "waiting" as const })),
+    );
+    const reopenFailedOperation = mock(
+      behavior.reopen ?? (async (_id: string) => true),
+    );
+    const byId = new Map(ops.map((op) => [op.id as string, op]));
+    const source = {
+      ops: {
+        mint: {
+          listPending: async () =>
+            ops.filter(
+              (op) => op.state === "pending" || op.state === "executing",
+            ),
+          get: async (id: string) => byId.get(id) ?? null,
+          finalize,
+        },
+      },
+      mintOperationService: { observePendingOperation },
+      reopenFailedOperation,
+    } as unknown as MintQuoteRecoverySource;
+    return { source, finalize, observePendingOperation, reopenFailedOperation };
+  }
+
+  it("mints the stored outputs for a quote the mint reports PAID", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ checked: 1, recovered: 1, waiting: 0 });
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(finalize.mock.calls[0]?.[0]).toBe("op-1");
+  });
+
+  it("restores proofs for a quote already issued at the mint", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "completed" }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ recovered: 1 });
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an unpaid quote pending", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "waiting" }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ checked: 1, recovered: 0, waiting: 1 });
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("reports a quote the mint can no longer issue", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "terminal" }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ terminal: 1, recovered: 0 });
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("retries later when the mint is unreachable", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => {
+        throw new Error("fetch failed");
+      },
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ retryable: 1, recovered: 0 });
+    expect(result.errors).toHaveLength(1);
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("does not count a failed finalize as a recovery", async () => {
+    // coco returns a terminal operation instead of throwing when the mint
+    // refuses, so a fulfilled finalize is not evidence that sats were claimed.
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: async () => ({
+        state: "failed",
+        error: "Recovered: quote quote-1 expired while executing mint",
+      }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ recovered: 0, terminal: 1 });
+    expect(result.errors[0]?.error).toContain("expired");
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not count a finalized-with-error operation as a recovery", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "completed" }),
+      finalize: async () => ({
+        state: "finalized",
+        error: "Recovered issued quote quote-1 but no proofs could be restored",
+      }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ recovered: 0, terminal: 1 });
+    expect(result.errors).toHaveLength(1);
+  });
+
+  it("bounds finalize so one hung mint cannot block recovery", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: () => new Promise(() => {}),
+    });
+
+    const started = Date.now();
+    const result = await runMintQuoteRecovery(source, { timeoutMs: 20 });
+
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result).toMatchObject({ retryable: 1, recovered: 0 });
+  });
+
+  it("recovers an interrupted mint without re-checking the quote", async () => {
+    const { source, finalize, observePendingOperation } = fakeSource([
+      mintOp({ state: "executing" }),
+    ]);
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ recovered: 1 });
+    expect(finalize).toHaveBeenCalledTimes(1);
+    expect(observePendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("skips failed operations unless the caller opts in", async () => {
+    const { source, reopenFailedOperation } = fakeSource([
+      mintOp({ state: "failed", lastObservedRemoteState: "PAID" }),
+    ]);
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ checked: 0, recovered: 0, reopened: 0 });
+    expect(reopenFailedOperation).not.toHaveBeenCalled();
+  });
+
+  it("re-opens a named failed operation, then mints it", async () => {
+    const { source, reopenFailedOperation, finalize } = fakeSource(
+      [mintOp({ state: "failed", lastObservedRemoteState: "PAID" })],
+      { observe: async () => ({ category: "ready" }) },
+    );
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+      includeFailed: true,
+    });
+
+    expect(result).toMatchObject({ reopened: 1, recovered: 1 });
+    expect(reopenFailedOperation).toHaveBeenCalledWith("op-1");
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-opens a named failed operation even without a PAID observation", async () => {
+    // The old local-fail bug left quotes with a stale or missing observation,
+    // which is exactly when an operator needs to retry them.
+    const { source, reopenFailedOperation } = fakeSource(
+      [mintOp({ state: "failed" })],
+      { observe: async () => ({ category: "ready" }) },
+    );
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+      includeFailed: true,
+    });
+
+    expect(result).toMatchObject({ reopened: 1, recovered: 1 });
+    expect(reopenFailedOperation).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips an operation that is no longer failed when re-opened", async () => {
+    const { source, finalize } = fakeSource(
+      [mintOp({ state: "failed" })],
+      { reopen: async () => false },
+    );
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+      includeFailed: true,
+    });
+
+    expect(result).toMatchObject({ reopened: 0, checked: 0, recovered: 0 });
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("reports an unknown operation id instead of throwing", async () => {
+    const { source } = fakeSource([]);
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["missing"],
+    });
+
+    expect(result.checked).toBe(0);
+    expect(result.errors).toEqual([
+      { operationId: "missing", error: "operation not found" },
+    ]);
+  });
+
+  it("deduplicates repeated operation ids", async () => {
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+    });
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1", "op-1"],
+    });
+
+    expect(result.checked).toBe(1);
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores finalized operations even when targeted", async () => {
+    const { source, finalize } = fakeSource([mintOp({ state: "finalized" })]);
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+    });
+
+    expect(result.checked).toBe(0);
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("leaves a non-terminal finalize result for a later run, not terminal", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: async () => ({ state: "pending" }),
+    });
+
+    const result = await runMintQuoteRecovery(source);
+
+    expect(result).toMatchObject({ recovered: 0, terminal: 0, retryable: 1 });
+    expect(result.errors[0]?.error).toContain("will retry");
+  });
+
+  it("skips operations whose earlier recovery is still in flight", async () => {
+    const outstanding = new Map<string, Promise<unknown>>([
+      ["op-1", new Promise(() => {})],
+    ]);
+    const { source, finalize, observePendingOperation } = fakeSource(
+      [mintOp()],
+      { observe: async () => ({ category: "ready" }) },
+    );
+
+    const result = await runMintQuoteRecovery(source, { outstanding });
+
+    expect(result).toMatchObject({ busy: 1, checked: 0, recovered: 0 });
+    expect(observePendingOperation).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("keeps a timed-out finalize registered so a retry waits", async () => {
+    const outstanding = new Map<string, Promise<unknown>>();
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: () => new Promise(() => {}),
+    });
+
+    const first = await runMintQuoteRecovery(source, {
+      timeoutMs: 20,
+      outstanding,
+    });
+    const second = await runMintQuoteRecovery(source, {
+      timeoutMs: 20,
+      outstanding,
+    });
+
+    expect(first).toMatchObject({ retryable: 1, recovered: 0 });
+    expect(outstanding.has("op-1")).toBe(true);
+    // The abandoned mint request must not be retried underneath.
+    expect(second).toMatchObject({ busy: 1, checked: 0 });
+  });
+
+  it("does not re-open a failed operation whose recovery is in flight", async () => {
+    const outstanding = new Map<string, Promise<unknown>>([
+      ["op-1", new Promise(() => {})],
+    ]);
+    const { source, reopenFailedOperation } = fakeSource(
+      [mintOp({ state: "failed" })],
+      {},
+    );
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+      includeFailed: true,
+      outstanding,
+    });
+
+    expect(result).toMatchObject({ busy: 1, reopened: 0 });
+    expect(reopenFailedOperation).not.toHaveBeenCalled();
+  });
+
+  it("counts an in-progress operation as busy rather than retryable", async () => {
+    const { source } = fakeSource(
+      [mintOp({ state: "failed" })],
+      {
+        reopen: async () => {
+          const error = new Error("Operation op-1 is already in progress");
+          error.name = "OperationInProgressError";
+          throw error;
+        },
+      },
+    );
+
+    const result = await runMintQuoteRecovery(source, {
+      operationIds: ["op-1"],
+      includeFailed: true,
+    });
+
+    expect(result).toMatchObject({ busy: 1, retryable: 0, reopened: 0 });
+  });
+
+  it("keeps a timed-out quote check registered so a retry waits", async () => {
+    // observePendingOperation is not read-only, so a hung check must not be
+    // retried underneath: it could persist a stale observation later.
+    const outstanding = new Map<string, Promise<unknown>>();
+    const { source, finalize } = fakeSource([mintOp()], {
+      observe: () => new Promise(() => {}),
+    });
+
+    const first = await runMintQuoteRecovery(source, {
+      timeoutMs: 20,
+      outstanding,
+    });
+    const second = await runMintQuoteRecovery(source, {
+      timeoutMs: 20,
+      outstanding,
+    });
+
+    expect(first).toMatchObject({ retryable: 1, checked: 1 });
+    expect(outstanding.has("op-1")).toBe(true);
+    expect(second).toMatchObject({ busy: 1, checked: 0 });
+    expect(finalize).not.toHaveBeenCalled();
   });
 });

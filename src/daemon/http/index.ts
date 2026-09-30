@@ -283,6 +283,18 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function optionalStringArrayField(
+  body: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
+  const value = body[field];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new CocodHttpError(400, `'${field}' must be an array of strings.`);
+  }
+  return value as string[];
+}
+
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
@@ -473,6 +485,30 @@ export function createDaemonRequestHandler(deps: {
               ? body.minAgeMs
               : undefined,
           dryRun: body.dryRun === true,
+          force: body.force === true,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverMintQuotes) {
+          throw new CocodHttpError(
+            501,
+            "Mint quote recovery is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const result = await deps.walletClient.recoverMintQuotes({
+          operationIds: optionalStringArrayField(body, "operationIds"),
+          includeFailed: body.includeFailed === true,
+          timeoutMs:
+            typeof body.timeoutMs === "number" && Number.isFinite(body.timeoutMs)
+              ? body.timeoutMs
+              : undefined,
         });
         return { output: result };
       });
