@@ -1,5 +1,6 @@
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
+import { executeLightningOperation } from "./lightning-payments";
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
@@ -9,6 +10,7 @@ import {
   shouldTrackRequestLifecycle,
   InsufficientBalanceError,
   ProviderManager,
+  LightningPaymentError,
 } from "@routstr/sdk";
 import type { RequestLifecycleDriver, UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
@@ -223,6 +225,10 @@ function respondWithError(
 ): void {
   if (error instanceof WalletHttpError) {
     sendJson(res, error.status, { error: error.message });
+    return;
+  }
+  if (error instanceof LightningPaymentError) {
+    sendJson(res, error.status, { error: error.message, detail: error.detail });
     return;
   }
 
@@ -642,6 +648,17 @@ export function createDaemonRequestHandler(deps: {
       (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json"
     ) {
       sendJson(res, 415, { error: "Content-Type must be application/json." });
+      return;
+    }
+
+    const lightningAction = /^\/payments\/lightning\/(create|topup|status|recover|refund|invoices)$/.exec(url.pathname)?.[1];
+    if (req.method === "POST" && lightningAction) {
+      try {
+        const output = await executeLightningOperation(lightningAction, await readJsonBody(req), deps.storageAdapter);
+        sendJson(res, 200, { output });
+      } catch (error) {
+        respondWithError(res, error);
+      }
       return;
     }
 
@@ -1639,9 +1656,10 @@ export function createDaemonRequestHandler(deps: {
           refundMessage = "No mint available to refund to";
         }
 
-        // refundApiKey removes the key on success; remove manually on failure.
+        // A failed/ambiguous refund must retain the credential for recovery.
         if (!refunded) {
-          deps.storageAdapter.removeApiKey(existing.baseUrl);
+          sendJson(res, 409, { output: { baseUrl: existing.baseUrl, removed: false, refunded: false, refundMessage }, error: refundMessage || "Refund failed; API key retained" });
+          return;
         }
 
         sendJson(res, 200, {
