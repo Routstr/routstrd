@@ -121,6 +121,8 @@ Show wallet transaction history.
 |--------|---------|-------------|
 | `-n, --limit <number>` | 50 | Number of entries to show |
 | `--offset <number>` | 0 | Number of entries to skip |
+| `-t, --type <type...>` | all | Filter by transaction type (`send`, `receive`, `mint`, `melt`). Repeatable or comma-separated |
+| `-i, --id <id>` | | Show a single transaction by its ID (prints one summary line; add `--verbose` for full details) |
 | `-v, --verbose` | false | Show full details including encoded Cashu tokens |
 | `--json` | false | Output raw JSON with token objects (no encoding) |
 

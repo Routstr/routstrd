@@ -375,6 +375,46 @@ function makeSdkLogger(...parts: string[]): SdkLogger {
   };
 }
 
+/**
+ * Parse a `type` query parameter into a list of normalized transaction types.
+ * Accepts comma-separated values and is case-insensitive.
+ */
+export function parseHistoryTypes(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+}
+
+/** Page size used when scanning history to apply a type filter. */
+const HISTORY_TYPE_SCAN_PAGE_SIZE = 200;
+
+/**
+ * Return history entries matching `types`, with offset/limit applied after
+ * filtering. The coco history repository only paginates by raw position, so we
+ * scan pages until enough matches accumulate (or history is exhausted).
+ */
+export async function getHistoryByTypes(
+  client: Pick<CocodClient, "getHistory">,
+  types: string[],
+  offset: number,
+  limit: number,
+): Promise<HistoryEntry[]> {
+  const wanted = new Set(types);
+  const matched: HistoryEntry[] = [];
+  let scanOffset = 0;
+  while (matched.length < offset + limit) {
+    const page = await client.getHistory(scanOffset, HISTORY_TYPE_SCAN_PAGE_SIZE);
+    for (const entry of page) {
+      if (wanted.has(entry.type)) matched.push(entry);
+    }
+    if (page.length < HISTORY_TYPE_SCAN_PAGE_SIZE) break;
+    scanOffset += HISTORY_TYPE_SCAN_PAGE_SIZE;
+  }
+  return matched.slice(offset, offset + limit);
+}
+
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
@@ -596,9 +636,25 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const offsetParam = url.searchParams.get("offset");
         const limitParam = url.searchParams.get("limit");
+        const idParam = url.searchParams.get("id")?.trim() || "";
+        const types = parseHistoryTypes(url.searchParams.get("type"));
         const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
         const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
-        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        let entries: HistoryEntry[];
+        if (idParam) {
+          const entry = await deps.walletClient.getHistoryEntryById(idParam);
+          entries = entry ? [entry] : [];
+        } else if (types.length > 0) {
+          entries = await getHistoryByTypes(
+            deps.walletClient,
+            types,
+            offset,
+            limit,
+          );
+        } else {
+          entries = await deps.walletClient.getHistory(offset, limit);
+        }
 
         const encoded = entries.map((entry: HistoryEntry) => {
           const base = { ...entry } as Record<string, unknown>;

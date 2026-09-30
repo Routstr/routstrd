@@ -1707,6 +1707,10 @@ export async function createCocoClient(
       return coco.history.getPaginatedHistory(offset, limit);
     },
 
+    async getHistoryEntryById(id: string): Promise<HistoryEntry | null> {
+      return coco.history.getHistoryEntryById(id);
+    },
+
     async getNpcAddress(): Promise<NpcAddress> {
       const info = await npcApi().getInfo();
       const name =

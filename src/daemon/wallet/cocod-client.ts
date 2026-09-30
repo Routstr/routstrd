@@ -142,6 +142,8 @@ export interface CocodClient {
   /** Release resources held by in-process wallet implementations. */
   dispose?(): Promise<void>;
   getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
+  /** Look up a single transaction by its history entry ID. */
+  getHistoryEntryById(id: string): Promise<HistoryEntry | null>;
   /** NPC (npubx.cash) Lightning address for this wallet. */
   getNpcAddress(): Promise<NpcAddress>;
   /** Claim an NPC username; pass confirm=true to pay the claim fee from the wallet. */
@@ -464,6 +466,9 @@ export function createCocodClient(
     },
     async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
       return [];
+    },
+    async getHistoryEntryById(_id: string): Promise<HistoryEntry | null> {
+      return null;
     },
     async getNpcAddress(): Promise<NpcAddress> {
       const address = await callDaemon<string>("/npc/address");
