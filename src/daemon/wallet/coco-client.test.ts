@@ -96,9 +96,9 @@ describe("default mint functionality", () => {
       const mints = await client.listMints();
       expect(mints).toEqual(expect.arrayContaining([...DEFAULT_TRUSTED_MINT_URLS]));
 
-      // Cuba still owns the default slot even though minibits is trusted too.
+      // Minibits owns the default slot even though Cuba is trusted too.
       const defaultMint = await client.getDefaultMint();
-      expect(defaultMint).toBe("https://mint.cubabitcoin.org");
+      expect(defaultMint).toBe("https://mint.minibits.cash/Bitcoin");
     } finally {
       await client.dispose?.();
     }
@@ -160,18 +160,18 @@ describe("default mint functionality", () => {
       legacyPidPath: join(walletDir, "legacy-cocod.pid"),
     });
     try {
-      // The initial default should be the auto-added Cuba mint
+      // The initial default should be the auto-added Minibits mint
       const initialDefault = await client.getDefaultMint();
-      expect(initialDefault).toBe("https://mint.cubabitcoin.org");
+      expect(initialDefault).toBe("https://mint.minibits.cash/Bitcoin");
 
       // Setting the same mint should work
       const message = await client.setDefaultMint(
-        "https://mint.cubabitcoin.org",
+        "https://mint.minibits.cash/Bitcoin",
       );
-      expect(message).toContain("https://mint.cubabitcoin.org");
+      expect(message).toContain("https://mint.minibits.cash/Bitcoin");
 
       const defaultMint = await client.getDefaultMint();
-      expect(defaultMint).toBe("https://mint.cubabitcoin.org");
+      expect(defaultMint).toBe("https://mint.minibits.cash/Bitcoin");
     } finally {
       await client.dispose?.();
     }
