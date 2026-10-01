@@ -22,6 +22,7 @@ import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
+import { collapseDuplicatedV1 } from "./request-path";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -446,6 +447,19 @@ export function createDaemonRequestHandler(deps: {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
+
+    // The node canonicalizes exactly ONE optional "v1/" segment (routstr-core
+    // `_canonical_api_path`). A client whose base URL already ends in /v1 while
+    // its transport appends /v1 itself — the Anthropic SDKs do, the OpenAI ones
+    // do not — would otherwise get a paid upstream 404 from every provider in
+    // the pool. Collapse the duplicate before any routing or payment decision.
+    const canonicalPath = collapseDuplicatedV1(url.pathname);
+    if (canonicalPath !== url.pathname) {
+      logger.warn(
+        `[daemon] Collapsing duplicated '/v1' in request path: ${url.pathname} -> ${canonicalPath}`,
+      );
+      url.pathname = canonicalPath;
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, { ok: true });
