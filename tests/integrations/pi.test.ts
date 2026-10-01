@@ -35,6 +35,12 @@ const MOCK_DEPS: Partial<PiIntegrationDeps> = {
           context_length: 262144,
           architecture: { input_modalities: ["text", "image"] },
         },
+        {
+          id: "claude-opus-5.5",
+          name: "Claude Opus 5.5",
+          context_length: 1000000,
+          architecture: { input_modalities: ["text", "image"] },
+        },
       ],
     },
   }),
@@ -56,6 +62,56 @@ async function readProvider(configPath: string) {
 }
 
 describe("installPiIntegration", () => {
+  it("points the provider at the daemon root, with no /v1", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
+    const configPath = join(dir, "models.json");
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
+
+    const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as {
+      providers: Record<string, { baseUrl?: string; api?: string }>;
+    };
+    // Every transport appends its own endpoint (/chat/completions,
+    // /responses, /v1/messages). A base URL carrying /v1 would double the
+    // prefix for Anthropic models and 404 on every provider.
+    expect(parsed.providers["routstr"].baseUrl).toBe("http://127.0.0.1:8008");
+    expect(parsed.providers["routstr"].api).toBe("openai-completions");
+  });
+
+  it("pins anthropic-messages for claude* models", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
+    const configPath = join(dir, "models.json");
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
+
+    const provider = await readProvider(configPath);
+    const claude = provider.models.find((m) => m.id === "claude-opus-5.5");
+    expect(claude?.api).toBe("anthropic-messages");
+    // Non-claude, non-gpt models fall through to the provider default.
+    const glm = provider.models.find((m) => m.id === "glm-5.3");
+    expect("api" in glm!).toBe(false);
+  });
+
+  it("replaces a stale hand-written api override on claude* models", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
+    const configPath = join(dir, "models.json");
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
+
+    const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as {
+      providers: Record<string, { models: Array<Record<string, unknown>> }>;
+    };
+    const claude = parsed.providers["routstr"].models.find(
+      (m) => m.id === "claude-opus-5.5",
+    );
+    claude!.api = "openai-completions";
+    const { writeFileSync } = await import("fs");
+    writeFileSync(configPath, JSON.stringify(parsed));
+
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
+    const provider = await readProvider(configPath);
+    expect(provider.models.find((m) => m.id === "claude-opus-5.5")?.api).toBe(
+      "anthropic-messages",
+    );
+  });
+
   it("pins supportsDeveloperRole=false for deepseek* models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
@@ -327,7 +383,22 @@ describe("buildPiModelEntry", () => {
     expect(entry.api).toBe("openai-responses");
   });
 
-  it("preserves a user-curated api on non-gpt models and omits it otherwise", () => {
+  it("pins api=anthropic-messages for claude* models, overriding any curated value", () => {
+    for (const id of [
+      "claude-opus-5.5",
+      "claude-sonnet-5.5",
+      "claude-fable-5.1",
+      "claude-haiku-4.5",
+    ]) {
+      const entry = buildPiModelEntry(model({ id }), {
+        id,
+        api: "openai-completions",
+      });
+      expect(entry.api).toBe("anthropic-messages");
+    }
+  });
+
+  it("preserves a user-curated api on models outside the pinned families", () => {
     const curated = buildPiModelEntry(
       model({ id: "glm-5.3" }),
       { id: "glm-5.3", api: "openai-responses" },

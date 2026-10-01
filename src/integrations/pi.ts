@@ -92,6 +92,13 @@ export function deriveThinkingFields(
 
 const isDeepSeekModel = (id: string): boolean => id.startsWith("deepseek");
 const isGptModel = (id: string): boolean => id.startsWith("gpt-");
+/**
+ * Anthropic-served models (claude-opus-5.5, claude-sonnet-5, claude-fable-5.1,
+ * ...). routstr nodes proxy the Anthropic-native `messages` route, so pi's
+ * Anthropic transport can talk to the node's own endpoint instead of the
+ * OpenAI-shaped translation.
+ */
+const isClaudeModel = (id: string): boolean => id.startsWith("claude");
 
 /** Project one daemon model onto a pi config entry. */
 export function buildPiModelEntry(
@@ -115,11 +122,22 @@ export function buildPiModelEntry(
   if (mods.includes("image")) input.push("image");
   entry.input = input;
 
-  // gpt-* models are served through OpenAI's Responses API; the provider-level
-  // `api: "openai-completions"` stays the default for everything else. For
-  // non-gpt models keep whatever per-model api the user curated.
+  // Per-model transport pins. `api` is per-model while the provider `baseUrl`
+  // is shared, and the transports disagree about what a base URL means: the
+  // OpenAI SDKs append only their endpoint (`/chat/completions`, `/responses`)
+  // while Anthropic SDKs append `/v1/messages` themselves. The provider base
+  // URL is therefore the daemon ROOT (see installPiIntegration), which is the
+  // one spelling that resolves correctly for every transport:
+  //   gpt-*   -> {root}/responses        -> `responses`
+  //   claude* -> {root}/v1/messages      -> `messages`
+  //   other   -> {root}/chat/completions -> `chat/completions`
+  // Pins override a curated value: a stale `anthropic-messages` left on a
+  // non-claude model picks an endpoint the daemon is not expecting, and the
+  // user cannot see from models.json which family needs which transport.
   if (isGptModel(model.id)) {
     entry.api = "openai-responses";
+  } else if (isClaudeModel(model.id)) {
+    entry.api = "anthropic-messages";
   } else if (previous?.api !== undefined) {
     entry.api = previous.api;
   }
@@ -185,7 +203,16 @@ export async function installPiIntegration(
   console.log("\nInstalling routstr models in pi models.json...");
   console.log(`Using API key for ${name}`);
 
-  const baseUrl = `${getDaemonBaseUrlFn(config)}/v1`;
+  // The daemon ROOT, deliberately without `/v1`. Every transport appends its
+  // own endpoint path, and only the Anthropic ones add a version prefix
+  // (`/v1/messages`); a base URL that already carries `/v1` therefore yields
+  // the doubled `/v1/v1/messages`, which routstr-core rejects with a 404 from
+  // every provider in the pool (it canonicalizes exactly one optional `v1/`).
+  // At the root, openai-completions -> `/chat/completions`, openai-responses
+  // -> `/responses` and anthropic-messages -> `/v1/messages` all land on an
+  // allowed route. getDaemonBaseUrl() strips any trailing slash, so no path
+  // can be double-slashed either.
+  const baseUrl = getDaemonBaseUrlFn(config);
 
   let piConfig: PiConfig = {};
 
@@ -219,7 +246,9 @@ export async function installPiIntegration(
     // models.json is always a faithful projection of the daemon's state.
     // Thinking fields are derived from the model's published reasoning allowlist;
     // when the daemon has none, the user's hand-curated values are preserved.
-    // `compat` stays user-curated, except for the deepseek* pin applied below.
+    // `compat` stays user-curated, except for the deepseek* pin applied below;
+    // `api` is pinned per family (see buildPiModelEntry), since the family
+    // decides which transport — and so which endpoint — the model is served by.
     const existingModels = new Map<string, PiModelEntry>(
       (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
     );
