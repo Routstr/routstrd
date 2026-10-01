@@ -134,6 +134,36 @@ describe("PAID mint quote recovery with a real Manager and mint", () => {
     expect(await booted.spendable()).toBe(210_000);
   });
 
+  it("existing coco recovery already issues expired paid pending quotes", async () => {
+    booted = await boot({ quoteExpiry: -60 });
+    const op = await prepareQuote(booted, 100);
+    booted.mint.markPaid(op.quoteId as string);
+    await booted.manager.recoverPendingMintOperations();
+    expect(await booted.spendable()).toBe(100);
+    expect(booted.mint.getQuote(op.quoteId as string)?.state).toBe("ISSUED");
+  });
+
+  it("keeps rejected stored outputs and reports the actionable mint error", async () => {
+    booted = await boot({ quoteExpiry: -60 });
+    const op = await prepareQuote(booted, 100);
+    const outputs = outputsOf(op);
+    booted.mint.markPaid(op.quoteId as string);
+    // Model the mint refusing the stored outputs, not invoice expiry. This is
+    // not evidence that the production quotes used an inactive keyset.
+    booted.mint.mintError = { code: 12001, detail: "keyset id inactive." };
+    await booted.manager.recoverPendingMintOperations();
+    expect(await booted.spendable()).toBe(0);
+    const result = await runMintQuoteRecovery(booted.source() as never, {
+      operationIds: [op.id as string],
+    });
+    expect(result).toMatchObject({ recovered: 0, retryable: 1 });
+    expect(result.errors.some((entry) => entry.error.includes("keyset id inactive"))).toBe(true);
+    expect(await booted.spendable()).toBe(0);
+    expect(booted.mint.getQuote(op.quoteId as string)?.state).toBe("PAID");
+    expect(outputsOf(await booted.manager.ops.mint.get(op.id as string) as unknown as AnyRecord)).toEqual(outputs);
+    for (const request of booted.mint.requests) expect(request.outputs).toEqual(outputs);
+  });
+
   it("restores proofs for a quote already issued at the mint", async () => {
     booted = await boot({ quoteExpiry: null });
     const op = await prepareQuote(booted, 210_000);

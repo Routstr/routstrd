@@ -289,10 +289,13 @@ function optionalStringArrayField(
 ): string[] | undefined {
   const value = body[field];
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new CocodHttpError(400, `'${field}' must be an array of strings.`);
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !item.trim())
+  ) {
+    throw new CocodHttpError(400, `'${field}' must be an array of non-empty strings.`);
   }
-  return value as string[];
+  return value.map((item: string) => item.trim());
 }
 
 function getCurrentMode(deps: DaemonDeps): ClientMode {
@@ -502,13 +505,27 @@ export function createDaemonRequestHandler(deps: {
         }
 
         const body = await readJsonBody(req);
+        const operationIds = optionalStringArrayField(body, "operationIds");
+        if (body.includeFailed === true && !operationIds?.length) {
+          throw new CocodHttpError(
+            400,
+            "'includeFailed' requires non-empty 'operationIds'.",
+          );
+        }
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)
+        ) {
+          throw new CocodHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
         const result = await deps.walletClient.recoverMintQuotes({
-          operationIds: optionalStringArrayField(body, "operationIds"),
+          operationIds,
           includeFailed: body.includeFailed === true,
-          timeoutMs:
-            typeof body.timeoutMs === "number" && Number.isFinite(body.timeoutMs)
-              ? body.timeoutMs
-              : undefined,
+          timeoutMs: body.timeoutMs as number | undefined,
         });
         return { output: result };
       });

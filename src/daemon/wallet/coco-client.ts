@@ -36,7 +36,7 @@ import type {
   WalletCleanupResult,
   WalletRecoveryProgress,
 } from "./cocod-client";
-import { selectCleanupOperations } from "./cleanup";
+import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
   classifyMintQuoteObservation,
   selectMintQuotesForRecovery,
@@ -1032,7 +1032,13 @@ export async function runMintQuoteRecovery(
   options: MintQuoteRecoveryOptions = {},
   onProgress?: (message: string) => void,
 ): Promise<MintQuoteRecoveryResult> {
+  if (options.includeFailed && !options.operationIds?.length) {
+    throw new Error("includeFailed requires explicit operationIds");
+  }
   const timeoutMs = options.timeoutMs ?? MINT_QUOTE_RECOVERY_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("timeoutMs must be a positive finite number");
+  }
   const outstanding =
     options.outstanding ?? new Map<string, Promise<unknown>>();
   const result: MintQuoteRecoveryResult = {
@@ -1215,7 +1221,18 @@ export async function runMintQuoteRecovery(
         onProgress?.(`${label}: another recovery is working on it; skipped`);
       } else {
         result.retryable++;
-        onProgress?.(`${label}: could not finish recovery: ${messageOf(error)}`);
+        // finalize can throw a generic "remains pending" error after coco has
+        // persisted the actionable mint rejection (for example inactive keyset).
+        const current = await withTimeout(
+          source.ops.mint.get(operationId),
+          remaining(),
+        ).catch(() => null);
+        const detail = current?.state === "pending" && current.error
+          ? current.error
+          : messageOf(error);
+        result.errors.push({ operationId, error: detail });
+        onProgress?.(`${label}: could not finish recovery: ${detail}`);
+        return;
       }
       result.errors.push({ operationId, error: messageOf(error) });
       return;
@@ -2337,11 +2354,14 @@ export async function createCocoClient(
         }
       }
 
-      const failedMintQuoteCount = dryRun
-        ? selection.mintsToFail.length
-        : failedMintQuotes;
+      const mintSummary = summarizeMintCleanup({
+        dryRun,
+        candidates: selection.mintsToFail.length,
+        failed: failedMintQuotes,
+        leftForRecovery,
+      });
       const actedOn =
-        failedMintQuoteCount +
+        (dryRun ? mintSummary.mintQuoteCandidates : mintSummary.failedMintQuotes) +
         leftForRecovery +
         selection.sendsToReclaim.length +
         selection.meltsToCancel.length;
@@ -2351,8 +2371,7 @@ export async function createCocoClient(
 
       return {
         dryRun,
-        failedMintQuotes: failedMintQuoteCount,
-        leftForRecovery,
+        ...mintSummary,
         reclaimedSends: selection.sendsToReclaim.length,
         cancelledMelts: selection.meltsToCancel.length,
         skipped,

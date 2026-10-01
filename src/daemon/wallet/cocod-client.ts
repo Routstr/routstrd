@@ -94,9 +94,11 @@ export interface WalletCleanupOptions {
 /** Summary of a wallet cleanup run. */
 export interface WalletCleanupResult {
   dryRun: boolean;
-  /** Number of expired pending mint quotes marked as failed. */
+  /** Expired quotes selected for checking; dry runs do not contact the mint. */
+  mintQuoteCandidates: number;
+  /** Number actually marked failed (always zero in a dry run). */
   failedMintQuotes: number;
-  /** Expired quotes whose mint reported PAID/ISSUED, left for recovery. */
+  /** Expired quotes kept pending because they are paid/issued or unverified. */
   leftForRecovery: number;
   /** Number of stale pending send operations reclaimed. */
   reclaimedSends: number;

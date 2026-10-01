@@ -1333,6 +1333,28 @@ describe("runMintQuoteRecovery", () => {
     expect(result.errors).toHaveLength(1);
   });
 
+  it("falls back to the original failure when diagnostic lookup fails", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: async () => { throw new Error("original failure"); },
+    });
+    source.ops.mint.get = async () => { throw new Error("lookup failed"); };
+    const result = await runMintQuoteRecovery(source);
+    expect(result).toMatchObject({ retryable: 1, recovered: 0 });
+    expect(result.errors).toEqual([{ operationId: "op-1", error: "original failure" }]);
+  });
+
+  it("bounds a hung diagnostic lookup after finalize fails", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: async () => { throw new Error("original failure"); },
+    });
+    source.ops.mint.get = () => new Promise(() => {});
+    const result = await runMintQuoteRecovery(source, { timeoutMs: 20 });
+    expect(result).toMatchObject({ retryable: 1, recovered: 0 });
+    expect(result.errors).toEqual([{ operationId: "op-1", error: "original failure" }]);
+  });
+
   it("bounds finalize so one hung mint cannot block recovery", async () => {
     const { source } = fakeSource([mintOp()], {
       observe: async () => ({ category: "ready" }),
@@ -1367,6 +1389,26 @@ describe("runMintQuoteRecovery", () => {
 
     expect(result).toMatchObject({ checked: 0, recovered: 0, reopened: 0 });
     expect(reopenFailedOperation).not.toHaveBeenCalled();
+  });
+
+  it("requires explicit IDs when including failed operations", async () => {
+    const { source, reopenFailedOperation, observePendingOperation } = fakeSource([]);
+    await expect(runMintQuoteRecovery(source, { includeFailed: true })).rejects.toThrow(
+      "includeFailed requires explicit operationIds",
+    );
+    await expect(runMintQuoteRecovery(source, { includeFailed: true, operationIds: [] })).rejects.toThrow(
+      "includeFailed requires explicit operationIds",
+    );
+    expect(reopenFailedOperation).not.toHaveBeenCalled();
+    expect(observePendingOperation).not.toHaveBeenCalled();
+  });
+
+  it.each([0, -1, NaN, Infinity])("rejects invalid recovery timeout %s", async (timeoutMs) => {
+    const { source, observePendingOperation } = fakeSource([]);
+    await expect(runMintQuoteRecovery(source, { timeoutMs })).rejects.toThrow(
+      "timeoutMs must be a positive finite number",
+    );
+    expect(observePendingOperation).not.toHaveBeenCalled();
   });
 
   it("re-opens a named failed operation, then mints it", async () => {

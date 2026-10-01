@@ -2045,7 +2045,9 @@ walletCmd
         });
         const answer = await new Promise<string>((resolve) => {
           rl.question(
-            "This will fail expired mint quotes confirmed unpaid, reclaim old pending sends, and cancel prepared melts. Continue? [y/N] ",
+            options.force
+              ? "WARNING: --force fails expired mint quotes WITHOUT checking the mint and may strand paid sats. It also reclaims old pending sends and cancels prepared melts. Continue? [y/N] "
+              : "This will fail expired mint quotes confirmed unpaid, reclaim old pending sends, and cancel prepared melts. Continue? [y/N] ",
             (value: string) => {
               rl.close();
               resolve(value.trim().toLowerCase());
@@ -2080,6 +2082,7 @@ walletCmd
           | {
               dryRun?: boolean;
               failedMintQuotes?: number;
+              mintQuoteCandidates?: number;
               leftForRecovery?: number;
               reclaimedSends?: number;
               cancelledMelts?: number;
@@ -2091,9 +2094,13 @@ walletCmd
         if (output) {
           const prefix = output.dryRun ? "Would clean up:" : "Cleaned up:";
           console.log(prefix);
-          console.log(
-            `  Expired mint quotes failed: ${output.failedMintQuotes ?? 0}`,
-          );
+          if (output.dryRun) {
+            console.log(
+              `  Expired mint quote candidates (not checked with mint): ${output.mintQuoteCandidates ?? 0}`,
+            );
+          } else {
+            console.log(`  Expired mint quotes failed: ${output.failedMintQuotes ?? 0}`);
+          }
           console.log(
             `  Expired quotes kept for recovery (paid/issued/unverified): ${output.leftForRecovery ?? 0}`,
           );
@@ -2129,11 +2136,11 @@ walletCmd
 walletCmd
   .command("recover")
   .description(
-    "Re-issue PAID mint quotes whose sats were never claimed by checking each quote with its mint",
+    "Retry mint quotes using their stored outputs (does not replace rejected outputs)",
   )
   .option(
     "--op <id>",
-    "Recover only this operation id (repeatable; required to target failed operations)",
+    "Recover this operation id (repeatable; find IDs with routstrd history --json)",
     (value: string, previous: string[]) => [...previous, value],
     [] as string[],
   )

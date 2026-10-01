@@ -5,11 +5,14 @@
  * `pending` (the Lightning payment landed before expiry while the daemon was
  * down, so no local observation was ever recorded) or even terminally
  * `failed` (coco gives up when the mint refuses to sign, for example after the
- * invoice expiry). The paid sats are claimable either way: NUT-04 lets the
- * holder submit outputs for any quote id while `amount_issued < amount_paid`.
+ * invoice expiry). Claimability still depends on the mint accepting issuance.
+ * This feature retries the stored outputs or restores their signatures; it
+ * does not regenerate outputs rejected by the mint (for example an inactive
+ * keyset). coco already reconciles pending paid quotes at startup and in the
+ * periodic sweep. The new capability is operator-targeted recovery, including
+ * explicitly reopening failed operations, alongside safer cleanup.
  *
- * Recovery therefore has to ask the mint what it thinks, then re-issue the
- * quote. These helpers decide *what* to do from a remote observation; the
+ * Recovery asks the mint what it thinks, then retries issuance or restore. These helpers decide *what* to do from a remote observation; the
  * actual state transitions are applied by the in-process coco wallet client
  * so coco-core's operation services emit their normal events and release
  * proof reservations. Keeping the decisions here makes them unit testable
