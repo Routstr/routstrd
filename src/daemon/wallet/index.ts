@@ -1,6 +1,7 @@
 import { getTokenMetadata } from "@cashu/cashu-ts";
 import { InsufficientBalanceError } from "@routstr/sdk";
 import { WalletConnect } from "applesauce-wallet-connect";
+import { WalletBaseError } from "applesauce-wallet-connect/helpers/error";
 import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { withTimeout } from "../../utils/with-timeout";
@@ -13,7 +14,7 @@ import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
  * connection is rebuilt before one retry.
  */
 const NWC_READ_TIMEOUT_MS = 15_000;
-/** Lightning payments can legitimately take a little longer to settle. */
+/** Overall bound including encryption negotiation; replies have a library 30s timeout. */
 const NWC_PAY_TIMEOUT_MS = 45_000;
 
 type NwcPayment = { preimage?: string; fees_paid?: number };
@@ -176,7 +177,8 @@ export async function createWalletAdapter(
         `${label} timed out`,
       );
     } catch (error) {
-      if (!nwcConnectionString) throw error;
+      // A normal NIP-47 error proves the wallet answered. Keep other calls alive.
+      if (error instanceof WalletBaseError || !nwcConnectionString) throw error;
       logger.warn(
         `[nwc] ${label} failed (${(error as Error).message}); rebuilding NWC connection and retrying`,
       );
@@ -194,8 +196,8 @@ export async function createWalletAdapter(
   /**
    * Pay a BOLT-11 invoice over NWC with a bounded wait. A timeout rebuilds the
    * relay connection so later calls recover without a daemon restart. The
-   * payment is not retried here: the invoice itself is single-use, and the
-   * caller decides whether to attempt a fresh invoice.
+   * payment is not retried here. A timeout is an unknown payment outcome,
+   * not proof of failure; callers must reconcile before trying a fresh invoice.
    */
   async function payNwcInvoice(invoice: string): Promise<NwcPayment> {
     const payer = wallet;
@@ -207,7 +209,10 @@ export async function createWalletAdapter(
         "NWC payment timed out",
       );
     } catch (error) {
-      rebuildNwcConnection("reconnected after payment timeout");
+      // Include the library's own timeout, but not normal wallet error replies.
+      if (!(error instanceof WalletBaseError)) {
+        rebuildNwcConnection("reconnected after payment timeout");
+      }
       throw error;
     }
   }
@@ -232,10 +237,6 @@ export async function createWalletAdapter(
         nwcConnectionString = undefined;
         logger.log("[nwc] NWC wallet disconnected.");
       }
-
-      // A connection added after startup previously never started the
-      // auto-refill loop, so it silently stayed disabled until a restart.
-      ensureAutoRefillLoop();
     },
 
     async getBalances(): Promise<Record<string, number>> {

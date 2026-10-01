@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { RestrictedError } from "applesauce-wallet-connect/helpers/error";
 import type { CocodClient } from "./cocod-client";
 
 /**
@@ -11,13 +12,16 @@ import type { CocodClient } from "./cocod-client";
  * relay connection, and retry once instead of hanging `routstrd nwc status`.
  */
 
-type Behavior = "resolve" | "hang";
+type Behavior = "resolve" | "hang" | "restricted" | "library-timeout" | "deferred";
 
 const state = {
   infoQueue: [] as Behavior[],
   balanceQueue: [] as Behavior[],
   payQueue: [] as Behavior[],
   createdInstances: 0,
+  pendingPayments: [] as (() => void)[],
+  paymentStarted: undefined as (() => void) | undefined,
+  closedPools: 0,
 };
 
 function next(queue: Behavior[]): Behavior {
@@ -27,6 +31,7 @@ function next(queue: Behavior[]): Behavior {
 class MockRelayPool {
   relays = new Map<string, unknown>([["wss://relay.example", {}]]);
   remove(url: string, _close?: boolean): void {
+    state.closedPools++;
     this.relays.delete(url);
   }
 }
@@ -53,7 +58,10 @@ class MockWalletConnect {
     network: string;
     methods: string[];
   }> {
-    if (next(state.infoQueue) === "hang") return new Promise<never>(() => {});
+    const behavior = next(state.infoQueue);
+    if (behavior === "hang") return new Promise<never>(() => {});
+    if (behavior === "restricted") return Promise.reject(new RestrictedError("restricted"));
+    if (behavior === "library-timeout") return Promise.reject(new Error("Timeout"));
     return Promise.resolve({
       alias: "Test Wallet",
       pubkey: "cd".repeat(32),
@@ -63,14 +71,31 @@ class MockWalletConnect {
   }
 
   getBalance(): Promise<{ balance: number }> {
-    if (next(state.balanceQueue) === "hang") return new Promise<never>(() => {});
+    const behavior = next(state.balanceQueue);
+    if (behavior === "hang") return new Promise<never>(() => {});
+    if (behavior === "restricted") return Promise.reject(new RestrictedError("restricted"));
     return Promise.resolve({ balance: 123_000 });
   }
 
   payInvoice(
     _invoice: string,
   ): Promise<{ preimage: string; fees_paid: number }> {
-    if (next(state.payQueue) === "hang") return new Promise<never>(() => {});
+    const behavior = next(state.payQueue);
+    if (behavior === "hang") return new Promise<never>(() => {});
+    if (behavior === "restricted") return Promise.reject(new RestrictedError("restricted"));
+    if (behavior === "library-timeout") return Promise.reject(new Error("Timeout"));
+    if (behavior === "deferred") {
+      return new Promise((resolve) => {
+        const closedAtStart = state.closedPools;
+        state.pendingPayments.push(() => {
+          // Closing the shared pool loses the original payment response.
+          if (state.closedPools === closedAtStart) {
+            resolve({ preimage: "00".repeat(32), fees_paid: 1000 });
+          }
+        });
+        state.paymentStarted?.();
+      });
+    }
     return Promise.resolve({ preimage: "00".repeat(32), fees_paid: 1000 });
   }
 }
@@ -109,6 +134,9 @@ beforeEach(() => {
   state.balanceQueue = [];
   state.payQueue = [];
   state.createdInstances = 0;
+  state.closedPools = 0;
+  state.pendingPayments = [];
+  state.paymentStarted = undefined;
 });
 
 afterAll(() => {
@@ -151,5 +179,56 @@ describe("NWC status resilience", () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain("timed out");
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+});
+
+describe("NWC wallet errors versus transport stalls", () => {
+  it("does not retry or rebuild on a wallet read error", async () => {
+    state.infoQueue = ["restricted"];
+    const adapter = await makeAdapter();
+    expect((await adapter.getNwcStatus()).error).toBe("restricted");
+    expect(state.createdInstances).toBe(1);
+    expect(state.closedPools).toBe(0);
+  });
+
+  it("keeps an in-flight payment alive during a pay-only status check", async () => {
+    state.payQueue = ["deferred"];
+    state.balanceQueue = ["restricted"];
+    const adapter = await makeAdapter(500);
+    const started = new Promise<void>((resolve) => { state.paymentStarted = resolve; });
+    const payment = adapter.fundFromNWC(2100);
+    await started;
+    expect((await adapter.getNwcStatus()).connected).toBe(true);
+    expect(state.createdInstances).toBe(1);
+    state.pendingPayments[0]!();
+    expect((await payment).success).toBe(true);
+    expect(state.closedPools).toBe(0);
+  });
+
+  it("keeps a slow payment alive when an overlapping payment gets a wallet error", async () => {
+    state.payQueue = ["deferred", "restricted"];
+    const adapter = await makeAdapter(500);
+    const started = new Promise<void>((resolve) => { state.paymentStarted = resolve; });
+    const slow = adapter.fundFromNWC(2100);
+    await started;
+    expect((await adapter.fundFromNWC(2100)).error).toBe("restricted");
+    state.pendingPayments[0]!();
+    expect((await slow).success).toBe(true);
+    expect(state.createdInstances).toBe(1);
+  });
+
+  it("rebuilds and retries reads on the library's own timeout", async () => {
+    state.infoQueue = ["library-timeout"];
+    const adapter = await makeAdapter();
+    expect((await adapter.getNwcStatus()).connected).toBe(true);
+    expect(state.createdInstances).toBe(2);
+  });
+
+  it("rebuilds after the library's payment timeout without retrying payment", async () => {
+    state.payQueue = ["library-timeout", "restricted"];
+    const adapter = await makeAdapter();
+    expect((await adapter.fundFromNWC(2100)).error).toBe("Timeout");
+    expect(state.createdInstances).toBe(2);
+    expect(state.payQueue).toEqual(["restricted"]);
   });
 });

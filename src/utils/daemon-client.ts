@@ -57,9 +57,9 @@ class DaemonConnectionError extends Error {
 }
 
 /**
- * Upper bound for a single daemon request. The daemon bounds its own NWC
- * operations, so this only guards against a wedged server; without it a hung
- * request would block the CLI forever.
+ * Upper bound for NWC requests, including response-body consumption.
+ * Other routes can perform long-running mint payments; aborting the client
+ * does not cancel those operations, so do not impose this cap on them.
  */
 export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
 
@@ -77,7 +77,7 @@ export function getAuthBaseUrl(config: RoutstrdConfig): string {
   return getDaemonBaseUrl(config);
 }
 
-async function _callUrl(
+export async function callDaemonUrl(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
@@ -106,36 +106,41 @@ async function _callUrl(
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString) headers.set("Content-Type", "application/json");
 
-  let response: Response;
   const controller = new AbortController();
-  const timeoutId = setTimeout(
-    () => controller.abort(),
-    DAEMON_REQUEST_TIMEOUT_MS,
-  );
+  const timeoutId = path.startsWith("/nwc/")
+    ? setTimeout(() => controller.abort(), DAEMON_REQUEST_TIMEOUT_MS)
+    : undefined;
   try {
-    response = await fetch(url, {
-      method,
-      headers,
-      body: bodyString,
-      signal: controller.signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: bodyString,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      // Only connection failures qualify for alternate-host retries.
+      throw new DaemonConnectionError(error);
+    }
+
+    if (!response.ok) {
+      const errorData = (await response.json()) as { error?: string };
+      throw new Error(errorData.error || `HTTP ${response.status}`);
+    }
+    return await response.json() as CommandResponse;
   } catch (error) {
     if (controller.signal.aborted) {
       throw new Error(
-        `Daemon request timed out after ${DAEMON_REQUEST_TIMEOUT_MS / 1000}s`,
+        `Daemon request timed out after ${DAEMON_REQUEST_TIMEOUT_MS / 1000}s; ` +
+        "any payment outcome is unknown — check before retrying",
       );
     }
-    throw new DaemonConnectionError(error);
+    throw error;
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
-
-  if (!response.ok) {
-    const errorData = (await response.json()) as { error?: string };
-    throw new Error(errorData.error || `HTTP ${response.status}`);
-  }
-
-  return response.json() as Promise<CommandResponse>;
 }
 
 async function callLocalDaemon(
@@ -147,7 +152,7 @@ async function callLocalDaemon(
   let connectionError: DaemonConnectionError | undefined;
   for (const baseUrl of localDaemonBaseUrls(config)) {
     try {
-      return await _callUrl(baseUrl, path, options, config);
+      return await callDaemonUrl(baseUrl, path, options, config);
     } catch (error) {
       if (!(error instanceof DaemonConnectionError)) throw error;
       connectionError = error;
@@ -162,7 +167,7 @@ export async function callDaemon(
 ): Promise<CommandResponse> {
   const config = await loadConfig();
   if (config.daemonUrl) {
-    return _callUrl(getDaemonBaseUrl(config), path, options, config);
+    return callDaemonUrl(getDaemonBaseUrl(config), path, options, config);
   }
   return callLocalDaemon(path, options, config);
 }
@@ -177,7 +182,7 @@ export async function callAuth(
   if (!config.authUrl && !config.daemonUrl) {
     return callLocalDaemon(path, options, config);
   }
-  return _callUrl(getAuthBaseUrl(config), path, options, config);
+  return callDaemonUrl(getAuthBaseUrl(config), path, options, config);
 }
 
 export async function isDaemonRunning(): Promise<boolean> {

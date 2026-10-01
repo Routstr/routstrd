@@ -1,5 +1,6 @@
 /**
  * Rejects when `timeoutMs` elapses before `promise` settles.
+ * This bounds the caller's wait; it does not cancel the underlying operation.
  *
  * Used to bound requests that may otherwise wait forever — notably NWC calls
  * whose underlying library applies its own timeout only after a support/encryption
