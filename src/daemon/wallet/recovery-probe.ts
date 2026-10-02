@@ -7,24 +7,22 @@
  * and drives recovery per operation only for mints that answer — so one dead
  * mint costs a single short probe instead of N sequential timeouts, and its
  * operations stay parked (exactly as coco's "will retry later" path leaves
- * them) until the mint comes back.
+ * them) until a later startup finds the mint reachable.
  */
 import { normalizeMintUrl, type Manager } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 
 /** Short probe: a mint that cannot answer /v1/info in 2s slows every op. */
 export const MINT_PROBE_TIMEOUT_MS = 2_000;
-/** How often stuck operations are re-checked (and dead mints re-probed). */
-export const RECOVERY_RECHECK_INTERVAL_MS = 300_000;
 
 type OpsApi = Manager["ops"];
 
 /** Structural subset of the ops APIs used to enumerate and recover operations. */
 export interface StuckOperationSource {
-  send: Pick<OpsApi["send"], "listInFlight" | "refresh">;
-  melt: Pick<OpsApi["melt"], "listInFlight" | "refresh">;
-  receive: Pick<OpsApi["receive"], "listInFlight" | "refresh">;
-  mint: Pick<OpsApi["mint"], "listInFlight" | "refresh">;
+  send: Pick<OpsApi["send"], "listInFlight" | "refresh" | "diagnostics">;
+  melt: Pick<OpsApi["melt"], "listInFlight" | "refresh" | "diagnostics">;
+  receive: Pick<OpsApi["receive"], "listInFlight" | "refresh" | "diagnostics">;
+  mint: Pick<OpsApi["mint"], "listInFlight" | "refresh" | "diagnostics">;
 }
 
 export type StuckOperationKind = "send" | "melt" | "receive" | "mint";
@@ -46,13 +44,12 @@ export interface StuckOperation {
  * `mintOperationService` (see coco-client.ts).
  */
 export interface SendRecoveryService {
-  tryRecoverInitOperation(op: unknown): Promise<void>;
-  tryRecoverExecutingOperation(op: unknown): Promise<void>;
+  recoverExecutingOperation(op: unknown): Promise<void>;
 }
 
 export interface RecoveryRunResult {
-  /** Operations at reachable mints whose recovery completed. */
-  recovered: number;
+  /** Operations for which recovery was attempted (not necessarily completed). */
+  attempted: number;
   /** Operations skipped because their mint did not answer the probe. */
   skipped: number;
   /** Operations at reachable mints whose recovery still failed. */
@@ -89,8 +86,8 @@ function asStuckOperations(
         raw: op,
       });
     } catch {
-      // Unparseable mint URL: keep the operation recoverable by treating it as
-      // reachable (probe only covers successfully normalized URLs).
+      // Preserve malformed persisted URLs; the probe will classify them as
+      // unreachable rather than attempting recovery against an invalid URL.
       stuck.push({ kind, id: op.id, mintUrl: op.mintUrl, state: op.state, raw: op });
     }
   }
@@ -135,7 +132,7 @@ export async function probeMintReachability(
   await Promise.all(
     mintUrls.map(async (mintUrl) => {
       try {
-        await fetcher(new URL("/v1/info", mintUrl).toString(), {
+        await fetcher(`${normalizeMintUrl(mintUrl)}/v1/info`, {
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (error) {
@@ -162,12 +159,8 @@ async function recoverStuckOperation(
         // Public API: actively re-checks the proofs with the mint.
         await source.send.refresh(op.id);
       } else if (op.state === "executing") {
-        // No public per-op path exists for executing sends (coco keeps it
-        // private); tryRecover* swallows per-op errors and leaves the
-        // operation for the next pass, matching the global sweep's behavior.
-        await sendService.tryRecoverExecutingOperation(op.raw);
-      } else if (op.state === "init") {
-        await sendService.tryRecoverInitOperation(op.raw);
+        // Startup snapshot only; skip live operations in the driver below.
+        await sendService.recoverExecutingOperation(op.raw);
       }
       // prepared / rolling_back: the global sweep only warns; nothing to do.
       return;
@@ -200,7 +193,7 @@ export async function runTargetedRecovery(
   options: TargetedRecoveryOptions = {},
 ): Promise<RecoveryRunResult> {
   const result: RecoveryRunResult = {
-    recovered: 0,
+    attempted: 0,
     skipped: 0,
     failed: 0,
     skippedMints: new Map(),
@@ -228,9 +221,11 @@ export async function runTargetedRecovery(
 
   for (const op of stuck) {
     if (unreachable.has(op.mintUrl)) continue;
+    if (source[op.kind].diagnostics.isLocked(op.id)) continue;
+    if (op.kind === "send" && !["pending", "executing"].includes(op.state)) continue;
+    result.attempted++;
     try {
       await recoverStuckOperation(source, sendService, op);
-      result.recovered++;
     } catch (error) {
       // Same semantics as coco's tryRecover*: leave the operation for the
       // next pass. A reachable mint can still reject a specific operation.
@@ -245,68 +240,4 @@ export async function runTargetedRecovery(
   }
 
   return result;
-}
-
-export interface RecoveryRecheckOptions extends TargetedRecoveryOptions {
-  intervalMs?: number;
-  /** Called when a mint transitions unreachable -> reachable with recovered op count. */
-  onMintBack?: (mintUrl: string) => void;
-  /** Called when a mint transitions reachable -> unreachable. */
-  onMintDown?: (mintUrl: string, opCount: number) => void;
-}
-
-/**
- * Periodically re-run targeted recovery so a mint that comes back online has
- * its parked operations recovered without a daemon restart, and operations
- * that get stuck mid-session are reconciled too. Idle ticks (no stuck
- * operations) cost one DB query and no network traffic. Logging is
- * transition-based: a mint that stays dead produces no repeated output.
- *
- * Returns a stop function that waits for any in-flight tick.
- */
-export function startRecoveryRecheck(
-  source: StuckOperationSource,
-  sendService: SendRecoveryService,
-  options: RecoveryRecheckOptions = {},
-): () => Promise<void> {
-  const intervalMs = options.intervalMs ?? RECOVERY_RECHECK_INTERVAL_MS;
-  let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let inFlight: Promise<void> = Promise.resolve();
-  const knownDead = new Set<string>();
-
-  const tick = async () => {
-    if (stopped) return;
-    inFlight = (async () => {
-      const result = await runTargetedRecovery(source, sendService, {
-        ...options,
-        onSkippedMint: (mintUrl, opCount) => {
-          if (!knownDead.has(mintUrl)) {
-            knownDead.add(mintUrl);
-            options.onMintDown?.(mintUrl, opCount);
-          }
-          options.onSkippedMint?.(mintUrl, opCount);
-        },
-      });
-      for (const mintUrl of [...knownDead]) {
-        if (!result.skippedMints.has(mintUrl)) {
-          knownDead.delete(mintUrl);
-          options.onMintBack?.(mintUrl);
-        }
-      }
-    })().catch((error: unknown) => {
-      logger.warn(
-        `Stuck-operation recheck failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    await inFlight;
-    if (!stopped) timer = setTimeout(tick, intervalMs);
-  };
-  timer = setTimeout(tick, intervalMs);
-
-  return async () => {
-    stopped = true;
-    if (timer) clearTimeout(timer);
-    await inFlight;
-  };
 }

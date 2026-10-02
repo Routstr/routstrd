@@ -1,9 +1,8 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import {
   collectStuckOperations,
   probeMintReachability,
   runTargetedRecovery,
-  startRecoveryRecheck,
   type StuckOperationSource,
   type SendRecoveryService,
 } from "./recovery-probe";
@@ -40,6 +39,7 @@ function makeSource(
     mint: stuck.mint ?? [],
   };
   const family = (kind: keyof typeof full) => ({
+    diagnostics: { isLocked: () => false },
     listInFlight: async () => full[kind] as never,
     refresh: async (id: string) => {
       refreshed[kind].push(id);
@@ -60,18 +60,12 @@ function makeSource(
 }
 
 function makeSendService(): SendRecoveryService & {
-  initRecovered: string[];
   executingRecovered: string[];
 } {
-  const initRecovered: string[] = [];
   const executingRecovered: string[] = [];
   return {
-    initRecovered,
     executingRecovered,
-    tryRecoverInitOperation: async (raw) => {
-      initRecovered.push((raw as FakeOp).id);
-    },
-    tryRecoverExecutingOperation: async (raw) => {
+    recoverExecutingOperation: async (raw) => {
       executingRecovered.push((raw as FakeOp).id);
     },
   };
@@ -148,7 +142,7 @@ describe("runTargetedRecovery", () => {
     const result = await runTargetedRecovery(makeSource({}), makeSendService(), {
       fetchImpl: deadFetch.fetchImpl,
     });
-    expect(result).toMatchObject({ recovered: 0, skipped: 0, failed: 0 });
+    expect(result).toMatchObject({ attempted: 0, skipped: 0, failed: 0 });
     expect(deadFetch.calls).toHaveLength(0);
   });
 
@@ -163,7 +157,7 @@ describe("runTargetedRecovery", () => {
       fetchImpl: deadFetch.fetchImpl,
       onSkippedMint: (mintUrl, count) => skippedMints.push([mintUrl, count]),
     });
-    expect(result.recovered).toBe(2);
+    expect(result.attempted).toBe(2);
     expect(result.skipped).toBe(2);
     expect(result.failed).toBe(0);
     expect(skippedMints).toEqual([["https://dead.example.com", 2]]);
@@ -178,17 +172,15 @@ describe("runTargetedRecovery", () => {
       send: [
         op("pending-1", "https://live.example.com", "pending"),
         op("exec-1", "https://live.example.com", "executing"),
-        op("init-1", "https://live.example.com", "init"),
       ],
     });
     const sendService = makeSendService();
     const result = await runTargetedRecovery(source, sendService, {
       fetchImpl: liveFetch().fetchImpl,
     });
-    expect(result.recovered).toBe(3);
+    expect(result.attempted).toBe(2);
     expect(source.refreshed.send).toEqual(["pending-1"]);
     expect(sendService.executingRecovered).toEqual(["exec-1"]);
-    expect(sendService.initRecovered).toEqual(["init-1"]);
   });
 
   it("counts per-operation failures at reachable mints and continues", async () => {
@@ -198,7 +190,7 @@ describe("runTargetedRecovery", () => {
     const result = await runTargetedRecovery(source, makeSendService(), {
       fetchImpl: liveFetch().fetchImpl,
     });
-    expect(result.recovered).toBe(1);
+    expect(result.attempted).toBe(2);
     expect(result.failed).toBe(1);
     expect(source.refreshed.melt).toEqual(["boom-1", "m2"]);
   });
@@ -221,59 +213,39 @@ describe("runTargetedRecovery", () => {
   });
 });
 
-describe("startRecoveryRecheck", () => {
-  it("recovers stuck operations on the interval and stops cleanly", async () => {
-    const source = makeSource({
-      send: [op("s1", "https://live.example.com")],
-    });
-    const stop = startRecoveryRecheck(source, makeSendService(), {
-      intervalMs: 20,
-      fetchImpl: liveFetch().fetchImpl,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    await stop();
-    expect(source.refreshed.send.length).toBeGreaterThanOrEqual(1);
-    const after = source.refreshed.send.length;
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(source.refreshed.send.length).toBe(after);
-  });
 
-  it("is idle without network traffic when nothing is stuck", async () => {
-    const { calls, fetchImpl } = makeFetch(() => false);
-    const stop = startRecoveryRecheck(makeSource({}), makeSendService(), {
-      intervalMs: 20,
-      fetchImpl,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    await stop();
-    expect(calls).toHaveLength(0);
-  });
+it("preserves subpath mint URLs when probing", async () => {
+  const { fetchImpl, calls } = liveFetch();
+  await probeMintReachability(["https://mint.example.com/Bitcoin/"], { fetchImpl });
+  expect(calls).toEqual(["https://mint.example.com/Bitcoin/v1/info"]);
+});
 
-  it("reports mint down/up transitions once instead of repeating", async () => {
-    let dead = true;
-    const { fetchImpl } = makeFetch(() => dead);
-    const source = makeSource({
-      melt: [op("m1", "https://flaky.example.com")],
-    });
-    const down: string[] = [];
-    const back: string[] = [];
-    const stop = startRecoveryRecheck(source, makeSendService(), {
-      intervalMs: 20,
-      fetchImpl,
-      onMintDown: (mintUrl) => down.push(mintUrl),
-      onMintBack: (mintUrl) => back.push(mintUrl),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 90));
-    // Dead across several ticks: reported once, never re-probed per op.
-    expect(down).toEqual(["https://flaky.example.com"]);
-    expect(back).toEqual([]);
-    expect(source.refreshed.melt).toEqual([]);
+it("does not drive locked operations or count rolling-back sends as attempts", async () => {
+  const source = makeSource({ send: [
+    op("live", "https://mint.example.com", "executing"),
+    op("rollback", "https://mint.example.com", "rolling_back"),
+  ] });
+  source.send.diagnostics.isLocked = (id) => id === "live";
+  const service = makeSendService();
+  const result = await runTargetedRecovery(source, service, { fetchImpl: liveFetch().fetchImpl });
+  expect(result.attempted).toBe(0);
+  expect(service.executingRecovered).toEqual([]);
+});
 
-    dead = false;
-    await new Promise((resolve) => setTimeout(resolve, 90));
-    await stop();
-    expect(down).toEqual(["https://flaky.example.com"]);
-    expect(back).toEqual(["https://flaky.example.com"]);
-    expect(source.refreshed.melt.length).toBeGreaterThanOrEqual(1);
+it("classifies malformed persisted URLs as unreachable without fetching", async () => {
+  const { fetchImpl, calls } = liveFetch();
+  const unreachable = await probeMintReachability(["not-a-url"], { fetchImpl });
+  expect([...unreachable]).toEqual(["not-a-url"]);
+  expect(calls).toEqual([]);
+});
+
+it("bounds a hanging probe with an abort signal", async () => {
+  const fetchImpl = (async (_url: unknown, options: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
+    })) as unknown as typeof fetch;
+  const unreachable = await probeMintReachability(["https://slow.example.com"], {
+    fetchImpl, timeoutMs: 10,
   });
+  expect([...unreachable]).toEqual(["https://slow.example.com"]);
 });

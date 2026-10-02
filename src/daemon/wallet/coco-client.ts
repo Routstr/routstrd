@@ -46,7 +46,6 @@ import {
   collectStuckOperations,
   probeMintReachability,
   runTargetedRecovery,
-  startRecoveryRecheck,
   type SendRecoveryService,
   type StuckOperation,
 } from "./recovery-probe";
@@ -1552,12 +1551,38 @@ function sendRecoveryServiceOf(coco: Manager): SendRecoveryService {
     .sendOperationService;
 }
 
+/** Local-only crash cleanup, run before the degraded gate opens. */
+export async function cleanupLocalRecoveryState(
+  coco: Manager,
+  repo: SqliteRepositories,
+): Promise<void> {
+  // Coco 1.0.1 implements these as local repository/proof operations only.
+  // Keep this version-sensitive bridge together with the send recovery bridge.
+  const services = coco as unknown as Record<string, {
+    recoverInitOperation(op: unknown): Promise<void>;
+    cleanupOrphanedReservations(): Promise<number>;
+  }>;
+  const families = [
+    ["send", repo.sendOperationRepository],
+    ["melt", repo.meltOperationRepository],
+    ["receive", repo.receiveOperationRepository],
+    ["mint", repo.mintOperationRepository],
+  ] as const;
+  for (const [kind, repository] of families) {
+    for (const op of await repository.getByState("init")) {
+      await services[`${kind}OperationService`]!.recoverInitOperation(op);
+    }
+  }
+  await services.sendOperationService!.cleanupOrphanedReservations();
+}
+
 /**
  * Gate for value-moving wallet operations while startup recovery runs.
  *
- * The gate is per mint: once recovery has enumerated stuck operations
- * (publishStuckMints), callers whose target mint has none proceed immediately
- * — a dead or slow mint must not stall spends from a healthy one. Callers
+ * On degraded startup only, publishStuckMints opens the gate for callers
+ * whose target mint has no stuck operations after probing and local cleanup.
+ * A dead mint must not stall spends from a healthy one. On the happy path
+ * all callers wait until the global sweeps finish. Callers
  * without a target mint, or whose mint has stuck operations, wait for the
  * full sweep. fail() poisons every caller; reads are never gated.
  */
@@ -1628,11 +1653,12 @@ export function createRecoveryGate(): RecoveryGate {
  * are failed locally so `recoverPendingMintOperations()` skips them, while
  * paid/issued and unreachable-mint quotes stay pending for the sweep.
  */
-async function runWalletRecovery(
+export async function runWalletRecovery(
   coco: Manager,
   onProgress: (progress: RecoveryPhaseProgress) => void,
   receiveOperationIds?: string[],
   onStuckMintsKnown?: (mints: Set<string>) => void,
+  options: { cleanupLocalState?: () => Promise<void>; fetchImpl?: typeof fetch } = {},
 ): Promise<void> {
   surfacingRecoveryProgress = true;
   let failedMintQuotes = 0;
@@ -1666,11 +1692,9 @@ async function runWalletRecovery(
     // later" path would leave them.
     onProgress({ phase: "Probing mints", failedMintQuotes });
     const stuckOperations = await collectStuckOperations(coco.ops);
-    // Value-moving operations gate per mint on this set (see waitForRecovery);
-    // publish it as soon as it is known so healthy mints unblock immediately.
-    onStuckMintsKnown?.(new Set(stuckOperations.map((op) => op.mintUrl)));
     const unreachableMints = await probeMintReachability(
       [...new Set(stuckOperations.map((op) => op.mintUrl))],
+      { fetchImpl: options.fetchImpl },
     );
     for (const mintUrl of unreachableMints) {
       const count = stuckOperations.filter((op) => op.mintUrl === mintUrl).length;
@@ -1679,6 +1703,13 @@ async function runWalletRecovery(
       );
     }
     const degraded = unreachableMints.size > 0;
+    if (degraded) {
+      // Local-only housekeeping must finish before any new operation is allowed.
+      await options.cleanupLocalState?.();
+      // Global sweeps enumerate fresh state and are unsafe beside live sends.
+      // Only the snapshot-based degraded path may open the per-mint gate.
+      onStuckMintsKnown?.(new Set(stuckOperations.map((op) => op.mintUrl)));
+    }
     const targeted = (kinds: Array<StuckOperation["kind"]>) =>
       runTargetedRecovery(coco.ops, sendRecoveryServiceOf(coco), {
         kinds,
@@ -1687,9 +1718,10 @@ async function runWalletRecovery(
       });
 
     // Happy path (every mint reachable) keeps coco's global sweeps: they also
-    // clean up init operations and orphaned proof reservations, which the
-    // per-op driver cannot enumerate. The targeted driver only runs when a
-    // dead mint would otherwise tax every stuck op with a network timeout.
+    // clean up init operations and orphaned proof reservations. Degraded
+    // startup runs that local housekeeping before opening its gate, and only
+    // drives the previously collected snapshot when a dead mint would
+    // otherwise tax every stuck op with a network timeout.
     onProgress({ phase: "Send recovery", failedMintQuotes });
     if (!degraded) await coco.ops.send.recovery.run();
     else await targeted(["send"]);
@@ -1790,7 +1822,6 @@ export async function createCocoClient(
   };
   let recoveryResolve: (() => void) | undefined;
   let stopPendingMintSweep: (() => Promise<void>) | undefined;
-  let stopRecoveryRecheck: (() => Promise<void>) | undefined;
   const recoveryPromise = new Promise<void>((resolve) => {
     recoveryResolve = resolve;
   });
@@ -1993,6 +2024,7 @@ export async function createCocoClient(
       },
       receiveRecoveryOperationIds,
       (mints) => recoveryGate.publishStuckMints(mints),
+      { cleanupLocalState: () => cleanupLocalRecoveryState(coco!, repo) },
     )
       .then(async () => {
         await syncReceiveReservations();
@@ -2001,24 +2033,6 @@ export async function createCocoClient(
         recoveryGate.complete();
         recoveryResolve?.();
         startupProgress("Wallet recovery complete.");
-        // Re-check stuck operations periodically: a mint that comes back has
-        // its parked operations recovered without a daemon restart, and
-        // operations stuck mid-session are reconciled too. Receive stays
-        // startup-only because recovering competing receives safely requires
-        // the startup dedup classification (see receive-dedup.ts).
-        stopRecoveryRecheck = startRecoveryRecheck(
-          coco!.ops,
-          sendRecoveryServiceOf(coco!),
-          {
-            kinds: ["send", "melt", "mint"],
-            onMintDown: (mintUrl, opCount) =>
-              logger.warn(
-                `Mint ${mintUrl} is unreachable; ${opCount} stuck operation(s) will keep retrying`,
-              ),
-            onMintBack: (mintUrl) =>
-              logger.log(`Mint ${mintUrl} is reachable again; resumed recovering its operations`),
-          },
-        );
         stopPendingMintSweep = startPendingMintSweep({
           ops: coco!.ops,
           wallet: coco!.wallet,
@@ -2344,7 +2358,6 @@ export async function createCocoClient(
     async dispose(): Promise<void> {
       if (disposed) return;
       disposed = true;
-      await stopRecoveryRecheck?.();
       try {
         // Let any in-flight recovery settle before closing the database from
         // underneath it. The recovery promise resolves on success or failure.
