@@ -14,6 +14,9 @@ import { basename, join } from "path";
 
 const RELEASES_API = "https://api.github.com/repos/Routstr/routstrd/releases/latest";
 const FETCH_TIMEOUT_MS = 30_000;
+// Same budget as install.sh's DOWNLOAD_TIMEOUT_SECS; the abort signal also
+// covers reading the body, so 30s fails archive downloads under ~1.3 MB/s.
+const DOWNLOAD_TIMEOUT_MS = 900_000;
 const PROCESS_TIMEOUT_MS = 30_000;
 const MAX_ARCHIVE_BYTES = 250 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 1024 * 1024;
@@ -56,6 +59,7 @@ async function fetchOrThrow(
   url: string,
   fetchImpl: typeof fetch,
   maxBytes = MAX_CHECKSUM_BYTES,
+  timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const response = await fetchImpl(url, {
     headers: {
@@ -63,7 +67,7 @@ async function fetchOrThrow(
       "User-Agent": "routstrd",
     },
     redirect: "follow",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(`Download failed (${response.status}) for ${url}`);
@@ -157,19 +161,21 @@ export async function installStandaloneRelease(
   const stagedPath = `${executablePath}.update-${randomBytes(12).toString("hex")}`;
 
   try {
-    const [archiveResponse, checksumsResponse] = await Promise.all([
+    // Read each body as it arrives, or the checksums timeout expires mid-archive.
+    const [archiveBytes, checksums] = await Promise.all([
       fetchOrThrow(
         release.archive.browser_download_url,
         fetchImpl,
         MAX_ARCHIVE_BYTES,
+        DOWNLOAD_TIMEOUT_MS,
+      ).then((response) => response.arrayBuffer()),
+      fetchOrThrow(release.checksums.browser_download_url, fetchImpl).then(
+        (response) => response.text(),
       ),
-      fetchOrThrow(release.checksums.browser_download_url, fetchImpl),
     ]);
-    const archiveBytes = await archiveResponse.arrayBuffer();
     if (archiveBytes.byteLength > MAX_ARCHIVE_BYTES) {
       throw new Error(`Download is too large (${archiveBytes.byteLength} bytes).`);
     }
-    const checksums = await checksumsResponse.text();
     if (Buffer.byteLength(checksums) > MAX_CHECKSUM_BYTES) {
       throw new Error("SHA256SUMS is too large.");
     }
