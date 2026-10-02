@@ -20,6 +20,7 @@ import {
   isZombieProcess,
   reopenFailedMintOperation,
   runMintQuoteRecovery,
+  runWalletDoctor,
   settleExpiredMintQuotes,
   settlePendingMintQuotes,
   stopLegacyCocod,
@@ -27,6 +28,7 @@ import {
   type MintQuoteRecoverySource,
   type PendingMintQuoteSource,
   type PendingMintSweepState,
+  type WalletDoctorSource,
 } from "./coco-client";
 import { OperationInProgressError } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
@@ -1632,5 +1634,217 @@ describe("runMintQuoteRecovery", () => {
     expect(outstanding.has("op-1")).toBe(true);
     expect(second).toMatchObject({ busy: 1, checked: 0 });
     expect(finalize).not.toHaveBeenCalled();
+  });
+});
+
+describe("runWalletDoctor", () => {
+  const NOW = Date.now();
+
+  function doctorMintOp(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "op-1",
+      mintUrl: "https://mint.example",
+      quoteId: "quote-1",
+      state: "pending",
+      amount: 500,
+      expiry: Math.floor(NOW / 1000) + 600,
+      createdAt: NOW - 5 * 60_000,
+      updatedAt: NOW - 60_000,
+      ...overrides,
+    };
+  }
+
+  function doctorMeltOp(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "melt-1",
+      mintUrl: "https://mint.example",
+      quoteId: "melt-quote-1",
+      state: "prepared",
+      amount: 2_100,
+      fee_reserve: 12,
+      inputProofSecrets: ["secret-a"],
+      createdAt: NOW - 3 * 24 * 3_600_000,
+      updatedAt: NOW - 3 * 24 * 3_600_000,
+      ...overrides,
+    };
+  }
+
+  function fakeDoctorSource(overrides: Partial<WalletDoctorSource> = {}) {
+    const fetchQuoteState = mock(async (_mintUrl: string, _quoteId: string) => "UNPAID");
+    const source: WalletDoctorSource = {
+      listTrustedMintUrls: async () => ["https://mint.example"],
+      listPendingMintOps: async () => [],
+      listFailedMintOps: async () => [],
+      listPreparedMelts: async () => [],
+      listInFlightMelts: async () => [],
+      listFailedMelts: async () => [],
+      getInflightProofSecrets: async () => [],
+      probeMint: async (mintUrl: string) => ({
+        mintUrl,
+        reachable: true,
+        latencyMs: 5,
+      }),
+      fetchQuoteState,
+      ...overrides,
+    };
+    return { source, fetchQuoteState };
+  }
+
+  it("reports a healthy wallet as all-green", async () => {
+    const { source } = fakeDoctorSource();
+    const report = await runWalletDoctor(source);
+    expect(report.mints).toEqual([
+      { mintUrl: "https://mint.example", reachable: true, latencyMs: 5 },
+    ]);
+    expect(report.unpaidQuotes).toEqual([]);
+    expect(report.paidUnissued).toEqual([]);
+    expect(report.stuckMelts).toEqual([]);
+    expect(report.uncheckedQuotes).toBe(0);
+  });
+
+  it("lists a recent quote the mint still reports UNPAID", async () => {
+    const { source } = fakeDoctorSource({
+      listPendingMintOps: async () => [doctorMintOp() as never],
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.unpaidQuotes).toHaveLength(1);
+    expect(report.unpaidQuotes[0]).toMatchObject({
+      operationId: "op-1",
+      amount: 500,
+    });
+    expect(report.paidUnissued).toEqual([]);
+  });
+
+  it("flags a pending quote the mint reports PAID with the recover command", async () => {
+    const { source } = fakeDoctorSource({
+      listPendingMintOps: async () => [doctorMintOp() as never],
+      fetchQuoteState: async () => "PAID",
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.unpaidQuotes).toEqual([]);
+    expect(report.paidUnissued).toHaveLength(1);
+    expect(report.paidUnissued[0]).toMatchObject({
+      operationId: "op-1",
+      remoteState: "PAID",
+      remediation: "routstrd wallet recover --op op-1",
+    });
+  });
+
+  it("flags a failed quote last seen PAID with --include-failed", async () => {
+    const { source } = fakeDoctorSource({
+      listFailedMintOps: async () => [
+        doctorMintOp({
+          id: "op-9",
+          state: "failed",
+          lastObservedRemoteState: "PAID",
+        }) as never,
+      ],
+      fetchQuoteState: async () => "PAID",
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.paidUnissued).toHaveLength(1);
+    expect(report.paidUnissued[0]?.remediation).toBe(
+      "routstrd wallet recover --op op-9 --include-failed",
+    );
+  });
+
+  it("does not probe failed quotes last seen UNPAID", async () => {
+    const { source, fetchQuoteState } = fakeDoctorSource({
+      listFailedMintOps: async () => [
+        doctorMintOp({
+          state: "failed",
+          lastObservedRemoteState: "UNPAID",
+        }) as never,
+      ],
+    });
+    const report = await runWalletDoctor(source);
+    expect(fetchQuoteState).not.toHaveBeenCalled();
+    expect(report.paidUnissued).toEqual([]);
+    expect(report.uncheckedQuotes).toBe(0);
+  });
+
+  it("probes each target quote only once", async () => {
+    const { source, fetchQuoteState } = fakeDoctorSource({
+      listPendingMintOps: async () => [doctorMintOp() as never],
+    });
+    fetchQuoteState.mockImplementation(async () => "PAID");
+    await runWalletDoctor(source);
+    expect(fetchQuoteState).toHaveBeenCalledTimes(1);
+    expect(fetchQuoteState).toHaveBeenCalledWith(
+      "https://mint.example",
+      "quote-1",
+    );
+  });
+
+  it("counts probe failures as unchecked instead of dropping them", async () => {
+    const { source } = fakeDoctorSource({
+      listPendingMintOps: async () => [doctorMintOp() as never],
+      fetchQuoteState: async () => {
+        throw new Error("mint unreachable");
+      },
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.uncheckedQuotes).toBe(1);
+    expect(report.unpaidQuotes).toEqual([]);
+    expect(report.paidUnissued).toEqual([]);
+  });
+
+  it("counts quotes the probe budget never reached as unchecked", async () => {
+    const { source, fetchQuoteState } = fakeDoctorSource({
+      listPendingMintOps: async () => [
+        doctorMintOp() as never,
+        doctorMintOp({ id: "op-2", quoteId: "quote-2" }) as never,
+      ],
+      quoteProbeBudgetMs: 0,
+    });
+    const report = await runWalletDoctor(source);
+    expect(fetchQuoteState).not.toHaveBeenCalled();
+    expect(report.uncheckedQuotes).toBe(2);
+  });
+
+  it("passes unreachable mint probes through", async () => {
+    const { source } = fakeDoctorSource({
+      probeMint: async (mintUrl: string) => ({
+        mintUrl,
+        reachable: false,
+        error: "fetch failed",
+      }),
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.mints).toEqual([
+      { mintUrl: "https://mint.example", reachable: false, error: "fetch failed" },
+    ]);
+  });
+
+  it("flags old prepared melts and failed melts with locked proofs", async () => {
+    const { source } = fakeDoctorSource({
+      listPreparedMelts: async () => [doctorMeltOp()],
+      listFailedMelts: async () => [
+        doctorMeltOp({ id: "melt-2", state: "failed" }),
+      ],
+      getInflightProofSecrets: async () => ["secret-a"],
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.stuckMelts).toHaveLength(2);
+    const byKind = new Map(report.stuckMelts.map((melt) => [melt.kind, melt]));
+    expect(byKind.get("prepared")).toMatchObject({
+      operationId: "melt-1",
+      feeReserve: 12,
+    });
+    expect(byKind.get("failed-locked")).toMatchObject({
+      operationId: "melt-2",
+      lockedSecrets: 1,
+    });
+  });
+
+  it("ignores failed melts whose proofs were released", async () => {
+    const { source } = fakeDoctorSource({
+      listFailedMelts: async () => [
+        doctorMeltOp({ id: "melt-2", state: "failed" }),
+      ],
+      getInflightProofSecrets: async () => [],
+    });
+    const report = await runWalletDoctor(source);
+    expect(report.stuckMelts).toEqual([]);
   });
 });
