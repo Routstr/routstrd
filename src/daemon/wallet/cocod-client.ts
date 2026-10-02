@@ -4,6 +4,7 @@ import { isAbsolute } from "path";
 import { logger } from "../../utils/logger";
 import { withCrossProcessLock } from "../../utils/process-lock";
 import type { HistoryEntry } from "@cashu/coco-core";
+import type { WalletDoctorReport } from "./doctor";
 
 const DEFAULT_CONFIG_DIR =
   process.env.COCOD_DIR || `${process.env.HOME || process.env.USERPROFILE || ""}/.cocod`;
@@ -201,6 +202,12 @@ export interface CocodClient {
   ): Promise<WalletMintQuoteRecoveryResult>;
   /** Report background wallet recovery progress, when the wallet supports it. */
   getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
+  /**
+   * Run the read-only wallet health checks behind `routstrd wallet doctor`:
+   * mint reachability, recent unpaid quotes, paid-but-never-issued quotes,
+   * and melt operations holding locked proofs. Never mutates wallet state.
+   */
+  diagnoseWallet?(): Promise<WalletDoctorReport>;
 }
 
 export function resolveCocodExecutable(cocodPath?: string | null): string {

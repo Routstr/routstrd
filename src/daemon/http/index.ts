@@ -495,6 +495,19 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/wallet/doctor") {
+      await respond(res, async () => {
+        if (!deps.walletClient.diagnoseWallet) {
+          throw new CocodHttpError(
+            501,
+            "Wallet doctor is not supported by this wallet client.",
+          );
+        }
+        return { output: await deps.walletClient.diagnoseWallet() };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/recover") {
       await respond(res, async () => {
         if (!deps.walletClient.recoverMintQuotes) {
