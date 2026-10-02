@@ -681,6 +681,29 @@ describe("settleExpiredMintQuotes", () => {
     expect(observePendingOperation).not.toHaveBeenCalled();
     expect(failPendingOperation).not.toHaveBeenCalled();
   });
+
+  it("skips quotes at probe-unreachable mints without spending the budget", async () => {
+    const ops = [
+      pendingMintOp({ id: "dead-1", mintUrl: "https://dead.example.com" }),
+      pendingMintOp({ id: "dead-2", mintUrl: "https://dead.example.com/" }),
+      pendingMintOp({ id: "live-1", mintUrl: "https://live.example.com" }),
+    ];
+    const { source, observePendingOperation, failPendingOperation } =
+      fakeSource(ops);
+
+    const result = await settleExpiredMintQuotes(
+      source,
+      NOW_MS,
+      undefined,
+      { unreachableMints: new Set(["https://dead.example.com"]) },
+    );
+
+    expect(result).toEqual({ failed: 1, leftForRecovery: 0, unobserved: 2 });
+    // Only the reachable mint was asked anything.
+    expect(observePendingOperation).toHaveBeenCalledTimes(1);
+    expect(observePendingOperation.mock.calls[0]?.[0]).toBe("live-1");
+    expect(failPendingOperation).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("settlePendingMintQuotes", () => {
@@ -1537,7 +1560,7 @@ describe("runMintQuoteRecovery", () => {
 
   it("skips operations whose earlier recovery is still in flight", async () => {
     const outstanding = new Map<string, Promise<unknown>>([
-      ["op-1", new Promise(() => {})],
+      ["mint:op-1", new Promise(() => {})],
     ]);
     const { source, finalize, observePendingOperation } = fakeSource(
       [mintOp()],
@@ -1568,14 +1591,14 @@ describe("runMintQuoteRecovery", () => {
     });
 
     expect(first).toMatchObject({ retryable: 1, recovered: 0 });
-    expect(outstanding.has("op-1")).toBe(true);
+    expect(outstanding.has("mint:op-1")).toBe(true);
     // The abandoned mint request must not be retried underneath.
     expect(second).toMatchObject({ busy: 1, checked: 0 });
   });
 
   it("does not re-open a failed operation whose recovery is in flight", async () => {
     const outstanding = new Map<string, Promise<unknown>>([
-      ["op-1", new Promise(() => {})],
+      ["mint:op-1", new Promise(() => {})],
     ]);
     const { source, reopenFailedOperation } = fakeSource(
       [mintOp({ state: "failed" })],
@@ -1630,7 +1653,7 @@ describe("runMintQuoteRecovery", () => {
     });
 
     expect(first).toMatchObject({ retryable: 1, checked: 1 });
-    expect(outstanding.has("op-1")).toBe(true);
+    expect(outstanding.has("mint:op-1")).toBe(true);
     expect(second).toMatchObject({ busy: 1, checked: 0 });
     expect(finalize).not.toHaveBeenCalled();
   });

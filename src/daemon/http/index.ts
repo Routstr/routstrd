@@ -572,6 +572,19 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/recover/operations") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverStuckOperations) {
+          throw new CocodHttpError(
+            501,
+            "Stuck operation recovery is not supported by this wallet client.",
+          );
+        }
+        return { output: await deps.walletClient.recoverStuckOperations() };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/receive/cashu") {
       await respond(res, async () => {
         const body = await readJsonBody(req);

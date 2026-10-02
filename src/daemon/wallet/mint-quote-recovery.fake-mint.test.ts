@@ -363,7 +363,7 @@ describe("PAID mint quote recovery with a real Manager and mint", () => {
       outstanding,
     })) as unknown as Record<string, number>;
     expect(first).toMatchObject({ retryable: 1, recovered: 0 });
-    expect(outstanding.has(op.id as string)).toBe(true);
+    expect(outstanding.has(`mint:${op.id}`)).toBe(true);
 
     const second = (await runMintQuoteRecovery(booted.source() as never, {
       outstanding,

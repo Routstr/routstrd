@@ -47,3 +47,53 @@ describe("POST /wallet/recover validation", () => {
     expect(recoverMintQuotes).toHaveBeenCalledTimes(1);
   });
 });
+
+async function recoverOperations() {
+  const recoverStuckOperations = mock(async () => ({
+    attempted: 1,
+    busy: 0,
+    skipped: 0,
+    failed: 0,
+    skippedMints: {},
+  }));
+  const handler = createDaemonRequestHandler({ walletClient: { recoverStuckOperations } } as never);
+  const req = new EventEmitter() as any;
+  Object.assign(req, { method: "POST", url: "/wallet/recover/operations", headers: { host: "localhost" } });
+  const res = {
+    status: 0, body: "",
+    writeHead(status: number) { this.status = status; },
+    end(chunk: string) { this.body = chunk; },
+  };
+  setImmediate(() => {
+    req.emit("data", Buffer.from("{}"));
+    req.emit("end");
+  });
+  await handler(req, res as never);
+  return { res, recoverStuckOperations };
+}
+
+describe("POST /wallet/recover/operations", () => {
+  it("drives stuck-operation recovery and returns the summary", async () => {
+    const { res, recoverStuckOperations } = await recoverOperations();
+    expect(res.status).toBe(200);
+    expect(recoverStuckOperations).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(res.body).output).toMatchObject({ attempted: 1, busy: 0 });
+  });
+
+  it("returns 501 when the wallet client does not support it", async () => {
+    const handler = createDaemonRequestHandler({ walletClient: {} } as never);
+    const req = new EventEmitter() as any;
+    Object.assign(req, { method: "POST", url: "/wallet/recover/operations", headers: { host: "localhost" } });
+    const res = {
+      status: 0, body: "",
+      writeHead(status: number) { this.status = status; },
+      end(chunk: string) { this.body = chunk; },
+    };
+    setImmediate(() => {
+      req.emit("data", Buffer.from("{}"));
+      req.emit("end");
+    });
+    await handler(req, res as never);
+    expect(res.status).toBe(501);
+  });
+});

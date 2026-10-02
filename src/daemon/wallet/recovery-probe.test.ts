@@ -7,6 +7,8 @@ import {
   type SendRecoveryService,
 } from "./recovery-probe";
 
+import { runMintQuoteRecovery, settlePendingMintQuotes, settleExpiredMintQuotes } from "./coco-client";
+
 interface FakeOp {
   id: string;
   mintUrl: string;
@@ -52,7 +54,11 @@ function makeSource(
   return {
     stuck: full,
     refreshed,
-    send: family("send") as FakeSource["send"],
+    send: {
+      ...family("send"),
+      get: async (id: string) =>
+        (full.send.find((o) => o.id === id) ?? null) as never,
+    } as FakeSource["send"],
     melt: family("melt") as FakeSource["melt"],
     receive: family("receive") as FakeSource["receive"],
     mint: family("mint") as FakeSource["mint"],
@@ -61,12 +67,24 @@ function makeSource(
 
 function makeSendService(): SendRecoveryService & {
   executingRecovered: string[];
+  /** Lock events in order, e.g. "acquire:op-1", "release:op-1". */
+  lockLog: string[];
 } {
   const executingRecovered: string[] = [];
+  const lockLog: string[] = [];
   return {
     executingRecovered,
+    lockLog,
+    acquireOperationLock: async (id) => {
+      lockLog.push(`acquire:${id}`);
+      return () => {
+        lockLog.push(`release:${id}`);
+      };
+    },
     recoverExecutingOperation: async (raw) => {
-      executingRecovered.push((raw as FakeOp).id);
+      const id = (raw as FakeOp).id;
+      executingRecovered.push(id);
+      lockLog.push(`recover:${id}`);
     },
   };
 }
@@ -181,6 +199,54 @@ describe("runTargetedRecovery", () => {
     expect(result.attempted).toBe(2);
     expect(source.refreshed.send).toEqual(["pending-1"]);
     expect(sendService.executingRecovered).toEqual(["exec-1"]);
+    // The executing send is driven under coco's per-operation lock.
+    expect(sendService.lockLog).toEqual([
+      "acquire:exec-1",
+      "recover:exec-1",
+      "release:exec-1",
+    ]);
+  });
+
+  it("re-reads state under the lock and skips a send that left executing", async () => {
+    const source = makeSource({
+      send: [op("s1", "https://live.example.com", "pending")],
+    });
+    const sendService = makeSendService();
+    // Snapshot taken while the op was still executing; it has since settled.
+    const result = await runTargetedRecovery(source, sendService, {
+      stuckOperations: [
+        {
+          kind: "send",
+          id: "s1",
+          mintUrl: "https://live.example.com",
+          state: "executing",
+          raw: op("s1", "https://live.example.com", "executing"),
+        },
+      ],
+      unreachableMints: new Set(),
+    });
+    expect(result.attempted).toBe(1);
+    expect(sendService.executingRecovered).toEqual([]);
+    // The lock is still acquired and released around the re-read.
+    expect(sendService.lockLog).toEqual(["acquire:s1", "release:s1"]);
+  });
+
+  it("counts a send as busy when a live execute wins the lock race", async () => {
+    const source = makeSource({
+      send: [op("s1", "https://live.example.com", "executing")],
+    });
+    const sendService = makeSendService();
+    sendService.acquireOperationLock = async () => {
+      const error = new Error("operation in progress");
+      error.name = "OperationInProgressError";
+      throw error;
+    };
+    const result = await runTargetedRecovery(source, sendService, {
+      fetchImpl: liveFetch().fetchImpl,
+    });
+    expect(result.busy).toBe(1);
+    expect(result.failed).toBe(0);
+    expect(sendService.executingRecovered).toEqual([]);
   });
 
   it("counts per-operation failures at reachable mints and continues", async () => {
@@ -229,7 +295,9 @@ it("does not drive locked operations or count rolling-back sends as attempts", a
   const service = makeSendService();
   const result = await runTargetedRecovery(source, service, { fetchImpl: liveFetch().fetchImpl });
   expect(result.attempted).toBe(0);
+  expect(result.busy).toBe(1);
   expect(service.executingRecovered).toEqual([]);
+  expect(service.lockLog).toEqual([]);
 });
 
 it("classifies malformed persisted URLs as unreachable without fetching", async () => {
@@ -248,4 +316,133 @@ it("bounds a hanging probe with an abort signal", async () => {
     fetchImpl, timeoutMs: 10,
   });
   expect([...unreachable]).toEqual(["https://slow.example.com"]);
+});
+
+
+it("shares timed-out mint observations across quote recovery, targeted recovery and the sweep", async () => {
+  const source = makeSource({ mint: [op("q1", "https://live.example.com")] });
+  let finish!: (value: { category: "waiting" }) => void;
+  const observation = new Promise<{ category: "waiting" }>(r => { finish = r; });
+  const outstanding = new Map<string, Promise<unknown>>();
+  const quoteSource = {
+    ops: { mint: {
+      listPending: async () => [{ ...source.stuck.mint[0]!, method: "bolt11" }],
+      get: async () => null,
+      finalize: async () => ({ state: "finalized" }),
+    } },
+    mintOperationService: { observePendingOperation: () => observation },
+    reopenFailedOperation: async () => false,
+  };
+  try {
+    await runMintQuoteRecovery(quoteSource as never, { outstanding, timeoutMs: 5 });
+    expect(outstanding.has("mint:q1")).toBe(true);
+    const result = await runTargetedRecovery(source, makeSendService(), {
+      outstanding, fetchImpl: liveFetch().fetchImpl,
+    });
+    expect(result.busy).toBe(1);
+    await settlePendingMintQuotes({
+      ops: { mint: { ...source.mint, listPending: async () => source.stuck.mint as never } },
+      wallet: { balances: { byMint: async () => ({}) } },
+      mintOperationService: { failPendingOperation: async () => ({}) },
+    } as never, Date.now(), { state: { outstanding } });
+    expect(source.refreshed.mint).toEqual([]);
+  } finally { finish({ category: "waiting" }); await observation; }
+});
+
+it("tracks a hung targeted mint so quote recovery skips it while unrelated operations proceed", async () => {
+  const source = makeSource({ mint: [op("q1", "https://live.example.com")], melt: [op("m1", "https://live.example.com")] });
+  let finish!: (value: never) => void;
+  source.mint.refresh = () => new Promise(r => { finish = r; });
+  const outstanding = new Map<string, Promise<unknown>>();
+  try {
+    const result = await runTargetedRecovery(source, makeSendService(), {
+      outstanding, timeoutMs: 5, fetchImpl: liveFetch().fetchImpl,
+    });
+    expect(result.timedOut).toBe(1);
+    expect(source.refreshed.melt).toEqual(["m1"]);
+    const quote = await runMintQuoteRecovery({
+      ops: { mint: { listPending: async () => [{ ...source.stuck.mint[0]!, method: "bolt11" }] } },
+    } as never, { outstanding });
+    expect(quote.busy).toBe(1);
+  } finally { finish({ state: "pending" } as never); }
+});
+
+it("retains executing-send lock until a timed-out underlying drive actually finishes", async () => {
+  const source = makeSource({ send: [op("s1", "https://live.example.com", "executing")] });
+  const service = makeSendService();
+  let finish!: () => void;
+  service.recoverExecutingOperation = () => new Promise<void>(r => { finish = r; });
+  const outstanding = new Map<string, Promise<unknown>>();
+  const result = await runTargetedRecovery(source, service, {
+    outstanding, timeoutMs: 5, fetchImpl: liveFetch().fetchImpl,
+  });
+  expect(result.timedOut).toBe(1);
+  expect(service.lockLog).toEqual(["acquire:s1"]);
+  const retry = await runTargetedRecovery(source, service, { outstanding, fetchImpl: liveFetch().fetchImpl });
+  expect(retry.busy).toBe(1);
+  const actual = outstanding.get("send:s1")!;
+  finish();
+  await actual;
+  expect(service.lockLog).toEqual(["acquire:s1", "release:s1"]);
+  expect(outstanding.size).toBe(0);
+});
+
+it("refuses missing executing-send internals without driving the operation", async () => {
+  const source = makeSource({ send: [op("s1", "https://live.example.com", "executing")] });
+  const result = await runTargetedRecovery(source, {} as SendRecoveryService, { fetchImpl: liveFetch().fetchImpl });
+  expect(result.failed).toBe(1);
+});
+
+
+it("startup settlement keeps its timed-out observation visible to manual recovery", async () => {
+  const source = makeSource({ mint: [op("q1", "https://live.example.com")] });
+  let finish!: (value: { category: "ready" }) => void;
+  const observation = new Promise<{ category: "ready" }>(r => { finish = r; });
+  const outstanding = new Map<string, Promise<unknown>>();
+  const settlement = await settleExpiredMintQuotes({
+    ops: { mint: { listPending: async () => [{ ...source.stuck.mint[0]!, expiry: 1, updatedAt: 1 }] } },
+    mintOperationService: { observePendingOperation: () => observation },
+  } as never, Date.now(), 5, { outstanding });
+  expect(settlement.unobserved).toBe(1);
+  const result = await runTargetedRecovery(source, makeSendService(), { outstanding, fetchImpl: liveFetch().fetchImpl });
+  expect(result.busy).toBe(1);
+  expect(source.refreshed.mint).toEqual([]);
+  const actual = outstanding.get("mint:q1")!;
+  finish({ category: "ready" });
+  await actual;
+  expect(outstanding.size).toBe(0);
+});
+
+it("deadline and shutdown leave remaining operations untouched", async () => {
+  const source = makeSource({ mint: [op("q1", "https://live.example.com")] });
+  const result = await runTargetedRecovery(source, makeSendService(), {
+    shouldStop: () => true, fetchImpl: liveFetch().fetchImpl,
+  });
+  expect(result.skipped).toBe(1);
+  expect(result.attempted).toBe(0);
+  expect(source.refreshed.mint).toEqual([]);
+});
+
+it("a pass budget bounds total drive waits, not just each operation", async () => {
+  const source = makeSource({ mint: [op("q1", "https://live.example.com"), op("q2", "https://live.example.com")] });
+  let finish!: (value: never) => void;
+  source.mint.refresh = () => new Promise(r => { finish = r; });
+  const outstanding = new Map<string, Promise<unknown>>();
+  const result = await runTargetedRecovery(source, makeSendService(), {
+    outstanding, timeoutMs: 100, deadlineMs: 10, fetchImpl: liveFetch().fetchImpl,
+  });
+  expect(result.timedOut).toBe(1);
+  expect(result.attempted).toBe(1);
+  expect(result.skipped).toBe(1);
+  const actual = outstanding.get("mint:q1")!;
+  finish({ state: "pending" } as never);
+  await actual;
+});
+
+it("unfinished work in another operation family does not block the same bare id", async () => {
+  const source = makeSource({ mint: [op("same-id", "https://live.example.com")] });
+  const outstanding = new Map<string, Promise<unknown>>([["send:same-id", new Promise(() => {})]]);
+  const result = await runTargetedRecovery(source, makeSendService(), { outstanding, fetchImpl: liveFetch().fetchImpl });
+  expect(result.busy).toBe(0);
+  expect(source.refreshed.mint).toEqual(["same-id"]);
 });

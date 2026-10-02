@@ -55,12 +55,15 @@ it("targeted recovery leaves a send that execute() holds alone", async () => {
 
   const live = coco.ops.send.execute(OP);
   await started; // swap is at the mint
-  await runTargetedRecovery(coco.ops, internals.sendOperationService, {
+  const result = await runTargetedRecovery(coco.ops, internals.sendOperationService, {
     kinds: ["send"],
     fetchImpl: (async () => new Response("{}")) as unknown as unknown as typeof fetch,
   });
   // On 8005aeb this is "rolled_back" and "in-1" is no longer reserved.
   expect((await coco.ops.send.get(OP))?.state).toBe("executing");
+  // The live execute holds coco's per-operation lock: busy, never driven.
+  expect(result.attempted).toBe(0);
+  expect(result.busy).toBe(1);
 
   finishSwap({ send: [{ id: "00aa", amount: 8, secret: "out-1", C: "02bb" }], keep: [] });
   await live;
@@ -136,6 +139,65 @@ it("degraded startup finishes local housekeeping before opening the per-mint gat
   }
 });
 
+it("degraded startup probes before settlement and never asks a dead mint", async () => {
+  const db = new Database(":memory:");
+  const repo = new SqliteRepositories({ database: db });
+  await repo.init();
+  const coco = new Manager(repo, async () => new Uint8Array(64));
+  const expiredRow = (id: string, mintUrl: string) => ({
+    id, mintUrl, quoteId: `q-${id}`, state: "pending",
+    createdAt: 1_000, updatedAt: 2_000, method: "bolt11",
+    methodData: { method: "bolt11", data: {} }, amount: 100, unit: "sat",
+    request: "lnbc1example", expiry: 1_000_000, // epoch seconds, long past
+  });
+  await repo.mintOperationRepository.create(expiredRow("dead-quote", "https://dead.example.com") as never);
+  await repo.mintOperationRepository.create(expiredRow("live-quote", "https://live.example.com") as never);
+  const internals = coco as unknown as {
+    mintOperationService: {
+      observePendingOperation(id: string): Promise<{ category: "waiting" }>;
+      failPendingOperation(op: unknown, failure: unknown): Promise<unknown>;
+    };
+  };
+  const events: string[] = [];
+  const observe = spyOn(internals.mintOperationService, "observePendingOperation")
+    .mockImplementation(async (id: string) => {
+      events.push(`observe:${id}`);
+      return { category: "waiting" };
+    });
+  // Fail the row for real (as the production service would) so the targeted
+  // mint pass sees state "failed" and refresh() returns without re-observing.
+  const fail = spyOn(internals.mintOperationService, "failPendingOperation")
+    .mockImplementation(async (op: unknown) => {
+      const id = (op as { id: string }).id;
+      const row = await repo.mintOperationRepository.getById(id);
+      if (row) await repo.mintOperationRepository.update({ ...row, state: "failed" } as never);
+      return {} as never;
+    });
+  const gate = createRecoveryGate();
+  try {
+    const recovery = runWalletRecovery(coco, () => {}, [], (mints) => {
+      events.push("gate");
+      gate.publishStuckMints(mints);
+    }, {
+      fetchImpl: (async (url: unknown) => {
+        if (String(url).includes("dead.example.com")) throw new Error("offline");
+        return new Response("{}");
+      }) as unknown as typeof fetch,
+      cleanupLocalState: async () => { events.push("cleanup"); },
+    }).then(() => gate.complete());
+    await recovery;
+    // The dead mint was probed, never asked to observe its quote; the gate
+    // opened before settlement spent anything on the live mint.
+    expect(events).toEqual(["cleanup", "gate", "observe:live-quote"]);
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(fail).toHaveBeenCalledTimes(1);
+  } finally {
+    observe.mockRestore();
+    fail.mockRestore();
+    db.close();
+  }
+});
+
 it("local housekeeping cleans init sends and orphaned reservations without network", async () => {
   const db = new Database(":memory:");
   const repo = new SqliteRepositories({ database: db });
@@ -169,6 +231,27 @@ it("local housekeeping cleans init sends and orphaned reservations without netwo
     expect(await repo.receiveOperationRepository.getById("init-receive")).toBeNull();
     expect(await repo.mintOperationRepository.getById("init-mint")).toBeNull();
   } finally {
+    db.close();
+  }
+});
+
+it("cleanup checks all private methods before making any local writes", async () => {
+  const db = new Database(":memory:");
+  const repo = new SqliteRepositories({ database: db });
+  await repo.init();
+  const coco = new Manager(repo, async () => new Uint8Array(64));
+  const internals = coco as unknown as { mintOperationService: { recoverInitOperation: unknown } };
+  const original = internals.mintOperationService.recoverInitOperation;
+  try {
+    await repo.sendOperationRepository.create({
+      id: "untouched-init", mintUrl: MINT, amount: 8, state: "init", method: "default",
+      methodData: {}, createdAt: Date.now(), updatedAt: Date.now(),
+    } as never);
+    internals.mintOperationService.recoverInitOperation = undefined;
+    await expect(cleanupLocalRecoveryState(coco, repo)).rejects.toThrow("mintOperationService.recoverInitOperation is unavailable");
+    expect((await repo.sendOperationRepository.getById("untouched-init"))?.state).toBe("init");
+  } finally {
+    internals.mintOperationService.recoverInitOperation = original;
     db.close();
   }
 });
