@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { HISTORY_ENTRY_TYPES, isHistoryEntryType } from "./history";
+import { HISTORY_ENTRY_TYPES, historyStatus, isHistoryEntryType } from "./history";
 
 describe("history entry types", () => {
   it("lists the four supported transaction types", () => {
@@ -16,5 +16,12 @@ describe("history entry types", () => {
     expect(isHistoryEntryType("melt")).toBe(true);
     expect(isHistoryEntryType("SEND")).toBe(false);
     expect(isHistoryEntryType("refund")).toBe(false);
+  });
+});
+
+describe("history status", () => {
+  it("tells a stuck mint apart from a finished melt", () => {
+    expect(historyStatus("mint", "PAID")).toBe("paid, not minted");
+    expect(historyStatus("melt", "PAID")).toBe("");
   });
 });
