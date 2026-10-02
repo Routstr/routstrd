@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { selectCleanupOperations } from "./cleanup";
+import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 
 const NOW_MS = 1_800_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -164,5 +164,16 @@ describe("selectCleanupOperations", () => {
     });
 
     expect(result.meltsToCancel).toEqual([]);
+  });
+});
+
+describe("mint cleanup reporting", () => {
+  it("reports dry-run candidates, not confirmed failures", () => {
+    expect(summarizeMintCleanup({ dryRun: true, candidates: 3, failed: 0, leftForRecovery: 0 }))
+      .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 0, leftForRecovery: 0 });
+  });
+  it("reports only actual failures in a real run", () => {
+    expect(summarizeMintCleanup({ dryRun: false, candidates: 3, failed: 1, leftForRecovery: 2 }))
+      .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 1, leftForRecovery: 2 });
   });
 });

@@ -64,8 +64,8 @@ export interface CleanupSelection<
  *   can have happened before expiry while the daemon was down, leaving no
  *   local observation. Callers that fail quotes automatically at startup must
  *   therefore confirm UNPAID with the mint first (see
- *   settleExpiredMintQuotes in coco-client.ts); only the explicit,
- *   user-invoked cleanup command may fail candidates purely locally.
+ *   failExpiredMintQuoteIfUnpaid in coco-client.ts). Explicit cleanup follows
+ *   the same rule unless the operator opts into unsafe `--force` behaviour.
  * - Pending sends are reclaimed (rolled back) only when they are older than
  *   `minAgeMs`, so we never roll back a token that a receiver might still
  *   legitimately claim.
@@ -101,4 +101,18 @@ export function selectCleanupOperations<
   );
 
   return { mintsToFail, sendsToReclaim, meltsToCancel };
+}
+
+/** Keep a local-only dry-run preview distinct from mint-confirmed outcomes. */
+export function summarizeMintCleanup(input: {
+  dryRun: boolean;
+  candidates: number;
+  failed: number;
+  leftForRecovery: number;
+}) {
+  return {
+    mintQuoteCandidates: input.candidates,
+    failedMintQuotes: input.dryRun ? 0 : input.failed,
+    leftForRecovery: input.dryRun ? 0 : input.leftForRecovery,
+  };
 }

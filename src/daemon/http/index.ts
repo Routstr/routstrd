@@ -284,6 +284,21 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function optionalStringArrayField(
+  body: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
+  const value = body[field];
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !item.trim())
+  ) {
+    throw new CocodHttpError(400, `'${field}' must be an array of non-empty strings.`);
+  }
+  return value.map((item: string) => item.trim());
+}
+
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
@@ -527,6 +542,44 @@ export function createDaemonRequestHandler(deps: {
               ? body.minAgeMs
               : undefined,
           dryRun: body.dryRun === true,
+          force: body.force === true,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverMintQuotes) {
+          throw new CocodHttpError(
+            501,
+            "Mint quote recovery is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const operationIds = optionalStringArrayField(body, "operationIds");
+        if (body.includeFailed === true && !operationIds?.length) {
+          throw new CocodHttpError(
+            400,
+            "'includeFailed' requires non-empty 'operationIds'.",
+          );
+        }
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)
+        ) {
+          throw new CocodHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
+        const result = await deps.walletClient.recoverMintQuotes({
+          operationIds,
+          includeFailed: body.includeFailed === true,
+          timeoutMs: body.timeoutMs as number | undefined,
         });
         return { output: result };
       });
