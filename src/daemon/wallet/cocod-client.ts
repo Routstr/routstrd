@@ -159,6 +159,22 @@ export interface WalletMintQuoteRecoveryResult {
   errors: Array<{ operationId: string; error: string }>;
 }
 
+/** Summary of a stuck-operation (send/melt/mint) recovery run. */
+export interface WalletStuckOperationRecoveryResult {
+  /** Timed-out waits; the underlying operation remains tracked. */
+  timedOut: number;
+  /** Operations for which recovery was attempted (not necessarily completed). */
+  attempted: number;
+  /** Locked operations or unfinished work from another pass; retry later. */
+  busy: number;
+  /** Operations skipped for unreachable mints, shutdown, or pass budget exhaustion. */
+  skipped: number;
+  /** Operations at reachable mints whose recovery still failed. */
+  failed: number;
+  /** Unreachable mint URL -> number of operations skipped there. */
+  skippedMints: Record<string, number>;
+}
+
 export interface CocodClient {
   ping(): Promise<boolean>;
   getStatus(): Promise<CocodState>;
@@ -201,6 +217,12 @@ export interface CocodClient {
     options?: WalletMintQuoteRecoveryOptions,
     onProgress?: (message: string) => void,
   ): Promise<WalletMintQuoteRecoveryResult>;
+  /**
+   * Recover stuck send/melt/mint operations whose mints answer a
+   * reachability probe. Operations a live execute holds are reported busy,
+   * never driven. Receive stays startup-only (receive dedup classification).
+   */
+  recoverStuckOperations?(): Promise<WalletStuckOperationRecoveryResult>;
   /** Report background wallet recovery progress, when the wallet supports it. */
   getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }

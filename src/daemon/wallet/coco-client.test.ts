@@ -14,6 +14,7 @@ import {
   assertLegacyCocodNotRunning,
   claimLegacyCocodPidFile,
   createCocoClient,
+  createRecoveryGate,
   createRunQueue,
   DEFAULT_TRUSTED_MINT_URLS,
   failExpiredMintQuoteIfUnpaid,
@@ -679,6 +680,29 @@ describe("settleExpiredMintQuotes", () => {
     expect(result).toEqual({ failed: 0, leftForRecovery: 0, unobserved: 0 });
     expect(observePendingOperation).not.toHaveBeenCalled();
     expect(failPendingOperation).not.toHaveBeenCalled();
+  });
+
+  it("skips quotes at probe-unreachable mints without spending the budget", async () => {
+    const ops = [
+      pendingMintOp({ id: "dead-1", mintUrl: "https://dead.example.com" }),
+      pendingMintOp({ id: "dead-2", mintUrl: "https://dead.example.com/" }),
+      pendingMintOp({ id: "live-1", mintUrl: "https://live.example.com" }),
+    ];
+    const { source, observePendingOperation, failPendingOperation } =
+      fakeSource(ops);
+
+    const result = await settleExpiredMintQuotes(
+      source,
+      NOW_MS,
+      undefined,
+      { unreachableMints: new Set(["https://dead.example.com"]) },
+    );
+
+    expect(result).toEqual({ failed: 1, leftForRecovery: 0, unobserved: 2 });
+    // Only the reachable mint was asked anything.
+    expect(observePendingOperation).toHaveBeenCalledTimes(1);
+    expect(observePendingOperation.mock.calls[0]?.[0]).toBe("live-1");
+    expect(failPendingOperation).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1536,7 +1560,7 @@ describe("runMintQuoteRecovery", () => {
 
   it("skips operations whose earlier recovery is still in flight", async () => {
     const outstanding = new Map<string, Promise<unknown>>([
-      ["op-1", new Promise(() => {})],
+      ["mint:op-1", new Promise(() => {})],
     ]);
     const { source, finalize, observePendingOperation } = fakeSource(
       [mintOp()],
@@ -1567,14 +1591,14 @@ describe("runMintQuoteRecovery", () => {
     });
 
     expect(first).toMatchObject({ retryable: 1, recovered: 0 });
-    expect(outstanding.has("op-1")).toBe(true);
+    expect(outstanding.has("mint:op-1")).toBe(true);
     // The abandoned mint request must not be retried underneath.
     expect(second).toMatchObject({ busy: 1, checked: 0 });
   });
 
   it("does not re-open a failed operation whose recovery is in flight", async () => {
     const outstanding = new Map<string, Promise<unknown>>([
-      ["op-1", new Promise(() => {})],
+      ["mint:op-1", new Promise(() => {})],
     ]);
     const { source, reopenFailedOperation } = fakeSource(
       [mintOp({ state: "failed" })],
@@ -1629,8 +1653,78 @@ describe("runMintQuoteRecovery", () => {
     });
 
     expect(first).toMatchObject({ retryable: 1, checked: 1 });
-    expect(outstanding.has("op-1")).toBe(true);
+    expect(outstanding.has("mint:op-1")).toBe(true);
     expect(second).toMatchObject({ busy: 1, checked: 0 });
     expect(finalize).not.toHaveBeenCalled();
+  });
+});
+
+describe("createRecoveryGate", () => {
+  const HEALTHY = "https://healthy.example.com";
+  const STUCK = "https://stuck.example.com";
+
+  function settled(promise: Promise<unknown>): Promise<boolean> {
+    return Promise.race([
+      promise.then(() => true, () => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+    ]);
+  }
+
+  it("lets a mint without stuck operations proceed while another mint recovers", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    // Recovery is still running (complete() never called), yet the healthy
+    // mint must not be blocked by the stuck one.
+    await gate.waitForRecovery(HEALTHY);
+  });
+
+  it("holds a mint with stuck operations until recovery completes", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    const waiting = gate.waitForRecovery(STUCK);
+    expect(await settled(waiting)).toBe(false);
+    gate.complete();
+    await waiting;
+  });
+
+  it("waits for the stuck-mint enumeration before deciding", async () => {
+    const gate = createRecoveryGate();
+    const waiting = gate.waitForRecovery(HEALTHY);
+    expect(await settled(waiting)).toBe(false);
+    gate.publishStuckMints(new Set([STUCK]));
+    await waiting;
+  });
+
+  it("holds callers without a target mint until recovery completes", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    const waiting = gate.waitForRecovery();
+    expect(await settled(waiting)).toBe(false);
+    gate.complete();
+    await waiting;
+  });
+
+  it("poisons every caller after a recovery failure", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    gate.fail("disk exploded");
+    await expect(gate.waitForRecovery(HEALTHY)).rejects.toThrow(
+      "Wallet is not ready: disk exploded",
+    );
+    await expect(gate.waitForRecovery(STUCK)).rejects.toThrow(
+      "Wallet is not ready: disk exploded",
+    );
+    await expect(gate.waitForRecovery()).rejects.toThrow(
+      "Wallet is not ready: disk exploded",
+    );
+  });
+
+  it("falls back to the global gate for unparseable mint URLs", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    const waiting = gate.waitForRecovery("not a url");
+    expect(await settled(waiting)).toBe(false);
+    gate.complete();
+    await waiting;
   });
 });
