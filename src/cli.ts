@@ -155,6 +155,36 @@ async function waitForMintQuote(operationId: string): Promise<void> {
   }
 }
 
+/**
+ * Warn that value-moving wallet operations will block until startup recovery
+ * finishes. Reads stay available, but the daemon gates send/receive behind the
+ * recovery gate, so without this notice the CLI would appear to hang silently
+ * after a restart.
+ */
+async function warnIfWalletRecovering(): Promise<void> {
+  try {
+    await ensureDaemonRunning();
+    const result = await callDaemon("/wallet/status");
+    const output = result.output as
+      | { state?: string; recovery?: { phase?: string } }
+      | undefined;
+    if (output?.state !== "RECOVERING") return;
+
+    const phase = output.recovery?.phase;
+    console.error(
+      "Wallet is recovering from a previous run (this only happens after a restart).",
+    );
+    if (phase && phase !== "done") {
+      console.error(`Recovery phase: ${phase}.`);
+    }
+    console.error(
+      "Please wait — send and receive resume as soon as recovery completes.",
+    );
+  } catch {
+    // Status is best-effort; never block the real command on it.
+  }
+}
+
 export function initializeWallet(walletDir = defaultWalletDir()): void {
   const walletConfig = join(walletDir, "config.json");
 
@@ -1950,6 +1980,7 @@ program
   )
   .option("--mint-url <url>", "Mint URL to use")
   .action(async (target: string, options: { mintUrl?: string }) => {
+    await warnIfWalletRecovering();
     if (isPositiveIntegerString(target)) {
       await handleDaemonCommand("/wallet/send/cashu", {
         method: "POST",
@@ -1977,6 +2008,7 @@ program
   )
   .option("--mint-url <url>", "Mint URL to use for bolt11 receive")
   .action(async (value: string, options: { mintUrl?: string }) => {
+    await warnIfWalletRecovering();
     if (isPositiveIntegerString(value)) {
       try {
         await ensureDaemonRunning();
@@ -2304,6 +2336,7 @@ walletReceiveCmd
   .command("cashu <token>")
   .description("Receive a Cashu token")
   .action(async (token: string) => {
+    await warnIfWalletRecovering();
     await handleDaemonCommand("/wallet/receive/cashu", {
       method: "POST",
       body: { token },
@@ -2315,6 +2348,7 @@ walletReceiveCmd
   .description("Create a Lightning invoice")
   .option("--mint-url <url>", "Mint URL to use")
   .action(async (amount: string, options: { mintUrl?: string }) => {
+    await warnIfWalletRecovering();
     try {
       await ensureDaemonRunning();
 
@@ -2353,6 +2387,7 @@ walletSendCmd
   .description("Create a Cashu token to send")
   .option("--mint-url <url>", "Mint URL to use")
   .action(async (amount: string, options: { mintUrl?: string }) => {
+    await warnIfWalletRecovering();
     await handleDaemonCommand("/wallet/send/cashu", {
       method: "POST",
       body: {
@@ -2367,6 +2402,7 @@ walletSendCmd
   .description("Pay a Lightning invoice")
   .option("--mint-url <url>", "Mint URL to use")
   .action(async (invoice: string, options: { mintUrl?: string }) => {
+    await warnIfWalletRecovering();
     await handleDaemonCommand("/wallet/send/bolt11", {
       method: "POST",
       body: {
