@@ -8,7 +8,7 @@
         "@cashu/cashu-ts": "^4.3.0",
         "@cashu/coco-core": "^1.0.1",
         "@cashu/coco-sqlite-bun": "^1.0.1",
-        "@routstr/sdk": "^0.4.7",
+        "@routstr/sdk": "^0.4.8",
         "@scure/bip39": "^2.2.0",
         "applesauce-core": "^5.1.0",
         "applesauce-relay": "^5.1.0",
@@ -98,7 +98,7 @@
 
     "@panva/hpke-noble": ["@panva/hpke-noble@1.1.3", "", { "dependencies": { "@noble/ciphers": "^2.2.0", "@noble/curves": "^2.2.0", "@noble/hashes": "^2.2.0", "@noble/post-quantum": "^0.6.1" }, "peerDependencies": { "hpke": "^1.0.0" } }, "sha512-zPG7MR9x7QE7+KdYsKBO9H0vp3AdYt9/4AT3ab7T7W6SL0fdRqhgNRu8q4OGTJNLeKpdbkkRb6LhBDaA9+9xWQ=="],
 
-    "@routstr/sdk": ["@routstr/sdk@0.4.7", "", { "dependencies": { "@cashu/cashu-ts": "^3.1.1", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "applesauce-sqlite": "^6.0.0", "ehbp": "^0.3.2", "rxjs": "^7.8.1", "tinfoil": "^1.2.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^12.10.0" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-01oRnwUW9uZIOcpXiEi3LgnDip16WK0VHA16US3dv0izlGXxbfocVRND83vDpj5lmP/qy3j5w/81894HiuFhVQ=="],
+    "@routstr/sdk": ["@routstr/sdk@0.4.8", "", { "dependencies": { "@cashu/cashu-ts": "^4.11.0", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "applesauce-sqlite": "^6.0.0", "ehbp": "^0.3.2", "rxjs": "^7.8.1", "tinfoil": "^1.2.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^12.10.0" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-ThcV9OM4vang6V4L61bIwQCsP3yvWWoHv3MPmgLeR0PUbot3UiWl7tmRAGe66CzGDy9UUd1z/ACSjUtmpb6GfQ=="],
 
     "@scure/base": ["@scure/base@2.2.0", "", {}, "sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg=="],
 
@@ -366,7 +366,7 @@
 
     "@panva/hpke-noble/@noble/ciphers": ["@noble/ciphers@2.2.0", "", {}, "sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA=="],
 
-    "@routstr/sdk/@cashu/cashu-ts": ["@cashu/cashu-ts@3.7.1", "", { "dependencies": { "@noble/curves": "^2.2.0", "@noble/hashes": "^2.2.0", "@scure/base": "^2.2.0", "@scure/bip32": "^2.2.0" } }, "sha512-EdUdjR6D0eY1YT6irNh/d5SBRc/ug4WNpnlLBXbRI9iOb8UNnQeGfk9CJQWL9ElQMjQ/4g582SehKXzEAZ2vnw=="],
+    "@routstr/sdk/@cashu/cashu-ts": ["@cashu/cashu-ts@4.11.0", "", { "dependencies": { "@noble/curves": "^2.4.0", "@noble/hashes": "^2.4.0", "@scure/base": "^2.4.0", "@scure/bip32": "^2.4.0" } }, "sha512-euNst5ZZCCAYDpIs9qXm0CElJYgvUargsODu+WvlI7SiRCVjTEPOIoeSsdBuEfj30qYfyufBopEDipVzS0d22Q=="],
 
     "applesauce-common/applesauce-core": ["applesauce-core@6.2.0", "", { "dependencies": { "debug": "^4.4.0", "fast-deep-equal": "^3.1.3", "hash-sum": "^2.0.0", "nanoid": "^5.0.9", "nostr-tools": "~2.19", "rxjs": "^7.8.1" } }, "sha512-O6AlVyzqcuIhTOIuexm6UWmx7mRIa2D98gJP7K7vFGf90YdtvSH78AsKQWZXJ0Pk/K14at+9zkwfCkFr7ghgNw=="],
 
@@ -399,6 +399,14 @@
     "npubcash-sdk/@cashu/cashu-ts": ["@cashu/cashu-ts@3.7.1", "", { "dependencies": { "@noble/curves": "^2.2.0", "@noble/hashes": "^2.2.0", "@scure/base": "^2.2.0", "@scure/bip32": "^2.2.0" } }, "sha512-EdUdjR6D0eY1YT6irNh/d5SBRc/ug4WNpnlLBXbRI9iOb8UNnQeGfk9CJQWL9ElQMjQ/4g582SehKXzEAZ2vnw=="],
 
     "@freedomofpress/crypto-browser/@noble/curves/@noble/hashes": ["@noble/hashes@1.8.0", "", {}, "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A=="],
+
+    "@routstr/sdk/@cashu/cashu-ts/@noble/curves": ["@noble/curves@2.4.0", "", { "dependencies": { "@noble/hashes": "2.4.0" } }, "sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew=="],
+
+    "@routstr/sdk/@cashu/cashu-ts/@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
+
+    "@routstr/sdk/@cashu/cashu-ts/@scure/base": ["@scure/base@2.4.0", "", {}, "sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg=="],
+
+    "@routstr/sdk/@cashu/cashu-ts/@scure/bip32": ["@scure/bip32@2.4.0", "", { "dependencies": { "@noble/curves": "2.4.0", "@noble/hashes": "2.4.0", "@scure/base": "2.4.0" } }, "sha512-i3DS0CptAocyvqE4n3SUkpzeQK4vJMFwWLofTwRiiKo2aWojBOfyMCgfKw9HVpO6fSY5AK86sHS/Uzn8kK9Few=="],
 
     "applesauce-common/applesauce-core/nostr-tools": ["nostr-tools@2.19.4", "", { "dependencies": { "@noble/ciphers": "^0.5.1", "@noble/curves": "1.2.0", "@noble/hashes": "1.3.1", "@scure/base": "1.1.1", "@scure/bip32": "1.3.1", "@scure/bip39": "1.2.1", "nostr-wasm": "0.1.0" }, "peerDependencies": { "typescript": ">=5.0.0" }, "optionalPeers": ["typescript"] }, "sha512-qVLfoTpZegNYRJo5j+Oi6RPu0AwLP6jcvzcB3ySMnIT5DrAGNXfs5HNBspB/2HiGfH3GY+v6yXkTtcKSBQZwSg=="],
 
