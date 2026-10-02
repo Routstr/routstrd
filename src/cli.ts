@@ -2062,16 +2062,22 @@ walletCmd
   .option("--mint-url <url>", "Only clean up operations for this mint URL")
   .option(
     "--min-age <hours>",
-    "Minimum age for reclaiming sends/cancelling melts, in hours (default: 168, one week; expired mint quotes are always failed)",
+    "Minimum age for reclaiming sends/cancelling melts, in hours (default: 168, one week; expired mint quotes are checked with their mint)",
     "168",
   )
   .option("--dry-run", "Report what would be cleaned without applying changes", false)
+  .option(
+    "--force",
+    "Fail expired mint quotes without confirming UNPAID with the mint (may strand paid quotes)",
+    false,
+  )
   .option("-y, --yes", "Skip confirmation prompt", false)
   .action(
     async (options: {
       mintUrl?: string;
       minAge: string;
       dryRun: boolean;
+      force: boolean;
       yes: boolean;
     }) => {
       const minAgeHours = Number.parseFloat(options.minAge);
@@ -2087,7 +2093,9 @@ walletCmd
         });
         const answer = await new Promise<string>((resolve) => {
           rl.question(
-            "This will fail expired mint quotes, reclaim old pending sends, and cancel prepared melts. Continue? [y/N] ",
+            options.force
+              ? "WARNING: --force fails expired mint quotes WITHOUT checking the mint and may strand paid sats. It also reclaims old pending sends and cancels prepared melts. Continue? [y/N] "
+              : "This will fail expired mint quotes confirmed unpaid, reclaim old pending sends, and cancel prepared melts. Continue? [y/N] ",
             (value: string) => {
               rl.close();
               resolve(value.trim().toLowerCase());
@@ -2109,6 +2117,7 @@ walletCmd
             mintUrl: options.mintUrl,
             minAgeMs: Math.round(minAgeHours * 60 * 60 * 1000),
             dryRun: options.dryRun === true,
+            force: options.force === true,
           },
         });
 
@@ -2121,6 +2130,8 @@ walletCmd
           | {
               dryRun?: boolean;
               failedMintQuotes?: number;
+              mintQuoteCandidates?: number;
+              leftForRecovery?: number;
               reclaimedSends?: number;
               cancelledMelts?: number;
               skipped?: number;
@@ -2131,8 +2142,15 @@ walletCmd
         if (output) {
           const prefix = output.dryRun ? "Would clean up:" : "Cleaned up:";
           console.log(prefix);
+          if (output.dryRun) {
+            console.log(
+              `  Expired mint quote candidates (not checked with mint): ${output.mintQuoteCandidates ?? 0}`,
+            );
+          } else {
+            console.log(`  Expired mint quotes failed: ${output.failedMintQuotes ?? 0}`);
+          }
           console.log(
-            `  Expired mint quotes failed: ${output.failedMintQuotes ?? 0}`,
+            `  Expired quotes kept for recovery (paid/issued/unverified): ${output.leftForRecovery ?? 0}`,
           );
           console.log(`  Pending sends reclaimed: ${output.reclaimedSends ?? 0}`);
           console.log(
@@ -2140,6 +2158,124 @@ walletCmd
           );
           console.log(
             `  Skipped (still recent or already terminal): ${output.skipped ?? 0}`,
+          );
+          if (output.errors && output.errors.length > 0) {
+            console.log("\nErrors:");
+            for (const e of output.errors) {
+              console.log(`  - ${e.operationId}: ${e.error}`);
+            }
+          }
+        }
+      } catch (error) {
+        const message = (error as Error).message;
+        if (
+          message?.includes("fetch failed") ||
+          message?.includes("Connection refused")
+        ) {
+          console.error("Daemon is not running");
+          process.exit(1);
+        }
+        console.error(message);
+        process.exit(1);
+      }
+    },
+  );
+
+walletCmd
+  .command("recover")
+  .description(
+    "Retry mint quotes using their stored outputs (does not replace rejected outputs)",
+  )
+  .option(
+    "--op <id>",
+    "Recover this operation id (repeatable; find IDs with routstrd history --json)",
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[],
+  )
+  .option(
+    "--include-failed",
+    "Also re-open operations coco already gave up on (requires --op)",
+    false,
+  )
+  .option("-y, --yes", "Skip confirmation prompt", false)
+  .action(
+    async (options: {
+      op: string[];
+      includeFailed: boolean;
+      yes: boolean;
+    }) => {
+      const operationIds = options.op ?? [];
+      if (options.includeFailed && operationIds.length === 0) {
+        console.error(
+          "--include-failed can only target operations named with --op",
+        );
+        process.exit(1);
+      }
+
+      if (!options.yes) {
+        const rl = require("readline").createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        const prompt =
+          operationIds.length > 0
+            ? `Recover ${operationIds.length} mint quote operation(s)? [y/N] `
+            : "Check every pending mint quote with its mint and claim any paid sats? [y/N] ";
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(prompt, (value: string) => {
+            rl.close();
+            resolve(value.trim().toLowerCase());
+          });
+        });
+        if (answer !== "y" && answer !== "yes") {
+          console.log("Aborted.");
+          return;
+        }
+      }
+
+      try {
+        await ensureDaemonRunning();
+
+        const result = await callDaemon("/wallet/recover", {
+          method: "POST",
+          body: {
+            operationIds: operationIds.length > 0 ? operationIds : undefined,
+            includeFailed: options.includeFailed === true,
+          },
+        });
+
+        if (result.error) {
+          console.log(result.error);
+          process.exit(1);
+        }
+
+        const output = result.output as
+          | {
+              checked?: number;
+              recovered?: number;
+              waiting?: number;
+              terminal?: number;
+              reopened?: number;
+              retryable?: number;
+              busy?: number;
+              errors?: Array<{ operationId: string; error: string }>;
+            }
+          | undefined;
+
+        if (output) {
+          console.log("Mint quote recovery:");
+          console.log(`  Checked with mint: ${output.checked ?? 0}`);
+          console.log(
+            `  Recovered (paid sats claimed): ${output.recovered ?? 0}`,
+          );
+          console.log(`  Still unpaid: ${output.waiting ?? 0}`);
+          console.log(`  No longer issuable: ${output.terminal ?? 0}`);
+          console.log(
+            `  Re-opened failed operations: ${output.reopened ?? 0}`,
+          );
+          console.log(`  Left for a later run: ${output.retryable ?? 0}`);
+          console.log(
+            `  Skipped (recovery still running): ${output.busy ?? 0}`,
           );
           if (output.errors && output.errors.length > 0) {
             console.log("\nErrors:");
