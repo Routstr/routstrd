@@ -1355,6 +1355,32 @@ describe("runMintQuoteRecovery", () => {
     expect(result.errors).toEqual([{ operationId: "op-1", error: "original failure" }]);
   });
 
+  it("surfaces the persisted mint error even when the mint budget is nearly spent", async () => {
+    const { source } = fakeSource([mintOp()], {
+      observe: async () => ({ category: "ready" }),
+      finalize: async () => {
+        // Consume almost the whole per-op mint budget before throwing: exactly
+        // the slow-mint case where a diagnostic bound to remaining() would
+        // starve and silently fall back to the generic message.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        throw new Error("remains pending");
+      },
+    });
+    source.ops.mint.get = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return {
+        ...mintOp(),
+        state: "pending",
+        error: "keyset id inactive.",
+      };
+    };
+    const result = await runMintQuoteRecovery(source, { timeoutMs: 30 });
+    expect(result).toMatchObject({ retryable: 1, recovered: 0 });
+    expect(result.errors).toEqual([
+      { operationId: "op-1", error: "keyset id inactive." },
+    ]);
+  });
+
   it("bounds finalize so one hung mint cannot block recovery", async () => {
     const { source } = fakeSource([mintOp()], {
       observe: async () => ({ category: "ready" }),

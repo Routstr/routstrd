@@ -1003,6 +1003,14 @@ export function createRunQueue(): <T>(run: () => Promise<T>) => Promise<T> {
 const MINT_QUOTE_RECOVERY_TIMEOUT_MS = 20_000;
 
 /**
+ * Bound for the local post-finalize diagnostic read. This is a database
+ * lookup, not a mint round-trip, so it gets its own small budget: the per-op
+ * mint budget is often already spent when finalize throws, and a starved
+ * diagnostic would silently fall back to the generic error message.
+ */
+const DIAGNOSTIC_LOOKUP_TIMEOUT_MS = 250;
+
+/**
  * Recover mint quotes whose sats are PAID at the mint but were never claimed.
  *
  * For every target the mint is asked for the current quote state, and only it
@@ -1142,7 +1150,8 @@ export async function runMintQuoteRecovery(
     }
     result.checked++;
     // One budget per operation, shared by the mint check and the finalize, so
-    // a slow mint cannot silently double the documented per-quote wait.
+    // a slow mint cannot silently double the documented per-quote wait. The
+    // local post-finalize diagnostic read is exempt (DIAGNOSTIC_LOOKUP_TIMEOUT_MS).
     const deadlineAt = Date.now() + timeoutMs;
     const remaining = () => Math.max(1, deadlineAt - Date.now());
 
@@ -1225,7 +1234,7 @@ export async function runMintQuoteRecovery(
         // persisted the actionable mint rejection (for example inactive keyset).
         const current = await withTimeout(
           source.ops.mint.get(operationId),
-          remaining(),
+          Math.max(remaining(), DIAGNOSTIC_LOOKUP_TIMEOUT_MS),
         ).catch(() => null);
         const detail = current?.state === "pending" && current.error
           ? current.error
