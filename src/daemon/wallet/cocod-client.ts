@@ -83,13 +83,23 @@ export interface WalletCleanupOptions {
   minAgeMs?: number;
   /** Report what would be cleaned without applying changes. */
   dryRun?: boolean;
+  /**
+   * Fail expired mint quotes without confirming UNPAID with the mint. Only for
+   * operators who accept the risk of stranding a quote that was paid before
+   * its invoice expired; recovery is the safe default.
+   */
+  force?: boolean;
 }
 
 /** Summary of a wallet cleanup run. */
 export interface WalletCleanupResult {
   dryRun: boolean;
-  /** Number of expired pending mint quotes marked as failed. */
+  /** Expired quotes selected for checking; dry runs do not contact the mint. */
+  mintQuoteCandidates: number;
+  /** Number actually marked failed (always zero in a dry run). */
   failedMintQuotes: number;
+  /** Expired quotes kept pending because they are paid/issued or unverified. */
+  leftForRecovery: number;
   /** Number of stale pending send operations reclaimed. */
   reclaimedSends: number;
   /** Number of stale prepared melt operations cancelled. */
@@ -120,6 +130,51 @@ export interface MintQuoteStatus {
   error?: string;
 }
 
+/** Options for explicit PAID mint-quote recovery. */
+export interface WalletMintQuoteRecoveryOptions {
+  /** Target only these operation ids (may include failed operations). */
+  operationIds?: string[];
+  /** Re-open failed operations instead of skipping them. */
+  includeFailed?: boolean;
+  /** Per-quote mint timeout in milliseconds. */
+  timeoutMs?: number;
+}
+
+/** Summary of a PAID mint-quote recovery run. */
+export interface WalletMintQuoteRecoveryResult {
+  /** Operations whose quote state was checked with the mint. */
+  checked: number;
+  /** Operations whose paid sats were minted or restored. */
+  recovered: number;
+  /** Quotes the mint still reports UNPAID; left pending. */
+  waiting: number;
+  /** Quotes the mint can no longer issue. */
+  terminal: number;
+  /** Failed operations moved back to pending before checking. */
+  reopened: number;
+  /** Operations left to a later run (mint unreachable, budget spent, non-terminal). */
+  retryable: number;
+  /** Operations skipped because an earlier recovery of them is still running. */
+  busy: number;
+  errors: Array<{ operationId: string; error: string }>;
+}
+
+/** Summary of a stuck-operation (send/melt/mint) recovery run. */
+export interface WalletStuckOperationRecoveryResult {
+  /** Timed-out waits; the underlying operation remains tracked. */
+  timedOut: number;
+  /** Operations for which recovery was attempted (not necessarily completed). */
+  attempted: number;
+  /** Locked operations or unfinished work from another pass; retry later. */
+  busy: number;
+  /** Operations skipped for unreachable mints, shutdown, or pass budget exhaustion. */
+  skipped: number;
+  /** Operations at reachable mints whose recovery still failed. */
+  failed: number;
+  /** Unreachable mint URL -> number of operations skipped there. */
+  skippedMints: Record<string, number>;
+}
+
 export interface CocodClient {
   ping(): Promise<boolean>;
   getStatus(): Promise<CocodState>;
@@ -142,6 +197,8 @@ export interface CocodClient {
   /** Release resources held by in-process wallet implementations. */
   dispose?(): Promise<void>;
   getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
+  /** Look up a single transaction by its history entry ID. */
+  getHistoryEntryById(id: string): Promise<HistoryEntry | null>;
   /** NPC (npubx.cash) Lightning address for this wallet. */
   getNpcAddress(): Promise<NpcAddress>;
   /** Claim an NPC username; pass confirm=true to pay the claim fee from the wallet. */
@@ -152,6 +209,20 @@ export interface CocodClient {
   cleanupStuckOperations?(
     options?: WalletCleanupOptions,
   ): Promise<WalletCleanupResult>;
+  /**
+   * Re-issue PAID mint quotes whose sats were never claimed, optionally
+   * targeting specific operations (including ones coco already failed).
+   */
+  recoverMintQuotes?(
+    options?: WalletMintQuoteRecoveryOptions,
+    onProgress?: (message: string) => void,
+  ): Promise<WalletMintQuoteRecoveryResult>;
+  /**
+   * Recover stuck send/melt/mint operations whose mints answer a
+   * reachability probe. Operations a live execute holds are reported busy,
+   * never driven. Receive stays startup-only (receive dedup classification).
+   */
+  recoverStuckOperations?(): Promise<WalletStuckOperationRecoveryResult>;
   /** Report background wallet recovery progress, when the wallet supports it. */
   getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }
@@ -464,6 +535,9 @@ export function createCocodClient(
     },
     async getHistory(_offset?: number, _limit?: number): Promise<HistoryEntry[]> {
       return [];
+    },
+    async getHistoryEntryById(_id: string): Promise<HistoryEntry | null> {
+      return null;
     },
     async getNpcAddress(): Promise<NpcAddress> {
       const address = await callDaemon<string>("/npc/address");

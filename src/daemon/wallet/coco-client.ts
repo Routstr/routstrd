@@ -1,4 +1,5 @@
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
+import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
 import {
   Manager,
   OperationInProgressError,
@@ -37,7 +38,19 @@ import type {
   WalletCleanupResult,
   WalletRecoveryProgress,
 } from "./cocod-client";
-import { selectCleanupOperations } from "./cleanup";
+import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
+import {
+  classifyMintQuoteObservation,
+  selectMintQuotesForRecovery,
+  type MintQuoteRecoveryCandidate,
+} from "./mint-quote-recovery";
+import {
+  collectStuckOperations,
+  probeMintReachability,
+  runTargetedRecovery,
+  type SendRecoveryService,
+  type StuckOperation,
+} from "./recovery-probe";
 import {
   clearInterruptedReceiveReservations,
   deleteReceiveTokenReservation,
@@ -580,6 +593,96 @@ interface MintOperationServiceCleanup {
   observePendingOperation(
     operationId: string,
   ): Promise<{ category: "waiting" | "ready" | "completed" | "terminal" }>;
+  /**
+   * Acquire coco's per-operation lock for `operationId` and return its release
+   * function. coco's execute/finalize/recover paths take the same lock, so
+   * holding it across a read-check-write makes the transition atomic with
+   * respect to them.
+   */
+  acquireOperationLock(operationId: string): Promise<() => void>;
+  /** Reload a mint operation row, or null when it no longer exists. */
+  getOperation(operationId: string): Promise<Record<string, unknown> | null>;
+  /**
+   * Put a terminally failed operation back into `pending`.
+   *
+   * coco keeps this private, and it spreads whatever it is handed into the row
+   * it writes. The sqlite repository rewrites every column, so callers MUST
+   * pass a freshly reloaded full row: a partial object such as `{ id }` would
+   * erase `outputDataJson` and make the paid sats unrecoverable.
+   */
+  transitionToPending(
+    op: Record<string, unknown>,
+    error?: string,
+  ): Promise<unknown>;
+}
+
+/**
+ * Re-open a terminally failed mint operation so recovery can retry it.
+ *
+ * Two details make this safe:
+ *
+ * - The persisted row is reloaded and handed to coco in full. coco spreads
+ *   whatever it is given and the sqlite repository rewrites every column, so a
+ *   partial object would be rejected by the NOT NULL schema or, on a more
+ *   permissive adapter, erase the stored outputs.
+ * - The read-check-write runs under coco's per-operation lock, the same lock
+ *   coco's execute/finalize/recover paths take. Reloading alone only narrows
+ *   the race: without the lock two concurrent recoveries could both see
+ *   `failed` and the slower one would clobber a newer state.
+ *
+ * The lock is fail-fast rather than wait-based: coco's `OperationIdLock.acquire`
+ * throws `OperationInProgressError` when the id is already locked. So either
+ * this helper holds the lock - and coco's own execute/finalize/recover paths
+ * cannot interleave, because acquiring would throw for them too - or it throws
+ * and writes nothing. It never waits, and never writes without the lock, which
+ * is why a stale `failed` snapshot cannot clobber a newer state.
+ *
+ * Scope of that lock, in this coco version: `recordPendingObservation` and
+ * `failPendingOperation` write without taking it. The justified claim is
+ * therefore narrow - a re-open cannot clobber a concurrent executing/recovery
+ * pass - not a general guarantee against every watcher write.
+ *
+ * This is a compatibility shim over private coco internals, so it fails closed:
+ * if any of the expected methods are missing it throws before writing. That
+ * check only catches removals, not changed behaviour under the same name: it
+ * was written against @cashu/coco-core 1.0.1, so any coco bump must re-run the
+ * real-Manager and fake-mint integration tests. The long-term fix is an
+ * upstream public `reopenFailedOperation(id)` that takes the same lock, reloads
+ * the full row, preserves the outputs and emits the usual events.
+ */
+export async function reopenFailedMintOperation(
+  service: Pick<
+    MintOperationServiceCleanup,
+    "acquireOperationLock" | "getOperation" | "transitionToPending"
+  >,
+  operationId: string,
+): Promise<boolean> {
+  for (const method of [
+    "acquireOperationLock",
+    "getOperation",
+    "transitionToPending",
+  ] as const) {
+    if (typeof service[method] !== "function") {
+      throw new Error(
+        `coco mintOperationService.${method} is unavailable; refusing to re-open a failed mint operation`,
+      );
+    }
+  }
+  const release = await service.acquireOperationLock(operationId);
+  try {
+    const current = await service.getOperation(operationId);
+    if (!current) throw new Error(`Operation ${operationId} not found`);
+    if (current.state !== "failed") return false;
+    // Clearing the terminal-failure marker keeps the re-opened row from
+    // looking terminally failed to readers that inspect it alongside `state`.
+    await service.transitionToPending(
+      { ...current, terminalFailure: undefined },
+      undefined,
+    );
+    return true;
+  } finally {
+    release();
+  }
 }
 
 export interface CreateCocoClientOptions {
@@ -630,6 +733,7 @@ const EXPIRED_MINT_OBSERVATION_DEADLINE_MS = 15_000;
 
 /** Rejects when `timeoutMs` elapses before `promise` settles. */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  if (timeoutMs === Infinity) return promise;
   return withRequestTimeout(promise, timeoutMs, "Timed out contacting mint");
 }
 
@@ -663,6 +767,57 @@ export interface ExpiredMintSettlement {
   unobserved: number;
 }
 
+/** Outcome of asking a mint about one expired pending quote. */
+export type ExpiredMintQuoteOutcome =
+  | "failed"
+  | "leftForRecovery"
+  | "unobserved";
+
+/**
+ * Decide one expired pending quote's fate by asking the mint.
+ *
+ * Expiry alone does not prove the quote was never paid: the Lightning payment
+ * can land just before expiry while the daemon is down, leaving no local
+ * observation. A quote the mint still reports UNPAID can never be issued and
+ * is safe to fail locally; anything else (PAID/ISSUED, or a mint that cannot
+ * answer) stays pending so recovery can still claim the sats.
+ */
+export async function failExpiredMintQuoteIfUnpaid(
+  mintService: Pick<
+    MintOperationServiceCleanup,
+    "observePendingOperation" | "failPendingOperation"
+  >,
+  operationId: string,
+  timeoutMs: number,
+): Promise<{
+  outcome: ExpiredMintQuoteOutcome;
+  category?: "waiting" | "ready" | "completed" | "terminal";
+  error?: unknown;
+}> {
+  try {
+    const observation = await withTimeout(
+      mintService.observePendingOperation(operationId),
+      timeoutMs,
+    );
+    if (observation.category !== "waiting") {
+      return { outcome: "leftForRecovery", category: observation.category };
+    }
+    // The mint confirms the expired quote is still unpaid: it can never be
+    // issued now, so failing it locally cannot strand funds.
+    await mintService.failPendingOperation(
+      { id: operationId },
+      {
+        reason: "Expired mint quote confirmed unpaid by mint",
+        retryable: false,
+        observedAt: Date.now(),
+      },
+    );
+    return { outcome: "failed", category: observation.category };
+  } catch (error) {
+    return { outcome: "unobserved", error };
+  }
+}
+
 /**
  * Settle expired pending mint quotes before the mint recovery sweep runs.
  *
@@ -684,6 +839,7 @@ export async function settleExpiredMintQuotes(
   source: ExpiredMintQuoteSource,
   nowMs: number,
   deadlineMs: number = EXPIRED_MINT_OBSERVATION_DEADLINE_MS,
+  options: { unreachableMints?: Set<string>; outstanding?: RecoveryWork; shouldStop?: () => boolean } = {},
 ): Promise<ExpiredMintSettlement> {
   const pendingMints = await source.ops.mint.listPending();
   const selection = selectCleanupOperations({
@@ -704,6 +860,25 @@ export async function settleExpiredMintQuotes(
 
   const startedAt = Date.now();
   for (const op of candidates) {
+    if (options.shouldStop?.() || options.outstanding?.has(recoveryKey("mint", op.id))) {
+      settlement.unobserved++; continue;
+    }
+    // A mint the startup probe already found unreachable cannot answer an
+    // observation either; skip it without spending the shared wall-clock
+    // budget, leaving the quote pending for a later startup.
+    if (options.unreachableMints) {
+      let mintUrl = op.mintUrl;
+      try {
+        mintUrl = normalizeMintUrl(op.mintUrl);
+      } catch {
+        // Malformed persisted URL: probe keys are raw for those, and the
+        // observation below would fail anyway, landing in `unobserved`.
+      }
+      if (options.unreachableMints.has(mintUrl)) {
+        settlement.unobserved++;
+        continue;
+      }
+    }
     const remainingMs = deadlineMs - (Date.now() - startedAt);
     if (remainingMs <= 0) {
       const skipped =
@@ -718,50 +893,401 @@ export async function settleExpiredMintQuotes(
       break;
     }
 
-    try {
-      const result = await withTimeout(
-        source.mintOperationService.observePendingOperation(op.id),
-        remainingMs,
+    // Track the complete observation/failure chain, not just its bounded wait.
+    const work = failExpiredMintQuoteIfUnpaid(source.mintOperationService, op.id, Infinity);
+    if (options.outstanding) trackRecovery(options.outstanding, recoveryKey("mint", op.id), work);
+    const check = await waitForRecoveryWork(work, remainingMs).catch(error => ({
+      outcome: "unobserved" as const, error, category: undefined,
+    }));
+    if (check.outcome === "failed") {
+      settlement.failed++;
+    } else if (check.outcome === "leftForRecovery") {
+      // PAID/ISSUED (or terminally failed) at the mint: normal recovery
+      // must see this quote so paid proofs get claimed.
+      settlement.leftForRecovery++;
+      const observed =
+        check.category === "ready"
+          ? "was paid at the mint"
+          : check.category === "completed"
+            ? "was already issued at the mint"
+            : "failed terminally at the mint";
+      startupProgress(
+        `Expired mint quote ${op.quoteId ?? op.id} at ${op.mintUrl} ${observed}; leaving it for mint recovery.`,
       );
-      if (result.category === "waiting") {
-        // The mint confirms the expired quote is still unpaid: it can never
-        // be issued now, so failing it locally cannot strand funds.
-        await source.mintOperationService.failPendingOperation(
-          { id: op.id },
-          {
-            reason: "Expired mint quote confirmed unpaid by mint",
-            retryable: false,
-            observedAt: Date.now(),
-          },
-        );
-        settlement.failed++;
-      } else {
-        // PAID/ISSUED (or terminally failed) at the mint: normal recovery
-        // must see this quote so paid proofs get claimed.
-        settlement.leftForRecovery++;
-        const observed =
-          result.category === "ready"
-            ? "was paid at the mint"
-            : result.category === "completed"
-              ? "was already issued at the mint"
-              : "failed terminally at the mint";
-        startupProgress(
-          `Expired mint quote ${op.quoteId ?? op.id} at ${op.mintUrl} ${observed}; leaving it for mint recovery.`,
-        );
-      }
-    } catch (error) {
+    } else {
       // Mint unreachable, too slow, or the quote unknown to it: leave the
       // operation pending so a later startup can still recover it.
       settlement.unobserved++;
       logger.warn("Could not check expired mint quote; leaving it pending", {
         operationId: op.id,
         mintUrl: op.mintUrl,
-        error: error instanceof Error ? error.message : String(error),
+        error:
+          check.error instanceof Error
+            ? check.error.message
+            : String(check.error),
       });
     }
   }
 
   return settlement;
+}
+
+/**
+ * Source for explicit PAID mint-quote recovery.
+ *
+ * Unlike the startup sweeps this also accepts caller-supplied operation ids so
+ * an operator can target a quote coco already gave up on (state `failed`).
+ */
+export interface MintQuoteRecoverySource {
+  ops: {
+    mint: {
+      listPending(): Promise<MintQuoteRecoveryCandidate[]>;
+      get(operationId: string): Promise<MintQuoteRecoveryCandidate | null>;
+      finalize(operationId: string): Promise<unknown>;
+    };
+  };
+  mintOperationService: Pick<
+    MintOperationServiceCleanup,
+    "observePendingOperation"
+  >;
+  /**
+   * Re-open a failed operation so it can be recovered; false when it is no
+   * longer failed. Implementations must reload the full row (see
+   * `reopenFailedMintOperation`).
+   */
+  reopenFailedOperation(operationId: string): Promise<boolean>;
+}
+
+export interface MintQuoteRecoveryOptions {
+  shouldStop?: () => boolean;
+  /** Target only these operation ids (may include failed operations). */
+  operationIds?: string[];
+  /** Per-quote budget for observing the mint and finalizing the operation. */
+  timeoutMs?: number;
+  /**
+   * Re-open failed operations instead of skipping them. Only applies to
+   * operations named by `operationIds`: coco's pending listing never returns
+   * failed operations, so they can only be recovered by explicit id.
+   */
+  includeFailed?: boolean;
+  /**
+   * In-flight recovery work keyed by family:id (mint:<operation id>), shared across runs.
+   * withTimeout does not cancel the underlying request, so a timed-out quote
+   * check or finalize must keep blocking a retry until it actually settles.
+   */
+  outstanding?: Map<string, Promise<unknown>>;
+}
+
+export interface MintQuoteRecoveryResult {
+  /** Operations recovery acted on. */
+  checked: number;
+  /** Operations whose paid sats were minted or restored. */
+  recovered: number;
+  /** Quotes the mint still reports UNPAID; left pending. */
+  waiting: number;
+  /**
+   * Quotes that ended terminally: the mint can no longer issue them, or coco
+   * finalised them without recovering any proofs.
+   */
+  terminal: number;
+  /** Failed operations moved back to pending before checking. */
+  reopened: number;
+  /**
+   * Operations left to a later run: the mint was unreachable, the per-quote
+   * budget ran out, or the operation ended in a non-terminal state.
+   */
+  retryable: number;
+  /** Operations skipped because an earlier recovery of them is still running. */
+  busy: number;
+  errors: Array<{ operationId: string; error: string }>;
+}
+
+/**
+ * Run async tasks strictly one after another.
+ *
+ * Used to serialize explicit wallet recovery: two concurrent requests must not
+ * both snapshot the same failed operation, and a retry must not start
+ * underneath work that outlived its timeout. A rejected task never breaks the
+ * chain for the next one.
+ */
+export function createRunQueue(): (<T>(run: () => Promise<T>) => Promise<T>) & { drain(): Promise<void> } {
+  let tail: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(run: () => Promise<T>): Promise<T> => {
+    const result = tail.then(run, run);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+  return Object.assign(enqueue, { drain: async () => { await tail; } });
+}
+
+/** Per-quote budget for the mint round-trip during explicit recovery. */
+const MINT_QUOTE_RECOVERY_TIMEOUT_MS = 20_000;
+
+/**
+ * Bound for the local post-finalize diagnostic read. This is a database
+ * lookup, not a mint round-trip, so it gets its own small budget: the per-op
+ * mint budget is often already spent when finalize throws, and a starved
+ * diagnostic would silently fall back to the generic error message.
+ */
+const DIAGNOSTIC_LOOKUP_TIMEOUT_MS = 250;
+
+/**
+ * Recover mint quotes whose sats are PAID at the mint but were never claimed.
+ *
+ * For every target the mint is asked for the current quote state, and only it
+ * decides the outcome: PAID quotes have their stored outputs submitted, ISSUED
+ * quotes have their signatures restored (NUT-09), UNPAID quotes are left
+ * pending, and quotes the mint can no longer issue are reported rather than
+ * silently dropped. Anything the mint cannot answer is retried later.
+ *
+ * `finalize()` does not throw when the mint refuses to issue or when an
+ * already-issued quote's proofs cannot be restored: it returns a terminal
+ * operation instead. Recovery therefore inspects the returned operation's
+ * state and error and only counts a genuine finalized-without-error as
+ * recovered.
+ *
+ * Failed operations are skipped unless `includeFailed` is set, and they can
+ * only be targeted by explicit id because coco's pending listing never returns
+ * them. Re-opening an operation is a mutation, so it happens only here, never
+ * during startup recovery.
+ *
+ * Callers should serialize their own invocations and pass a shared
+ * `outstanding` map: `timeoutMs` bounds the wait but does not cancel the
+ * request behind it, so both a timed-out quote check and a timed-out finalize
+ * keep blocking a retry until they actually settle.
+ */
+export async function runMintQuoteRecovery(
+  source: MintQuoteRecoverySource,
+  options: MintQuoteRecoveryOptions = {},
+  onProgress?: (message: string) => void,
+): Promise<MintQuoteRecoveryResult> {
+  if (options.includeFailed && !options.operationIds?.length) {
+    throw new Error("includeFailed requires explicit operationIds");
+  }
+  const timeoutMs = options.timeoutMs ?? MINT_QUOTE_RECOVERY_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("timeoutMs must be a positive finite number");
+  }
+  const outstanding =
+    options.outstanding ?? new Map<string, Promise<unknown>>();
+  const result: MintQuoteRecoveryResult = {
+    checked: 0,
+    recovered: 0,
+    waiting: 0,
+    terminal: 0,
+    reopened: 0,
+    retryable: 0,
+    busy: 0,
+    errors: [],
+  };
+  const messageOf = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
+  /** coco's fail-fast operation lock rejected the call: another holder exists. */
+  const isInProgress = (error: unknown) =>
+    error instanceof Error && error.name === "OperationInProgressError";
+  const track = (operationId: string, work: Promise<unknown>) =>
+    trackRecovery(outstanding, recoveryKey("mint", operationId), work);
+
+  let targets: MintQuoteRecoveryCandidate[];
+  if (options.operationIds && options.operationIds.length > 0) {
+    targets = [];
+    const seen = new Set<string>();
+    for (const operationId of options.operationIds) {
+      if (seen.has(operationId)) continue;
+      seen.add(operationId);
+      try {
+        const op = await source.ops.mint.get(operationId);
+        if (!op) {
+          result.errors.push({ operationId, error: "operation not found" });
+          continue;
+        }
+        targets.push(op);
+      } catch (error) {
+        result.errors.push({ operationId, error: messageOf(error) });
+      }
+    }
+  } else {
+    targets = await source.ops.mint.listPending();
+  }
+
+  const { pending, failed } = selectMintQuotesForRecovery({
+    mints: targets,
+    includeFailed: options.includeFailed === true,
+  });
+
+  for (const op of failed) {
+    if (options.shouldStop?.()) break;
+    const label = `Mint quote ${op.quoteId ?? op.id} at ${op.mintUrl}`;
+    if (outstanding.has(recoveryKey("mint", op.id))) {
+      result.busy++;
+      onProgress?.(`${label}: an earlier recovery is still running; skipped`);
+      continue;
+    }
+    try {
+      if (!(await source.reopenFailedOperation(op.id))) {
+        onProgress?.(`${label}: no longer failed; skipped`);
+        continue;
+      }
+      result.reopened++;
+      onProgress?.(`${label}: re-opened failed operation for recovery`);
+    } catch (error) {
+      // coco's operation lock is fail-fast, so an in-progress error means a
+      // processor or another recovery holds the operation right now.
+      if (isInProgress(error)) {
+        result.busy++;
+        onProgress?.(`${label}: another recovery holds it; skipped`);
+      } else {
+        result.retryable++;
+        onProgress?.(`${label}: could not re-open: ${messageOf(error)}`);
+      }
+      result.errors.push({ operationId: op.id, error: messageOf(error) });
+      continue;
+    }
+    await recoverOne(op);
+  }
+
+  for (const op of pending) {
+    if (options.shouldStop?.()) break;
+    await recoverOne(op);
+  }
+
+  return result;
+
+  async function recoverOne(op: MintQuoteRecoveryCandidate): Promise<void> {
+    const label = `Mint quote ${op.quoteId ?? op.id} at ${op.mintUrl}`;
+    if (outstanding.has(recoveryKey("mint", op.id))) {
+      result.busy++;
+      onProgress?.(`${label}: an earlier recovery is still running; skipped`);
+      return;
+    }
+    result.checked++;
+    // One budget per operation, shared by the mint check and the finalize, so
+    // a slow mint cannot silently double the documented per-quote wait. The
+    // local post-finalize diagnostic read is exempt (DIAGNOSTIC_LOOKUP_TIMEOUT_MS).
+    const deadlineAt = Date.now() + timeoutMs;
+    const remaining = () => Math.max(1, deadlineAt - Date.now());
+
+    if (op.state === "executing") {
+      // A crash mid-mint can leave outputs already signed at the mint;
+      // finalize recovers them instead of minting a second time.
+      await finalizeAndClassify(
+        op.id,
+        label,
+        "recovered interrupted mint",
+        remaining,
+      );
+      return;
+    }
+
+    let observation: {
+      category: "waiting" | "ready" | "completed" | "terminal";
+    };
+    // observePendingOperation is not read-only: it emits quote-state-changed,
+    // persists the observation and can fail a terminal operation. Track it too,
+    // so a timed-out check cannot be retried and then persist a stale read.
+    const check = source.mintOperationService.observePendingOperation(op.id);
+    track(op.id, check);
+    try {
+      observation = await withTimeout(check, remaining());
+    } catch (error) {
+      result.retryable++;
+      result.errors.push({ operationId: op.id, error: messageOf(error) });
+      onProgress?.(`${label}: could not check with mint: ${messageOf(error)}`);
+      return;
+    }
+
+    const decision = classifyMintQuoteObservation(observation.category);
+    if (decision.action === "finalize") {
+      await finalizeAndClassify(
+        op.id,
+        label,
+        decision.observedRemoteState === "PAID"
+          ? `paid, minting proofs (${op.amount} sat)`
+          : `already issued, restoring proofs (${op.amount} sat)`,
+        remaining,
+      );
+    } else if (decision.action === "waiting") {
+      result.waiting++;
+      onProgress?.(`${label}: mint reports UNPAID; left pending`);
+    } else {
+      // coco records the mint's terminal verdict by failing the operation.
+      result.terminal++;
+      onProgress?.(`${label}: mint can no longer issue this quote`);
+    }
+  }
+
+  /**
+   * Run finalize and classify its result. coco returns a terminal operation
+   * rather than throwing when the mint refuses (for example an expired quote)
+   * or when an already-issued quote's proofs could not be restored, so a
+   * fulfilled promise is not by itself evidence that sats were recovered.
+   */
+  async function finalizeAndClassify(
+    operationId: string,
+    label: string,
+    successMessage: string,
+    remaining: () => number,
+  ): Promise<void> {
+    const work = source.ops.mint.finalize(operationId);
+    track(operationId, work);
+    let terminal: { state?: string; error?: string } | null | undefined;
+    try {
+      terminal = (await withTimeout(work, remaining())) as
+        | { state?: string; error?: string }
+        | null
+        | undefined;
+    } catch (error) {
+      if (isInProgress(error)) {
+        result.busy++;
+        onProgress?.(`${label}: another recovery is working on it; skipped`);
+      } else {
+        result.retryable++;
+        // finalize can throw a generic "remains pending" error after coco has
+        // persisted the actionable mint rejection (for example inactive keyset).
+        const current = await withTimeout(
+          source.ops.mint.get(operationId),
+          Math.max(remaining(), DIAGNOSTIC_LOOKUP_TIMEOUT_MS),
+        ).catch(() => null);
+        const detail = current?.state === "pending" && current.error
+          ? current.error
+          : messageOf(error);
+        result.errors.push({ operationId, error: detail });
+        onProgress?.(`${label}: could not finish recovery: ${detail}`);
+        return;
+      }
+      result.errors.push({ operationId, error: messageOf(error) });
+      return;
+    }
+    if (terminal?.state === "finalized" && !terminal.error) {
+      result.recovered++;
+      onProgress?.(`${label}: ${successMessage}`);
+      return;
+    }
+    if (
+      terminal?.state === "failed" ||
+      (terminal?.state === "finalized" && terminal.error)
+    ) {
+      result.terminal++;
+      const detail =
+        terminal.error ?? `left in state ${terminal.state ?? "unknown"}`;
+      result.errors.push({ operationId, error: detail });
+      onProgress?.(`${label}: not recovered: ${detail}`);
+      return;
+    }
+    // Pending/executing/unknown: coco may still be working on the operation,
+    // so leave it to a later run rather than calling it terminal.
+    result.retryable++;
+    result.errors.push({
+      operationId,
+      error: `left in state ${terminal?.state ?? "unknown"}; will retry`,
+    });
+    onProgress?.(
+      `${label}: still ${terminal?.state ?? "unknown"}; left for a later run`,
+    );
+  }
 }
 
 const PENDING_MINT_SWEEP_INTERVAL_MS = 15_000;
@@ -787,6 +1313,7 @@ export interface PendingMintSweepOptions {
   deadlineMs?: number;
   checkTimeoutMs?: number;
   state?: PendingMintSweepState;
+  shouldStop?: () => boolean;
 }
 
 type PendingMintOutcome = "unreachable" | "other";
@@ -808,21 +1335,21 @@ export async function settlePendingMintQuotes(
   const ordered = [...pending.slice(resumeAt), ...pending.slice(0, resumeAt)];
   const startedAt = Date.now();
   for (const op of ordered) {
+    if (options.shouldStop?.()) break;
     const remainingMs = deadlineMs - (Date.now() - startedAt);
-    if (state.outstanding.has(op.id) || remainingMs <= 0) {
+    if (state.outstanding.has(recoveryKey("mint", op.id)) || remainingMs <= 0) {
       unreachable++;
       continue;
     }
     state.after = op.id;
-    // Report on the refresh itself so a late result is still logged.
+    // Track refresh AND its late-result reporting mutations as one lifetime.
     const settled = source.ops.mint
       .refresh(op.id)
       .then(
         (result) => reportPendingMintRefresh(source, op, result, nowMs),
         (error) => reportPendingMintRefreshError(source, op, error),
-      )
-      .finally(() => state.outstanding.delete(op.id));
-    state.outstanding.set(op.id, settled);
+      );
+    trackRecovery(state.outstanding, recoveryKey("mint", op.id), settled);
     try {
       const outcome = await withTimeout(settled, Math.min(checkTimeoutMs, remainingMs));
       if (outcome === "unreachable") unreachable++;
@@ -898,16 +1425,16 @@ async function reportPendingMintRefreshError(
  * still running after that fails against the closed database and is picked
  * up by startup recovery.
  */
-function startPendingMintSweep(source: PendingMintQuoteSource): () => Promise<void> {
+function startPendingMintSweep(source: PendingMintQuoteSource, outstanding: RecoveryWork): () => Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight: Promise<void> = Promise.resolve();
   let unreachableBefore = 0;
-  const state: PendingMintSweepState = { outstanding: new Map() };
+  const state: PendingMintSweepState = { outstanding };
 
   const tick = async () => {
     if (stopped) return;
-    inFlight = settlePendingMintQuotes(source, Date.now(), { state }).then(
+    inFlight = settlePendingMintQuotes(source, Date.now(), { state, shouldStop: () => stopped }).then(
       ({ unreachable }) => {
         // Report a mint becoming unreachable, or reachable again, once.
         if (unreachable > 0 && unreachableBefore === 0) {
@@ -1024,20 +1551,173 @@ interface RecoveryPhaseProgress {
 }
 
 /**
+ * Coco keeps per-operation recovery private on its services; routstrd already
+ * reaches into the Manager the same way for `mintOperationService`. Send is
+ * the only family whose public `refresh()` cannot recover executing ops.
+ */
+function sendRecoveryServiceOf(coco: Manager): SendRecoveryService {
+  return (coco as unknown as { sendOperationService: SendRecoveryService })
+    .sendOperationService;
+}
+
+/** Local-only crash cleanup, run before the degraded gate opens. */
+export async function cleanupLocalRecoveryState(
+  coco: Manager,
+  repo: SqliteRepositories,
+): Promise<void> {
+  // Coco 1.0.1 implements these as local repository/proof operations only.
+  // Keep this version-sensitive bridge together with the send recovery bridge.
+  const services = coco as unknown as Record<string, {
+    recoverInitOperation?(op: unknown): Promise<void>;
+    cleanupOrphanedReservations?(): Promise<number>;
+  } | undefined>;
+  const families = [
+    ["send", repo.sendOperationRepository],
+    ["melt", repo.meltOperationRepository],
+    ["receive", repo.receiveOperationRepository],
+    ["mint", repo.mintOperationRepository],
+  ] as const;
+  // Fail closed the way reopenFailedMintOperation does: a coco bump that
+  // removes or renames these privates must stop recovery with a clear error
+  // before anything is written, not crash halfway through the loop with the
+  // cleanup half-applied.
+  for (const [kind] of families) {
+    if (typeof services[`${kind}OperationService`]?.recoverInitOperation !== "function") {
+      throw new Error(
+        `coco ${kind}OperationService.recoverInitOperation is unavailable; refusing local recovery cleanup`,
+      );
+    }
+  }
+  if (typeof services.sendOperationService?.cleanupOrphanedReservations !== "function") {
+    throw new Error(
+      "coco sendOperationService.cleanupOrphanedReservations is unavailable; refusing local recovery cleanup",
+    );
+  }
+  for (const [kind, repository] of families) {
+    for (const op of await repository.getByState("init")) {
+      await services[`${kind}OperationService`]!.recoverInitOperation!(op);
+    }
+  }
+  await services.sendOperationService!.cleanupOrphanedReservations!();
+}
+
+/**
+ * Gate for value-moving wallet operations while startup recovery runs.
+ *
+ * On degraded startup only, publishStuckMints opens the gate for callers
+ * whose target mint has no stuck operations after probing and local cleanup.
+ * A dead mint must not stall spends from a healthy one. On the happy path
+ * all callers wait until the global sweeps finish. Callers
+ * without a target mint, or whose mint has stuck operations, wait for the
+ * full sweep. fail() poisons every caller; reads are never gated.
+ */
+export interface RecoveryGate {
+  waitForRecovery(mintUrl?: string): Promise<void>;
+  publishStuckMints(mints: Set<string>): void;
+  complete(): void;
+  fail(error: string): void;
+}
+
+export function createRecoveryGate(): RecoveryGate {
+  let stuckMints: Set<string> | undefined;
+  let done = false;
+  let error: string | undefined;
+  let mintsResolve: (() => void) | undefined;
+  const mintsPromise = new Promise<void>((resolve) => {
+    mintsResolve = resolve;
+  });
+  let doneResolve: (() => void) | undefined;
+  const donePromise = new Promise<void>((resolve) => {
+    doneResolve = resolve;
+  });
+
+  return {
+    async waitForRecovery(mintUrl?: string): Promise<void> {
+      if (mintUrl) {
+        let normalized: string | undefined;
+        try {
+          normalized = normalizeMintUrl(mintUrl);
+        } catch {
+          // Unparseable URL falls back to the global gate.
+          normalized = undefined;
+        }
+        if (normalized) {
+          await mintsPromise;
+          if (!stuckMints?.has(normalized)) {
+            if (error) throw new Error(`Wallet is not ready: ${error}`);
+            return;
+          }
+        }
+      }
+      if (!done) await donePromise;
+      if (error) throw new Error(`Wallet is not ready: ${error}`);
+    },
+    publishStuckMints(mints: Set<string>): void {
+      if (stuckMints) return;
+      stuckMints = mints;
+      mintsResolve?.();
+    },
+    complete(): void {
+      done = true;
+      mintsResolve?.();
+      doneResolve?.();
+    },
+    fail(message: string): void {
+      done = true;
+      error = message;
+      mintsResolve?.();
+      doneResolve?.();
+    },
+  };
+}
+
+/**
  * Run the wallet recovery sweeps in order, reporting phase changes.
  *
- * Expired mint quotes are settled first: quotes their mint confirms as unpaid
+ * Probe first, then settle expired mint quotes: quotes confirmed as unpaid
  * are failed locally so `recoverPendingMintOperations()` skips them, while
  * paid/issued and unreachable-mint quotes stay pending for the sweep.
  */
-async function runWalletRecovery(
+export async function runWalletRecovery(
   coco: Manager,
   onProgress: (progress: RecoveryPhaseProgress) => void,
   receiveOperationIds?: string[],
+  onStuckMintsKnown?: (mints: Set<string>) => void,
+  options: { cleanupLocalState?: () => Promise<void>; fetchImpl?: typeof fetch; outstanding?: RecoveryWork; shouldStop?: () => boolean } = {},
 ): Promise<void> {
   surfacingRecoveryProgress = true;
   let failedMintQuotes = 0;
   try {
+    // Probe every mint that has stuck operations once, FIRST, so a dead mint
+    // costs a single short probe instead of taxing settlement's observation
+    // budget plus a network timeout per operation per sweep. Healthy-mint
+    // operations are recovered per op; dead-mint operations stay parked
+    // exactly as coco's own "will retry later" path would leave them.
+    onProgress({ phase: "Probing mints", failedMintQuotes });
+    const stuckOperations = await collectStuckOperations(coco.ops);
+    const unreachableMints = await probeMintReachability(
+      [...new Set(stuckOperations.map((op) => op.mintUrl))],
+      { fetchImpl: options.fetchImpl },
+    );
+    for (const mintUrl of unreachableMints) {
+      const count = stuckOperations.filter((op) => op.mintUrl === mintUrl).length;
+      startupProgress(
+        `Skipping recovery for unreachable mint: ${mintUrl} (${count} op${count === 1 ? "" : "s"})`,
+      );
+    }
+    const degraded = unreachableMints.size > 0;
+    if (degraded) {
+      // Local-only housekeeping must finish before any new operation is allowed.
+      await options.cleanupLocalState?.();
+      // Global sweeps enumerate fresh state and are unsafe beside live sends.
+      // Only the snapshot-based degraded path may open the per-mint gate.
+      onStuckMintsKnown?.(new Set(stuckOperations.map((op) => op.mintUrl)));
+    }
+
+    // Settlement runs after the gate opens and only spends its observation
+    // budget on mints the probe found reachable; dead-mint quotes stay
+    // pending untouched. It only reads and locally fails long-expired quotes,
+    // so it cannot conflict with live operations the gate just admitted.
     onProgress({ phase: "Settling expired mint quotes", failedMintQuotes });
     const settlement = await settleExpiredMintQuotes(
       {
@@ -1049,6 +1729,8 @@ async function runWalletRecovery(
         ).mintOperationService,
       },
       Date.now(),
+      undefined,
+      { unreachableMints, outstanding: options.outstanding, shouldStop: options.shouldStop },
     );
     failedMintQuotes = settlement.failed;
     if (settlement.leftForRecovery > 0 || settlement.unobserved > 0) {
@@ -1059,22 +1741,48 @@ async function runWalletRecovery(
       );
     }
     onProgress({ phase: "Settled expired mint quotes", failedMintQuotes });
+    const targeted = (kinds: Array<StuckOperation["kind"]>) =>
+      runTargetedRecovery(coco.ops, sendRecoveryServiceOf(coco), {
+        kinds,
+        outstanding: options.outstanding,
+        shouldStop: options.shouldStop,
+        stuckOperations,
+        unreachableMints,
+      });
 
+    // Happy path (every mint reachable) keeps coco's global sweeps: they also
+    // clean up init operations and orphaned proof reservations. Degraded
+    // startup runs that local housekeeping before opening its gate, and only
+    // drives the previously collected snapshot when a dead mint would
+    // otherwise tax every stuck op with a network timeout.
     onProgress({ phase: "Send recovery", failedMintQuotes });
-    await coco.ops.send.recovery.run();
+    if (!degraded) await coco.ops.send.recovery.run();
+    else await targeted(["send"]);
 
     onProgress({ phase: "Melt recovery", failedMintQuotes });
-    await coco.ops.melt.recovery.run();
+    if (!degraded) await coco.ops.melt.recovery.run();
+    else await targeted(["melt"]);
 
     onProgress({ phase: "Receive recovery", failedMintQuotes });
     if (receiveOperationIds) {
       // The pre-check already classified every executing receive by unique
       // input set. Recover only the conclusive retained operations; unresolved
       // groups stay untouched instead of falling back to Coco 1's expensive
-      // per-row sweep on this startup.
+      // per-row sweep on this startup. Operations at mints the probe found
+      // unreachable are skipped rather than costing their 15s timeout each.
+      const mintByOperation = new Map(
+        stuckOperations
+          .filter((op) => op.kind === "receive")
+          .map((op) => [op.id, op.mintUrl]),
+      );
       for (const operationId of receiveOperationIds) {
+        if (options.shouldStop?.()) break;
+        const mintUrl = mintByOperation.get(operationId);
+        if (mintUrl && unreachableMints.has(mintUrl)) continue;
         try {
-          await withTimeout(coco.ops.receive.refresh(operationId), 15_000);
+          const work = coco.ops.receive.refresh(operationId);
+          if (options.outstanding) trackRecovery(options.outstanding, recoveryKey("receive", operationId), work);
+          await withTimeout(work, 15_000);
         } catch (error) {
           logger.warn("Targeted receive recovery did not complete", {
             operationId,
@@ -1082,12 +1790,19 @@ async function runWalletRecovery(
           });
         }
       }
-    } else {
+    } else if (!degraded) {
       await coco.ops.receive.recovery.run();
+    } else {
+      await targeted(["receive"]);
     }
 
     onProgress({ phase: "Mint recovery", failedMintQuotes });
-    await coco.recoverPendingMintOperations();
+    // A settlement wait may have timed out while an unlocked observation
+    // still runs. Never let a fresh global mint sweep observe it again.
+    if (!degraded && ![...(options.outstanding?.keys() ?? [])].some(key => key.startsWith("mint:"))) {
+      await coco.recoverPendingMintOperations();
+    }
+    else await targeted(["mint"]);
 
     onProgress({ phase: "done", failedMintQuotes });
   } finally {
@@ -1150,6 +1865,10 @@ export async function createCocoClient(
   const recoveryPromise = new Promise<void>((resolve) => {
     recoveryResolve = resolve;
   });
+  const recoveryGate = createRecoveryGate();
+  let disposed = false;
+  const enqueueRecovery = createRunQueue();
+  const recoveryOutstanding: RecoveryWork = new Map();
 
   try {
     startupProgress("Opening Cashu wallet database...");
@@ -1347,11 +2066,14 @@ export async function createCocoClient(
         }
       },
       receiveRecoveryOperationIds,
+      (mints) => recoveryGate.publishStuckMints(mints),
+      { cleanupLocalState: () => cleanupLocalRecoveryState(coco!, repo), outstanding: recoveryOutstanding, shouldStop: () => disposed },
     )
       .then(async () => {
         await syncReceiveReservations();
         recoveryDone = true;
         recoveryPhase = "done";
+        recoveryGate.complete();
         recoveryResolve?.();
         startupProgress("Wallet recovery complete.");
         stopPendingMintSweep = startPendingMintSweep({
@@ -1360,12 +2082,13 @@ export async function createCocoClient(
           mintOperationService: (
             coco as unknown as { mintOperationService: MintOperationServiceCleanup }
           ).mintOperationService,
-        });
+        }, recoveryOutstanding);
       })
       .catch((error) => {
         recoveryDone = true;
         recoveryPhase = "error";
         recoveryError = error instanceof Error ? error.message : String(error);
+        recoveryGate.fail(recoveryError);
         recoveryResolve?.();
         startupProgress(`Wallet recovery failed: ${recoveryError}`);
       });
@@ -1388,18 +2111,32 @@ export async function createCocoClient(
     return api;
   };
 
-  let disposed = false;
+  const assertOpen = () => { if (disposed) throw new Error("Wallet is shutting down"); };
 
-  /**
-   * Block a value-moving operation until background recovery has settled.
-   * Reads stay ungated so the daemon can report balances/status immediately.
-   */
-  const waitForRecovery = async (): Promise<void> => {
-    if (!recoveryDone) await recoveryPromise;
-    if (recoveryError) {
-      throw new Error(`Wallet is not ready: ${recoveryError}`);
-    }
+  // Block a value-moving operation until background recovery has settled for
+  // its target mint (see createRecoveryGate). Reads stay ungated so the
+  // daemon can report balances/status immediately.
+  const waitForRecovery = async (mintUrl?: string): Promise<void> => {
+    assertOpen();
+    await recoveryGate.waitForRecovery(mintUrl);
+    assertOpen();
   };
+
+  const disposeRecovery = createRecoveryDisposer(
+    () => { disposed = true; },
+    async () => {
+      await recoveryPromise;
+      await stopPendingMintSweep?.();
+      await enqueueRecovery.drain();
+      await drainRecoveryWork(recoveryOutstanding);
+    },
+    async () => {
+      await coco.dispose();
+      database.close();
+      releaseLegacyPidClaim();
+      releaseWalletPidClaim();
+    },
+  );
 
   return {
     async ping(): Promise<boolean> {
@@ -1579,13 +2316,13 @@ export async function createCocoClient(
     },
 
     async receiveBolt11(amount: number, mintUrl?: string) {
-      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning invoice");
       }
+      await waitForRecovery(targetMint);
       const op = await coco.ops.mint.prepare({
         mintUrl: targetMint,
         amount,
@@ -1611,13 +2348,13 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for sending");
       }
+      await waitForRecovery(targetMint);
       const prepared = await coco.ops.send.prepare({
         mintUrl: targetMint,
         amount,
@@ -1627,13 +2364,13 @@ export async function createCocoClient(
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
-      await waitForRecovery();
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
         : walletConfig.defaultMintUrl;
       if (!targetMint) {
         throw new Error("No trusted mint available for Lightning payment");
       }
+      await waitForRecovery(targetMint);
       const prepared = await coco.ops.melt.prepare({
         mintUrl: targetMint,
         method: "bolt11",
@@ -1677,26 +2414,18 @@ export async function createCocoClient(
     },
 
     async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
-      try {
-        // Let any in-flight recovery settle before closing the database from
-        // underneath it. The recovery promise resolves on success or failure.
-        await recoveryPromise;
-        await stopPendingMintSweep?.();
-        await coco.dispose();
-      } finally {
-        try {
-          database.close();
-        } finally {
-          releaseLegacyPidClaim();
-          releaseWalletPidClaim();
-        }
-      }
+      await disposeRecovery().catch(error => {
+        logger.warn("Wallet shutdown incomplete; database and ownership retained until recovery settles");
+        throw error;
+      });
     },
 
     async getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]> {
       return coco.history.getPaginatedHistory(offset, limit);
+    },
+
+    async getHistoryEntryById(id: string): Promise<HistoryEntry | null> {
+      return coco.history.getHistoryEntryById(id);
     },
 
     async getNpcAddress(): Promise<NpcAddress> {
@@ -1740,6 +2469,7 @@ export async function createCocoClient(
       await waitForRecovery();
       const minAgeMs = options.minAgeMs ?? 7 * 24 * 60 * 60 * 1000;
       const dryRun = options.dryRun === true;
+      const force = options.force === true;
       const nowMs = Date.now();
 
       const [pendingMints, inFlightSends, preparedMelts] = await Promise.all([
@@ -1767,6 +2497,8 @@ export async function createCocoClient(
       });
 
       const errors: WalletCleanupResult["errors"] = [];
+      let failedMintQuotes = 0;
+      let leftForRecovery = 0;
 
       if (!dryRun) {
         const mintService = (
@@ -1776,20 +2508,49 @@ export async function createCocoClient(
         ).mintOperationService;
 
         for (const op of selection.mintsToFail) {
-          try {
-            await mintService.failPendingOperation(
-              { id: op.id },
-              {
-                reason: "Expired unpaid mint quote cleaned up by routstrd",
-                retryable: false,
-                observedAt: nowMs,
-              },
-            );
-          } catch (error) {
-            errors.push({
-              operationId: op.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
+          if (force) {
+            // Legacy behaviour: fail the quote locally without asking the mint.
+            try {
+              await mintService.failPendingOperation(
+                { id: op.id },
+                {
+                  reason: "Expired mint quote cleaned up by routstrd (forced)",
+                  retryable: false,
+                  observedAt: nowMs,
+                },
+              );
+              failedMintQuotes++;
+            } catch (error) {
+              errors.push({
+                operationId: op.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+            continue;
+          }
+          // Expiry alone does not prove the quote was never paid: the
+          // Lightning payment can land before expiry while the daemon is down.
+          // Confirm UNPAID with the mint before failing, exactly as startup
+          // recovery does; paid quotes are left for recovery to finalize.
+          const check = await failExpiredMintQuoteIfUnpaid(
+            mintService,
+            op.id,
+            EXPIRED_MINT_OBSERVATION_DEADLINE_MS,
+          );
+          if (check.outcome === "failed") {
+            failedMintQuotes++;
+          } else {
+            leftForRecovery++;
+            if (check.outcome === "unobserved") {
+              errors.push({
+                operationId: op.id,
+                error: `could not confirm quote state with mint: ${
+                  check.error instanceof Error
+                    ? check.error.message
+                    : String(check.error)
+                }`,
+              });
+            }
           }
         }
 
@@ -1816,8 +2577,15 @@ export async function createCocoClient(
         }
       }
 
+      const mintSummary = summarizeMintCleanup({
+        dryRun,
+        candidates: selection.mintsToFail.length,
+        failed: failedMintQuotes,
+        leftForRecovery,
+      });
       const actedOn =
-        selection.mintsToFail.length +
+        (dryRun ? mintSummary.mintQuoteCandidates : mintSummary.failedMintQuotes) +
+        leftForRecovery +
         selection.sendsToReclaim.length +
         selection.meltsToCancel.length;
       const skipped =
@@ -1826,11 +2594,62 @@ export async function createCocoClient(
 
       return {
         dryRun,
-        failedMintQuotes: selection.mintsToFail.length,
+        ...mintSummary,
         reclaimedSends: selection.sendsToReclaim.length,
         cancelledMelts: selection.meltsToCancel.length,
         skipped,
         errors,
+      };
+    },
+
+    async recoverMintQuotes(options, onProgress) {
+      await waitForRecovery();
+      const service = (
+        coco as unknown as {
+          mintOperationService: MintOperationServiceCleanup;
+        }
+      ).mintOperationService;
+      // Serialize explicit recovery: two concurrent requests must not both
+      // snapshot the same failed operation, and a retry must not start
+      // underneath a finalize that outlived its timeout.
+      return enqueueRecovery(() => {
+        assertOpen();
+        return runMintQuoteRecovery(
+          {
+            ops: coco.ops as unknown as MintQuoteRecoverySource["ops"],
+            mintOperationService: service,
+            reopenFailedOperation: (operationId) =>
+              reopenFailedMintOperation(service, operationId),
+          },
+          { ...options, outstanding: recoveryOutstanding, shouldStop: () => disposed },
+          onProgress,
+        );
+      });
+    },
+
+    async recoverStuckOperations() {
+      await waitForRecovery();
+      // Serialized against explicit mint-quote recovery (and itself) through
+      // the same queue and lifetime tracker, so timed-out passes cannot retry the same
+      // operation. Receive stays startup-only: recovering competing receives
+      // safely requires the startup dedup classification (receive-dedup.ts).
+      // Operations a live execute holds come back as busy via coco's
+      // fail-fast operation lock, never driven underneath it.
+      const result = await enqueueRecovery(() => {
+        assertOpen();
+        return runTargetedRecovery(coco!.ops, sendRecoveryServiceOf(coco!), {
+          kinds: ["send", "melt", "mint"],
+          outstanding: recoveryOutstanding,
+          shouldStop: () => disposed,
+        });
+      });
+      return {
+        timedOut: result.timedOut,
+        attempted: result.attempted,
+        busy: result.busy,
+        skipped: result.skipped,
+        failed: result.failed,
+        skippedMints: Object.fromEntries(result.skippedMints),
       };
     },
   };

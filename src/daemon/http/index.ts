@@ -283,6 +283,21 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function optionalStringArrayField(
+  body: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
+  const value = body[field];
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !item.trim())
+  ) {
+    throw new CocodHttpError(400, `'${field}' must be an array of non-empty strings.`);
+  }
+  return value.map((item: string) => item.trim());
+}
+
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
@@ -373,6 +388,46 @@ function makeSdkLogger(...parts: string[]): SdkLogger {
     debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
     child: (p: string) => makeSdkLogger(...parts, p),
   };
+}
+
+/**
+ * Parse a `type` query parameter into a list of normalized transaction types.
+ * Accepts comma-separated values and is case-insensitive.
+ */
+export function parseHistoryTypes(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+}
+
+/** Page size used when scanning history to apply a type filter. */
+const HISTORY_TYPE_SCAN_PAGE_SIZE = 200;
+
+/**
+ * Return history entries matching `types`, with offset/limit applied after
+ * filtering. The coco history repository only paginates by raw position, so we
+ * scan pages until enough matches accumulate (or history is exhausted).
+ */
+export async function getHistoryByTypes(
+  client: Pick<CocodClient, "getHistory">,
+  types: string[],
+  offset: number,
+  limit: number,
+): Promise<HistoryEntry[]> {
+  const wanted = new Set(types);
+  const matched: HistoryEntry[] = [];
+  let scanOffset = 0;
+  while (matched.length < offset + limit) {
+    const page = await client.getHistory(scanOffset, HISTORY_TYPE_SCAN_PAGE_SIZE);
+    for (const entry of page) {
+      if (wanted.has(entry.type)) matched.push(entry);
+    }
+    if (page.length < HISTORY_TYPE_SCAN_PAGE_SIZE) break;
+    scanOffset += HISTORY_TYPE_SCAN_PAGE_SIZE;
+  }
+  return matched.slice(offset, offset + limit);
 }
 
 export function createDaemonRequestHandler(deps: {
@@ -473,8 +528,59 @@ export function createDaemonRequestHandler(deps: {
               ? body.minAgeMs
               : undefined,
           dryRun: body.dryRun === true,
+          force: body.force === true,
         });
         return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverMintQuotes) {
+          throw new CocodHttpError(
+            501,
+            "Mint quote recovery is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const operationIds = optionalStringArrayField(body, "operationIds");
+        if (body.includeFailed === true && !operationIds?.length) {
+          throw new CocodHttpError(
+            400,
+            "'includeFailed' requires non-empty 'operationIds'.",
+          );
+        }
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)
+        ) {
+          throw new CocodHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
+        const result = await deps.walletClient.recoverMintQuotes({
+          operationIds,
+          includeFailed: body.includeFailed === true,
+          timeoutMs: body.timeoutMs as number | undefined,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover/operations") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverStuckOperations) {
+          throw new CocodHttpError(
+            501,
+            "Stuck operation recovery is not supported by this wallet client.",
+          );
+        }
+        return { output: await deps.walletClient.recoverStuckOperations() };
       });
       return;
     }
@@ -596,9 +702,25 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const offsetParam = url.searchParams.get("offset");
         const limitParam = url.searchParams.get("limit");
+        const idParam = url.searchParams.get("id")?.trim() || "";
+        const types = parseHistoryTypes(url.searchParams.get("type"));
         const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
         const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
-        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        let entries: HistoryEntry[];
+        if (idParam) {
+          const entry = await deps.walletClient.getHistoryEntryById(idParam);
+          entries = entry ? [entry] : [];
+        } else if (types.length > 0) {
+          entries = await getHistoryByTypes(
+            deps.walletClient,
+            types,
+            offset,
+            limit,
+          );
+        } else {
+          entries = await deps.walletClient.getHistory(offset, limit);
+        }
 
         const encoded = entries.map((entry: HistoryEntry) => {
           const base = { ...entry } as Record<string, unknown>;
