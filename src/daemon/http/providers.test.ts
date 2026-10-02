@@ -269,3 +269,14 @@ describe("POST /providers/nostr-sync", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("wallet errors", () => {
+  it("maps a WalletHttpError onto its HTTP status", async () => {
+    const handler = createDaemonRequestHandler({
+      walletClient: { getMintQuote: async () => null },
+    } as any);
+    const res = await call(handler, "GET", "/wallet/receive/bolt11/missing");
+    expect(res.status).toBe(404);
+    expect(res.json()).toEqual({ error: "Mint quote not found" });
+  });
+});
