@@ -56,6 +56,32 @@ class DaemonConnectionError extends Error {
   }
 }
 
+/**
+ * Upper bound for a single daemon request, including response-body
+ * consumption. The daemon bounds its own NWC operations, so this only guards
+ * against a wedged server; without it a hung request would block the CLI
+ * forever.
+ */
+export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * Upper bound for value-moving wallet routes. A cashu melt/swap can
+ * legitimately run longer than {@link DAEMON_REQUEST_TIMEOUT_MS} (the mint has
+ * no request timeout in routstrd), so these get a more generous bound that
+ * still prevents an indefinite CLI hang.
+ */
+export const DAEMON_LONG_REQUEST_TIMEOUT_MS = 600_000;
+
+/** Routes that may legitimately outlive the default request timeout. */
+const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/"];
+
+function requestTimeoutMs(path: string): number {
+  const pathname = path.split("?")[0] ?? path;
+  return LONG_RUNNING_ROUTES.some((route) => pathname.startsWith(route))
+    ? DAEMON_LONG_REQUEST_TIMEOUT_MS
+    : DAEMON_REQUEST_TIMEOUT_MS;
+}
+
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
     return config.daemonUrl.replace(/\/$/, "");
@@ -70,7 +96,7 @@ export function getAuthBaseUrl(config: RoutstrdConfig): string {
   return getDaemonBaseUrl(config);
 }
 
-async function _callUrl(
+export async function callDaemonUrl(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
@@ -99,23 +125,41 @@ async function _callUrl(
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString) headers.set("Content-Type", "application/json");
 
+  const timeoutMs = requestTimeoutMs(path);
+  const timeoutError = () =>
+    new Error(
+      `Daemon request timed out after ${timeoutMs / 1000}s; ` +
+        "any payment outcome is unknown — check before retrying",
+    );
+  // The signal stays armed while the body is read, so a daemon that sends
+  // headers and then stalls the body cannot hang the CLI either. Aborting
+  // here never cancels the daemon's operation — see timeoutError's warning.
+  const signal = AbortSignal.timeout(timeoutMs);
+
   let response: Response;
   try {
     response = await fetch(url, {
       method,
       headers,
       body: bodyString,
+      signal,
     });
   } catch (error) {
+    if (signal.aborted) throw timeoutError();
+    // Only connection failures qualify for alternate-host retries.
     throw new DaemonConnectionError(error);
   }
 
-  if (!response.ok) {
-    const errorData = (await response.json()) as { error?: string };
-    throw new Error(errorData.error || `HTTP ${response.status}`);
+  try {
+    if (!response.ok) {
+      const errorData = (await response.json()) as { error?: string };
+      throw new Error(errorData.error || `HTTP ${response.status}`);
+    }
+    return (await response.json()) as CommandResponse;
+  } catch (error) {
+    if (signal.aborted) throw timeoutError();
+    throw error;
   }
-
-  return response.json() as Promise<CommandResponse>;
 }
 
 async function callLocalDaemon(
@@ -127,7 +171,7 @@ async function callLocalDaemon(
   let connectionError: DaemonConnectionError | undefined;
   for (const baseUrl of localDaemonBaseUrls(config)) {
     try {
-      return await _callUrl(baseUrl, path, options, config);
+      return await callDaemonUrl(baseUrl, path, options, config);
     } catch (error) {
       if (!(error instanceof DaemonConnectionError)) throw error;
       connectionError = error;
@@ -142,7 +186,7 @@ export async function callDaemon(
 ): Promise<CommandResponse> {
   const config = await loadConfig();
   if (config.daemonUrl) {
-    return _callUrl(getDaemonBaseUrl(config), path, options, config);
+    return callDaemonUrl(getDaemonBaseUrl(config), path, options, config);
   }
   return callLocalDaemon(path, options, config);
 }
@@ -157,7 +201,7 @@ export async function callAuth(
   if (!config.authUrl && !config.daemonUrl) {
     return callLocalDaemon(path, options, config);
   }
-  return _callUrl(getAuthBaseUrl(config), path, options, config);
+  return callDaemonUrl(getAuthBaseUrl(config), path, options, config);
 }
 
 export async function isDaemonRunning(): Promise<boolean> {

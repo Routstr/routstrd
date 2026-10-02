@@ -1,3 +1,4 @@
+import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
 import {
   Manager,
@@ -733,16 +734,7 @@ const EXPIRED_MINT_OBSERVATION_DEADLINE_MS = 15_000;
 /** Rejects when `timeoutMs` elapses before `promise` settles. */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   if (timeoutMs === Infinity) return promise;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new Error("Timed out contacting mint")),
-      timeoutMs,
-    );
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
-  });
+  return withRequestTimeout(promise, timeoutMs, "Timed out contacting mint");
 }
 
 /** Structural subset of coco's Manager used by expired-quote settlement. */

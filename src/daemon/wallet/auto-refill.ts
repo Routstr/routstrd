@@ -37,6 +37,15 @@ export function startAutoRefillLoop(
   getWallet: () => WalletConnect | undefined,
   getConfig: () => AutoRefillConfig | undefined,
   intervalMs: number = 5000,
+  payInvoice: (
+    invoice: string,
+  ) => Promise<{ preimage?: string; fees_paid?: number }> = (invoice) => {
+    const wallet = getWallet();
+    if (!wallet?.service) {
+      return Promise.reject(new Error("NWC not connected"));
+    }
+    return wallet.payInvoice(invoice);
+  },
 ): () => void {
   let lastRefillAt = 0;
   let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
@@ -113,7 +122,7 @@ export function startAutoRefillLoop(
         logger.log("[auto-refill] Wallet disconnected during refill check");
         return;
       }
-      const payment = await currentWallet.payInvoice(invoice);
+      const payment = await payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
       // and issue tokens. We don't need to explicitly mint here; cocod
