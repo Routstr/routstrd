@@ -4,7 +4,7 @@
 //
 // Uses applesauce-wallet-connect (same approach as nwc_integration/pay_invoice.mts).
 
-import type { CocodClient } from "./cocod-client";
+import type { WalletClient } from "./wallet-client";
 import type { WalletConnect } from "applesauce-wallet-connect";
 import { logger } from "../../utils/logger";
 
@@ -33,7 +33,7 @@ function isFatalError(message: string): boolean {
 }
 
 export function startAutoRefillLoop(
-  cocod: CocodClient,
+  walletClient: WalletClient,
   getWallet: () => WalletConnect | undefined,
   getConfig: () => AutoRefillConfig | undefined,
   intervalMs: number = 5000,
@@ -88,7 +88,7 @@ export function startAutoRefillLoop(
     checkInProgress = true;
 
     try {
-      const balances = await cocod.getBalances();
+      const balances = await walletClient.getBalances();
       const totalBalance = Object.values(balances).reduce<number>(
         (sum, b) => sum + (typeof b === "number" ? b : 0),
         0,
@@ -103,17 +103,20 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
-      const mintUrl = await cocod.getDefaultMint();
+      const mintUrl = await walletClient.getDefaultMint();
       if (!mintUrl) {
         logger.error("[auto-refill] No default mint configured");
         return;
       }
 
-      // Step 1: Create a BOLT-11 invoice via cocod to fund the Cashu wallet
+      // Step 1: Create a BOLT-11 invoice via the wallet to fund the Cashu wallet
       logger.log(
         `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mintUrl}...`,
       );
-      const { invoice } = await cocod.receiveBolt11(config.amount, mintUrl);
+      const { invoice } = await walletClient.receiveBolt11(
+        config.amount,
+        mintUrl,
+      );
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
@@ -125,7 +128,7 @@ export function startAutoRefillLoop(
       const payment = await payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
-      // and issue tokens. We don't need to explicitly mint here; cocod
+      // and issue tokens. We don't need to explicitly mint here; the wallet
       // handles this on its end when the mint sees the payment.
       const preimage = payment.preimage;
       if (preimage) {

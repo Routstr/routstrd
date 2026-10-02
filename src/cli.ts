@@ -305,10 +305,7 @@ async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
 
   // Create initial config (0600, atomic write)
   if (!existsSync(CONFIG_FILE)) {
-    const config: RoutstrdConfig = {
-      ...DEFAULT_CONFIG,
-      cocodPath: null,
-    };
+    const config: RoutstrdConfig = { ...DEFAULT_CONFIG };
     saveDaemonConfig(config);
     console.log(`Created config file: ${CONFIG_FILE}`);
   }

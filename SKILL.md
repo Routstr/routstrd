@@ -488,7 +488,6 @@ Config file: `~/.routstrd/config.json`
 | `port` | number | 8008 | Daemon HTTP port |
 | `host` | string | `"127.0.0.1"` | Bind address |
 | `provider` | string\|null | null | Default provider URL |
-| `cocodPath` | string\|null | null | Custom path to a legacy cocod executable |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
 | `maxTokens` | number | 64000 | Completion budget applied when a client sets no output-token limit |
 | `daemonUrl` | string | — | Remote daemon URL (set by `routstrd remote`) |

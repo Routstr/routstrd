@@ -5,7 +5,7 @@ import { WalletBaseError } from "applesauce-wallet-connect/helpers/error";
 import { RelayPool } from "applesauce-relay";
 import { logger } from "../../utils/logger";
 import { withTimeout } from "../../utils/with-timeout";
-import { createCocodClient, type CocodClient } from "./cocod-client";
+import type { WalletClient } from "./wallet-client";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
 
 /**
@@ -34,7 +34,7 @@ export function decodeCashuTokenAmount(token: string): {
 }
 
 export async function receiveCashuToken(
-  client: Pick<CocodClient, "receiveCashu">,
+  client: Pick<WalletClient, "receiveCashu">,
   token: string,
 ): Promise<{ message: string; amount: number; unit: "sat" | "msat" }> {
   // Validate the token before handing it to a state-changing wallet call. This
@@ -46,8 +46,8 @@ export async function receiveCashuToken(
 }
 
 export interface WalletAdapterOptions {
-  cocodPath?: string | null;
-  walletClient?: CocodClient;
+  /** The in-process wallet engine. Required — construct it with `createCocoClient()`. */
+  walletClient: WalletClient;
   /** NWC connection string for Lightning funding (uses applesauce-wallet-connect) */
   nwcConnectionString?: string;
   /** Override the NWC read timeout in milliseconds (test hook). */
@@ -65,10 +65,9 @@ export interface WalletAdapterOptions {
 }
 
 export async function createWalletAdapter(
-  options: WalletAdapterOptions = {},
+  options: WalletAdapterOptions,
 ) {
-  const client =
-    options.walletClient || createCocodClient({ cocodPath: options.cocodPath });
+  const client = options.walletClient;
   let activeMintUrl: string | null = null;
   let mintUnits: Record<string, "sat" | "msat"> = {};
 

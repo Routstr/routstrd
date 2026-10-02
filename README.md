@@ -275,7 +275,6 @@ Configuration is stored in `~/.routstrd/config.json`:
   "port": 8008,
   "host": "127.0.0.1",
   "provider": null,
-  "cocodPath": null,
   "autoModelPath": false,
   "autoRefresh": { "enabled": true }
 }

@@ -181,7 +181,6 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   };
 
   const walletAdapter = await createWalletAdapter({
-    cocodPath: config.cocodPath,
     walletClient,
     getAutoRefillConfig,
     nwcConnectionString: config.nwc?.connectionString,

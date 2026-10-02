@@ -30,14 +30,14 @@ import {
 import { dirname, join } from "path";
 import { mnemonicToSeedSync } from "@scure/bip39";
 import type {
-  CocodClient,
-  CocodState,
+  WalletClient,
+  WalletRuntimeState,
   NpcAddress,
   NpcUsernameResult,
   WalletCleanupOptions,
   WalletCleanupResult,
   WalletRecoveryProgress,
-} from "./cocod-client";
+} from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
   classifyMintQuoteObservation,
@@ -1812,7 +1812,7 @@ export async function runWalletRecovery(
 
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
-): Promise<CocodClient> {
+): Promise<WalletClient> {
   const configDir = options.walletDir || options.configDir || defaultWalletDir();
   const configFile = join(configDir, "config.json");
   const dbPath = join(configDir, "coco.db");
@@ -2148,7 +2148,7 @@ export async function createCocoClient(
       }
     },
 
-    async getStatus(): Promise<CocodState> {
+    async getStatus(): Promise<WalletRuntimeState> {
       if (recoveryError) return "ERROR";
       if (!recoveryDone) return "RECOVERING";
       try {
