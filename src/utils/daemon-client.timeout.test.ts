@@ -1,21 +1,32 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { callDaemonUrl, DAEMON_REQUEST_TIMEOUT_MS } from "./daemon-client";
+import {
+  callDaemonUrl,
+  DAEMON_LONG_REQUEST_TIMEOUT_MS,
+  DAEMON_REQUEST_TIMEOUT_MS,
+} from "./daemon-client";
 import { DEFAULT_CONFIG } from "./config";
 
 const originalFetch = globalThis.fetch;
-const originalSetTimeout = globalThis.setTimeout;
-const originalClearTimeout = globalThis.clearTimeout;
+const originalAbortTimeout = AbortSignal.timeout;
+
+/** Deadline (ms) passed to AbortSignal.timeout by the last request. */
+let requestedDeadlines: number[] = [];
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  globalThis.setTimeout = originalSetTimeout;
-  globalThis.clearTimeout = originalClearTimeout;
+  AbortSignal.timeout = originalAbortTimeout;
+  requestedDeadlines = [];
 });
 
+/**
+ * Record the requested deadline and arm a fast one instead, so tests do not
+ * wait out the real 120s/600s bounds.
+ */
 function shortenDeadline(): void {
-  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) =>
-    originalSetTimeout(callback, delay === DAEMON_REQUEST_TIMEOUT_MS ? 20 : delay, ...args)
-  ) as typeof setTimeout;
+  AbortSignal.timeout = ((ms: number) => {
+    requestedDeadlines.push(ms);
+    return originalAbortTimeout(20);
+  }) as typeof AbortSignal.timeout;
 }
 
 function stalledResponse(status = 200): void {
@@ -33,7 +44,7 @@ function stalledResponse(status = 200): void {
 const request = (path = "/nwc/status") =>
   callDaemonUrl("http://daemon.example", path, {}, DEFAULT_CONFIG);
 
-describe("NWC daemon request deadline", () => {
+describe("daemon request deadline", () => {
   test("bounds the wait for response headers", async () => {
     shortenDeadline();
     globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => new Promise((_resolve, reject) => {
@@ -50,26 +61,27 @@ describe("NWC daemon request deadline", () => {
     });
   }
 
-  test("does not impose the NWC deadline on mint payment routes", async () => {
-    let deadlines = 0;
-    globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
-      if (delay === DAEMON_REQUEST_TIMEOUT_MS) deadlines++;
-      return originalSetTimeout(callback, delay, ...args);
-    }) as typeof setTimeout;
-    globalThis.fetch = (async () => Response.json({ output: "paid" })) as unknown as typeof fetch;
-    expect(await request("/wallet/send/bolt11")).toEqual({ output: "paid" });
-    expect(deadlines).toBe(0);
+  test("applies the default deadline to ordinary routes", async () => {
+    shortenDeadline();
+    globalThis.fetch = (async () => Response.json({ output: "ok" })) as unknown as typeof fetch;
+    expect(await request("/nwc/status")).toEqual({ output: "ok" });
+    expect(requestedDeadlines).toEqual([DAEMON_REQUEST_TIMEOUT_MS]);
   });
 
-  test("clears the deadline after consuming a successful response", async () => {
-    let cleared = 0;
-    globalThis.clearTimeout = ((timer) => {
-      cleared++;
-      originalClearTimeout(timer as ReturnType<typeof setTimeout>);
-    }) as typeof clearTimeout;
-    globalThis.fetch = (async () => Response.json({ output: "ok" })) as unknown as typeof fetch;
-    expect(await request()).toEqual({ output: "ok" });
-    expect(cleared).toBe(1);
+  for (const path of ["/wallet/send/bolt11", "/wallet/receive/cashu"]) {
+    test(`uses the long deadline for value-moving route ${path}`, async () => {
+      shortenDeadline();
+      globalThis.fetch = (async () => Response.json({ output: "paid" })) as unknown as typeof fetch;
+      expect(await request(path)).toEqual({ output: "paid" });
+      expect(requestedDeadlines).toEqual([DAEMON_LONG_REQUEST_TIMEOUT_MS]);
+    });
+  }
+
+  test("bounds a stalled body on a long-running route too", async () => {
+    shortenDeadline();
+    stalledResponse();
+    await expect(request("/wallet/send/bolt11")).rejects.toThrow("payment outcome is unknown");
+    expect(requestedDeadlines).toEqual([DAEMON_LONG_REQUEST_TIMEOUT_MS]);
   });
 
   test("preserves HTTP errors rather than labeling them connection failures", async () => {

@@ -57,11 +57,30 @@ class DaemonConnectionError extends Error {
 }
 
 /**
- * Upper bound for NWC requests, including response-body consumption.
- * Other routes can perform long-running mint payments; aborting the client
- * does not cancel those operations, so do not impose this cap on them.
+ * Upper bound for a single daemon request, including response-body
+ * consumption. The daemon bounds its own NWC operations, so this only guards
+ * against a wedged server; without it a hung request would block the CLI
+ * forever.
  */
 export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * Upper bound for value-moving wallet routes. A cashu melt/swap can
+ * legitimately run longer than {@link DAEMON_REQUEST_TIMEOUT_MS} (the mint has
+ * no request timeout in routstrd), so these get a more generous bound that
+ * still prevents an indefinite CLI hang.
+ */
+export const DAEMON_LONG_REQUEST_TIMEOUT_MS = 600_000;
+
+/** Routes that may legitimately outlive the default request timeout. */
+const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/"];
+
+function requestTimeoutMs(path: string): number {
+  const pathname = path.split("?")[0] ?? path;
+  return LONG_RUNNING_ROUTES.some((route) => pathname.startsWith(route))
+    ? DAEMON_LONG_REQUEST_TIMEOUT_MS
+    : DAEMON_REQUEST_TIMEOUT_MS;
+}
 
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
@@ -106,40 +125,40 @@ export async function callDaemonUrl(
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString) headers.set("Content-Type", "application/json");
 
-  const controller = new AbortController();
-  const timeoutId = path.startsWith("/nwc/")
-    ? setTimeout(() => controller.abort(), DAEMON_REQUEST_TIMEOUT_MS)
-    : undefined;
-  try {
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method,
-        headers,
-        body: bodyString,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (controller.signal.aborted) throw error;
-      // Only connection failures qualify for alternate-host retries.
-      throw new DaemonConnectionError(error);
-    }
+  const timeoutMs = requestTimeoutMs(path);
+  const timeoutError = () =>
+    new Error(
+      `Daemon request timed out after ${timeoutMs / 1000}s; ` +
+        "any payment outcome is unknown — check before retrying",
+    );
+  // The signal stays armed while the body is read, so a daemon that sends
+  // headers and then stalls the body cannot hang the CLI either. Aborting
+  // here never cancels the daemon's operation — see timeoutError's warning.
+  const signal = AbortSignal.timeout(timeoutMs);
 
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers,
+      body: bodyString,
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) throw timeoutError();
+    // Only connection failures qualify for alternate-host retries.
+    throw new DaemonConnectionError(error);
+  }
+
+  try {
     if (!response.ok) {
       const errorData = (await response.json()) as { error?: string };
       throw new Error(errorData.error || `HTTP ${response.status}`);
     }
-    return await response.json() as CommandResponse;
+    return (await response.json()) as CommandResponse;
   } catch (error) {
-    if (controller.signal.aborted) {
-      throw new Error(
-        `Daemon request timed out after ${DAEMON_REQUEST_TIMEOUT_MS / 1000}s; ` +
-        "any payment outcome is unknown — check before retrying",
-      );
-    }
+    if (signal.aborted) throw timeoutError();
     throw error;
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 

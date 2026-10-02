@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { RestrictedError } from "applesauce-wallet-connect/helpers/error";
-import type { CocodClient } from "./cocod-client";
+import type { WalletAdapterOptions } from "./index";
 
 /**
  * Regression tests for the NWC hang fixed in this change.
@@ -107,13 +107,19 @@ mock.module("applesauce-relay", () => ({ RelayPool: MockRelayPool }));
 
 const { createWalletAdapter } = await import("./index");
 
-function makeClient(): CocodClient {
+/**
+ * Type of the injected wallet client, derived from the adapter options so this
+ * test keeps compiling when the legacy `CocodClient` is replaced (see #118).
+ */
+type WalletClientOption = NonNullable<WalletAdapterOptions["walletClient"]>;
+
+function makeClient(): WalletClientOption {
   return {
     getBalances: async () => ({ "https://mint.example": 0 }),
     getDefaultMint: async () => "https://mint.example",
     receiveBolt11: async () => ({ invoice: "lnbc-test-invoice" }),
     receiveCashu: async () => "ok",
-  } as unknown as CocodClient;
+  } as unknown as WalletClientOption;
 }
 
 function makeAdapter(timeoutMs = 25) {

@@ -182,7 +182,7 @@ export async function createWalletAdapter(
       logger.warn(
         `[nwc] ${label} failed (${(error as Error).message}); rebuilding NWC connection and retrying`,
       );
-      rebuildNwcConnection("reconnected after timeout");
+      rebuildNwcConnection("reconnected after stall");
       const retry = wallet;
       if (!retry?.service) throw error;
       return await withTimeout(
@@ -211,7 +211,7 @@ export async function createWalletAdapter(
     } catch (error) {
       // Include the library's own timeout, but not normal wallet error replies.
       if (!(error instanceof WalletBaseError)) {
-        rebuildNwcConnection("reconnected after payment timeout");
+        rebuildNwcConnection("reconnected after payment stall");
       }
       throw error;
     }

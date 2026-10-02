@@ -6,7 +6,7 @@ The wallet adapter adds an overall deadline: 15 seconds per read attempt and 45 
 
 Normal NIP-47 wallet errors do not rebuild the shared relay connection: a wallet error proves a response arrived, and rebuilding could interrupt unrelated payments. Transport failures and timeouts, including the library's own timeout, still trigger recovery.
 
-CLI `/nwc/*` requests have a 120-second deadline covering headers and response-body consumption. Other daemon routes are not subject to this cap because mint payment operations may run longer and cannot be cancelled by aborting the CLI request.
+Every CLI daemon request has a deadline covering headers and response-body consumption: 120 seconds by default, and 600 seconds for value-moving wallet routes (`/wallet/send/*`, `/wallet/receive/*`), whose mint operations can legitimately run longer. Aborting the CLI request never cancels the daemon-side operation; the longer bound only delays how soon the CLI reports the stall.
 
 A payment timeout is an **unknown outcome**, not proof that no payment occurred. Promise deadlines do not cancel the underlying operation. Check the mint quote, wallet transactions, and Cashu balance before creating and paying another invoice.
 
