@@ -142,7 +142,7 @@ export interface WalletDoctorReport {
   paidUnissued: DoctorPaidUnissuedQuote[];
   /** Melt operations holding locked proofs. */
   stuckMelts: DoctorStuckMelt[];
-  /** Quotes skipped because the probe budget ran out. */
+  /** Quotes whose remote state could not be checked (probe failure or budget exhausted). */
   uncheckedQuotes: number;
 }
 

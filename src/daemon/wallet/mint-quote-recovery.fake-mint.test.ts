@@ -15,7 +15,15 @@ import { join } from "node:path";
 import { Manager } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { QUOTE_EXPIRED, FakeMint } from "./testing/fake-mint";
-import { reopenFailedMintOperation, runMintQuoteRecovery } from "./coco-client";
+import {
+  fetchMintQuoteState,
+  probeMintInfo,
+  reopenFailedMintOperation,
+  runMintQuoteRecovery,
+  runWalletDoctor,
+  type WalletDoctorSource,
+} from "./coco-client";
+import type { DoctorMintOperation } from "./doctor";
 
 type AnyRecord = Record<string, unknown>;
 
@@ -382,5 +390,103 @@ describe("PAID mint quote recovery with a real Manager and mint", () => {
     )) as unknown as Record<string, number>;
     expect(third).toMatchObject({ recovered: 1 });
     expect(await booted.spendable()).toBe(21_000);
+  });
+});
+
+describe("wallet doctor with a real Manager and mint", () => {
+  function doctorSource(booted: Booted): WalletDoctorSource {
+    const manager = booted.manager;
+    const repos = manager as unknown as {
+      mintOperationRepository: {
+        getByState(state: string): Promise<DoctorMintOperation[]>;
+      };
+      meltOperationRepository: {
+        getByState(state: string): Promise<AnyRecord[]>;
+      };
+      proofRepository: {
+        getInflightProofs(): Promise<Array<{ secret: string }>>;
+      };
+    };
+    return {
+      listTrustedMintUrls: async () =>
+        (await manager.mint.getAllTrustedMints()).map((mint) => mint.mintUrl),
+      listPendingMintOps: async () => {
+        const byId = new Map<string, DoctorMintOperation>();
+        for (const op of [
+          ...(await manager.ops.mint.listPending()),
+          ...(await manager.ops.mint.listInFlight()),
+        ] as unknown as DoctorMintOperation[]) {
+          byId.set(op.id, op);
+        }
+        return [...byId.values()];
+      },
+      listFailedMintOps: () => repos.mintOperationRepository.getByState("failed"),
+      listPreparedMelts: async () =>
+        manager.ops.melt.listPrepared() as unknown as AnyRecord[],
+      listInFlightMelts: async () =>
+        manager.ops.melt.listInFlight() as unknown as AnyRecord[],
+      listFailedMelts: () => repos.meltOperationRepository.getByState("failed"),
+      getInflightProofSecrets: async () =>
+        (await repos.proofRepository.getInflightProofs()).map(
+          (proof) => proof.secret,
+        ),
+      probeMint: probeMintInfo,
+      fetchQuoteState: fetchMintQuoteState,
+    };
+  }
+
+  it("surfaces unpaid, then paid-unissued, then a clean bill after recovery", async () => {
+    booted = await boot({ quoteExpiry: null });
+    const op = await prepareQuote(booted, 100);
+
+    // Fresh quote, unpaid: the doctor reaches the mint and lists the quote.
+    const unpaid = await runWalletDoctor(doctorSource(booted));
+    expect(unpaid.mints).toHaveLength(1);
+    expect(unpaid.mints[0]?.reachable).toBe(true);
+    expect(unpaid.paidUnissued).toEqual([]);
+    expect(unpaid.uncheckedQuotes).toBe(0);
+    expect(unpaid.unpaidQuotes).toHaveLength(1);
+    expect(unpaid.unpaidQuotes[0]).toMatchObject({
+      operationId: op.id as string,
+      amount: 100,
+    });
+
+    // The quote gets paid while the daemon is "down": the doctor surfaces
+    // exactly the stuck scenario recovery exists for, with the recover hint.
+    booted.mint.markPaid(op.quoteId as string);
+    const stuck = await runWalletDoctor(doctorSource(booted));
+    expect(stuck.unpaidQuotes).toEqual([]);
+    expect(stuck.paidUnissued).toHaveLength(1);
+    expect(stuck.paidUnissued[0]).toMatchObject({
+      operationId: op.id as string,
+      remoteState: "PAID",
+      amount: 100,
+      remediation: `routstrd wallet recover --op ${op.id as string}`,
+    });
+
+    // Recovery claims the sats; the doctor goes back to all-green.
+    const recovered = (await runMintQuoteRecovery(
+      booted.source() as never,
+    )) as unknown as Record<string, number>;
+    expect(recovered).toMatchObject({ recovered: 1 });
+    const clean = await runWalletDoctor(doctorSource(booted));
+    expect(clean.unpaidQuotes).toEqual([]);
+    expect(clean.paidUnissued).toEqual([]);
+    expect(clean.stuckMelts).toEqual([]);
+    expect(clean.uncheckedQuotes).toBe(0);
+  });
+
+  it("reports unreachable mints without failing the other checks", async () => {
+    booted = await boot({ quoteExpiry: null });
+    await prepareQuote(booted, 100);
+    booted.mint.stop();
+
+    const report = await runWalletDoctor(doctorSource(booted));
+    expect(report.mints[0]?.reachable).toBe(false);
+    // The quote probe fails too, and is counted rather than dropped.
+    expect(report.uncheckedQuotes).toBe(1);
+    expect(report.unpaidQuotes).toEqual([]);
+    expect(report.paidUnissued).toEqual([]);
+    booted.mint.start();
   });
 });
