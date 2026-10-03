@@ -49,7 +49,7 @@ Start the background daemon process.
 |--------|-------------|
 | `--port <port>` | Port to listen on (default: 8008) |
 | `--host <host>` | Bind address (default: 127.0.0.1) |
-| `-p, --provider <provider>` | Default provider to use |
+| `-p, --provider <provider>` | Pin all requests to this provider (no cross-provider failover) |
 
 ### `routstrd daemon`
 
@@ -479,6 +479,20 @@ The incoming request path is forwarded to the provider, so the Anthropic
 Messages API (`POST /v1/messages`) and the OpenAI Responses API
 (`POST /v1/responses`) are proxied in their own formats as well.
 
+#### Provider pinning
+
+A provider can be pinned with any of:
+
+- request header `x-routstr-provider: <provider-url>`
+- query parameter `?provider=<provider-url>` (takes precedence over the header)
+- config `provider` / `routstrd start --provider <provider-url>`
+
+All three are **strict pins**: the request is routed only to that provider. If
+it answers with an error (including a 400/422 upstream rejection), the request
+is **not** failed over to another node — the error is returned to the client.
+Retries against the same provider (top-up, mint fallback) still happen. Without
+a pin, the router falls over to the next-cheapest eligible provider as usual.
+
 ## Configuration
 
 Config file: `~/.routstrd/config.json`
@@ -487,7 +501,7 @@ Config file: `~/.routstrd/config.json`
 |-------|------|---------|-------------|
 | `port` | number | 8008 | Daemon HTTP port |
 | `host` | string | `"127.0.0.1"` | Bind address |
-| `provider` | string\|null | null | Default provider URL |
+| `provider` | string\|null | null | Pinned provider URL; all requests go only to this node (no cross-provider failover) |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
 | `maxTokens` | number | 64000 | Completion budget applied when a client sets no output-token limit |
 | `daemonUrl` | string | — | Remote daemon URL (set by `routstrd remote`) |
