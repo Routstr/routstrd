@@ -3,6 +3,8 @@ import { VERSION } from "../version";
 import { getLatestStandaloneRelease } from "./standalone-update";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
+/** Bounds the update check so a stalled registry cannot hang `routstrd update`. */
+const NPM_TIMEOUT_MS = 30_000;
 
 /** Packages that `routstrd update` manages. */
 export const UPDATE_PACKAGES = [
@@ -20,6 +22,7 @@ export async function getLatestNpmVersion(
   try {
     const response = await fetch(
       `${NPM_REGISTRY}/${encodeURIComponent(packageName)}/latest`,
+      { signal: AbortSignal.timeout(NPM_TIMEOUT_MS) },
     );
     if (!response.ok) return null;
     const data = (await response.json()) as { version?: string };

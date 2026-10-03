@@ -179,3 +179,118 @@ describe("installStandaloneRelease", () => {
     expect(readFileSync(current, "utf8")).toBe(original);
   });
 });
+
+describe("download deadlines", () => {
+  async function makeFixture() {
+    const dir = mkdtempSync(join(tmpdir(), "routstrd-updater-timeout-"));
+    tempDirs.push(dir);
+    const current = join(dir, "installed-routstrd");
+    const archiveRoot = join(dir, "archive");
+    const candidate = join(archiveRoot, "routstrd");
+    const archivePath = join(dir, "routstrd-v0.5.0-linux-x64.tar.gz");
+    mkdirSync(archiveRoot);
+    writeFileSync(current, "#!/bin/sh\necho 0.4.4\n");
+    writeFileSync(candidate, "#!/bin/sh\necho 0.5.0\n");
+    chmodSync(current, 0o755);
+    chmodSync(candidate, 0o755);
+    const tar = Bun.spawnSync([
+      "tar",
+      "-C",
+      archiveRoot,
+      "-czf",
+      archivePath,
+      "routstrd",
+    ]);
+    expect(tar.exitCode).toBe(0);
+    const archiveBytes = readFileSync(archivePath);
+    return {
+      current,
+      archiveBytes,
+      releaseName: "routstrd-v0.5.0-linux-x64.tar.gz",
+      checksum: sha256(archiveBytes),
+    };
+  }
+
+  /** Headers land immediately; the body arrives after `delayMs`, or errors on abort. */
+  function delayedResponse(
+    bytes: Uint8Array,
+    delayMs: number,
+    signal: AbortSignal | null | undefined,
+  ): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const timer = setTimeout(() => {
+          controller.enqueue(bytes);
+          controller.close();
+        }, delayMs);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            controller.error(new DOMException("Aborted", "AbortError"));
+          },
+          { once: true },
+        );
+      },
+    });
+    return new Response(stream);
+  }
+
+  function slowArchiveFetch(
+    archiveBytes: Uint8Array,
+    checksum: string,
+    releaseName: string,
+    bodyDelayMs: number,
+  ): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) =>
+      String(input).endsWith("SHA256SUMS")
+        ? new Response(`${checksum}  ${releaseName}\n`)
+        : delayedResponse(archiveBytes, bodyDelayMs, init?.signal)) as typeof fetch;
+  }
+
+  test("does not kill a slow archive on the connect budget", async () => {
+    const { current, archiveBytes, releaseName, checksum } = await makeFixture();
+    // Body takes 80ms; the connect budget is 20ms. Regression guard for the flat
+    // 30s deadline that failed real 70s downloads.
+    const fetchImpl = slowArchiveFetch(archiveBytes, checksum, releaseName, 80);
+
+    await installStandaloneRelease(
+      {
+        version: "0.5.0",
+        archive: { name: releaseName, browser_download_url: "https://example/archive" },
+        checksums: { name: "SHA256SUMS", browser_download_url: "https://example/SHA256SUMS" },
+      },
+      current,
+      fetchImpl,
+      { connectMs: 20, transferMs: 2_000 },
+    );
+
+    const version = Bun.spawnSync([current, "--version"]);
+    expect(version.exitCode).toBe(0);
+    expect(version.stdout.toString().trim()).toBe("0.5.0");
+  });
+
+  test("gives up when the transfer deadline is exceeded", async () => {
+    const { current, archiveBytes, releaseName, checksum } = await makeFixture();
+    const fetchImpl = slowArchiveFetch(archiveBytes, checksum, releaseName, 300);
+
+    await expect(
+      installStandaloneRelease(
+        {
+          version: "0.5.0",
+          archive: {
+            name: releaseName,
+            browser_download_url: "https://example/archive",
+          },
+          checksums: {
+            name: "SHA256SUMS",
+            browser_download_url: "https://example/SHA256SUMS",
+          },
+        },
+        current,
+        fetchImpl,
+        { connectMs: 1_000, transferMs: 50 },
+      ),
+    ).rejects.toThrow(/Downloading from .* timed out after/);
+  });
+});
