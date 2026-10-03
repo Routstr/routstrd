@@ -13,10 +13,18 @@ import { tmpdir } from "os";
 import { basename, join } from "path";
 
 const RELEASES_API = "https://api.github.com/repos/Routstr/routstrd/releases/latest";
-const FETCH_TIMEOUT_MS = 30_000;
+/** Time allowed to connect and receive response headers. */
+const CONNECT_TIMEOUT_MS = 30_000;
+/** Time allowed to download a release archive once headers have arrived. */
+const TRANSFER_TIMEOUT_MS = 300_000;
 const PROCESS_TIMEOUT_MS = 30_000;
 const MAX_ARCHIVE_BYTES = 250 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 1024 * 1024;
+
+export type UpdateTimeouts = {
+  connectMs?: number;
+  transferMs?: number;
+};
 
 type ReleaseAsset = {
   name: string;
@@ -52,27 +60,74 @@ export function releaseArchiveName(
   return `routstrd-v${normalizeVersion(version)}-${platform}-${arch}.tar.gz`;
 }
 
-async function fetchOrThrow(
+type FetchOptions = {
+  maxBytes?: number;
+  connectTimeoutMs?: number;
+  transferTimeoutMs?: number;
+};
+
+/**
+ * Fetch `url` and hand the response to `consume` while it is still covered by a
+ * deadline. The connect+header phase gets the short `CONNECT_TIMEOUT_MS`; once
+ * headers are in, the deadline is relaxed to the (much longer)
+ * `transferTimeoutMs` so that a slow-but-progressing download is not killed for
+ * failing to fit a 38 MB archive into the connect budget.
+ */
+async function fetchOrThrow<T>(
   url: string,
   fetchImpl: typeof fetch,
-  maxBytes = MAX_CHECKSUM_BYTES,
-): Promise<Response> {
-  const response = await fetchImpl(url, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": "routstrd",
-    },
-    redirect: "follow",
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!response.ok) {
-    throw new Error(`Download failed (${response.status}) for ${url}`);
+  {
+    maxBytes = MAX_CHECKSUM_BYTES,
+    connectTimeoutMs = CONNECT_TIMEOUT_MS,
+    transferTimeoutMs = CONNECT_TIMEOUT_MS,
+  }: FetchOptions,
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let deadlineHit = false;
+  let phase: "connect" | "transfer" = "connect";
+  const startDeadline = (ms: number) =>
+    setTimeout(() => {
+      deadlineHit = true;
+      controller.abort();
+    }, ms);
+  let timer = startDeadline(connectTimeoutMs);
+
+  try {
+    const response = await fetchImpl(url, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "routstrd",
+      },
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Download failed (${response.status}) for ${url}`);
+    }
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new Error(`Download is too large (${contentLength} bytes) for ${url}`);
+    }
+
+    // Headers are in: the body gets its own, larger budget.
+    phase = "transfer";
+    clearTimeout(timer);
+    timer = startDeadline(transferTimeoutMs);
+
+    return await consume(response);
+  } catch (error) {
+    if (deadlineHit) {
+      const seconds = Math.round(
+        (phase === "connect" ? connectTimeoutMs : transferTimeoutMs) / 1000,
+      );
+      const what = phase === "connect" ? "Connecting to" : "Downloading from";
+      throw new Error(`${what} ${url} timed out after ${seconds}s.`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  const contentLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new Error(`Download is too large (${contentLength} bytes) for ${url}`);
-  }
-  return response;
 }
 
 async function waitForExit(
@@ -100,8 +155,12 @@ export async function getLatestStandaloneRelease(
   arch: string = process.arch,
   fetchImpl: typeof fetch = fetch,
 ): Promise<StandaloneRelease> {
-  const response = await fetchOrThrow(RELEASES_API, fetchImpl);
-  const release = (await response.json()) as GithubRelease;
+  const release = await fetchOrThrow(
+    RELEASES_API,
+    fetchImpl,
+    {},
+    async (response) => (await response.json()) as GithubRelease,
+  );
   const version = normalizeVersion(release.tag_name || "");
   if (!/^\d+\.\d+\.\d+/.test(version)) {
     throw new Error("The latest GitHub Release has an invalid version tag.");
@@ -151,28 +210,43 @@ export async function installStandaloneRelease(
   release: StandaloneRelease,
   executablePath: string = process.execPath,
   fetchImpl: typeof fetch = fetch,
+  timeouts: UpdateTimeouts = {},
 ): Promise<void> {
+  const connectMs = timeouts.connectMs ?? CONNECT_TIMEOUT_MS;
+  const transferMs = timeouts.transferMs ?? TRANSFER_TIMEOUT_MS;
+  /** SHA256SUMS is a few hundred bytes, so it gets the short budget, not the archive's. */
+  const checksumMs = connectMs;
   const tempDir = mkdtempSync(join(tmpdir(), "routstrd-update-"));
   const archivePath = join(tempDir, release.archive.name);
   const stagedPath = `${executablePath}.update-${randomBytes(12).toString("hex")}`;
 
   try {
-    const [archiveResponse, checksumsResponse] = await Promise.all([
+    const [archiveBytes, checksums] = await Promise.all([
       fetchOrThrow(
         release.archive.browser_download_url,
         fetchImpl,
-        MAX_ARCHIVE_BYTES,
+        { maxBytes: MAX_ARCHIVE_BYTES, connectTimeoutMs: connectMs, transferTimeoutMs: transferMs },
+        async (response) => {
+          const bytes = await response.arrayBuffer();
+          if (bytes.byteLength > MAX_ARCHIVE_BYTES) {
+            throw new Error(`Download is too large (${bytes.byteLength} bytes).`);
+          }
+          return bytes;
+        },
       ),
-      fetchOrThrow(release.checksums.browser_download_url, fetchImpl),
+      fetchOrThrow(
+        release.checksums.browser_download_url,
+        fetchImpl,
+        { connectTimeoutMs: connectMs, transferTimeoutMs: checksumMs },
+        async (response) => {
+          const contents = await response.text();
+          if (Buffer.byteLength(contents) > MAX_CHECKSUM_BYTES) {
+            throw new Error("SHA256SUMS is too large.");
+          }
+          return contents;
+        },
+      ),
     ]);
-    const archiveBytes = await archiveResponse.arrayBuffer();
-    if (archiveBytes.byteLength > MAX_ARCHIVE_BYTES) {
-      throw new Error(`Download is too large (${archiveBytes.byteLength} bytes).`);
-    }
-    const checksums = await checksumsResponse.text();
-    if (Buffer.byteLength(checksums) > MAX_CHECKSUM_BYTES) {
-      throw new Error("SHA256SUMS is too large.");
-    }
     const expected = expectedChecksum(checksums, release.archive.name);
     const actual = sha256(archiveBytes);
     if (actual !== expected) {
