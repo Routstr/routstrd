@@ -226,6 +226,7 @@ export async function listClientsAction(): Promise<void> {
     console.log(`    Name:     ${client.name}`);
     console.log(`    API Key:  ${client.apiKey}`);
     console.log(`    Created:  ${createdAt}`);
+    console.log(`    Last Used: ${lastUsed}`);
     console.log("");
   }
 }
