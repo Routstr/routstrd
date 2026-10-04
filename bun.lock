@@ -8,7 +8,7 @@
         "@cashu/cashu-ts": "^4.3.0",
         "@cashu/coco-core": "^1.0.1",
         "@cashu/coco-sqlite-bun": "^1.0.1",
-        "@routstr/sdk": "^0.4.8",
+        "@routstr/sdk": "^0.4.9",
         "@scure/bip39": "^2.2.0",
         "applesauce-core": "^5.1.0",
         "applesauce-relay": "^5.1.0",
@@ -98,7 +98,7 @@
 
     "@panva/hpke-noble": ["@panva/hpke-noble@1.1.3", "", { "dependencies": { "@noble/ciphers": "^2.2.0", "@noble/curves": "^2.2.0", "@noble/hashes": "^2.2.0", "@noble/post-quantum": "^0.6.1" }, "peerDependencies": { "hpke": "^1.0.0" } }, "sha512-zPG7MR9x7QE7+KdYsKBO9H0vp3AdYt9/4AT3ab7T7W6SL0fdRqhgNRu8q4OGTJNLeKpdbkkRb6LhBDaA9+9xWQ=="],
 
-    "@routstr/sdk": ["@routstr/sdk@0.4.8", "", { "dependencies": { "@cashu/cashu-ts": "^4.11.0", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "applesauce-sqlite": "^6.0.0", "ehbp": "^0.3.2", "rxjs": "^7.8.1", "tinfoil": "^1.2.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^12.10.0" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-ThcV9OM4vang6V4L61bIwQCsP3yvWWoHv3MPmgLeR0PUbot3UiWl7tmRAGe66CzGDy9UUd1z/ACSjUtmpb6GfQ=="],
+    "@routstr/sdk": ["@routstr/sdk@0.4.9", "", { "dependencies": { "@cashu/cashu-ts": "^4.11.0", "applesauce-core": "^5.1.0", "applesauce-relay": "^5.1.0", "applesauce-sqlite": "^6.0.0", "ehbp": "^0.3.2", "rxjs": "^7.8.1", "tinfoil": "^1.2.1", "zustand": "^5.0.5" }, "optionalDependencies": { "better-sqlite3": "^12.10.0" }, "peerDependencies": { "typescript": ">=5.0.0" } }, "sha512-kmqgpL6HpwRoritwR5s42B8h6fC6FzOjJgFzi1ath0v+tC4ppRWxeOloe3IaoHAovmh2GosRbN1rFPpb1wIXSw=="],
 
     "@scure/base": ["@scure/base@2.2.0", "", {}, "sha512-b8XEupJibegiXV+tDUseI8oLQc8ei3d/4Jkb2RpbHh3MfE054ov3uIz2dhFkB3FI8iwYkEh0gGCApkrYggkPNg=="],
 

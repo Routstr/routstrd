@@ -125,10 +125,11 @@ routstrd start --host 0.0.0.0
 
 Only expose the daemon behind appropriate network controls.
 
-With specific provider:
+Pin all requests to one provider (no cross-provider failover):
 ```sh
 routstrd start --provider https://your-provider.com
 ```
+See [Provider pinning](#provider-pinning) for the request-level header/query.
 
 ### CLI Commands
 
@@ -233,6 +234,23 @@ Any unmatched `POST` path is proxied to the selected provider with the incoming
 path preserved, so `POST /v1/messages` (Anthropic Messages API) and
 `POST /v1/responses` (OpenAI Responses API) work in their own formats too.
 
+#### Provider pinning
+
+Pin a request to a single provider with either the `x-routstr-provider` header
+or the `?provider=` query parameter (the query takes precedence):
+
+```sh
+curl -H 'x-routstr-provider: https://your-provider.com' ... \
+  http://127.0.0.1:8008/v1/chat/completions
+```
+
+A pin is strict: the request is sent only to that provider. On an upstream
+error — including a 400/422 the node itself rejects — the request is **not**
+failed over to another node; the error is returned to the client. Retries
+against the same provider (top-up, mint fallback) still happen. The config
+`provider` and `routstrd start --provider` set the same strict pin as a
+default for every request.
+
 Request body:
 ```json
 {
@@ -291,6 +309,10 @@ overrides the 21-minute interval.
 choose and pin an advertised model path for `deepseek-v4.1-flash` requests.
 Explicit `x-routstr-model-path` request headers work independently of this
 setting and take precedence. Restart the daemon after changing `autoModelPath`.
+
+`provider` pins every request to one node (same strict behavior as the
+`x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
+router pick the cheapest eligible provider and fail over between nodes.
 
 ### Environment Variables
 
