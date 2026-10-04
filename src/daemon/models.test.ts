@@ -289,3 +289,69 @@ describe("createModelService.getRoutstr21Models", () => {
     expect(models).toEqual([{ id: "no-such-model", name: "no-such-model" }]);
   });
 });
+
+/**
+ * Finding #4: the SDK refuses to spend a mint a provider does not advertise,
+ * so the daemon must actually populate the mint cache during bootstrap (and
+ * refresh). `discoverMints` was previously never called, leaving
+ * `getCachedMints()` empty and every provider "accepting all mints".
+ */
+describe("createModelService mint discovery wiring", () => {
+  function makeStore() {
+    const state: Record<string, unknown> = {
+      baseUrlsList: [],
+      setBaseUrlsList: () => {},
+      disabledProviders: [],
+      setDisabledProviders: () => {},
+      manuallyDisabledProviders: [],
+      manuallyEnabledProviders: [],
+    };
+    return { store: { getState: () => state } as unknown as SdkStore };
+  }
+
+  it("discovers mints for every bootstrapped provider", async () => {
+    const providers = ["https://a.example/", "https://b.example/"];
+    const modelManager = {
+      bootstrapProviders: async () => providers,
+      syncReviewedProvidersFromNostr: async () => [],
+    } as never;
+    const discoverCalls: string[][] = [];
+    const mintDiscovery = {
+      discoverMints: async (urls: string[]) => {
+        discoverCalls.push(urls);
+        return { mintsFromProviders: {}, infoFromProviders: {} };
+      },
+    } as never;
+
+    const service = createModelService(
+      modelManager as never,
+      {} as never,
+      makeStore().store,
+      mintDiscovery as never,
+    );
+    await service.ensureProvidersBootstrapped();
+
+    expect(discoverCalls).toEqual([providers]);
+  });
+
+  it("does not fail bootstrap when mint discovery throws", async () => {
+    const modelManager = {
+      bootstrapProviders: async () => ["https://a.example/"],
+      syncReviewedProvidersFromNostr: async () => [],
+    } as never;
+    const mintDiscovery = {
+      discoverMints: async () => {
+        throw new Error("mint discovery boom");
+      },
+    } as never;
+
+    const service = createModelService(
+      modelManager as never,
+      {} as never,
+      makeStore().store,
+      mintDiscovery as never,
+    );
+
+    await expect(service.ensureProvidersBootstrapped()).resolves.toBeUndefined();
+  });
+});
