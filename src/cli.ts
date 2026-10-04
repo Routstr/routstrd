@@ -60,6 +60,7 @@ import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import {
   HISTORY_ENTRY_TYPES,
+  historyStatus,
   isHistoryEntryType,
 } from "./utils/history";
 import { generateSecretKey, nip19 } from "nostr-tools";
@@ -1917,6 +1918,7 @@ program
     const idCol = "ID";
     const timeCol = "Date/Time";
     const typeCol = "Type";
+    const statusCol = "Status";
     const mintCol = "Mint";
     const amtCol = "Amount";
 
@@ -1924,16 +1926,18 @@ program
       const id = String(entry.id ?? "");
       const time = new Date(Number(entry.createdAt)).toISOString().replace("T", " ").slice(0, 19);
       const type = String(entry.type ?? "").toUpperCase();
+      const status = historyStatus(String(entry.type ?? ""), String(entry.state ?? ""));
       const mint = String(entry.mintUrl ?? "");
       const unit = String(entry.unit ?? "sat");
       const amount = `${entry.amount} ${unit}`;
-      return { id, time, type, mint, amount };
+      return { id, time, type, status, mint, amount };
     });
 
     const widths = {
       id: Math.max(idCol.length, ...rows.map((r) => r.id.length)),
       time: Math.max(timeCol.length, ...rows.map((r) => r.time.length)),
       type: Math.max(typeCol.length, ...rows.map((r) => r.type.length)),
+      status: Math.max(statusCol.length, ...rows.map((r) => r.status.length)),
       mint: Math.max(mintCol.length, ...rows.map((r) => r.mint.length)),
       amount: Math.max(amtCol.length, ...rows.map((r) => r.amount.length)),
     };
@@ -1944,14 +1948,14 @@ program
     // A single transaction lookup prints just its summary line.
     if (!options.id) {
       console.log(
-        `${pad(idCol, widths.id)} | ${pad(timeCol, widths.time)} | ${pad(typeCol, widths.type)} | ${pad(mintCol, widths.mint)} | ${pad(amtCol, widths.amount)}`,
+        `${pad(idCol, widths.id)} | ${pad(timeCol, widths.time)} | ${pad(typeCol, widths.type)} | ${pad(statusCol, widths.status)} | ${pad(mintCol, widths.mint)} | ${pad(amtCol, widths.amount)}`,
       );
       console.log(sep);
     }
 
     for (const row of rows) {
       console.log(
-        `${pad(row.id, widths.id)} | ${pad(row.time, widths.time)} | ${pad(row.type, widths.type)} | ${pad(row.mint, widths.mint)} | ${pad(row.amount, widths.amount)}`,
+        `${pad(row.id, widths.id)} | ${pad(row.time, widths.time)} | ${pad(row.type, widths.type)} | ${pad(row.status, widths.status)} | ${pad(row.mint, widths.mint)} | ${pad(row.amount, widths.amount)}`,
       );
     }
   });
