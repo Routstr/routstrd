@@ -204,42 +204,59 @@ export async function callDaemonUrl(
   }
 }
 
-async function callLocalDaemon(
+/** Resolve loopback addresses with safe reads, never by replaying a write. */
+async function callDaemonCandidates(
+  candidates: string[],
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
-  // Retry only connection failures; HTTP errors prove that a server answered.
+  const isRead = (options.method ?? "GET") === "GET";
   let connectionError: DaemonConnectionError | undefined;
-  for (const baseUrl of localDaemonBaseUrls(config)) {
+  for (const baseUrl of candidates) {
+    if (!isRead && candidates.length > 1) {
+      try {
+        // Select an address before dispatching a potentially money-moving
+        // request. An HTTP error is authoritative, not a reason to fall back.
+        await callDaemonUrl(baseUrl, "/health", { method: "GET" }, config);
+      } catch (error) {
+        if (!(error instanceof DaemonConnectionError)) throw error;
+        connectionError = error;
+        continue;
+      }
+    }
     try {
       return await callDaemonUrl(baseUrl, path, options, config);
     } catch (error) {
       if (!(error instanceof DaemonConnectionError)) throw error;
+      if (!isRead) {
+        // fetch can reject after the server has committed the operation.
+        throw new Error(
+          "Connection lost; operation outcome is unknown — check its status before retrying",
+          { cause: error },
+        );
+      }
       connectionError = error;
     }
   }
   throw connectionError ?? new Error("No daemon host candidates available");
 }
 
-/** Call a configured remote endpoint, retrying connection failures against the
- *  other loopback family when the host is `localhost`. */
+async function callLocalDaemon(
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
+): Promise<CommandResponse> {
+  return callDaemonCandidates(localDaemonBaseUrls(config), path, options, config);
+}
+
 async function callRemoteDaemon(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
-  let connectionError: DaemonConnectionError | undefined;
-  for (const candidate of baseUrlCandidates(baseUrl)) {
-    try {
-      return await callDaemonUrl(candidate, path, options, config);
-    } catch (error) {
-      if (!(error instanceof DaemonConnectionError)) throw error;
-      connectionError = error;
-    }
-  }
-  throw connectionError ?? new Error("No daemon host candidates available");
+  return callDaemonCandidates(baseUrlCandidates(baseUrl), path, options, config);
 }
 
 export async function callDaemon(
@@ -282,7 +299,7 @@ export async function isDaemonRunning(): Promise<boolean> {
           const response = await fetch(url, {
             headers: authorization ? { Authorization: authorization } : {},
           });
-          if (response.ok) return true;
+          return response.ok;
         } catch {
           // Try the next candidate host.
         }
@@ -298,7 +315,7 @@ export async function isDaemonRunning(): Promise<boolean> {
         const response = await fetch(`${baseUrl}/health`, {
           signal: controller.signal,
         });
-        if (response.ok) return true;
+        return response.ok;
       } catch {
         // Try the next candidate host.
       } finally {
