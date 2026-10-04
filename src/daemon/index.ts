@@ -2,6 +2,7 @@ import { createServer } from "http";
 import { existsSync, unlinkSync } from "fs";
 import {
   ProviderManager,
+  MintDiscovery,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
@@ -132,8 +133,13 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
+  // Mint discovery owns the mint cache the wallet uses to refuse a mint a
+  // provider does not accept. Its own 21-minute TTL gates network refreshes.
+  const mintDiscovery = new MintDiscovery(discoveryAdapter, {
+    logger: daemonSdkLogger,
+  });
   const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
-    createModelService(modelManager, providerManager, store);
+    createModelService(modelManager, providerManager, store, mintDiscovery);
 
   // The daemon may be launched directly (or by an older/global CLI), so do
   // not rely on the parent command having stopped the external wallet first.

@@ -3,6 +3,7 @@ import {
   findModelForId,
   ModelManager,
   ProviderManager,
+  type MintDiscovery,
   type Model,
   type SdkStore,
 } from "@routstr/sdk";
@@ -28,8 +29,22 @@ export function createModelService(
   modelManager: ModelManager,
   providerManager: ProviderManager,
   store: SdkStore,
+  mintDiscovery?: MintDiscovery,
 ) {
   let providerBootstrapPromise: Promise<void> | null = null;
+  let mintDiscoveryPromise: Promise<void> | null = null;
+
+  const scheduleMintDiscovery = (providers: string[]): void => {
+    if (!mintDiscovery || mintDiscoveryPromise) return;
+    const discovery = mintDiscovery;
+    mintDiscoveryPromise = Promise.resolve()
+      .then(async () => {
+        await discovery.discoverMints(providers);
+        logger.log(`Discovered mints for ${providers.length} provider(s)`);
+      })
+      .catch((error) => logger.error("Mint discovery failed:", error))
+      .finally(() => { mintDiscoveryPromise = null; });
+  };
 
   const normalizeBaseUrl = (url: string): string =>
     url.endsWith("/") ? url : `${url}/`;
@@ -132,6 +147,13 @@ export function createModelService(
         }
 
         logger.log("Provider bootstrap complete.");
+
+        // Populate the mint cache for every enabled provider. The SDK refuses
+        // to spend a mint a provider does not advertise, so without this the
+        // routing layer spends the wallet's largest mint and gets rejected
+        // (finding #4). MintDiscovery owns its own 21-minute TTL, so repeated
+        // calls within that window are cache hits and never refetch.
+        scheduleMintDiscovery(providers);
       })().catch((error) => {
         providerBootstrapPromise = null;
         logger.error("Provider bootstrap failed:", error);
@@ -277,6 +299,10 @@ export function createModelService(
     // Force-refresh models from all providers
     const models = await modelManager.fetchModels(providers, true);
     console.log(`Fetched ${models.length} models from ${providers.length} providers`);
+
+    // Refresh each provider's advertised mint list alongside its models so
+    // routing always has current mint data (TTL-gated by MintDiscovery).
+    scheduleMintDiscovery(providers);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status
     const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
