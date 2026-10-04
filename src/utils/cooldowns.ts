@@ -43,6 +43,15 @@ export interface CooldownsOutput {
   cooldowns: CooldownSummary[];
 }
 
+/** Result of clearing every cooldown (`POST /cooldowns/reset`). */
+export interface CooldownsResetOutput {
+  message: string;
+  /** Number of active entries that were cleared. */
+  cleared: number;
+  /** Distinct providers whose cooldowns were cleared. */
+  providers: string[];
+}
+
 /**
  * Build the `/cooldowns` payload: drop expired entries, tag each entry's
  * scope, and compute when it lifts. Longest remaining cooldown comes first.
@@ -130,5 +139,14 @@ export function formatCooldowns(output: CooldownsOutput): string {
     );
   }
 
+  return lines.join("\n");
+}
+
+/** Render a `/cooldowns/reset` payload for `routstrd cooldowns --reset`. */
+export function formatCooldownsReset(output: CooldownsResetOutput): string {
+  const lines = [output.message];
+  for (const baseUrl of output.providers) {
+    lines.push(`  - ${baseUrl}`);
+  }
   return lines.join("\n");
 }
