@@ -22,7 +22,7 @@ import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
-import { collapseDuplicatedV1 } from "./request-path";
+import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -2063,12 +2063,23 @@ export function createDaemonRequestHandler(deps: {
       await deps.ensureProvidersBootstrapped();
       const reqId = randomBytes(4).toString("hex");
       const reqLogger = makeSdkLogger(`req:${reqId}`, `model:${modelId}`);
-      reqLogger.log(`Routing request with path: ${url.pathname}`);
+      // Provider nodes accept an endpoint with or without a leading `/v1`, but
+      // they forward the caller's spelling to their own upstream, and some
+      // upstreams serve only the versioned route. Normalize at the last hop
+      // routstrd controls, so every client spelling reaches the same upstream
+      // URL. `url.pathname` stays untouched: the ingress matches its own
+      // routes against it.
+      const forwardedPath = ensureV1Prefix(url.pathname);
+      reqLogger.log(
+        forwardedPath === url.pathname
+          ? `Routing request with path: ${url.pathname}`
+          : `Routing request with path: ${url.pathname} (forwarding as ${forwardedPath})`,
+      );
 
       const response = await routeRequests({
         modelId,
         requestBody,
-        path: url.pathname,
+        path: forwardedPath,
         forcedProvider,
         autoModelPath: deps.autoModelPath === true,
         headers: incomingHeaders,
