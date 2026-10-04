@@ -10,6 +10,7 @@ import {
   loadConfig,
   getDaemonBaseUrl,
   getUserNpub,
+  normalizeBaseUrl,
   type CommandResponse,
 } from "./utils/daemon-client";
 import {
@@ -601,7 +602,7 @@ program
     }
 
     try {
-      new URL(url);
+      new URL(normalizeBaseUrl(url));
     } catch {
       console.error(`Invalid URL: ${url}`);
       process.exit(1);
@@ -609,7 +610,7 @@ program
 
     if (options.authUrl) {
       try {
-        new URL(options.authUrl);
+        new URL(normalizeBaseUrl(options.authUrl));
       } catch {
         console.error(`Invalid auth URL: ${options.authUrl}`);
         process.exit(1);
@@ -620,9 +621,10 @@ program
       mkdirSync(CONFIG_DIR, { recursive: true });
     }
 
-    const updates: Partial<RoutstrdConfig> = { daemonUrl: url };
+    const normalizedUrl = normalizeBaseUrl(url);
+    const updates: Partial<RoutstrdConfig> = { daemonUrl: normalizedUrl };
     if (options.authUrl) {
-      updates.authUrl = options.authUrl;
+      updates.authUrl = normalizeBaseUrl(options.authUrl);
     }
     let generatedNpub: string | undefined;
 
@@ -641,9 +643,9 @@ program
 
     saveDaemonConfig(updatedConfig);
 
-    console.log(`Remote daemon URL set to: ${url}`);
+    console.log(`Remote daemon URL set to: ${normalizedUrl}`);
     if (options.authUrl) {
-      console.log(`Auth proxy URL set to: ${options.authUrl}`);
+      console.log(`Auth proxy URL set to: ${normalizeBaseUrl(options.authUrl)}`);
     }
     if (generatedNpub) {
       console.log(
