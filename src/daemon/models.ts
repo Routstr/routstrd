@@ -32,6 +32,19 @@ export function createModelService(
   mintDiscovery?: MintDiscovery,
 ) {
   let providerBootstrapPromise: Promise<void> | null = null;
+  let mintDiscoveryPromise: Promise<void> | null = null;
+
+  const scheduleMintDiscovery = (providers: string[]): void => {
+    if (!mintDiscovery || mintDiscoveryPromise) return;
+    const discovery = mintDiscovery;
+    mintDiscoveryPromise = Promise.resolve()
+      .then(async () => {
+        await discovery.discoverMints(providers);
+        logger.log(`Discovered mints for ${providers.length} provider(s)`);
+      })
+      .catch((error) => logger.error("Mint discovery failed:", error))
+      .finally(() => { mintDiscoveryPromise = null; });
+  };
 
   const normalizeBaseUrl = (url: string): string =>
     url.endsWith("/") ? url : `${url}/`;
@@ -140,18 +153,7 @@ export function createModelService(
         // routing layer spends the wallet's largest mint and gets rejected
         // (finding #4). MintDiscovery owns its own 21-minute TTL, so repeated
         // calls within that window are cache hits and never refetch.
-        if (mintDiscovery) {
-          try {
-            await mintDiscovery.discoverMints(providers);
-            logger.log(
-              `Discovered mints for ${providers.length} provider(s)`,
-            );
-          } catch (error) {
-            // Mint discovery is best-effort: a provider that fails here must
-            // not abort model bootstrap or block request handling.
-            logger.error("Mint discovery failed:", error);
-          }
-        }
+        scheduleMintDiscovery(providers);
       })().catch((error) => {
         providerBootstrapPromise = null;
         logger.error("Provider bootstrap failed:", error);
@@ -300,13 +302,7 @@ export function createModelService(
 
     // Refresh each provider's advertised mint list alongside its models so
     // routing always has current mint data (TTL-gated by MintDiscovery).
-    if (mintDiscovery) {
-      try {
-        await mintDiscovery.discoverMints(providers);
-      } catch (error) {
-        console.error("Mint discovery failed during refresh:", error);
-      }
-    }
+    scheduleMintDiscovery(providers);
 
     // Sync review events from Nostr (kind 38425) and apply disabled status
     const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(

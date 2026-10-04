@@ -354,4 +354,29 @@ describe("createModelService mint discovery wiring", () => {
 
     await expect(service.ensureProvidersBootstrapped()).resolves.toBeUndefined();
   });
+
+  it("does not await an outstanding mint discovery pass or duplicate it", async () => {
+    let resolveDiscovery!: () => void;
+    const pending = new Promise<void>((resolve) => { resolveDiscovery = resolve; });
+    let calls = 0;
+    const modelManager = {
+      bootstrapProviders: async () => ["https://a.example/"],
+      syncReviewedProvidersFromNostr: async () => [],
+    } as never;
+    const discovery = {
+      discoverMints: () => { calls++; return pending; },
+    } as never;
+    const service = createModelService(modelManager, {} as never, makeStore().store, discovery);
+    try {
+      await Promise.race([
+        service.ensureProvidersBootstrapped(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("bootstrap blocked on mint discovery")), 100)),
+      ]);
+      await service.ensureProvidersBootstrapped();
+      expect(calls).toBe(1);
+    } finally {
+      resolveDiscovery();
+    }
+  });
+
 });
