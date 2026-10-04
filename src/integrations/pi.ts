@@ -19,6 +19,7 @@ export type ThinkingLevelMap = Partial<Record<PiThinkingLevel, string | null>>;
 export type PiModelEntry = {
   id: string;
   api?: string;
+  baseUrl?: string;
   contextWindow?: number;
   name?: string;
   input?: string[];
@@ -100,10 +101,19 @@ const isGptModel = (id: string): boolean => id.startsWith("gpt-");
  */
 const isClaudeModel = (id: string): boolean => id.startsWith("claude");
 
+export type PiModelEntryOptions = {
+  /**
+   * The daemon ROOT, without `/v1`. Assigned as the per-model `baseUrl` for
+   * models served over the Anthropic transport; see `buildPiModelEntry`.
+   */
+  anthropicBaseUrl?: string;
+};
+
 /** Project one daemon model onto a pi config entry. */
 export function buildPiModelEntry(
   model: RoutstrModel,
   previous?: PiModelEntry,
+  options: PiModelEntryOptions = {},
 ): PiModelEntry {
   const entry: PiModelEntry = { id: model.id };
 
@@ -125,12 +135,12 @@ export function buildPiModelEntry(
   // Per-model transport pins. `api` is per-model while the provider `baseUrl`
   // is shared, and the transports disagree about what a base URL means: the
   // OpenAI SDKs append only their endpoint (`/chat/completions`, `/responses`)
-  // while Anthropic SDKs append `/v1/messages` themselves. The provider base
-  // URL is therefore the daemon ROOT (see installPiIntegration), which is the
-  // one spelling that resolves correctly for every transport:
-  //   gpt-*   -> {root}/responses        -> `responses`
-  //   claude* -> {root}/v1/messages      -> `messages`
-  //   other   -> {root}/chat/completions -> `chat/completions`
+  // and expect the version segment to already be in the base URL, while
+  // Anthropic SDKs append `/v1/messages` themselves. The provider base URL is
+  // therefore the versioned one (`{root}/v1`, see installPiIntegration), which
+  // is what the OpenAI transports need:
+  //   gpt-*   -> {root}/v1/responses        -> `responses`
+  //   other   -> {root}/v1/chat/completions -> `chat/completions`
   // Pins override a curated value: a stale `anthropic-messages` left on a
   // non-claude model picks an endpoint the daemon is not expecting, and the
   // user cannot see from models.json which family needs which transport.
@@ -140,6 +150,20 @@ export function buildPiModelEntry(
     entry.api = "anthropic-messages";
   } else if (previous?.api !== undefined) {
     entry.api = previous.api;
+  }
+
+  // Anthropic-served models need the ROOT base URL, because their SDK appends
+  // the version segment itself: `{root}` + `/v1/messages` reaches the daemon's
+  // `messages` route, while the inherited `{root}/v1` would double the prefix
+  // to `/v1/v1/messages` — which routstr-core rejects (it canonicalizes exactly
+  // one optional `v1/`) with a 404 from every provider in the pool.
+  //
+  // Keyed on the transport actually in effect rather than on the model name, so
+  // a user-curated `api: "anthropic-messages"` on a non-claude model is served
+  // correctly too. Everything else inherits the provider base URL.
+  const effectiveApi = entry.api ?? "openai-completions";
+  if (options.anthropicBaseUrl && effectiveApi === "anthropic-messages") {
+    entry.baseUrl = options.anthropicBaseUrl;
   }
 
   const derived = deriveThinkingFields(model);
@@ -203,16 +227,19 @@ export async function installPiIntegration(
   console.log("\nInstalling routstr models in pi models.json...");
   console.log(`Using API key for ${name}`);
 
-  // The daemon ROOT, deliberately without `/v1`. Every transport appends its
-  // own endpoint path, and only the Anthropic ones add a version prefix
-  // (`/v1/messages`); a base URL that already carries `/v1` therefore yields
-  // the doubled `/v1/v1/messages`, which routstr-core rejects with a 404 from
-  // every provider in the pool (it canonicalizes exactly one optional `v1/`).
-  // At the root, openai-completions -> `/chat/completions`, openai-responses
-  // -> `/responses` and anthropic-messages -> `/v1/messages` all land on an
-  // allowed route. getDaemonBaseUrl() strips any trailing slash, so no path
-  // can be double-slashed either.
-  const baseUrl = getDaemonBaseUrlFn(config);
+  // The provider base URL is the versioned one, because that is what the
+  // OpenAI-shaped transports need: their SDKs append only their endpoint
+  // (`/chat/completions`, `/responses`) and expect the version segment to come
+  // from the base URL. Both the default `openai-completions` transport and the
+  // `openai-responses` one therefore land on an allowed route:
+  //   other -> {root}/v1/chat/completions
+  //   gpt-* -> {root}/v1/responses
+  // Anthropic-served models override this per model with the ROOT, since the
+  // Anthropic SDK appends `/v1/messages` itself (see buildPiModelEntry); a
+  // shared `{root}/v1` would double the prefix for them. getDaemonBaseUrl()
+  // strips any trailing slash, so no path can be double-slashed either.
+  const rootBaseUrl = getDaemonBaseUrlFn(config);
+  const baseUrl = `${rootBaseUrl}/v1`;
 
   let piConfig: PiConfig = {};
 
@@ -248,13 +275,16 @@ export async function installPiIntegration(
     // when the daemon has none, the user's hand-curated values are preserved.
     // `compat` stays user-curated, except for the deepseek* pin applied below;
     // `api` is pinned per family (see buildPiModelEntry), since the family
-    // decides which transport — and so which endpoint — the model is served by.
+    // decides which transport — and so which endpoint and base URL — the model
+    // is served by.
     const existingModels = new Map<string, PiModelEntry>(
       (piConfig.providers["routstr"]?.models ?? []).map((m) => [m.id, m]),
     );
 
     const providerModels: PiModelEntry[] = models.map((model) =>
-      buildPiModelEntry(model, existingModels.get(model.id)),
+      buildPiModelEntry(model, existingModels.get(model.id), {
+        anthropicBaseUrl: rootBaseUrl,
+      }),
     );
 
     // Rebuild provider from scratch too; only write routstrd-managed fields.

@@ -41,6 +41,12 @@ const MOCK_DEPS: Partial<PiIntegrationDeps> = {
           context_length: 1000000,
           architecture: { input_modalities: ["text", "image"] },
         },
+        {
+          id: "gpt-6.1-sol",
+          name: "GPT-6.1 Sol",
+          context_length: 922000,
+          architecture: { input_modalities: ["text", "image"] },
+        },
       ],
     },
   }),
@@ -62,7 +68,7 @@ async function readProvider(configPath: string) {
 }
 
 describe("installPiIntegration", () => {
-  it("points the provider at the daemon root, with no /v1", async () => {
+  it("points the provider at the versioned daemon base URL", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
     await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
@@ -70,14 +76,14 @@ describe("installPiIntegration", () => {
     const parsed = JSON.parse(readFileSync(configPath, "utf-8")) as {
       providers: Record<string, { baseUrl?: string; api?: string }>;
     };
-    // Every transport appends its own endpoint (/chat/completions,
-    // /responses, /v1/messages). A base URL carrying /v1 would double the
-    // prefix for Anthropic models and 404 on every provider.
-    expect(parsed.providers["routstr"].baseUrl).toBe("http://127.0.0.1:8008");
+    // The OpenAI transports append only their endpoint (/chat/completions,
+    // /responses) and need the version segment in the base URL; Anthropic
+    // models override this per model with the root (see the next test).
+    expect(parsed.providers["routstr"].baseUrl).toBe("http://127.0.0.1:8008/v1");
     expect(parsed.providers["routstr"].api).toBe("openai-completions");
   });
 
-  it("pins anthropic-messages for claude* models", async () => {
+  it("pins anthropic-messages and the root base URL for claude* models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");
     await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
@@ -85,9 +91,24 @@ describe("installPiIntegration", () => {
     const provider = await readProvider(configPath);
     const claude = provider.models.find((m) => m.id === "claude-opus-5.5");
     expect(claude?.api).toBe("anthropic-messages");
+    // The Anthropic SDK appends /v1/messages itself, so the model must not
+    // inherit the provider's /v1 base URL.
+    expect(claude?.baseUrl).toBe("http://127.0.0.1:8008");
     // Non-claude, non-gpt models fall through to the provider default.
     const glm = provider.models.find((m) => m.id === "glm-5.3");
     expect("api" in glm!).toBe(false);
+    expect("baseUrl" in glm!).toBe(false);
+  });
+
+  it("keeps the provider base URL on openai-responses models", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
+    const configPath = join(dir, "models.json");
+    await installPiIntegration(CONFIG, "key", makeIntegration(configPath), MOCK_DEPS);
+
+    const provider = await readProvider(configPath);
+    const gpt = provider.models.find((m) => m.id === "gpt-6.1-sol");
+    expect(gpt?.api).toBe("openai-responses");
+    expect("baseUrl" in gpt!).toBe(false);
   });
 
   it("replaces a stale hand-written api override on claude* models", async () => {
@@ -407,5 +428,41 @@ describe("buildPiModelEntry", () => {
 
     const plain = buildPiModelEntry(model({ id: "glm-5.3" }));
     expect("api" in plain).toBe(false);
+  });
+
+  it("gives anthropic-messages models the root base URL", () => {
+    const entry = buildPiModelEntry(model({ id: "claude-opus-5.5" }), undefined, {
+      anthropicBaseUrl: "http://127.0.0.1:8008",
+    });
+
+    expect(entry.api).toBe("anthropic-messages");
+    expect(entry.baseUrl).toBe("http://127.0.0.1:8008");
+  });
+
+  it("leaves other transports on the inherited base URL", () => {
+    for (const id of ["glm-5.3", "gpt-6.1-sol", "deepseek-v4.1-flash"]) {
+      const entry = buildPiModelEntry(model({ id }), undefined, {
+        anthropicBaseUrl: "http://127.0.0.1:8008",
+      });
+      expect("baseUrl" in entry).toBe(false);
+    }
+  });
+
+  it("keys the root base URL on the effective transport, not the model name", () => {
+    // A user-curated anthropic-messages transport on a non-claude model is
+    // served over the Anthropic SDK, so it needs the root too.
+    const curated = buildPiModelEntry(
+      model({ id: "glm-5.3" }),
+      { id: "glm-5.3", api: "anthropic-messages" },
+      { anthropicBaseUrl: "http://127.0.0.1:8008" },
+    );
+    expect(curated.baseUrl).toBe("http://127.0.0.1:8008");
+  });
+
+  it("omits the per-model base URL when no root is supplied", () => {
+    const entry = buildPiModelEntry(model({ id: "claude-opus-5.5" }));
+
+    expect(entry.api).toBe("anthropic-messages");
+    expect("baseUrl" in entry).toBe(false);
   });
 });
