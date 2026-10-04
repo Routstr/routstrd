@@ -1,6 +1,13 @@
 {
   "name": "routstrd",
   "version": "0.4.12",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/routstr/routstrd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/routstr/routstrd/issues"
+  },
   "module": "src/index.ts",
   "type": "module",
   "private": false,

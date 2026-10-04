@@ -375,7 +375,8 @@ not part of `bun test`.
 2. Push the tag. The release workflow runs lint and tests, builds Linux and
    macOS executables for x64 and arm64, smoke-tests them, verifies the archives
    through `install.sh` itself, and publishes the archives with `SHA256SUMS` and
-   `install.sh`.
+   `install.sh`. It also publishes `routstrd` to npm via trusted publishing
+   (OIDC, no token), skipping gracefully if that version already exists.
 3. Verify all four archives and `install.sh` appear in the GitHub Release and
    validate each checksum before announcing it.
 4. In disposable environments for each platform, test `--version`, `--help`,
