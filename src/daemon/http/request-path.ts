@@ -37,3 +37,50 @@ export function collapseDuplicatedV1(pathname: string): string {
   }
   return path;
 }
+
+/**
+ * Endpoints a provider node forwards, in the canonical spelling that omits
+ * `v1/`.
+ *
+ * Mirrors `_ALLOWED_ENDPOINTS` in routstr-core's proxy: the node reduces a
+ * request path to one of these keys after stripping exactly one optional
+ * `v1/`, and forwards anything else to no one. Kept as a local list for the
+ * same reason as `OPENAI_JSON_BODY_PATH_SUFFIXES` in `request-body.ts` —
+ * routstrd must not version a path it does not recognise, because a routstr
+ * node is not the only possible destination for a forwarded request.
+ */
+const FORWARDED_ENDPOINTS = new Set([
+  "chat/completions",
+  "completions",
+  "responses",
+  "messages",
+  "messages/count_tokens",
+  "embeddings",
+  "systemone",
+]);
+
+/**
+ * Ensure a forwarded API path carries the `/v1` prefix.
+ *
+ * The node accepts an endpoint with or without `v1/` (`_canonical_api_path`)
+ * and forwards the caller's spelling to its own upstream, so the spelling is
+ * not free: an upstream whose base URL carries no version prefix serves only
+ * the versioned route. Tinfoil is one — a bare `/chat/completions` reached
+ * `https://inference.tinfoil.sh/chat/completions` and came back
+ * `404 {"error":{"message":"Not found."}}`, while the same request with the
+ * prefix succeeded. A client cannot know which upstream sits behind a node, so
+ * routstrd sends the versioned spelling that every provider in the pool
+ * accepts.
+ *
+ * Applied to the forwarded path only — never to `url.pathname`, which the
+ * ingress still matches its own routes against — and only to the endpoints
+ * above. Idempotent, so a client that already sends `/v1/...` is unaffected;
+ * a query string and a trailing slash are preserved.
+ */
+export function ensureV1Prefix(pathname: string): string {
+  const [path = ""] = pathname.split("?");
+  if (path.startsWith("/v1/")) return pathname;
+  const endpoint = path.replace(/^\/+/, "").replace(/\/+$/, "");
+  if (!FORWARDED_ENDPOINTS.has(endpoint)) return pathname;
+  return `/v1${pathname}`;
+}
