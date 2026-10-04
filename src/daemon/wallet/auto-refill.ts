@@ -94,9 +94,10 @@ export function startAutoRefillLoop(
     try {
       if (unsettledRefill) {
         const quote = await walletClient.getMintQuote?.(unsettledRefill);
-        if (quote?.state === "pending" || quote?.state === "executing") return;
+        // Fail closed: only a final state proves the invoice can't still be paid.
+        if (quote?.state !== "finalized" && quote?.state !== "failed") return;
         unsettledRefill = undefined;
-        if (quote?.state === "finalized") {
+        if (quote.state === "finalized") {
           logger.log("[auto-refill] Timed-out payment landed; counting it as the refill.");
           lastRefillAt = now;
           return;
