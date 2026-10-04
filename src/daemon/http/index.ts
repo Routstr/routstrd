@@ -684,6 +684,31 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/wallet/mints/removal-info") {
+      await respond(res, async () => {
+        const mintUrl = url.searchParams.get("url")?.trim();
+        if (!mintUrl) {
+          throw new WalletHttpError(
+            400,
+            "Missing required 'url' query parameter.",
+          );
+        }
+        const info = await deps.walletClient.getMintRemovalInfo(mintUrl);
+        return { output: info };
+      });
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname === "/wallet/mints") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        const message = await deps.walletClient.removeMint(mintUrl);
+        return { output: { message, url: mintUrl } };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/mints/info") {
       await respond(res, async () => {
         const body = await readJsonBody(req);

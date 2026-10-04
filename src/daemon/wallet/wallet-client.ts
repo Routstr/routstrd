@@ -153,6 +153,31 @@ export interface WalletStuckOperationRecoveryResult {
   skippedMints: Record<string, number>;
 }
 
+/**
+ * Everything a caller needs to warn about before removing a mint. All values
+ * are read from local state, so this works even when the mint is unreachable.
+ */
+export interface MintRemovalInfo {
+  /** Normalized mint URL. */
+  url: string;
+  /** Spendable sats the wallet holds at this mint. */
+  spendable: number;
+  /** Sats locked in in-flight operations at this mint. */
+  reserved: number;
+  /** `spendable + reserved`. */
+  total: number;
+  /** Top-up (mint) quotes still waiting on payment or redemption. */
+  pendingMintQuotes: number;
+  /** Prepared or in-flight outbound (melt) payments for this mint. */
+  pendingMeltQuotes: number;
+  /** Whether this mint is the wallet's default. */
+  isDefault: boolean;
+  /** Total number of trusted mints in the wallet. */
+  mintCount: number;
+  /** True when funds or quotes at this mint deserve a confirmation prompt. */
+  hasAssets: boolean;
+}
+
 export interface WalletClient {
   ping(): Promise<boolean>;
   getStatus(): Promise<WalletRuntimeState>;
@@ -169,6 +194,9 @@ export interface WalletClient {
   sendBolt11(invoice: string, mintUrl?: string): Promise<string>;
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;
+  removeMint(url: string): Promise<string>;
+  /** Local reminder of what removing a mint would strand, for the CLI prompt. */
+  getMintRemovalInfo(url: string): Promise<MintRemovalInfo>;
   getMintInfo(url: string): Promise<unknown>;
   getDefaultMint(): Promise<string | null>;
   setDefaultMint(url: string): Promise<string>;

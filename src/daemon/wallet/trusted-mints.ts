@@ -29,6 +29,12 @@ export interface TrustedMintSeeder {
 export interface SeedTrustedMintsOptions {
   /** Mints to ensure are trusted, in order. Defaults to the shipped seeds. */
   seeds?: readonly string[];
+  /**
+   * Mints the user explicitly removed. They are never re-seeded, so a removed
+   * shipped mint does not silently reappear on the next daemon start. Adding a
+   * mint again clears it from this list at the call site.
+   */
+  skipMints?: readonly string[];
   /** Called before each mint fetch with a user-facing progress message. */
   onProgress?: (message: string) => void;
   /** Called when a non-default seed could not be added. */
@@ -64,11 +70,12 @@ export async function seedTrustedMints(
   const seeds = options.seeds ?? DEFAULT_TRUSTED_MINT_URLS;
   const target = safeNormalizeMintUrl(defaultMintUrl);
   const trusted = new Set(wallet.trustedMints.map(safeNormalizeMintUrl));
+  const skipped = new Set((options.skipMints ?? []).map(safeNormalizeMintUrl));
   const attempted = new Set<string>();
 
   for (const seed of [defaultMintUrl, ...seeds]) {
     const mintUrl = safeNormalizeMintUrl(seed);
-    if (attempted.has(mintUrl)) continue;
+    if (attempted.has(mintUrl) || skipped.has(mintUrl)) continue;
     attempted.add(mintUrl);
     if (trusted.has(mintUrl)) continue;
 

@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   collectRecentRequestsFromLines,
+  describeMintRemovalRisks,
   getLivePidFileOwner,
   initializeWallet,
   parseStructuredLogLine,
@@ -230,5 +231,53 @@ describe("initializeWallet", () => {
     expect(readFileSync(walletConfig, "utf8")).toBe(existingConfig);
     expect(permissions(walletDir)).toBe(0o700);
     expect(permissions(walletConfig)).toBe(0o600);
+  });
+});
+
+describe("describeMintRemovalRisks", () => {
+  test("says nothing for a plain mint with no funds or pending work", () => {
+    expect(
+      describeMintRemovalRisks({
+        total: 0,
+        spendable: 0,
+        reserved: 0,
+        pendingMintQuotes: 0,
+        pendingMeltQuotes: 0,
+        isDefault: false,
+      }),
+    ).toEqual([]);
+  });
+
+  test("breaks down held sats, including reserved ones", () => {
+    const lines = describeMintRemovalRisks({
+      total: 1500,
+      spendable: 1000,
+      reserved: 500,
+      pendingMintQuotes: 0,
+      pendingMeltQuotes: 0,
+      isDefault: false,
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("1500 sats");
+    expect(lines[0]).toContain("1000 spendable");
+    expect(lines[0]).toContain("500 reserved");
+  });
+
+  test("lists pending quotes, in-flight melts, and the default marker", () => {
+    const lines = describeMintRemovalRisks({
+      total: 0,
+      spendable: 0,
+      reserved: 0,
+      pendingMintQuotes: 2,
+      pendingMeltQuotes: 1,
+      isDefault: true,
+    });
+
+    expect(lines.some((line) => line.includes("2 pending top-up"))).toBe(true);
+    expect(lines.some((line) => line.includes("1 in-flight outbound"))).toBe(
+      true,
+    );
+    expect(lines.some((line) => line.includes("default mint"))).toBe(true);
   });
 });
