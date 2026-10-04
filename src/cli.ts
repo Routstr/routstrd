@@ -830,6 +830,30 @@ program
     }
   });
 
+// Explicit provider Lightning operations. Payment is made externally; no automatic NWC spending.
+const lightningPayments = program.command("payments-lightning").description("Fund provider keys or refund them over Lightning");
+for (const purpose of ["create", "topup"] as const) {
+  lightningPayments.command(`${purpose} <baseUrl> <amountSats>`)
+    .description("Create a provider Lightning invoice (pay the returned BOLT11 externally)")
+    .action(async (baseUrl: string, amountSats: string) => {
+      await handleDaemonCommand(`/payments/lightning/${purpose}`, { method: "POST", body: { baseUrl, amountSats: Number(amountSats) } });
+    });
+}
+lightningPayments.command("status <baseUrl> <invoiceId>").description("Check settlement and store/refresh the paid provider key")
+  .action(async (baseUrl: string, invoiceId: string) => {
+    await handleDaemonCommand("/payments/lightning/status", { method: "POST", body: { baseUrl, invoiceId } });
+  });
+lightningPayments.command("recover <baseUrl> <bolt11>").description("Recover a paid invoice and store/refresh its provider key")
+  .action(async (baseUrl: string, bolt11: string) => {
+    await handleDaemonCommand("/payments/lightning/recover", { method: "POST", body: { baseUrl, bolt11 } });
+  });
+lightningPayments.command("invoices").description("List saved provider invoices (contains sensitive recovery credentials)")
+  .action(async () => { await handleDaemonCommand("/payments/lightning/invoices", { method: "POST", body: {} }); });
+lightningPayments.command("refund <baseUrl> <lightningAddress>").description("Refund all available provider balance to a Lightning address; retain key for recovery")
+  .action(async (baseUrl: string, lightningAddress: string) => {
+    await handleDaemonCommand("/payments/lightning/refund", { method: "POST", body: { baseUrl, lightningAddress } });
+  });
+
 // Balance - get wallet and API key balances
 program
   .command("balance")

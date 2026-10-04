@@ -409,3 +409,42 @@ routstrd/
 ## License
 
 MIT
+
+### Provider Lightning payments
+
+Explicit Lightning funding is separate from the default Cashu automatic top-up flow:
+
+```sh
+routstrd payments-lightning create https://provider.example/ 100
+# Pay the returned BOLT11 with an external Lightning wallet, then:
+routstrd payments-lightning status https://provider.example/ <invoice-id>
+routstrd payments-lightning topup https://provider.example/ 100
+routstrd payments-lightning status https://provider.example/ <topup-invoice-id>
+routstrd payments-lightning refund https://provider.example/ alice@example.com
+```
+
+`status` imports a paid key or refreshes the existing key's balance. It refuses to
+replace a different stored key. `recover <provider> <bolt11>` recovers settlement
+from an invoice; `invoices` lists the recovery credentials saved under
+`~/.routstrd/lightning-invoices/` (directory 0700, files 0600). Treat the invoice
+IDs and BOLT11s as secrets: provider status/recovery can return spend-capable keys.
+Save the output yourself if the journal write reports a warning.
+
+No automatic Lightning/NWC spending occurs. Invoice creation needs a provider
+supporting `/v2/lightning`; a provider 404 is surfaced without retry/fallback.
+A timeout is not proof that an invoice or refund failed remotely. Recheck invoice
+status or recover by BOLT11 rather than paying another invoice blindly.
+
+Lightning refunds pay the entire available balance to the explicit address;
+they do not deposit Cashu into the local wallet. Their returned amount describes
+the gross balance, not necessarily the net payout after Lightning fees. The key
+is retained even after success so provider claim results can be recovered. An
+unresolved refund stays recoverable; it must not trigger key deletion. The
+existing delete-key command now also retains credentials when refund fails.
+Do not run refunds while requests/top-ups are active; the provider rejects active
+reservations and owns refund reconciliation.
+
+For these paired development worktrees, the SDK dependency points to
+`../../../routstr-sdk/.worktrees/lightning-payments`. Build that SDK first
+(`bun run build`), then build this daemon (`bun run build`). Restore the normal
+SDK dependency path/version when preparing a release from a standard checkout.
