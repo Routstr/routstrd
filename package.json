@@ -36,6 +36,7 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
+    "@noble/curves": "2.2.0",
     "@types/bun": "latest",
     "@types/qrcode": "^1.5.6"
   },
