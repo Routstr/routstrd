@@ -51,6 +51,11 @@ import {
   WalletMigrationConflictError,
 } from "./daemon/wallet/diagnostics";
 import {
+  doctorReportSeverity,
+  DOCTOR_RECENT_QUOTE_WINDOW_MS,
+  type WalletDoctorReport,
+} from "./daemon/wallet/doctor";
+import {
   legacyCocodDir,
   legacyCocodPidPath,
   legacyCocodSocketPath,
@@ -2064,14 +2069,156 @@ walletCmd
     await handleDaemonCommand("/wallet/status");
   });
 
+const doctorUseColor = !process.env.NO_COLOR && process.stdout.isTTY === true;
+const doctorPaint = (code: string, text: string): string =>
+  doctorUseColor ? `\x1b[${code}m${text}\x1b[0m` : text;
+const doctorGreen = (text: string) => doctorPaint("32", text);
+const doctorRed = (text: string) => doctorPaint("31", text);
+const doctorYellow = (text: string) => doctorPaint("33", text);
+
+function shortenOperationId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+function formatSats(amount: number): string {
+  return amount.toLocaleString("en-US");
+}
+
+function formatDoctorDuration(ms: number): string {
+  const abs = Math.abs(ms);
+  if (abs < 60_000) return `${Math.max(1, Math.round(abs / 1000))}s`;
+  if (abs < 3_600_000) return `${Math.round(abs / 60_000)}m`;
+  if (abs < 86_400_000) return `${Math.round(abs / 3_600_000)}h`;
+  return `${Math.round(abs / 86_400_000)}d`;
+}
+
+/** Render the daemon's live doctor report; colors are NO_COLOR/TTY aware. */
+export function renderWalletHealth(report: WalletDoctorReport): string {
+  const lines: string[] = ["Wallet health", "=============", ""];
+
+  lines.push("Mints");
+  if (report.mints.length === 0) {
+    lines.push("  (no trusted mints)");
+  }
+  for (const probe of report.mints) {
+    if (probe.reachable) {
+      const latency =
+        probe.latencyMs !== undefined ? ` (${probe.latencyMs} ms)` : "";
+      lines.push(`  ${doctorGreen("✓")} ${probe.mintUrl} — reachable${latency}`);
+    } else {
+      lines.push(
+        `  ${doctorRed("✗")} ${probe.mintUrl} — unreachable${probe.error ? `: ${probe.error}` : ""}`,
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    `Mint quotes (last ${formatDoctorDuration(DOCTOR_RECENT_QUOTE_WINDOW_MS)})`,
+  );
+  if (report.unpaidQuotes.length === 0) {
+    lines.push("  none unpaid");
+  }
+  for (const quote of report.unpaidQuotes) {
+    const expiry =
+      quote.expiresInMs === undefined
+        ? ""
+        : quote.expiresInMs >= 0
+          ? `, expires in ${formatDoctorDuration(quote.expiresInMs)}`
+          : `, expired ${formatDoctorDuration(quote.expiresInMs)} ago`;
+    lines.push(
+      `  ${doctorYellow("⚠")} ${shortenOperationId(quote.quoteId ?? quote.operationId)} at ${quote.mintUrl} — ${formatSats(quote.amount)} sat, UNPAID, created ${formatDoctorDuration(quote.ageMs)} ago${expiry}`,
+    );
+  }
+
+  lines.push("", "Paid but not issued");
+  if (report.paidUnissued.length === 0) {
+    lines.push("  none");
+  }
+  for (const finding of report.paidUnissued) {
+    lines.push(
+      `  ${doctorRed("✗")} ${shortenOperationId(finding.operationId)} (quote ${shortenOperationId(finding.quoteId ?? "?")}) at ${finding.mintUrl} — ${formatSats(finding.amount)} sat ${finding.remoteState} at mint, local state ${finding.localState}`,
+    );
+    if (finding.error) lines.push(`    mint error: ${finding.error}`);
+    lines.push(`    → ${finding.remediation}`);
+  }
+
+  lines.push("", "Melts");
+  if (report.stuckMelts.length === 0) {
+    lines.push("  none stuck");
+  }
+  for (const melt of report.stuckMelts) {
+    const icon = melt.kind === "failed-locked" ? doctorRed("✗") : doctorYellow("⚠");
+    const what =
+      melt.kind === "prepared"
+        ? "prepared, payment never attempted"
+        : melt.kind === "in-flight"
+          ? "payment in flight"
+          : "failed but proofs still locked";
+    lines.push(
+      `  ${icon} ${shortenOperationId(melt.operationId)} at ${melt.mintUrl} — ${formatSats(melt.amount + melt.feeReserve)} sat locked (${melt.lockedSecrets} proof(s)), ${what}, ${formatDoctorDuration(melt.ageMs)} old`,
+    );
+    lines.push(`    → ${melt.remediation}`);
+  }
+
+  if (report.uncheckedQuotes > 0) {
+    lines.push(
+      "",
+      `  ${doctorYellow("⚠")} ${report.uncheckedQuotes} quote(s) could not be checked with their mint`,
+    );
+  }
+  return lines.join("\n");
+}
+
 walletCmd
   .command("doctor")
-  .description("Diagnose conflicting wallets (current routstrd wallet vs legacy cocod)")
-  .action(async () => {
+  .description(
+    "Wallet health checks (mint reachability, unpaid/stuck quotes, locked melts), then legacy wallet migration diagnosis",
+  )
+  .option("--json", "Print the raw health report as JSON", false)
+  .action(async (options: { json: boolean }) => {
     const target = summarizeWalletDirectory(defaultWalletDir(), "canonical");
     const source = summarizeWalletDirectory(legacyCocodDir(), "legacy");
-    console.log(renderWalletDoctor(target, source));
-    if (diagnoseWallets(target, source).conflict) process.exit(1);
+    const migrationConflict = diagnoseWallets(target, source).conflict;
+
+    // Live health checks need the daemon; when it is down the offline
+    // migration diagnosis still runs, because a broken startup is exactly
+    // when the doctor gets invoked.
+    let report: WalletDoctorReport | undefined;
+    try {
+      const result = await callDaemon("/wallet/doctor");
+      if (result.error) throw new Error(result.error);
+      report = result.output as WalletDoctorReport | undefined;
+    } catch {
+      report = undefined;
+    }
+
+    if (options.json) {
+      console.log(
+        JSON.stringify(
+          { health: report ?? null, migrationConflict },
+          null,
+          2,
+        ),
+      );
+    } else {
+      if (report) {
+        console.log(renderWalletHealth(report));
+      } else {
+        console.log("Wallet health");
+        console.log("=============");
+        console.log("");
+        console.log(
+          "  skipped: daemon is not running; live checks need it (routstrd start)",
+        );
+      }
+      console.log("");
+      console.log(renderWalletDoctor(target, source));
+    }
+
+    const healthCritical =
+      report !== undefined && doctorReportSeverity(report) === "critical";
+    if (healthCritical || migrationConflict) process.exit(1);
   });
 
 walletCmd
