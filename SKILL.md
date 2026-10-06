@@ -402,11 +402,34 @@ Pay a Lightning invoice.
 
 ### `routstrd wallet mints list`
 
-List configured wallet mints. Includes the mints trusted by default (`https://mint.minibits.cash/Bitcoin`, `https://mint.cubabitcoin.org`) plus any added manually.
+List configured wallet mints as a numbered list, marking the default mint.
+Includes the mints trusted by default (`https://mint.minibits.cash/Bitcoin`,
+`https://mint.cubabitcoin.org`) plus any added manually. Pass `--json` for the
+raw response.
 
 ### `routstrd wallet mints add <url>`
 
 Add a new mint by URL.
+
+### `routstrd wallet mints remove <mint>`
+
+Remove a mint from the wallet. `<mint>` is a mint URL or the index shown by
+`routstrd wallet mints list`.
+
+Before removing, the daemon checks the mint's local state. If the mint still
+holds sats, has pending top-up (mint) quotes, or has in-flight outbound (melt)
+payments, the command prints a warning and asks for confirmation. Removing a
+mint keeps those sats in the wallet database but makes them unspendable until
+the mint is added back. A mint with none of these is removed without a prompt.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-y, --yes` | false | Skip the confirmation prompt when the mint still has funds or pending operations |
+
+Removing the default mint moves the default to another trusted mint. Removed
+mints stay removed across daemon restarts and are only re-added with
+`routstrd wallet mints add <url>`. The last mint in the wallet cannot be
+removed.
 
 ### `routstrd wallet mints set-default <url>`
 

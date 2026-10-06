@@ -37,6 +37,7 @@ import type {
   WalletCleanupOptions,
   WalletCleanupResult,
   WalletRecoveryProgress,
+  MintRemovalInfo,
 } from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
@@ -131,6 +132,12 @@ interface CocodConfig {
   mnemonic: string;
   encrypted: boolean;
   defaultMintUrl?: string;
+  /**
+   * Mint URLs the user removed from the wallet. Trusted-mint seeding skips
+   * these so a removed shipped mint does not reappear on the next restart.
+   * Adding a mint again clears its entry.
+   */
+  removedMintUrls?: string[];
 }
 
 const STARTUP_LOG_PREFIX = "[routstrd:start]";
@@ -259,6 +266,95 @@ function saveConfig(config: CocodConfig, configFile: string): void {
       // The temporary file may not have been created.
     }
     throw error;
+  }
+}
+
+// Config mint URLs are written by routstrd, but a hand-edited file must not
+// crash startup. Normalization only strips a default port and trailing slash.
+function configMintUrl(mintUrl: string): string {
+  try {
+    return normalizeMintUrl(mintUrl);
+  } catch {
+    return mintUrl.trim();
+  }
+}
+
+/** Record a removed mint so trusted-mint seeding will not re-add it. */
+function markMintRemoved(config: CocodConfig, mintUrl: string): boolean {
+  const url = configMintUrl(mintUrl);
+  const removed = new Set((config.removedMintUrls ?? []).map(configMintUrl));
+  if (removed.has(url)) return false;
+  removed.add(url);
+  config.removedMintUrls = [...removed];
+  return true;
+}
+
+/** Clear a mint's removed marker because the user added it back. */
+function clearMintRemoved(config: CocodConfig, mintUrl: string): boolean {
+  const url = configMintUrl(mintUrl);
+  const current = config.removedMintUrls ?? [];
+  const remaining = current.filter((entry) => configMintUrl(entry) !== url);
+  if (remaining.length === current.length) return false;
+  config.removedMintUrls = remaining;
+  return true;
+}
+
+/**
+ * Remove a mint's record and keysets from the wallet database. The public
+ * `MintApi` only exposes trust changes, so reach the underlying `MintService`
+ * structurally, as this module already does for other coco internals. Stored
+ * proofs are intentionally left untouched: deleting them would burn sats, and
+ * re-adding the mint restores access to them.
+ */
+async function deleteMintFromWallet(coco: Manager, mintUrl: string): Promise<void> {
+  const service = (
+    coco as unknown as {
+      mintService?: { deleteMint?: (url: string) => Promise<void> };
+    }
+  ).mintService;
+  if (!service?.deleteMint) {
+    throw new Error("Wallet backend does not support removing mints");
+  }
+  await service.deleteMint(mintUrl);
+}
+
+/** Pending top-up (mint) quotes for one mint, read from local state. */
+async function countPendingMintQuotes(
+  coco: Manager,
+  mintUrl: string,
+): Promise<number> {
+  try {
+    const pending = await coco.ops.mint.listPending();
+    return pending.filter((op) => configMintUrl(op.mintUrl) === mintUrl).length;
+  } catch (error) {
+    logger.warn("Could not read pending mint quotes while inspecting a mint", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  }
+}
+
+/** Prepared or in-flight outbound (melt) payments for one mint. */
+async function countPendingMeltQuotes(
+  coco: Manager,
+  mintUrl: string,
+): Promise<number> {
+  try {
+    const [prepared, inFlight] = await Promise.all([
+      coco.ops.melt.listPrepared(),
+      coco.ops.melt.listInFlight(),
+    ]);
+    const seen = new Set<string>();
+    for (const op of [...prepared, ...inFlight]) {
+      if (configMintUrl(op.mintUrl) !== mintUrl) continue;
+      seen.add(op.id);
+    }
+    return seen.size;
+  } catch (error) {
+    logger.warn("Could not read pending melt quotes while inspecting a mint", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
   }
 }
 
@@ -2016,6 +2112,7 @@ export async function createCocoClient(
       },
       defaultMintUrl,
       {
+        skipMints: walletConfig.removedMintUrls,
         onProgress: startupProgress,
         onError: (message, error) =>
           logger.warn(message, {
@@ -2389,7 +2486,81 @@ export async function createCocoClient(
       await waitForRecovery();
       const mintUrl = normalizeMintUrl(url);
       await coco.mint.addMint(mintUrl, { trusted: true });
+      // A mint the user adds back is wanted again, so forget any removal
+      // marker that would make trusted-mint seeding skip it on restart.
+      if (clearMintRemoved(walletConfig, mintUrl)) {
+        saveConfig(walletConfig, configFile);
+      }
       return `Mint ${mintUrl} added successfully`;
+    },
+
+    async removeMint(url: string): Promise<string> {
+      await waitForRecovery();
+      const mintUrl = normalizeMintUrl(url);
+      const trustedMints = await coco.mint.getAllTrustedMints();
+      if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
+        throw new Error(`Mint ${mintUrl} is not in the wallet mint list`);
+      }
+      if (trustedMints.length <= 1) {
+        throw new Error(
+          "Cannot remove the last mint in the wallet; add another mint first",
+        );
+      }
+
+      const remaining = trustedMints.filter((mint) => mint.mintUrl !== mintUrl);
+      await deleteMintFromWallet(coco, mintUrl);
+
+      let message = `Mint ${mintUrl} removed from the wallet`;
+      const wasDefault =
+        !!walletConfig.defaultMintUrl &&
+        configMintUrl(walletConfig.defaultMintUrl) === mintUrl;
+      if (wasDefault) {
+        const nextDefault = normalizeMintUrl(remaining[0]!.mintUrl);
+        walletConfig.defaultMintUrl = nextDefault;
+        message += `; default mint switched to ${nextDefault}`;
+      }
+      markMintRemoved(walletConfig, mintUrl);
+      saveConfig(walletConfig, configFile);
+      return message;
+    },
+
+    async getMintRemovalInfo(url: string): Promise<MintRemovalInfo> {
+      const mintUrl = normalizeMintUrl(url);
+      const trustedMints = await coco.mint.getAllTrustedMints();
+      if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
+        throw new Error(`Mint ${mintUrl} is not in the wallet mint list`);
+      }
+
+      // Balances come from stored proofs, so this stays local even when the
+      // mint is offline. `reserved` covers sats locked in in-flight sends.
+      const balances = await coco.wallet.balances.byMint({
+        mintUrls: [mintUrl],
+      });
+      const snapshot = balances[mintUrl] ?? {
+        spendable: 0,
+        reserved: 0,
+        total: 0,
+      };
+      const [pendingMintQuotes, pendingMeltQuotes] = await Promise.all([
+        countPendingMintQuotes(coco, mintUrl),
+        countPendingMeltQuotes(coco, mintUrl),
+      ]);
+      const isDefault =
+        !!walletConfig.defaultMintUrl &&
+        configMintUrl(walletConfig.defaultMintUrl) === mintUrl;
+
+      return {
+        url: mintUrl,
+        spendable: snapshot.spendable,
+        reserved: snapshot.reserved,
+        total: snapshot.total,
+        pendingMintQuotes,
+        pendingMeltQuotes,
+        isDefault,
+        mintCount: trustedMints.length,
+        hasAssets:
+          snapshot.total > 0 || pendingMintQuotes > 0 || pendingMeltQuotes > 0,
+      };
     },
 
     async getMintInfo(url: string): Promise<unknown> {
@@ -2406,6 +2577,9 @@ export async function createCocoClient(
       const trustedMints = await coco.mint.getAllTrustedMints();
       if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
         await coco.mint.addMint(mintUrl, { trusted: true });
+        // A mint the user adds back is wanted again, so forget any removal
+        // marker that would make trusted-mint seeding skip it on restart.
+        clearMintRemoved(walletConfig, mintUrl);
       }
 
       walletConfig.defaultMintUrl = mintUrl;

@@ -50,6 +50,7 @@ import {
   summarizeWalletDirectory,
   WalletMigrationConflictError,
 } from "./daemon/wallet/diagnostics";
+import type { MintRemovalInfo } from "./daemon/wallet/wallet-client";
 import {
   legacyCocodDir,
   legacyCocodPidPath,
@@ -2418,15 +2419,87 @@ walletSendCmd
     });
   });
 
+/** Call the daemon for a mint command, printing and exiting on transport errors. */
+async function callMintDaemon(
+  path: string,
+  options?: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+): Promise<CommandResponse> {
+  try {
+    return await callDaemon(path, options);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 const walletMintsCmd = walletCmd
   .command("mints")
   .description("Wallet mint operations");
 
+/**
+ * Human-readable reasons a mint is risky to remove. Only risks that actually
+ * apply to `info` are returned, so a mint holding nothing produces no lines.
+ */
+export function describeMintRemovalRisks(
+  info: Pick<
+    MintRemovalInfo,
+    | "total"
+    | "spendable"
+    | "reserved"
+    | "pendingMintQuotes"
+    | "pendingMeltQuotes"
+    | "isDefault"
+  >,
+): string[] {
+  const lines: string[] = [];
+  if (info.total > 0) {
+    const breakdown =
+      info.reserved > 0
+        ? ` (${info.spendable} spendable, ${info.reserved} reserved for in-flight operations)`
+        : "";
+    lines.push(`  - ${info.total} sats are held at this mint${breakdown}`);
+  }
+  if (info.pendingMintQuotes > 0) {
+    lines.push(
+      `  - ${info.pendingMintQuotes} pending top-up (mint) quote(s) at this mint`,
+    );
+  }
+  if (info.pendingMeltQuotes > 0) {
+    lines.push(
+      `  - ${info.pendingMeltQuotes} in-flight outbound (melt) payment(s) for this mint`,
+    );
+  }
+  if (info.isDefault) {
+    lines.push("  - this is the wallet's default mint");
+  }
+  return lines;
+}
+
 walletMintsCmd
   .command("list")
   .description("List configured wallet mints")
-  .action(async () => {
-    await handleDaemonCommand("/wallet/mints");
+  .option("--json", "Print the raw JSON response", false)
+  .action(async (options: { json: boolean }) => {
+    if (options.json) {
+      await handleDaemonCommand("/wallet/mints");
+      return;
+    }
+    await ensureDaemonRunning();
+    const result = await callMintDaemon("/wallet/mints");
+    const output = result.output as
+      | { mints?: string[]; defaultMint?: string | null; activeMint?: string | null }
+      | undefined;
+    const mints = output?.mints ?? [];
+    if (mints.length === 0) {
+      console.log("No wallet mints configured.");
+      return;
+    }
+    const defaultMint = output?.defaultMint ?? output?.activeMint ?? null;
+    console.log(`Wallet mints (${mints.length}):`);
+    mints.forEach((mint, index) => {
+      const marker = mint === defaultMint ? " (default)" : "";
+      console.log(`  ${index + 1}. ${mint}${marker}`);
+    });
   });
 
 walletMintsCmd
@@ -2437,6 +2510,92 @@ walletMintsCmd
       method: "POST",
       body: { url },
     });
+  });
+
+walletMintsCmd
+  .command("remove <mint>")
+  .description(
+    "Remove a wallet mint (accepts a mint URL or the index from 'wallet mints list')",
+  )
+  .option("-y, --yes", "Skip the confirmation prompt", false)
+  .action(async (mint: string, options: { yes: boolean }) => {
+    await ensureDaemonRunning();
+
+    // Allow the numbered entry from `wallet mints list` as a shortcut.
+    let mintUrl = mint.trim();
+    if (/^\d+$/.test(mintUrl)) {
+      const listResult = await callMintDaemon("/wallet/mints");
+      const mints =
+        (listResult.output as { mints?: string[] } | undefined)?.mints ?? [];
+      const index = Number.parseInt(mintUrl, 10);
+      const selected = index >= 1 ? mints[index - 1] : undefined;
+      if (!selected) {
+        console.error(
+          `No mint at index ${index}. Run 'routstrd wallet mints list' first.`,
+        );
+        process.exit(1);
+      }
+      mintUrl = selected;
+    }
+
+    const infoResult = await callMintDaemon(
+      `/wallet/mints/removal-info?url=${encodeURIComponent(mintUrl)}`,
+    );
+    const info = infoResult.output as MintRemovalInfo | undefined;
+    if (!info) {
+      console.error("Could not read mint details from the daemon.");
+      process.exit(1);
+    }
+    if (info.mintCount <= 1) {
+      console.error(
+        "Cannot remove the last mint in the wallet; add another mint first.",
+      );
+      process.exit(1);
+    }
+
+    // Only hold back a mint that still has funds or pending quotes. A mint the
+    // user never funded is removed without a prompt.
+    if (info.hasAssets) {
+      console.log(`Warning: ${info.url} still has funds or pending operations:`);
+      for (const line of describeMintRemovalRisks(info)) {
+        console.log(line);
+      }
+      console.log("");
+      console.log(
+        "Removing the mint keeps those sats in the wallet database, but they are",
+      );
+      console.log("not spendable until the mint is added back.");
+
+      if (!options.yes) {
+        const rl = require("readline").createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(`Remove ${info.url} anyway? [y/N] `, (value: string) => {
+            rl.close();
+            resolve(value.trim().toLowerCase());
+          });
+        });
+        if (answer !== "y" && answer !== "yes") {
+          console.log("Aborted.");
+          return;
+        }
+      }
+    } else if (info.isDefault) {
+      console.log(
+        `Note: ${info.url} is the wallet's default mint; the default will move to another mint.`,
+      );
+    }
+
+    const result = await callMintDaemon("/wallet/mints", {
+      method: "DELETE",
+      body: { url: info.url },
+    });
+    const output = result.output as { message?: string } | undefined;
+    console.log(
+      output?.message ?? `Mint ${info.url} removed from the wallet`,
+    );
   });
 
 walletMintsCmd
