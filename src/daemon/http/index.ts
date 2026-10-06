@@ -23,6 +23,7 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
+import { forwardTeeMetadata } from "./tee-metadata";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -2003,6 +2004,18 @@ export function createDaemonRequestHandler(deps: {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }
       return;
+    }
+
+    if (req.method === "GET") {
+      const providerHeader = req.headers["x-routstr-provider"];
+      const metadata = await forwardTeeMetadata(
+        url, typeof providerHeader === "string" ? providerHeader : undefined, deps,
+      );
+      if (metadata) {
+        res.writeHead(metadata.status, Object.fromEntries(metadata.headers));
+        res.end(Buffer.from(await metadata.arrayBuffer()));
+        return;
+      }
     }
 
     if (
