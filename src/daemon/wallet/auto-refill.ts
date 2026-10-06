@@ -53,6 +53,9 @@ export function startAutoRefillLoop(
   let timeout: ReturnType<typeof setInterval> | null = null;
   let checkInProgress = false;
   let consecutiveFailures = 0;
+  // Mint operation of a refill whose NWC payment timed out. Its invoice may
+  // still be paid, so no fresh invoice until the wallet settles it either way.
+  let unsettledRefill: string | undefined;
 
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
@@ -86,8 +89,21 @@ export function startAutoRefillLoop(
     }
 
     checkInProgress = true;
+    let operationId: string | undefined;
 
     try {
+      if (unsettledRefill) {
+        const quote = await walletClient.getMintQuote?.(unsettledRefill);
+        // Fail closed: only a final state proves the invoice can't still be paid.
+        if (quote?.state !== "finalized" && quote?.state !== "failed") return;
+        unsettledRefill = undefined;
+        if (quote.state === "finalized") {
+          logger.log("[auto-refill] Timed-out payment landed; counting it as the refill.");
+          lastRefillAt = now;
+          return;
+        }
+      }
+
       const balances = await walletClient.getBalances();
       const totalBalance = Object.values(balances).reduce<number>(
         (sum, b) => sum + (typeof b === "number" ? b : 0),
@@ -113,10 +129,12 @@ export function startAutoRefillLoop(
       logger.log(
         `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mintUrl}...`,
       );
-      const { invoice } = await walletClient.receiveBolt11(
+      const created = await walletClient.receiveBolt11(
         config.amount,
         mintUrl,
       );
+      const invoice = created.invoice;
+      operationId = created.operationId;
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
@@ -150,6 +168,16 @@ export function startAutoRefillLoop(
       const message = error instanceof Error ? error.message : String(error);
       lastAttemptAt = now; // track for backoff regardless of success/failure
       consecutiveFailures++;
+
+      // Set only once the invoice exists, so this timeout came from paying it.
+      if (operationId && /timed out|^timeout$/i.test(message)) {
+        logger.error(
+          `[auto-refill] ${message}; the payment may still complete. Waiting for the invoice to settle before refilling again.`,
+        );
+        unsettledRefill = operationId;
+        consecutiveFailures = 0;
+        return;
+      }
 
       if (isFatalError(message)) {
         // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
