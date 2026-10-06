@@ -409,6 +409,10 @@ not part of `bun test`.
    daemon. When isolation is needed, use both a separate `ROUTSTRD_DIR` and a
    non-production port in that configuration.
 
+See [docs/CI.md](docs/CI.md) for the full CI/CD details: job layout, npm trusted
+publishing (OIDC) setup, the canonical `repository.url` requirement, and how to
+order a release when it needs a newer `@routstr/sdk`.
+
 ## Project Structure
 
 ```
@@ -424,6 +428,7 @@ routstrd/
 │   └── utils/          # Config, paths, daemon client, update checker
 ├── tests/              # Integration tests (unit tests sit beside their source)
 ├── scripts/smoke/      # Manual end-to-end smoke test
+├── docs/CI.md          # CI and release automation
 ├── docs/plans/         # Design/migration plans not yet executed
 ├── package.json
 └── tsconfig.json
