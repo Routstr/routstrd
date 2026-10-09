@@ -7,6 +7,7 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RoutstrdConfig } from "../../utils/config";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
@@ -450,6 +451,8 @@ export function createDaemonRequestHandler(deps: {
   maxTokens: number;
   /** Enable SDK automatic DeepSeek V4.1 Flash model-path selection. */
   autoModelPath?: boolean;
+  /** Confidential-upstream settings (see RoutstrdConfig.confidentialUpstream). */
+  confidentialUpstream?: RoutstrdConfig["confidentialUpstream"];
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
@@ -2015,6 +2018,27 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Confidential upstream is opt-in per request; the node never sees the
+    // prompt or response. Fail closed: a request that asks for it is refused
+    // here, never sent on the plain path, when it cannot run confidentially.
+    const wantsConfidential =
+      String(req.headers["x-routstr-verify"] ?? "").toLowerCase() === "confidential";
+    if (wantsConfidential) {
+      if (deps.confidentialUpstream?.enabled !== true) {
+        sendJson(res, 400, {
+          error:
+            "x-routstr-verify: confidential requested, but confidentialUpstream is not enabled in the routstrd config.",
+        });
+        return;
+      }
+      if (!/^\/(v1\/)?chat\/completions\/?$/.test(url.pathname)) {
+        sendJson(res, 400, {
+          error: "Confidential requests support only POST /v1/chat/completions.",
+        });
+        return;
+      }
+    }
+
     let requestBody: unknown = {};
     try {
       requestBody = await readJsonBody(req);
@@ -2049,6 +2073,16 @@ export function createDaemonRequestHandler(deps: {
       deps.provider ||
       undefined;
 
+    const confidentialConfig = deps.confidentialUpstream;
+    const confidential =
+      wantsConfidential && confidentialConfig
+        ? {
+            trustedHosts: confidentialConfig.trusted_hosts ?? [],
+            nodePubkeys: confidentialConfig.node_pubkeys,
+            proverPath: confidentialConfig.prover_path,
+          }
+        : undefined;
+
     // Convert req.headers to Record<string, string>
     const incomingHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
@@ -2082,6 +2116,7 @@ export function createDaemonRequestHandler(deps: {
         path: forwardedPath,
         forcedProvider,
         autoModelPath: deps.autoModelPath === true,
+        ...(confidential ? { confidential } : {}),
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,

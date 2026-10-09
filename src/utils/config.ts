@@ -49,6 +49,20 @@ export interface RoutstrdConfig {
   mode?: "xcashu" | "apikeys";
   /** Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash. Disabled by default; requires daemon restart after changing. */
   autoModelPath?: boolean;
+  /**
+   * Confidential upstream: requests sent with `x-routstr-verify: confidential`
+   * run with the daemon as the TLS client of the node's provider, so the node
+   * never sees the prompt or the response. Off unless `enabled`.
+   */
+  confidentialUpstream?: {
+    enabled?: boolean;
+    /** Upstream TLS hostnames trusted for the other end (exact, `*.x`, `**.x`). */
+    trusted_hosts?: string[];
+    /** Node signing keys (hex or npub) whose offers are accepted. */
+    node_pubkeys?: string[];
+    /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
+    prover_path?: string;
+  };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {
     /** Enable raw request/response file logging. */

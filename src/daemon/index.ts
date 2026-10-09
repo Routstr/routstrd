@@ -220,6 +220,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
       autoModelPath: config.autoModelPath === true,
+      confidentialUpstream: config.confidentialUpstream,
       maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
       routstrModelsPubkey: config.routstrModelsPubkey,

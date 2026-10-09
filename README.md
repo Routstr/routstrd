@@ -310,6 +310,10 @@ choose and pin an advertised model path for `deepseek-v4.1-flash` requests.
 Explicit `x-routstr-model-path` request headers work independently of this
 setting and take precedence. Restart the daemon after changing `autoModelPath`.
 
+`confidentialUpstream` (off by default) lets requests sent with the
+`x-routstr-verify: confidential` header run so the node never sees the prompt
+or response. See [docs/confidential-upstream.md](docs/confidential-upstream.md).
+
 `provider` pins every request to one node (same strict behavior as the
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
 router pick the cheapest eligible provider and fail over between nodes.
