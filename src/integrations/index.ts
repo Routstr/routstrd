@@ -15,23 +15,65 @@ import { CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 export { CLIENT_INTEGRATIONS, CLIENT_CONFIGS, runIntegrationsForClients } from "./registry";
 
 /**
+ * What a refresh pass produced. Durations are measured by the caller so one
+ * summary can cover the whole pass (Nostr events + models + integrations).
+ */
+export interface ModelRefreshResult {
+  /** Models exposed for routstr21 after the refresh. */
+  modelCount: number;
+  /** Client integrations rewritten (0 when no clients are registered). */
+  integrationCount: number;
+  /** Integrations that failed; each failure is logged as it happens. */
+  failedCount: number;
+}
+
+/**
+ * One line for a whole refresh pass. The daemon repeats this on a timer, so the
+ * per-phase lines ("refreshing ...", "... completed successfully") are `debug`:
+ * at `info` a pass costs exactly one line, whether or not anything changed.
+ */
+export function formatModelRefreshSummary(
+  label: string,
+  result: ModelRefreshResult,
+  totalDurationMs: number,
+): string {
+  const parts = [`${result.modelCount} models`];
+  // Always the count, never "no client integrations": clients can be
+  // registered but skipped when they have no API key, and claiming there are
+  // none contradicts what `routstrd clients` shows.
+  parts.push(`${result.integrationCount} client integration(s)`);
+  if (result.failedCount > 0) parts.push(`${result.failedCount} failed`);
+  return `${label} refresh: ${parts.join(", ")} in ${(totalDurationMs / 1000).toFixed(1)}s`;
+}
+
+/**
  * Refresh routstr21 models and then run integrations for all registered clients.
  * Used both on initial daemon startup and in the recurring scheduled job.
+ *
+ * Returns the pass result instead of logging it: the caller owns the single
+ * summary line (see formatModelRefreshSummary).
  */
 export async function refreshModelsAndIntegrations(
   getRoutstr21Models: (force?: boolean) => Promise<any[]>,
   config: RoutstrdConfig,
   label: string = "Scheduled",
-): Promise<void> {
-  await getRoutstr21Models(true);
-  logger.log(`${label} model refresh completed successfully.`);
+): Promise<ModelRefreshResult> {
+  logger.debug(`${label} refresh: fetching routstr21 models...`);
+  const models = await getRoutstr21Models(true);
 
   const clientIds = await getClientsList();
+  let integrationCount = 0;
+  let failedCount = 0;
   if (clientIds.length > 0) {
-    logger.log(`Refreshing ${clientIds.length} client integration(s)...`);
-    await runIntegrationsForClients(clientIds, config);
-    logger.log("Client integrations refreshed.");
+    logger.debug(
+      `${label} refresh: rewriting ${clientIds.length} client integration(s)...`,
+    );
+    const run = await runIntegrationsForClients(clientIds, config);
+    integrationCount = run.refreshed;
+    failedCount = run.failed;
   }
+
+  return { modelCount: models.length, integrationCount, failedCount };
 }
 
 function ask(question: string): Promise<string> {

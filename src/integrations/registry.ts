@@ -1,5 +1,6 @@
 import { join } from "path";
 import type { RoutstrdConfig } from "../utils/config";
+import { logger } from "../utils/logger";
 import { installOpencodeIntegration } from "./opencode";
 import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
@@ -49,6 +50,14 @@ export type IntegrationFn = (
   integrationConfig: IntegrationConfig,
 ) => Promise<void>;
 
+/** Outcome of rewriting every registered client integration. */
+export interface IntegrationRunResult {
+  /** Integrations rewritten from the daemon's API keys. */
+  refreshed: number;
+  /** Integrations that threw; each failure is logged as it happens. */
+  failed: number;
+}
+
 export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
   opencode: {
     clientId: "opencode",
@@ -88,16 +97,21 @@ export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
 export async function runIntegrationsForClients(
   clientIds: Array<{ clientId: string; apiKey?: string }>,
   config: RoutstrdConfig,
-): Promise<void> {
+): Promise<IntegrationRunResult> {
+  let refreshed = 0;
+  let failed = 0;
   for (const client of clientIds) {
     const integrationFn = CLIENT_INTEGRATIONS[client.clientId];
     const integrationConfig = CLIENT_CONFIGS[client.clientId];
     if (integrationFn && integrationConfig && client.apiKey) {
       try {
         await integrationFn(config, client.apiKey, integrationConfig);
+        refreshed++;
       } catch (error) {
-        console.error(`Integration failed for ${client.clientId}:`, error);
+        failed++;
+        logger.error(`Integration failed for ${client.clientId}:`, error);
       }
     }
   }
+  return { refreshed, failed };
 }
