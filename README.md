@@ -487,6 +487,10 @@ setting and take precedence. Change it with
 to the next routed request, so editing the file by hand is only useful together
 with a restart.
 
+`confidentialUpstream` (off by default) lets requests sent with the
+`x-routstr-verify: confidential` header run so the node never sees the prompt
+or response. See [docs/confidential-upstream.md](docs/confidential-upstream.md).
+
 `provider` pins every request to one node (same strict behavior as the
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
 router pick the cheapest eligible provider and fail over between nodes.
