@@ -320,6 +320,8 @@ router pick the cheapest eligible provider and fail over between nodes.
 - `ROUTSTRD_SOCKET` - Socket path (default: `~/.routstrd/routstrd.sock`)
 - `ROUTSTRD_PID` - PID file path (default: `~/.routstrd/routstrd.pid`)
 - `ROUTSTRD_WALLET_DIR` - Wallet data directory (default: `~/.routstrd/wallet`)
+- `ROUTSTRD_LOG_LEVEL` - Minimum level written to the daily log: `debug`, `info` (default), `warn` or `error`. See [docs/logging.md](docs/logging.md)
+- `ROUTSTRD_COCO_LOG_LEVEL` - Same, for the Cashu wallet-engine log (default: `debug`)
 - `COCOD_DIR` - Legacy external cocod directory, used only for migration and exclusion (default: `~/.cocod`)
 
 ## Development

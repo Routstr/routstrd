@@ -289,7 +289,10 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         if (created) {
           logger.log(`Created new API key for ${integrationConfig.name}`);
         } else {
-          logger.log(`Using existing API key for ${integrationConfig.name}`);
+          // Reusing an existing key is the steady state for a client that is
+          // already set up (e.g. the `*/5 * * * * routstrd clients add
+          // --pi-agent` cron), so it is not worth a line per run.
+          logger.debug(`Using existing API key for ${integrationConfig.name}`);
         }
         await integrationFn(config, client.apiKey, integrationConfig);
 

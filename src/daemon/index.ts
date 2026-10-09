@@ -53,7 +53,7 @@ import type { AutoRefillConfig } from "./wallet/auto-refill";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
-import { refreshModelsAndIntegrations } from "../integrations";
+import { formatModelRefreshSummary, refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 import { mkdirSync } from "fs";
 import { dirname } from "path";
@@ -267,16 +267,26 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   let disabledNoticeLogged = false;
 
   const runScheduledRefresh = async (): Promise<void> => {
-    logger.log("Running scheduled Nostr event refresh...");
+    // One line per pass at `info` (below); the phase markers stay at `debug`
+    // because this repeats every 21 minutes and the pass is not news.
+    const startedAt = Date.now();
+    logger.debug("Running scheduled Nostr event refresh...");
     try {
       await modelManager.refreshNostrEvents();
     } catch (error) {
       logger.error("Scheduled Nostr event refresh failed:", error);
     }
 
-    logger.log("Running scheduled model refresh...");
+    logger.debug("Running scheduled model refresh...");
     try {
-      await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
+      const result = await refreshModelsAndIntegrations(
+        getRoutstr21Models,
+        updatedConfig,
+        "Scheduled",
+      );
+      logger.log(
+        formatModelRefreshSummary("Scheduled", result, Date.now() - startedAt),
+      );
     } catch (error) {
       logger.error("Scheduled model refresh failed:", error);
     }
@@ -435,8 +445,9 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
       .then(async () => {
+        const initialRefreshStartedAt = Date.now();
         // Catch up on any Nostr events published since last run
-        logger.log("Running initial Nostr event refresh...");
+        logger.debug("Running initial Nostr event refresh...");
         await modelManager.refreshNostrEvents();
 
         startModelRefreshJob();
@@ -445,10 +456,23 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
         // integrations are skipped when the scheduled job is disabled, so a
         // restart does not overwrite hand-edited client configs.
         if (readAutoRefreshSettings().enabled) {
-          logger.log("Running initial model refresh...");
-          await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Initial");
+          logger.debug("Running initial model refresh...");
+          const result = await refreshModelsAndIntegrations(
+            getRoutstr21Models,
+            updatedConfig,
+            "Initial",
+          );
+          logger.log(
+            formatModelRefreshSummary(
+              "Initial",
+              result,
+              Date.now() - initialRefreshStartedAt,
+            ),
+          );
         } else {
-          logger.log("Running initial model refresh (client integrations skipped)...");
+          logger.debug(
+            "Running initial model refresh (client integrations skipped)...",
+          );
           await getRoutstr21Models(true);
         }
       })
