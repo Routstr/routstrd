@@ -20,7 +20,7 @@ import {
 } from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
-import { getUsageSummary } from "./usage-summary";
+import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
 import {
@@ -1943,6 +1943,7 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/usage/summary") {
       try {
         const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const window = parseTimeWindow(url.searchParams.get("window"));
         const npubFilter = url.searchParams.get("npub")?.trim();
         const clients = getClientsFromStore(deps.store);
         const clientFilter = npubFilter
@@ -1950,7 +1951,7 @@ export function createDaemonRequestHandler(deps: {
               .filter((c) => c.ownerNpub === npubFilter)
               .map((c) => c.clientId)
           : undefined;
-        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter);
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter, window);
         sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });

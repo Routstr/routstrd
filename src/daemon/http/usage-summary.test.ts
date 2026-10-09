@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
 import type { UsageTrackingEntry } from "@routstr/sdk/storage";
 import type { ClientEntry } from "../../utils/clients";
-import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summary";
+import { getUsageSummary, parseTimeWindow, __resetUsageSummaryCacheForTest } from "./usage-summary";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 //
@@ -268,5 +268,120 @@ describe("getUsageSummary", () => {
     const summary2 = await getUsageSummary(driver, CLIENTS, TZ);
     // Same object reference means it was served from cache
     expect(summary1).toBe(summary2);
+  });
+});
+
+describe("parseTimeWindow", () => {
+  it("accepts every known window", () => {
+    expect(parseTimeWindow("all")).toBe("all");
+    expect(parseTimeWindow("today")).toBe("today");
+    expect(parseTimeWindow("7d")).toBe("7d");
+    expect(parseTimeWindow("30d")).toBe("30d");
+    expect(parseTimeWindow(" 7d ")).toBe("7d");
+  });
+
+  it("falls back to all for unknown/missing values", () => {
+    expect(parseTimeWindow("bogus")).toBe("all");
+    expect(parseTimeWindow("")).toBe("all");
+    expect(parseTimeWindow(null)).toBe("all");
+    expect(parseTimeWindow(undefined)).toBe("all");
+  });
+});
+
+describe("getUsageSummary time windows", () => {
+  let driver: ReturnType<typeof createMemoryUsageTrackingDriver>;
+
+  // tz = 0 (UTC) keeps the assertions independent of the host timezone.
+  const TZ0 = 0;
+  const NOW = Date.now();
+  const RECENT = NOW; // today
+  const THREE_DAYS_AGO = NOW - 3 * 86_400_000;
+  const TEN_DAYS_AGO = NOW - 10 * 86_400_000;
+
+  const windowEntry = (
+    id: string,
+    timestamp: number,
+    modelId: string,
+    totalTokens: number,
+    satsCost: number,
+  ): UsageTrackingEntry => ({
+    id,
+    timestamp,
+    modelId,
+    baseUrl: "https://api.openai.com/",
+    requestId: `req-${id}`,
+    cost: satsCost / 1000,
+    satsCost,
+    promptTokens: Math.floor(totalTokens / 2),
+    completionTokens: Math.floor(totalTokens / 2),
+    totalTokens,
+  });
+
+  beforeEach(() => {
+    __resetUsageSummaryCacheForTest();
+    driver = createMemoryUsageTrackingDriver([
+      windowEntry("w-recent", RECENT, "model-recent", 500, 5), // today, tiny
+      windowEntry("w-mid", THREE_DAYS_AGO, "model-mid", 2000, 7), // 3d ago, small
+      windowEntry("w-old", TEN_DAYS_AGO, "model-old", 50_000, 11), // 10d ago, large
+    ]);
+  });
+
+  it("defaults to the all window when omitted", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0);
+    expect(summary.window!.window).toBe("all");
+    expect(summary.window!.totals.requests).toBe(3);
+  });
+
+  it("scopes the window block without touching the all-time fields", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+
+    // Window block: only the recent + 3-day-old entries.
+    expect(summary.window!.window).toBe("7d");
+    expect(summary.window!.totals.requests).toBe(2);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7);
+    expect(summary.window!.models.map((m) => m.modelId).sort()).toEqual(["model-mid", "model-recent"]);
+
+    // All-time fields are unaffected by the requested window.
+    expect(summary.totals.requests).toBe(3);
+    expect(summary.models).toHaveLength(3);
+  });
+
+  it("30d includes everything observed within 30 days", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "30d");
+    expect(summary.window!.totals.requests).toBe(3);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7 + 11);
+  });
+
+  it("today only includes entries from the current day", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "today");
+    expect(summary.window!.totals.requests).toBe(1);
+    expect(summary.window!.models).toHaveLength(1);
+    expect(summary.window!.models[0]!.modelId).toBe("model-recent");
+  });
+
+  it("scopes the windowed size buckets", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    // w-recent (500) → tiny, w-mid (2000) → small, w-old excluded.
+    expect(summary.window!.sizeBuckets.tiny.count).toBe(1);
+    expect(summary.window!.sizeBuckets.small.count).toBe(1);
+    expect(summary.window!.sizeBuckets.large.count).toBe(0);
+
+    // All-time buckets still include the large entry.
+    expect(summary.sizeBuckets.large.count).toBe(1);
+  });
+
+  it("mirrors the all-time aggregates for the all window", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    expect(summary.window!.totals).toEqual(summary.totals);
+    expect(summary.window!.models).toEqual(summary.models);
+    expect(summary.window!.sizeBuckets).toEqual(summary.sizeBuckets);
+  });
+
+  it("caches per window rather than sharing one entry", async () => {
+    const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    const week = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    // Different windows must not be served the same cached summary.
+    expect(week).not.toBe(all);
+    expect(week.window!.window).toBe("7d");
   });
 });

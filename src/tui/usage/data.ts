@@ -6,7 +6,7 @@ import {
   isDaemonRunning,
   loadConfig,
 } from "../../utils/daemon-client.ts";
-import type { UsageStats, UsageSummary } from "./types.ts";
+import type { UsageStats, UsageSummary, TimeWindow, WindowedStats } from "./types.ts";
 
 export { isDaemonRunning };
 
@@ -82,10 +82,10 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
   }
 }
 
-export async function fetchUsageSummary(): Promise<UsageStats | null> {
+export async function fetchUsageSummary(windowId: TimeWindow = "all"): Promise<UsageStats | null> {
   try {
     const tz = new Date().getTimezoneOffset();
-    const result = await callDaemon(`/usage/summary?tz=${tz}`);
+    const result = await callDaemon(`/usage/summary?tz=${tz}&window=${windowId}`);
     if (result.error) return null;
 
     const summary = result.output as UsageSummary | undefined;
@@ -98,10 +98,27 @@ export async function fetchUsageSummary(): Promise<UsageStats | null> {
       recentSatsCost: summary.totals.satsCost,
       limit: 50,
       summary,
+      window: summary.window ?? windowFromAllTime(summary),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Older daemons don't return a `window` block; fall back to the all-time
+ * aggregates so the TUI still renders (just without window switching).
+ */
+function windowFromAllTime(summary: UsageSummary): WindowedStats {
+  return {
+    window: "all",
+    totals: summary.totals,
+    models: summary.models,
+    providers: summary.providers,
+    clients: summary.clients,
+    npubs: summary.npubs,
+    sizeBuckets: summary.sizeBuckets,
+  };
 }
 
 export function formatTime(timestamp: number): string {
