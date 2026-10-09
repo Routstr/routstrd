@@ -26,6 +26,7 @@ import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
+  type StoredFailureStreak,
 } from "../../utils/cooldowns";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
@@ -1804,10 +1805,16 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const state = deps.store.getState();
         const stored: StoredCooldownEntry[] = state.providersOnCooldown || [];
+        // Failure streaks only exist on SDKs with exponential cooldowns;
+        // feature-detect so older stores simply omit the section.
+        const streaks = (state as { modelFailureStreaks?: StoredFailureStreak[] })
+          .modelFailureStreaks;
         return {
           output: buildCooldownsOutput(
             stored,
             deps.providerManager.getCooldownDurationMs(),
+            Date.now(),
+            streaks,
           ),
         };
       });
