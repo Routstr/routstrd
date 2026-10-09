@@ -102,6 +102,27 @@ List available routstr21 models (discovered via Nostr).
 | `-r, --refresh` | Force refresh models from Nostr |
 | `-m, --model <id>` | Show the providers serving a specific model |
 
+### `routstrd models auto-model-path [on|off|toggle]`
+
+Show or change `autoModelPath` (SDK automatic model-path selection for
+`deepseek-v4.1-flash`). With no argument it prints the setting currently in
+effect; a pending restart is reported too.
+
+| Argument | Description |
+|----------|-------------|
+| _(none)_ / `status` | Print the current setting |
+| `on` / `enable` / `true` | Enable automatic model-path selection |
+| `off` / `disable` / `false` | Disable automatic model-path selection |
+| `toggle` | Flip the persisted setting |
+
+| Option | Description |
+|--------|-------------|
+| `--no-restart` | Persist the setting without restarting the daemon |
+
+The daemon reads this setting at startup, so the command restarts the local
+daemon afterwards (skip with `--no-restart`). When the daemon is remote, it
+prints the reminder that the node's operator has to restart it.
+
 ### `routstrd usage`
 
 Show recent usage logs and total sats cost.
@@ -479,6 +500,19 @@ The incoming request path is forwarded to the provider, so the Anthropic
 Messages API (`POST /v1/messages`) and the OpenAI Responses API
 (`POST /v1/responses`) are proxied in their own formats as well.
 
+### `GET`/`POST /settings/auto-model-path`
+
+Persist the SDK automatic model-path setting (`autoModelPath`).
+
+```json
+{ "enabled": true }
+```
+
+The response reports `restartRequired`, which is `true` when the running daemon
+still routes with the previous value and needs a restart to apply the new one.
+`GET /settings/auto-model-path` returns the effective value (`autoModelPath`),
+the persisted value (`configured`), and `restartRequired`.
+
 #### Provider pinning
 
 A provider can be pinned with any of:
@@ -503,6 +537,7 @@ Config file: `~/.routstrd/config.json`
 | `host` | string | `"127.0.0.1"` | Bind address |
 | `provider` | string\|null | null | Pinned provider URL; all requests go only to this node (no cross-provider failover) |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
+| `autoModelPath` | boolean | false | SDK automatic model-path selection for `deepseek-v4.1-flash`; toggled with `routstrd models auto-model-path`, applied on daemon restart |
 | `maxTokens` | number | 64000 | Completion budget applied when a client sets no output-token limit |
 | `daemonUrl` | string | — | Remote daemon URL (set by `routstrd remote`) |
 | `authUrl` | string | — | Auth proxy URL for management commands |

@@ -963,6 +963,50 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // SDK automatic model-path selection. Unlike autoRefresh this is captured
+    // once at startup (deps.autoModelPath), so a persisted change only takes
+    // effect after a daemon restart — the CLI drives that restart itself.
+    if (url.pathname === "/settings/auto-model-path") {
+      if (req.method === "GET") {
+        await respond(res, async () => {
+          const config = await loadDaemonConfig();
+          const configured = config.autoModelPath === true;
+          const active = deps.autoModelPath === true;
+
+          return {
+            output: {
+              autoModelPath: active,
+              configured,
+              restartRequired: configured !== active,
+            },
+          };
+        });
+        return;
+      }
+
+      if (req.method === "POST") {
+        await respond(res, async () => {
+          const body = await readJsonBody(req);
+          const enabled = body.enabled === true || body.enabled === "true";
+          const active = deps.autoModelPath === true;
+
+          const config = await loadDaemonConfig();
+          config.autoModelPath = enabled;
+          saveDaemonConfig(config);
+
+          return {
+            output: {
+              message: `Auto model path ${enabled ? "enabled" : "disabled"}.`,
+              autoModelPath: enabled,
+              // Only a value the running daemon does not already use needs a restart.
+              restartRequired: enabled !== active,
+            },
+          };
+        });
+        return;
+      }
+    }
+
     if (req.method === "GET" && url.pathname === "/models") {
       try {
         const forceRefresh =

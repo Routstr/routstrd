@@ -326,6 +326,133 @@ async function requireLocalDaemon(): Promise<void> {
   }
 }
 
+/**
+ * Stop the local daemon (when it is running), wait for it to release the wallet
+ * lock, then start it again. Startup-only settings (mode, auto model path) use
+ * this so a persisted change takes effect immediately.
+ */
+async function restartLocalDaemon(
+  config: RoutstrdConfig,
+  options: { port?: string; host?: string; provider?: string } = {},
+): Promise<void> {
+  if (await isDaemonRunning()) {
+    console.log("Stopping daemon...");
+    await callDaemon("/stop", { method: "POST" });
+
+    // Wait for the old daemon to fully exit: it keeps serving ongoing requests
+    // before it releases the wallet lock the new daemon has to claim.
+    try {
+      await waitForDaemonToExit({ pidFilePath: walletPidPath() });
+    } catch (error) {
+      logger.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+    console.log("Daemon stopped.");
+  } else {
+    console.log("Daemon was not running.");
+  }
+
+  await stopLegacyCocod();
+
+  console.log("Starting daemon...");
+  await startDaemon({
+    port: options.port || String(config.port || 8008),
+    host: options.host || config.host || undefined,
+    provider: options.provider || config.provider || undefined,
+  });
+}
+
+type AutoModelPathStatus = {
+  /** Value the running daemon routes with (captured at startup). */
+  autoModelPath: boolean;
+  /** Value persisted in config.json. */
+  configured: boolean;
+  /** config.json and the running daemon disagree, so a restart is pending. */
+  restartRequired: boolean;
+};
+
+/**
+ * Read the current auto model path setting from the daemon. Called before any
+ * write, so it doubles as the version probe for a daemon that predates the
+ * endpoint (see below).
+ */
+async function fetchAutoModelPathStatus(): Promise<AutoModelPathStatus> {
+  let result: CommandResponse;
+  try {
+    result = await callDaemon("/settings/auto-model-path");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // A daemon built before this setting existed has no GET route for it: it
+    // either 404s or falls through to the "POST only" catch-all. Without this
+    // hint the user just sees that unrelated message.
+    if (message.includes("404") || message === "Only POST is supported.") {
+      console.error(
+        "The running daemon has no /settings/auto-model-path endpoint, so it cannot read this setting. " +
+          "Update it (routstrd update) and restart it (routstrd restart), then try again.",
+      );
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  if (result.error) {
+    console.log(result.error);
+    process.exit(1);
+  }
+
+  const output = result.output as
+    | { autoModelPath?: unknown; configured?: unknown; restartRequired?: unknown }
+    | undefined;
+  const autoModelPath = output?.autoModelPath === true;
+  const configured = output?.configured === true;
+
+  return {
+    autoModelPath,
+    configured,
+    restartRequired:
+      typeof output?.restartRequired === "boolean"
+        ? output.restartRequired
+        : configured !== autoModelPath,
+  };
+}
+
+export type AutoModelPathArg =
+  | { kind: "status" }
+  | { kind: "set"; enabled: boolean }
+  | { kind: "toggle" }
+  | { kind: "invalid"; value: string };
+
+/**
+ * Parse the optional `[state]` argument of `routstrd models auto-model-path`.
+ * Missing or `status` reports the current setting; `on`/`off` set it explicitly
+ * and `toggle` flips it.
+ */
+export function parseAutoModelPathArg(
+  raw: string | undefined,
+): AutoModelPathArg {
+  if (raw === undefined) return { kind: "status" };
+
+  switch (raw.trim().toLowerCase()) {
+    case "":
+    case "status":
+      return { kind: "status" };
+    case "on":
+    case "enable":
+    case "enabled":
+    case "true":
+      return { kind: "set", enabled: true };
+    case "off":
+    case "disable":
+    case "disabled":
+    case "false":
+      return { kind: "set", enabled: false };
+    case "toggle":
+      return { kind: "toggle" };
+    default:
+      return { kind: "invalid", value: raw };
+  }
+}
+
 async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
   console.log("Initializing routstrd...");
 
@@ -1001,7 +1128,7 @@ program
   });
 
 // Models - list routstr21 models
-program
+const modelsCmd = program
   .command("models")
   .description("List available routstr21 models")
   .option("-r, --refresh", "Force refresh routstr21 models from Nostr", false)
@@ -1110,6 +1237,86 @@ program
         console.log("");
       }
     }
+  });
+
+/**
+ * `config.autoModelPath` is read once at daemon startup, so this command
+ * persists the new value and then restarts the daemon (locally, unless
+ * --no-restart is given) to make it take effect.
+ */
+modelsCmd
+  .command("auto-model-path [state]")
+  .description(
+    "Show or change automatic model-path selection (on|off|toggle)",
+  )
+  .option("--no-restart", "Persist the setting without restarting the daemon")
+  .action(async (state: string | undefined, options: { restart: boolean }) => {
+    await ensureDaemonRunning();
+
+    const parsed = parseAutoModelPathArg(state);
+    if (parsed.kind === "invalid") {
+      console.error(
+        `Invalid state '${parsed.value}'. Use 'on', 'off', 'toggle', or omit it to show the current setting.`,
+      );
+      process.exit(1);
+    }
+
+    const status = await fetchAutoModelPathStatus();
+    if (parsed.kind === "status") {
+      console.log(
+        `Automatic model-path selection: ${status.autoModelPath ? "enabled" : "disabled"}`,
+      );
+      if (status.restartRequired) {
+        console.log(
+          `config.json says ${status.configured ? "enabled" : "disabled"} — restart the daemon to apply it.`,
+        );
+      }
+      return;
+    }
+
+    // `toggle` flips what is persisted, so repeating it always alternates.
+    const enabled =
+      parsed.kind === "toggle" ? !status.configured : parsed.enabled;
+
+    const result = await callDaemon("/settings/auto-model-path", {
+      method: "POST",
+      body: { enabled },
+    });
+    if (result.error) {
+      console.log(result.error);
+      process.exit(1);
+    }
+
+    const output = result.output as
+      | { message?: string; restartRequired?: boolean }
+      | undefined;
+    console.log(
+      output?.message ??
+        `Auto model path ${enabled ? "enabled" : "disabled"}.`,
+    );
+
+    if (!output?.restartRequired) {
+      console.log("No restart needed: the running daemon already uses this value.");
+      return;
+    }
+
+    const config = await loadConfig();
+    if (config.daemonUrl) {
+      console.log(
+        `Restart the daemon at ${config.daemonUrl} to apply it (a remote node cannot be restarted from here).`,
+      );
+      return;
+    }
+
+    if (!options.restart) {
+      console.log("Restart the daemon to apply it: routstrd restart");
+      return;
+    }
+
+    await restartLocalDaemon(config);
+    console.log(
+      `Daemon restarted with automatic model-path selection ${enabled ? "enabled" : "disabled"}.`,
+    );
   });
 
 program
@@ -2708,33 +2915,7 @@ program
   .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
     const config = await loadConfig();
-    const wasRunning = await isDaemonRunning();
-
-    if (wasRunning) {
-      console.log("Stopping daemon...");
-      await callDaemon("/stop", { method: "POST" });
-
-      // Wait for the old daemon to fully exit so the wallet lock is free
-      // before a new daemon is spawned.
-      try {
-        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
-      } catch (error) {
-        logger.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-      }
-      console.log("Daemon stopped.");
-    } else {
-      console.log("Daemon was not running.");
-    }
-
-    await stopLegacyCocod();
-
-    console.log("Starting daemon...");
-    await startDaemon({
-      port: options.port || String(config.port || 8008),
-      host: options.host || config.host || undefined,
-      provider: options.provider,
-    });
+    await restartLocalDaemon(config, options);
     console.log("Daemon restarted.");
   });
 
@@ -2792,29 +2973,7 @@ program
     saveDaemonConfig(updatedConfig);
     console.log(`Mode set to '${selectedMode}'. Restarting daemon...`);
 
-    // Restart daemon
-    const wasRunning = await isDaemonRunning();
-    if (wasRunning) {
-      console.log("Stopping daemon...");
-      await callDaemon("/stop", { method: "POST" });
-
-      // Wait for the old daemon to fully exit so the wallet lock is free
-      // before a new daemon is spawned.
-      try {
-        await waitForDaemonToExit({ pidFilePath: walletPidPath() });
-      } catch (error) {
-        logger.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-      }
-      console.log("Daemon stopped.");
-    }
-
-    console.log("Starting daemon...");
-    await startDaemon({
-      port: String(config.port || 8008),
-      host: config.host || undefined,
-      provider: config.provider || undefined,
-    });
+    await restartLocalDaemon(config);
     console.log(`Daemon restarted with mode '${selectedMode}'.`);
   });
 

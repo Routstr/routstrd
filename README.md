@@ -159,6 +159,16 @@ routstrd clients --disable-automatic-refresh
 routstrd clients --enable-automatic-refresh
 ```
 
+Show or toggle automatic model-path selection (the daemon restarts itself so the
+change takes effect):
+```sh
+routstrd models auto-model-path          # show the current setting
+routstrd models auto-model-path on
+routstrd models auto-model-path off
+routstrd models auto-model-path toggle
+routstrd models auto-model-path on --no-restart   # persist only, restart later
+```
+
 Stop the daemon:
 ```sh
 routstrd stop
@@ -224,6 +234,24 @@ Request body:
 Enables or disables the scheduled refresh job. Persisted to the daemon's
 `config.json` as `autoRefresh.enabled` and picked up on the next tick, so no
 daemon restart is required.
+
+#### Automatic Model-Path Settings
+```
+GET /settings/auto-model-path
+POST /settings/auto-model-path
+```
+
+Request body for `POST`:
+```json
+{ "enabled": true }
+```
+
+Reads or writes `autoModelPath` in the daemon's `config.json`. `GET` returns the
+value the running daemon routes with (`autoModelPath`), the value on disk
+(`configured`), and whether the two disagree (`restartRequired`). Because the
+daemon captures this setting at startup, a change only takes effect after a
+restart; `POST` reports `restartRequired: true` when one is needed. Manage it
+with `routstrd models auto-model-path`.
 
 #### Route Request
 ```
@@ -308,7 +336,9 @@ overrides the 21-minute interval.
 `autoModelPath` defaults to `false`. Set it to `true` to let the SDK automatically
 choose and pin an advertised model path for `deepseek-v4.1-flash` requests.
 Explicit `x-routstr-model-path` request headers work independently of this
-setting and take precedence. Restart the daemon after changing `autoModelPath`.
+setting and take precedence. The daemon reads this setting at startup, so use
+`routstrd models auto-model-path on|off|toggle` (it restarts the daemon for you)
+instead of editing the file, or restart the daemon yourself after a manual edit.
 
 `provider` pins every request to one node (same strict behavior as the
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
