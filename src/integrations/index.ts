@@ -38,11 +38,10 @@ export function formatModelRefreshSummary(
   totalDurationMs: number,
 ): string {
   const parts = [`${result.modelCount} models`];
-  parts.push(
-    result.integrationCount > 0
-      ? `${result.integrationCount} client integration(s)`
-      : "no client integrations",
-  );
+  // Always the count, never "no client integrations": clients can be
+  // registered but skipped when they have no API key, and claiming there are
+  // none contradicts what `routstrd clients` shows.
+  parts.push(`${result.integrationCount} client integration(s)`);
   if (result.failedCount > 0) parts.push(`${result.failedCount} failed`);
   return `${label} refresh: ${parts.join(", ")} in ${(totalDurationMs / 1000).toFixed(1)}s`;
 }

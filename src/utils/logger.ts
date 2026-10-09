@@ -53,7 +53,12 @@ export function resolveLogLevel(
   fallback: LogLevel = DEFAULT_LOG_LEVEL,
 ): LogLevel {
   const normalized = (raw ?? "").trim().toLowerCase();
-  return normalized in LEVEL_RANK ? (normalized as LogLevel) : fallback;
+  // `in` would also accept inherited keys: "constructor" and "__proto__" are
+  // lowercase `Object.prototype` members, and ranking against `Object` makes
+  // every level compare false, which would mute the log including errors.
+  return Object.hasOwn(LEVEL_RANK, normalized)
+    ? (normalized as LogLevel)
+    : fallback;
 }
 
 export function isLevelEnabled(level: LogLevel, minLevel: LogLevel): boolean {

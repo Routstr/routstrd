@@ -12,14 +12,14 @@ describe("formatModelRefreshSummary", () => {
     ).toBe("Scheduled refresh: 214 models, 3 client integration(s) in 33.4s");
   });
 
-  it("says so when no client is registered", () => {
+  it("reports the count even when it is zero, never 'no client integrations'", () => {
     expect(
       formatModelRefreshSummary(
         "Scheduled",
         { modelCount: 214, integrationCount: 0, failedCount: 0 },
         12_000,
       ),
-    ).toBe("Scheduled refresh: 214 models, no client integrations in 12.0s");
+    ).toBe("Scheduled refresh: 214 models, 0 client integration(s) in 12.0s");
   });
 
   it("surfaces integration failures that used to be counted nowhere", () => {

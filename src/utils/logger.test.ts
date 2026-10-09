@@ -32,6 +32,21 @@ describe("resolveLogLevel", () => {
     expect(resolveLogLevel("bogus", "debug")).toBe("debug");
     expect(resolveLogLevel(undefined, "debug")).toBe("debug");
   });
+
+  it("rejects inherited object keys, which would otherwise mute the whole log", () => {
+    // `"constructor" in LEVEL_RANK` is true, and ranking against `Object`
+    // compares false for every level, so nothing would be written at all.
+    for (const key of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+      expect(resolveLogLevel(key)).toBe("info");
+      expect(resolveLogLevel(key, "debug")).toBe("debug");
+    }
+  });
+
+  it("still writes errors when a prototype key is passed as the level", () => {
+    const { logger, levels } = capture(resolveLogLevel("constructor"));
+    logger.error("a real error");
+    expect(levels()).toEqual(["ERROR"]);
+  });
 });
 
 describe("logger level filter", () => {
