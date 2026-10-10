@@ -78,6 +78,13 @@ export interface RoutstrdConfig {
       maxTotal?: number;
       /** Retire an armed session this old (default 480; the node ends it at 600). */
       maxAgeSeconds?: number;
+      /**
+       * Arm only for nodes whose abandon fee (what a session that is never
+       * used costs, `abandon_fee_msat` in the signed offer) is at most this
+       * many msats (default 5000; 0 never pre-warms a node that charges one).
+       * For such a node at most one session is armed.
+       */
+      maxSessionFeeMsat?: number;
     };
   };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */

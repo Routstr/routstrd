@@ -65,7 +65,8 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
       "activityWindowMinutes": 10,
       "maxPerKey": 2,
       "maxTotal": 2,
-      "maxAgeSeconds": 480
+      "maxAgeSeconds": 480,
+      "maxSessionFeeMsat": 5000
     }
   }
 }
@@ -78,6 +79,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 | `maxPerKey` | 2 | armed sessions per key |
 | `maxTotal` | 2 | armed sessions in total. Nodes limit unused sessions per client address (default 3, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
 | `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
+| `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
 
 How many sessions it keeps per key: 1 while the key is active, 2 after 3
 requests within 5 minutes, and at least as many as the most requests that
@@ -93,9 +95,25 @@ full-context prompt plus `max_tokens` at the offer rates), like an in-flight
 request. routstrd arms only while the credential's available balance on the
 node covers twice the last observed reservation (the new arm plus one cold
 request). An unused session is closed before the node's limit, and the node
-then releases its reservation without a charge. While sessions are armed,
+then releases its reservation without a charge (unless it charges an abandon
+fee, below). While sessions are armed,
 the balance the node reports is lower by their reservations. Pre-warming is
 not used in `xcashu` mode, where every request spends a fresh token.
+
+**Session fees.** A node may charge for its own work (most charge nothing):
+a rate surcharge (already in the offer's rates), a session fee added to every
+completed request, and an abandon fee (at least the session fee) for a session
+that ends without a request reaching the provider. A pre-warmed session that
+is used costs its usage + the session fee; one that expires unused costs the
+abandon fee. routstrd therefore arms at most **one** session for a node with
+an abandon fee (whatever `maxPerKey` says), none if the fee is above
+`maxSessionFeeMsat`, and logs the fee of each session it closes unused
+(`… abandon fee N msats paid, M msats on unused sessions so far`). Worst case,
+an active key that goes idle pays one abandon fee per idle period. Set
+`maxSessionFeeMsat` to `0` to never pay for unused sessions (every request
+then runs cold). The deposit routstrd tops up for a request includes the
+larger fee and any rate surcharge; the receipt check allows usage × signed
+rates + the session fee.
 
 Pool activity is logged at info level in the daemon log (`[confidential-prewarm]`:
 arming, armed, claim, retire, backoff), without credentials. Responses carry
