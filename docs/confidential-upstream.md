@@ -62,8 +62,8 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
     "prewarm": {
       "enabled": true,
       "activityWindowMinutes": 10,
-      "maxPerKey": 3,
-      "maxTotal": 4,
+      "maxPerKey": 2,
+      "maxTotal": 2,
       "maxAgeSeconds": 480
     }
   }
@@ -74,8 +74,8 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 |---|---|---|
 | `enabled` | `true` | `false` turns pre-warming off (every request runs cold) |
 | `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
-| `maxPerKey` | 3 | armed sessions per key |
-| `maxTotal` | 4 | armed sessions in total |
+| `maxPerKey` | 2 | armed sessions per key |
+| `maxTotal` | 2 | armed sessions in total. Nodes limit unused sessions per client address (default 3, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
 | `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
 
 How many sessions it keeps per key: 1 while the key is active, 2 after 3
