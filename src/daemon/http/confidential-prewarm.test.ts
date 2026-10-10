@@ -32,6 +32,8 @@ describe("confidentialUpstream.prewarm → SDK options", () => {
     expect(confidentialPrewarmOptions(undefined)?.maxSessionFeeMsat).toBeUndefined();
     expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 0 })?.maxSessionFeeMsat).toBe(0);
     expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 2500 })?.maxSessionFeeMsat).toBe(2500);
+    expect(confidentialPrewarmOptions(undefined)?.maxArmedWithFee).toBeUndefined();
+    expect(confidentialPrewarmOptions({ maxArmedWithFee: 6 })?.maxArmedWithFee).toBe(6);
     expect(confidentialPrewarmOptions({ maxSessionFeeMsat: -1 })?.maxSessionFeeMsat).toBeUndefined();
   });
 });
