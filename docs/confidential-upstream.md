@@ -66,7 +66,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
       "maxPerKey": 2,
       "maxTotal": 2,
       "maxAgeSeconds": 480,
-      "maxSessionFeeMsat": 20000
+      "maxSessionFeeMsat": 5000
     }
   }
 }
@@ -79,7 +79,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 | `maxPerKey` | 2 | armed sessions per key |
 | `maxTotal` | 2 | armed sessions in total. Nodes limit unused sessions per client address (default 3, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
 | `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
-| `maxSessionFeeMsat` | 20000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
+| `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
 
 How many sessions it keeps per key: 1 while the key is active, 2 after 3
 requests within 5 minutes, and at least as many as the most requests that
