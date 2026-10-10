@@ -41,3 +41,61 @@ non-streaming requests receive one `chat.completion`.
 Requires Bun ≥ 1.4 (WebCrypto X25519) and the `cu-prover` binary (build it
 from <https://github.com/jooray/routstr-confidential>: `cd crypto && cargo build
 --release -p zkbench --bin cu-prover`, binary in `crypto/zkbench/target/release/`).
+
+## Pre-warming (protocol v2)
+
+With a protocol v2 node, most of a cold request is the two-party
+preprocessing: about 21 MB each way, roughly 25 s on a home uplink. routstrd
+can run it before a request arrives. It keeps a few **armed** sessions per
+(node, model, `max_tokens`) that recently had traffic. An armed session has
+done the setup and the preprocessing but not the TLS handshake, so a request
+that claims one only waits for the fast part (about 2 s plus the provider's
+own latency).
+
+It is on by default and only reacts to traffic. An idle routstrd keeps no
+armed sessions and runs no timer. Configure it in `confidentialUpstream`:
+
+```json
+{
+  "confidentialUpstream": {
+    "enabled": true,
+    "prewarm": {
+      "enabled": true,
+      "activityWindowMinutes": 10,
+      "maxPerKey": 3,
+      "maxTotal": 4,
+      "maxAgeSeconds": 480
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` turns pre-warming off (every request runs cold) |
+| `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
+| `maxPerKey` | 3 | armed sessions per key |
+| `maxTotal` | 4 | armed sessions in total |
+| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
+
+How many sessions it keeps per key: 1 while the key is active, 2 after 3
+requests within 5 minutes, and at least as many as the most requests that
+overlapped in the window. The arming of a session starts only after a request
+for that key has settled, and only one arm runs at a time. No arm starts
+while a cold request is still in its own preprocessing. Each session is armed
+for a body-length bucket (a power of two ≥ 4 KiB, from the largest of the
+last 20 request bodies × 1.25). A larger request runs cold and raises the
+bucket. Smaller bodies are padded with spaces inside the JSON.
+
+**Funds.** Each armed session holds a reservation on the node credential (a
+full-context prompt plus `max_tokens` at the offer rates), like an in-flight
+request. routstrd arms only while the credential's available balance on the
+node covers twice the last observed reservation (the new arm plus one cold
+request). An unused session is closed before the node's limit, and the node
+then releases its reservation without a charge. While sessions are armed,
+the balance the node reports is lower by their reservations. Pre-warming is
+not used in `xcashu` mode, where every request spends a fresh token.
+
+Pool activity is logged at info level in the daemon log (`[confidential-prewarm]`:
+arming, armed, claim, retire, backoff), without credentials. Responses carry
+`x-routstr-confidential-prewarmed: 1` when served from an armed session.
