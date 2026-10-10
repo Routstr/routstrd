@@ -63,8 +63,8 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
     "prewarm": {
       "enabled": true,
       "activityWindowMinutes": 10,
-      "maxPerKey": 2,
-      "maxTotal": 2,
+      "maxPerKey": 6,
+      "maxTotal": 6,
       "maxAgeSeconds": 480,
       "maxSessionFeeMsat": 5000
     }
@@ -76,11 +76,11 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 |---|---|---|
 | `enabled` | `true` | `false` turns pre-warming off (every request runs cold) |
 | `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
-| `maxPerKey` | 2 | armed sessions per key |
-| `maxTotal` | 2 | armed sessions in total. Nodes limit unused sessions per client address (default 3, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
+| `maxPerKey` | 6 | armed sessions per key |
+| `maxTotal` | 6 | armed sessions in total. Nodes limit unused sessions per client address (default 12, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
 | `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
 | `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
-| `maxArmedWithFee` | 1 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
+| `maxArmedWithFee` | 6 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
 
 How many sessions it keeps per key: 1 while the key is active, 2 after 3
 requests within 5 minutes, and at least as many as the most requests that
@@ -106,7 +106,7 @@ a rate surcharge (already in the offer's rates), a session fee added to every
 completed request, and an abandon fee (at least the session fee) for a session
 that ends without a request reaching the provider. A pre-warmed session that
 is used costs its usage + the session fee; one that expires unused costs the
-abandon fee. routstrd therefore arms at most `maxArmedWithFee` (default **one**) sessions for a node with
+abandon fee. routstrd therefore arms at most `maxArmedWithFee` (default 6) sessions for a node with
 an abandon fee (whatever `maxPerKey` says), none if the fee is above
 `maxSessionFeeMsat`, and logs the fee of each session it closes unused
 (`… abandon fee N msats paid, M msats on unused sessions so far`). Worst case,
