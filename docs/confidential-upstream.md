@@ -99,3 +99,9 @@ not used in `xcashu` mode, where every request spends a fresh token.
 Pool activity is logged at info level in the daemon log (`[confidential-prewarm]`:
 arming, armed, claim, retire, backoff), without credentials. Responses carry
 `x-routstr-confidential-prewarmed: 1` when served from an armed session.
+
+
+Each armed session also pre-generates the setup of its three zero-knowledge proofs (a "proof channel"), so
+a request that finds an armed session spends well under a second on proofs. Measured from a home uplink
+against a production node: about 2–3 s to the first token warm, about 35 s cold. Arming one session takes
+about a minute on a slow uplink and moves roughly 23 MB each way, in the background.
