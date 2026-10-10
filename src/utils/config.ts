@@ -62,6 +62,23 @@ export interface RoutstrdConfig {
     node_pubkeys?: string[];
     /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
     prover_path?: string;
+    /**
+     * Traffic-driven pre-warming of protocol v2 sessions (the 2PC
+     * preprocessing runs before a request arrives). Only keys with recent
+     * traffic keep armed sessions; an idle daemon keeps none.
+     */
+    prewarm?: {
+      /** Default true. */
+      enabled?: boolean;
+      /** A key idle this long keeps no armed sessions (default 10). */
+      activityWindowMinutes?: number;
+      /** Armed sessions per (node, model, max_tokens) (default 3). */
+      maxPerKey?: number;
+      /** Armed sessions in total (default 4). */
+      maxTotal?: number;
+      /** Retire an armed session this old (default 480; the node ends it at 600). */
+      maxAgeSeconds?: number;
+    };
   };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {

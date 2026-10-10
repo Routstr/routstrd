@@ -2345,6 +2345,7 @@ export function createDaemonRequestHandler(deps: {
             trustedHosts: confidentialConfig.trusted_hosts ?? [],
             nodePubkeys: confidentialConfig.node_pubkeys,
             proverPath: confidentialConfig.prover_path,
+            prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
           }
         : undefined;
 
@@ -2484,5 +2485,36 @@ export function createDaemonRequestHandler(deps: {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
+  };
+}
+
+/**
+ * routstrd's `confidentialUpstream.prewarm` block → the SDK's pre-warm
+ * options (undefined = pre-warming off). On by default.
+ */
+export function confidentialPrewarmOptions(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["prewarm"]
+):
+  | {
+      enabled: boolean;
+      activityWindowMs?: number;
+      maxPerKey?: number;
+      maxTotal?: number;
+      maxAgeMs?: number;
+      log: (message: string) => void;
+    }
+  | undefined {
+  if (cfg?.enabled === false) return undefined;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const minutes = num(cfg?.activityWindowMinutes);
+  const seconds = num(cfg?.maxAgeSeconds);
+  return {
+    enabled: true,
+    activityWindowMs: minutes !== undefined ? minutes * 60_000 : undefined,
+    maxPerKey: num(cfg?.maxPerKey),
+    maxTotal: num(cfg?.maxTotal),
+    // The node and the sidecar end a session 600 s after setup.
+    maxAgeMs: seconds !== undefined ? Math.min(seconds, 570) * 1000 : undefined,
+    log: (message: string) => logger.log(message),
   };
 }
