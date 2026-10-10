@@ -72,9 +72,9 @@ export interface RoutstrdConfig {
       enabled?: boolean;
       /** A key idle this long keeps no armed sessions (default 10). */
       activityWindowMinutes?: number;
-      /** Armed sessions per (node, model, max_tokens) (default 3). */
+      /** Armed sessions per (node, model, max_tokens) (default 6). */
       maxPerKey?: number;
-      /** Armed sessions in total (default 4). */
+      /** Armed sessions in total (default 6). */
       maxTotal?: number;
       /** Retire an armed session this old (default 480; the node ends it at 600). */
       maxAgeSeconds?: number;
@@ -87,7 +87,7 @@ export interface RoutstrdConfig {
       maxSessionFeeMsat?: number;
       /**
        * Armed sessions in total for nodes that charge an abandon fee
-       * (default 1). Raise it for parallel agents: each unused one costs the fee.
+       * (default 6, for parallel agents): each one that ends unused costs the fee.
        */
       maxArmedWithFee?: number;
     };
