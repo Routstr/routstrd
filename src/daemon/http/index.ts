@@ -2877,6 +2877,7 @@ export function confidentialPrewarmOptions(
       maxPerKey?: number;
       maxTotal?: number;
       maxAgeMs?: number;
+      maxSessionFeeMsat?: number;
       log: (message: string) => void;
     }
   | undefined {
@@ -2891,6 +2892,7 @@ export function confidentialPrewarmOptions(
     maxTotal: num(cfg?.maxTotal),
     // The node and the sidecar end a session 600 s after setup.
     maxAgeMs: seconds !== undefined ? Math.min(seconds, 570) * 1000 : undefined,
+    maxSessionFeeMsat: num(cfg?.maxSessionFeeMsat),
     log: (message: string) => logger.log(message),
   };
 }

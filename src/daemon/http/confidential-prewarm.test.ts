@@ -27,4 +27,11 @@ describe("confidentialUpstream.prewarm → SDK options", () => {
     expect(o?.maxAgeMs).toBe(570_000);
     expect(confidentialPrewarmOptions({ maxAgeSeconds: 300 })?.maxAgeMs).toBe(300_000);
   });
+
+  test("passes the session-fee limit through (default: the SDK's)", () => {
+    expect(confidentialPrewarmOptions(undefined)?.maxSessionFeeMsat).toBeUndefined();
+    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 0 })?.maxSessionFeeMsat).toBe(0);
+    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 2500 })?.maxSessionFeeMsat).toBe(2500);
+    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: -1 })?.maxSessionFeeMsat).toBeUndefined();
+  });
 });
