@@ -105,6 +105,7 @@ arming, armed, claim, retire, backoff), without credentials. Responses carry
 Each armed session also pre-generates the setup of its three zero-knowledge proofs (a "proof channel"), so
 a request that finds an armed session spends well under a second on proofs. Measured against a production node: about 2–3 s to the first token warm (mostly the provider's
 latency). Cold requests are dominated by receiving ~22 MB of 2PC data: seconds on a fast connection, about
-45–70 s on a slow, download-limited link. Arming one session takes
+14–16 s from a good home connection (100 Mbit/s down) and 45–70 s on a slow, download-limited
+link. Arming one session takes
 about as long as a cold two-party computation and moves about 22 MB to the client and 1.2 MB from it, in the
 background.
