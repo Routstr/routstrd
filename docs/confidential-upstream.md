@@ -38,9 +38,12 @@ failed proof, receipt or cost check fails the request (or ends the stream
 with an error). Streaming responses stream as they decrypt;
 non-streaming requests receive one `chat.completion`.
 
-Requires Bun ≥ 1.4 (WebCrypto X25519) and the `cu-prover` binary (build it
+Requires the `cu-prover` binary (build it
 from <https://github.com/jooray/routstr-confidential>: `cd crypto && cargo build
---release -p zkbench --bin cu-prover`, binary in `crypto/zkbench/target/release/`).
+--release -p zkbench --bin cu-prover`, binary in `crypto/zkbench/target/release/`),
+and for protocol v2 nodes `cu-2pc` next to it. Protocol v1 sessions also need
+Bun ≥ 1.4, because their TLS handshake uses WebCrypto X25519 (the SDK checks
+this only for v1); v2 uses a joint P-256 key share.
 
 ## Pre-warming (protocol v2)
 
@@ -78,7 +81,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 | `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
 | `maxPerKey` | 6 | armed sessions per key |
 | `maxTotal` | 6 | armed sessions in total. Nodes limit unused sessions per client address (default 12, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
-| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends sessions at 600 s; capped at 570) |
+| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends a session 600 s after accepting its websocket; capped at 570) |
 | `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
 | `maxArmedWithFee` | 6 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
 
