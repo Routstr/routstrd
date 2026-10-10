@@ -82,9 +82,14 @@ export interface RoutstrdConfig {
        * Arm only for nodes whose abandon fee (what a session that is never
        * used costs, `abandon_fee_msat` in the signed offer) is at most this
        * many msats (default 5000; 0 never pre-warms a node that charges one).
-       * For such a node at most one session is armed.
+       * For such a node at most `maxArmedWithFee` sessions are armed.
        */
       maxSessionFeeMsat?: number;
+      /**
+       * Armed sessions in total for nodes that charge an abandon fee
+       * (default 1). Raise it for parallel agents: each unused one costs the fee.
+       */
+      maxArmedWithFee?: number;
     };
   };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
