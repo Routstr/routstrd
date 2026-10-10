@@ -41,6 +41,11 @@ export function isOpenAiJsonBodyPath(pathname: string): boolean {
  * kimi-k3) and balloons during provider failover. Chat/completions use
  * `max_tokens`; the OpenAI Responses API uses `max_output_tokens`.
  *
+ * A chat/completions `max_completion_tokens` is a client-supplied limit too:
+ * providers honour it over `max_tokens`, so injecting `max_tokens` next to it
+ * would not cap generation, only make the budget priced lower than what the
+ * provider may produce.
+ *
  * Non-OpenAI endpoints are left untouched — `/v1/systemone` returns typed
  * judgments rather than generated text, so it has no completion budget, and it
  * rejects the field outright. Mutates `body` in place. Returns true when a
@@ -61,7 +66,12 @@ export function applyDefaultOutputTokenLimit(
     return true;
   }
 
-  if (typeof body.max_tokens === "number") return false;
+  if (
+    typeof body.max_tokens === "number" ||
+    typeof body.max_completion_tokens === "number"
+  ) {
+    return false;
+  }
   body.max_tokens = maxTokens;
   return true;
 }
