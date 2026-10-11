@@ -154,7 +154,16 @@ export async function refreshModelsAndClientsAction(): Promise<void> {
   }
 
   console.log(`Refreshing ${clients.length} client integration(s)...`);
-  await runIntegrationsForClients(clients, config);
+  const run = await runIntegrationsForClients(clients, config);
+  if (run.failed > 0) {
+    // The failure detail (with a stack) is logged to the daemon log. That is
+    // not where a terminal operator is looking, so say it here as well instead
+    // of printing the success line below.
+    console.error(
+      `${run.failed} client integration(s) failed to refresh. See the daemon log for details.`,
+    );
+    process.exit(1);
+  }
   console.log("Client integrations refreshed.");
 }
 
@@ -289,7 +298,10 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         if (created) {
           logger.log(`Created new API key for ${integrationConfig.name}`);
         } else {
-          logger.log(`Using existing API key for ${integrationConfig.name}`);
+          // Reusing an existing key is the steady state for a client that is
+          // already set up (e.g. the `*/5 * * * * routstrd clients add
+          // --pi-agent` cron), so it is not worth a line per run.
+          logger.debug(`Using existing API key for ${integrationConfig.name}`);
         }
         await integrationFn(config, client.apiKey, integrationConfig);
 
