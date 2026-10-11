@@ -216,6 +216,21 @@ export async function createWalletAdapter(
     }
   }
 
+  /**
+   * Read the funding wallet's balance in sats, or undefined when it is not
+   * available (restricted key, older wallet, transient read failure). Shared by
+   * `getNwcStatus` and the auto-refill pre-flight check.
+   */
+  async function readNwcBalance(): Promise<number | undefined> {
+    try {
+      const bal = await nwcRead("get_balance", (w) => w.getBalance());
+      return Math.floor(bal.balance / 1000); // msats → sats
+    } catch {
+      // Balance might not be available
+      return undefined;
+    }
+  }
+
   if (options.nwcConnectionString) {
     connectNwc(options.nwcConnectionString, "connected");
   }
@@ -344,13 +359,7 @@ export async function createWalletAdapter(
 
       try {
         const info = await nwcRead("get_info", (w) => w.getInfo());
-        let balance: number | undefined;
-        try {
-          const bal = await nwcRead("get_balance", (w) => w.getBalance());
-          balance = Math.floor(bal.balance / 1000); // msats → sats
-        } catch {
-          // Balance might not be available
-        }
+        const balance = await readNwcBalance();
         return {
           connected: true,
           alias: info.alias,
@@ -438,6 +447,7 @@ export async function createWalletAdapter(
       getConfig,
       5000,
       payNwcInvoice,
+      readNwcBalance,
     );
   }
 
