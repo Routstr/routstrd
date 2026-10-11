@@ -284,11 +284,11 @@ describe("renderWindowBar", () => {
     expect(renderWindowBar("7d", "models")).toContain(`${COLORS.bgGreen}${COLORS.bold} 7d ${COLORS.reset}`);
   });
 
-  test("flags the selector as not applicable on tabs that ignore the window", () => {
+  test("is hidden on tabs that ignore the window", () => {
     for (const tab of ["overview", "today", "recent"] as const) {
-      expect(stripAnsi(renderWindowBar("7d", tab))).toContain("n/a on this tab");
+      expect(renderWindowBar("7d", tab)).toBe("");
     }
-    expect(stripAnsi(renderWindowBar("7d", "tokens"))).not.toContain("n/a on this tab");
+    expect(stripAnsi(renderWindowBar("7d", "tokens"))).toContain("window:");
   });
 });
 
