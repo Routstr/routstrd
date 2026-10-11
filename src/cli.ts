@@ -253,10 +253,13 @@ export function getLivePidFileOwner(
  * effect immediately. Failures are collected and reported but never
  * roll back the update itself.
  *
+ * Returns false when a daemon could not be restarted (callers decide whether
+ * that is fatal).
+ *
  * Note: cocod is no longer a separate process — the wallet now runs
  * in-process via coco-core, so there is nothing else to restart.
  */
-async function restartDaemonsAfterUpdate(): Promise<void> {
+async function restartDaemonsAfterUpdate(): Promise<boolean> {
   const config = await loadConfig();
   const isRemote = !!config.daemonUrl;
   const failures: string[] = [];
@@ -313,10 +316,11 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
     console.error(
       "The update was applied but may not take effect until the daemon is manually restarted.",
     );
-    process.exit(1);
+    return false;
   }
 
   console.log("\n✓ Daemon restarted successfully.");
+  return true;
 }
 
 /**
@@ -381,10 +385,18 @@ async function confirmUpdate(current: string, latest: string): Promise<boolean> 
   });
   try {
     const answer = await new Promise<string>((resolve) => {
+      let settled = false;
+      const done = (value: string) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
       rl.question(
         `A new routstrd version is available (v${current} -> v${latest}). Update now? [Y/n] `,
-        (value: string) => resolve(value.trim().toLowerCase()),
+        (value: string) => done(value.trim().toLowerCase()),
       );
+      // Ctrl+D / EOF closes the interface without answering; treat as "no".
+      rl.once("close", () => done("n"));
     });
     return answer === "" || answer === "y" || answer === "yes";
   } finally {
@@ -398,32 +410,37 @@ async function confirmUpdate(current: string, latest: string): Promise<boolean> 
  * prompt or pay for a network round-trip. Update failures are reported but
  * never stop the daemon from starting.
  *
+ * Returns true only when an update was actually installed, so callers can
+ * restart the daemon so the new build takes effect.
+ *
  * Set ROUTSTRD_NO_UPDATE_CHECK=1 to opt out even on a terminal.
  */
-async function maybePromptForUpdate(): Promise<void> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return;
-  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return;
+async function maybePromptForUpdate(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return false;
 
   let info;
   try {
     info = await checkRoutstrdUpdate();
   } catch {
-    return; // Update checks are best-effort.
+    return false; // Update checks are best-effort.
   }
-  if (!info.hasUpdate || !info.latest) return;
+  if (!info.hasUpdate || !info.latest) return false;
 
   if (!(await confirmUpdate(info.current, info.latest))) {
     console.log("Skipping update.\n");
-    return;
+    return false;
   }
 
   try {
     await applyRoutstrdUpdate();
+    return true;
   } catch (error) {
     console.error(
       `\n⚠ Could not update routstrd: ${error instanceof Error ? error.message : String(error)}`,
     );
     console.error("Continuing with the current version.\n");
+    return false;
   }
 }
 
@@ -526,7 +543,8 @@ program
     if (updatedAny) {
       console.log("All requested updates have been applied!");
       // Restart daemons so the new binaries take effect immediately.
-      await restartDaemonsAfterUpdate();
+      const restarted = await restartDaemonsAfterUpdate();
+      if (!restarted) process.exit(1);
     }
   });
 
@@ -852,7 +870,11 @@ program
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
-    await maybePromptForUpdate();
+    // If an update was installed, restart the running daemon so the new build
+    // takes effect; otherwise startDaemon would no-op on the old process.
+    if (await maybePromptForUpdate()) {
+      await restartDaemonsAfterUpdate();
+    }
     const config = await loadConfig();
     await stopLegacyCocod();
     try {

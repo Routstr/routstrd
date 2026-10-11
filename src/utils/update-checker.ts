@@ -1,3 +1,5 @@
+import { homedir } from "os";
+import { join, sep } from "path";
 import { isStandaloneExecutable } from "../runtime";
 import { VERSION } from "../version";
 import { getLatestStandaloneRelease } from "./standalone-update";
@@ -5,6 +7,13 @@ import { getLatestStandaloneRelease } from "./standalone-update";
 const NPM_REGISTRY = "https://registry.npmjs.org";
 /** Bounds the update check so a stalled registry cannot hang `routstrd update`. */
 const NPM_TIMEOUT_MS = 30_000;
+
+/**
+ * Short bound for the best-effort check that runs before `start`/`restart`.
+ * A normal `update` may wait the full `NPM_TIMEOUT_MS`, but startup must not
+ * stall for that long on a slow or blackholed network.
+ */
+export const INTERACTIVE_CHECK_TIMEOUT_MS = 3_000;
 
 /** Packages that `routstrd update` manages. */
 export const UPDATE_PACKAGES = [
@@ -18,11 +27,12 @@ export const UPDATE_PACKAGES = [
  */
 export async function getLatestNpmVersion(
   packageName: string,
+  timeoutMs: number = NPM_TIMEOUT_MS,
 ): Promise<string | null> {
   try {
     const response = await fetch(
       `${NPM_REGISTRY}/${encodeURIComponent(packageName)}/latest`,
-      { signal: AbortSignal.timeout(NPM_TIMEOUT_MS) },
+      { signal: AbortSignal.timeout(timeoutMs) },
     );
     if (!response.ok) return null;
     const data = (await response.json()) as { version?: string };
@@ -58,6 +68,30 @@ export async function getGlobalPackageVersion(
   } catch {
     return null;
   }
+}
+
+/**
+ * Directory holding bun's globally-installed packages. `bun install -g`
+ * writes here, and a globally-installed bin resolves its entry under it.
+ */
+export function getGlobalInstallDir(): string {
+  const bunInstall = process.env.BUN_INSTALL ?? join(homedir(), ".bun");
+  return join(bunInstall, "install", "global", "node_modules");
+}
+
+/**
+ * Whether the code currently running is the global install of `packageName`.
+ * `Bun.main` is the resolved entry path, so a source checkout (or a linked
+ * working copy) does not sit under the global install directory and is
+ * correctly treated as not-global — `bun install -g` would not update it.
+ */
+export function isRunningGlobalInstall(
+  packageName: string,
+  mainPath: string = Bun.main,
+  globalDir: string = getGlobalInstallDir(),
+): boolean {
+  const packageDir = join(globalDir, packageName);
+  return mainPath === packageDir || mainPath.startsWith(packageDir + sep);
 }
 
 type ParsedVersion = {
@@ -146,9 +180,14 @@ export interface RoutstrdUpdateInfo {
 export interface RoutstrdCheckDeps {
   standalone: boolean;
   version: string;
-  getLatestStandalone: typeof getLatestStandaloneRelease;
-  getGlobalVersion: typeof getGlobalPackageVersion;
-  getLatestNpm: typeof getLatestNpmVersion;
+  /** Bound applied to the network lookups. */
+  timeoutMs: number;
+  /** Resolved entry path of the running code (defaults to `Bun.main`). */
+  mainPath: string;
+  /** Global install root, see `getGlobalInstallDir`. */
+  globalDir: string;
+  getLatestStandalone: (timeoutMs: number) => Promise<{ version: string }>;
+  getLatestNpm: (name: string, timeoutMs: number) => Promise<string | null>;
 }
 
 /**
@@ -158,22 +197,30 @@ export interface RoutstrdCheckDeps {
  *
  * Best-effort: if the latest version cannot be fetched (offline, rate limited,
  * no release asset, ...) the running version is returned with `hasUpdate: false`
- * so callers can carry on without blocking.
+ * so callers can carry on without blocking. Network lookups are bounded by
+ * `timeoutMs` (short by default) so startup is never held up for long.
  */
 export async function checkRoutstrdUpdate(
   deps: Partial<RoutstrdCheckDeps> = {},
 ): Promise<RoutstrdUpdateInfo> {
   const standalone = deps.standalone ?? isStandaloneExecutable();
   const version = deps.version ?? VERSION;
+  const timeoutMs = deps.timeoutMs ?? INTERACTIVE_CHECK_TIMEOUT_MS;
+  const mainPath = deps.mainPath ?? Bun.main;
+  const globalDir = deps.globalDir ?? getGlobalInstallDir();
   const getLatestStandalone =
-    deps.getLatestStandalone ?? getLatestStandaloneRelease;
-  const getGlobalVersion = deps.getGlobalVersion ?? getGlobalPackageVersion;
+    deps.getLatestStandalone ??
+    ((ms: number) =>
+      getLatestStandaloneRelease(process.platform, process.arch, fetch, {
+        connectMs: ms,
+        transferMs: ms,
+      }));
   const getLatestNpm = deps.getLatestNpm ?? getLatestNpmVersion;
 
   if (standalone) {
     let latest: string | null = null;
     try {
-      latest = (await getLatestStandalone()).version;
+      latest = (await getLatestStandalone(timeoutMs)).version;
     } catch {
       // Best-effort; fall through with hasUpdate: false.
     }
@@ -184,16 +231,16 @@ export async function checkRoutstrdUpdate(
     };
   }
 
-  const [installed, latest] = await Promise.all([
-    getGlobalVersion("routstrd"),
-    getLatestNpm("routstrd"),
-  ]);
-  // Only offer an npm/bun update when the running code really is that global
+  const latest = await getLatestNpm("routstrd", timeoutMs);
+  // Only offer an npm/bun update when the running code really is bun's global
   // install. A source checkout (`bun src/index.ts ...`) reports the repo
   // version here, but `bun install -g routstrd` would not update it, so skip
   // those instead of nagging about an install the user is not running.
-  const runningGlobalInstall =
-    installed !== null && (compareVersions(installed, version) ?? -1) === 0;
+  const runningGlobalInstall = isRunningGlobalInstall(
+    "routstrd",
+    mainPath,
+    globalDir,
+  );
   return {
     hasUpdate: !!(
       runningGlobalInstall &&
