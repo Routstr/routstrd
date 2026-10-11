@@ -134,6 +134,77 @@ export interface UpdateCheckResult {
   packages: PackageUpdate[];
 }
 
+export interface RoutstrdUpdateInfo {
+  hasUpdate: boolean;
+  /** Version of the code actually running right now. */
+  current: string;
+  /** Latest available version, or null when it could not be determined. */
+  latest: string | null;
+}
+
+/** Overridable collaborators, so the install-layout logic is unit-testable. */
+export interface RoutstrdCheckDeps {
+  standalone: boolean;
+  version: string;
+  getLatestStandalone: typeof getLatestStandaloneRelease;
+  getGlobalVersion: typeof getGlobalPackageVersion;
+  getLatestNpm: typeof getLatestNpmVersion;
+}
+
+/**
+ * Check only routstrd for an available update, for both install layouts:
+ * standalone binaries are compared against the latest GitHub Release, while
+ * npm/bun installs are compared against the npm registry.
+ *
+ * Best-effort: if the latest version cannot be fetched (offline, rate limited,
+ * no release asset, ...) the running version is returned with `hasUpdate: false`
+ * so callers can carry on without blocking.
+ */
+export async function checkRoutstrdUpdate(
+  deps: Partial<RoutstrdCheckDeps> = {},
+): Promise<RoutstrdUpdateInfo> {
+  const standalone = deps.standalone ?? isStandaloneExecutable();
+  const version = deps.version ?? VERSION;
+  const getLatestStandalone =
+    deps.getLatestStandalone ?? getLatestStandaloneRelease;
+  const getGlobalVersion = deps.getGlobalVersion ?? getGlobalPackageVersion;
+  const getLatestNpm = deps.getLatestNpm ?? getLatestNpmVersion;
+
+  if (standalone) {
+    let latest: string | null = null;
+    try {
+      latest = (await getLatestStandalone()).version;
+    } catch {
+      // Best-effort; fall through with hasUpdate: false.
+    }
+    return {
+      hasUpdate: !!(latest && (compareVersions(version, latest) ?? -1) < 0),
+      current: version,
+      latest,
+    };
+  }
+
+  const [installed, latest] = await Promise.all([
+    getGlobalVersion("routstrd"),
+    getLatestNpm("routstrd"),
+  ]);
+  // Only offer an npm/bun update when the running code really is that global
+  // install. A source checkout (`bun src/index.ts ...`) reports the repo
+  // version here, but `bun install -g routstrd` would not update it, so skip
+  // those instead of nagging about an install the user is not running.
+  const runningGlobalInstall =
+    installed !== null && (compareVersions(installed, version) ?? -1) === 0;
+  return {
+    hasUpdate: !!(
+      runningGlobalInstall &&
+      latest &&
+      (compareVersions(version, latest) ?? -1) < 0
+    ),
+    current: version,
+    latest,
+  };
+}
+
 /**
  * Check both routstrd and cocod for available updates.
  * Returns a result with per-package details and an overall `hasUpdate` flag.
