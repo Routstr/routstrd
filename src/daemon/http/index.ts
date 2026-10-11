@@ -1814,6 +1814,40 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Clear every active cooldown so the router retries all providers now.
+    // Also drops the failure strikes (`lastFailed`) and the failed-provider
+    // set: those are what turn the next failure into an instant cooldown, so
+    // a reset without them would barely change routing behavior.
+    if (req.method === "POST" && url.pathname === "/cooldowns/reset") {
+      await respond(res, async () => {
+        const state = deps.store.getState();
+        const stored: StoredCooldownEntry[] = state.providersOnCooldown || [];
+        const before = buildCooldownsOutput(
+          stored,
+          deps.providerManager.getCooldownDurationMs(),
+        );
+        const providers = [
+          ...new Set(before.cooldowns.map((entry) => entry.baseUrl)),
+        ].sort();
+
+        deps.providerManager.clearCooldowns();
+        deps.providerManager.clearFailureHistory();
+        deps.providerManager.resetFailedProviders();
+
+        const message =
+          before.count === 0
+            ? "No active cooldowns to reset."
+            : `Reset ${before.count} cooldown${
+                before.count === 1 ? "" : "s"
+              } across ${providers.length} provider${
+                providers.length === 1 ? "" : "s"
+              }`;
+
+        return { output: { message, cleared: before.count, providers } };
+      });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/providers/reviews") {
       try {
         const state = deps.store.getState();

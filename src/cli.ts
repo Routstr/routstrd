@@ -15,7 +15,9 @@ import {
 } from "./utils/daemon-client";
 import {
   formatCooldowns,
+  formatCooldownsReset,
   type CooldownsOutput,
+  type CooldownsResetOutput,
 } from "./utils/cooldowns";
 import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
@@ -1444,11 +1446,59 @@ providersCmd
 program
   .command("cooldowns")
   .description(
-    "List providers and models currently on cooldown (temporarily skipped by the router)",
+    "List providers and models currently on cooldown (temporarily skipped by the router), or clear them with --reset",
   )
   .option("--json", "Print the raw daemon response as JSON", false)
-  .action(async (options: { json: boolean }) => {
+  .option(
+    "--reset",
+    "Clear all active cooldowns and failure strikes so every provider is retried now",
+    false,
+  )
+  .action(async (options: { json: boolean; reset: boolean }) => {
     await ensureDaemonRunning();
+
+    if (options.reset) {
+      let result: CommandResponse;
+      try {
+        result = await callDaemon("/cooldowns/reset", { method: "POST" });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        // A daemon built before this command existed has no reset route: it
+        // either 404s or falls through to the chat proxy and rejects the
+        // request for a missing `model` field.
+        if (
+          message.includes("404") ||
+          message === "Only POST is supported." ||
+          message.includes("Missing required 'model' field")
+        ) {
+          console.error(
+            "The running daemon has no /cooldowns/reset endpoint, so it cannot reset cooldowns. " +
+              "Restart it on a newer build (routstrd service restart) and try again.",
+          );
+          process.exit(1);
+        }
+        throw error;
+      }
+
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const output = result.output as CooldownsResetOutput | undefined;
+      if (options.json) {
+        console.log(JSON.stringify(output ?? {}, null, 2));
+        return;
+      }
+
+      if (!output) {
+        console.log("No cooldown reset data returned by the daemon.");
+        return;
+      }
+
+      console.log(formatCooldownsReset(output));
+      return;
+    }
 
     let result: CommandResponse;
     try {

@@ -3,6 +3,7 @@ import {
   buildCooldownsOutput,
   formatCooldownRemaining,
   formatCooldowns,
+  formatCooldownsReset,
   type StoredCooldownEntry,
 } from "./cooldowns";
 
@@ -153,5 +154,33 @@ describe("formatCooldowns", () => {
       ),
     );
     expect(text).toContain("1 active across 1 provider:");
+  });
+});
+
+describe("formatCooldownsReset", () => {
+  test("lists the providers whose cooldowns were cleared", () => {
+    expect(
+      formatCooldownsReset({
+        message: "Reset 2 cooldowns across 2 providers",
+        cleared: 2,
+        providers: ["https://a.example/", "https://b.example/"],
+      }),
+    ).toBe(
+      [
+        "Reset 2 cooldowns across 2 providers",
+        "  - https://a.example/",
+        "  - https://b.example/",
+      ].join("\n"),
+    );
+  });
+
+  test("prints just the message when nothing was cleared", () => {
+    expect(
+      formatCooldownsReset({
+        message: "No active cooldowns to reset.",
+        cleared: 0,
+        providers: [],
+      }),
+    ).toBe("No active cooldowns to reset.");
   });
 });

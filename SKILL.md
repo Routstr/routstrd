@@ -178,6 +178,7 @@ cleared by hand.
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--json` | false | Print the raw daemon response (timestamps and remaining ms per entry) |
+| `--reset` | false | Clear all active cooldowns and failure strikes so every provider is retried now |
 
 ```
 Cooldowns (210s window)
@@ -188,8 +189,15 @@ Cooldowns (210s window)
   MODEL     https://ai.redsh1ft.com/   deepseek-v4.1-flash  expires in 2m 30s
 ```
 
-Reads `GET /cooldowns` from the daemon; a daemon built before this command
-existed has no such endpoint and must be restarted on a newer build.
+`--reset` posts to `POST /cooldowns/reset`, which clears every active cooldown
+as well as the failure strikes (`lastFailed`) and failed-provider set that
+would otherwise cool a provider down again on its next failure. It prints the
+number of cooldowns cleared and the affected providers; combine with `--json`
+for the raw response.
+
+Reads `GET /cooldowns` (and posts to `/cooldowns/reset` for `--reset`) from the
+daemon; a daemon built before these endpoints existed must be restarted on a
+newer build.
 
 ### `routstrd clients`
 

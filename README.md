@@ -170,6 +170,11 @@ routstrd cooldowns
 routstrd cooldowns --json
 ```
 
+Clear all active cooldowns and failure strikes so every provider is retried now:
+```sh
+routstrd cooldowns --reset
+```
+
 ### NPC (Lightning Address)
 
 The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
@@ -204,12 +209,19 @@ GET /health
 #### Cooldowns
 ```
 GET /cooldowns
+POST /cooldowns/reset
 ```
 
-Providers and models the router is currently skipping. Each entry reports its
-scope (`provider` blocks every model on that provider, `model` blocks one),
-when the cooldown started, and when it lifts. Expired entries are filtered out,
-and the cooldown window comes from the SDK (`cooldownDurationMs`).
+`GET /cooldowns` lists providers and models the router is currently skipping.
+Each entry reports its scope (`provider` blocks every model on that provider,
+`model` blocks one), when the cooldown started, and when it lifts. Expired
+entries are filtered out, and the cooldown window comes from the SDK
+(`cooldownDurationMs`).
+
+`POST /cooldowns/reset` clears every active cooldown (and the failure strikes
+that turn the next failure into an instant cooldown) so the router retries all
+providers immediately. It returns the number of entries cleared and the
+affected providers.
 
 #### Automatic Refresh Settings
 ```
