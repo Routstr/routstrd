@@ -1,4 +1,4 @@
-import { getVisibleTabs } from "./constants.ts";
+import { cycleTimeWindow, getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
@@ -27,8 +27,8 @@ import {
   showCursor,
 } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
-import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
-import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
+import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs, renderWindowBar } from "./render.ts";
+import type { TabId, TimeWindow, UpdateInfo, UsageStats } from "./types.ts";
 import { checkForUpdates } from "../../utils/update-checker.ts";
 
 export async function runUsageTui(): Promise<void> {
@@ -55,6 +55,12 @@ export async function runUsageTui(): Promise<void> {
   let autoRefresh = true;
   let cleanedUp = false;
   let fetching = false;
+
+  // Selected time window and a per-window cache so switching is instant and
+  // the 2s auto-refresh only recomputes the active window.
+  let currentWindow: TimeWindow = "all";
+  const windowCache = new Map<TimeWindow, UsageStats>();
+  let fetchQueued = false;
 
   // Update-check state — re-checked at most every 210 minutes to avoid
   // spamming the npm registry. The first check happens shortly after
@@ -121,21 +127,31 @@ export async function runUsageTui(): Promise<void> {
    * are skipped via the `fetching` guard so we don't race stale results.
    */
   async function fetchData(): Promise<void> {
-    if (fetching) return;
+    if (fetching) {
+      // A fetch is already in flight; run once more afterwards so a window
+      // switch (or refresh) that arrives mid-flight is never dropped.
+      fetchQueued = true;
+      return;
+    }
     fetching = true;
     try {
+      const requestedWindow = currentWindow;
       const running = await isDaemonRunning();
       if (!running) {
         stats = null;
       } else {
         // Fire all 4 fetches concurrently — cuts the blocked window significantly.
         const [newStats, newBalance, newStatus, newClients] = await Promise.all([
-          fetchUsageSummary(),
+          fetchUsageSummary(requestedWindow),
           fetchBalance(),
           fetchStatus(),
           fetchClients(),
         ]);
-        if (newStats) stats = newStats;
+        if (newStats) {
+          windowCache.set(requestedWindow, newStats);
+          // Only display the result if the user hasn't switched windows since.
+          if (requestedWindow === currentWindow) stats = newStats;
+        }
         if (newBalance) balance = newBalance;
         if (newStatus) status = newStatus;
         if (newClients && newClients.length > 0) clients = newClients;
@@ -162,6 +178,10 @@ export async function runUsageTui(): Promise<void> {
       render();
     } finally {
       fetching = false;
+      if (fetchQueued) {
+        fetchQueued = false;
+        void fetchData();
+      }
     }
   }
 
@@ -185,8 +205,8 @@ export async function runUsageTui(): Promise<void> {
     }
 
     const content = renderTabContent(currentTab, stats, balance, status, width, naming);
-    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
+    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [W] window, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
+    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
@@ -237,6 +257,18 @@ export async function runUsageTui(): Promise<void> {
     if (key === "a" || key === "A") {
       autoRefresh = !autoRefresh;
       render();
+      return;
+    }
+
+    if (key === "w" || key === "W") {
+      currentWindow = cycleTimeWindow(currentWindow, key === "W" ? -1 : 1);
+      // Render the cached result for this window immediately (when we have
+      // one), then refresh it from the daemon in the background.
+      const cached = windowCache.get(currentWindow);
+      if (cached) stats = cached;
+      vimState.scrollPos = 0;
+      render();
+      void fetchData();
       return;
     }
 

@@ -1,4 +1,4 @@
-import { CLIENT_COLORS, COLORS, MODEL_COLORS } from "./constants.ts";
+import { CLIENT_COLORS, COLORS, MODEL_COLORS, WINDOW_LABELS, WINDOW_ORDER, tabSupportsWindow } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import {
   formatNumber,
@@ -9,7 +9,7 @@ import {
 import { vimState } from "./state.ts";
 import { stripAnsi } from "./terminal.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
-import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
+import type { TabId, TimeWindow, UpdateInfo, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
 function formatCost(value: number): string {
@@ -29,7 +29,7 @@ export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[]
   const title = `${COLORS.bold}${COLORS.cyan}ROUTSTRD USAGE MONITOR${COLORS.reset}`;
   const vimIndicator = `${COLORS.yellow}[vim]${COLORS.reset}`;
   const maxKey = visibleTabs.length;
-  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-${maxKey}] Tabs  [R] Refresh${COLORS.reset}`;
+  const help = `${COLORS.dim}[Q] Quit  [↑↓] Scroll  [←→] Tabs  [1-${maxKey}] Tabs  [W] Window  [R] Refresh${COLORS.reset}`;
   const fill = width - title.length - help.length - vimIndicator.length - 6;
   const headerLine = `${title}${vimIndicator}${" ".repeat(Math.max(1, fill))}${help}`;
 
@@ -57,6 +57,20 @@ export function renderTabs(activeTab: TabId, visibleTabs: Tab[]): string {
     ? `${COLORS.bgBlue} ${tab.key}:${tab.name} ${COLORS.reset}`
     : `${COLORS.dim}[${tab.key}]${COLORS.reset} ${tab.name}`).join("  ");
   return `${" ".repeat(2)}${tabStr}\n`;
+}
+
+/**
+ * Time-window selector line. The active window is highlighted; on tabs that
+ * ignore the window (Overview/Today/Recent) nothing is highlighted and a hint
+ * explains why.
+ */
+export function renderWindowBar(activeWindow: TimeWindow, activeTab: TabId): string {
+  const applicable = tabSupportsWindow(activeTab);
+  const parts = WINDOW_ORDER.map((id) => id === activeWindow
+    ? `${COLORS.bgGreen}${COLORS.bold} ${WINDOW_LABELS[id]} ${COLORS.reset}`
+    : `${COLORS.dim}${WINDOW_LABELS[id]}${COLORS.reset}`);
+  const label = applicable ? "window" : "window (n/a on this tab)";
+  return `  ${COLORS.dim}${label}:${COLORS.reset} ${parts.join("  ")}\n`;
 }
 
 export function renderSeparator(width: number): string {
@@ -367,11 +381,11 @@ export function renderToday(stats: UsageStats, width: number): string {
 }
 
 export function renderModels(stats: UsageStats, width: number): string {
-  const modelStats = stats.summary.models;
+  const modelStats = stats.window.models;
   if (modelStats.length === 0) return renderBox(["No model data available"], width, "Models");
 
-  // Use totalSatsCost (all-time) for percentage calculations to match header
-  const totalCost = stats.totalSatsCost;
+  // Percentages are relative to the selected window's total cost.
+  const totalCost = stats.window.totals.satsCost;
   const maxCost = modelStats[0]!.satsCost;
   const maxModelLabel = Math.max(...modelStats.map((m) => m.modelId.length));
   const lines: string[] = [];
@@ -394,7 +408,7 @@ export function renderModels(stats: UsageStats, width: number): string {
 }
 
 export function renderProviders(stats: UsageStats, width: number): string {
-  const providerStats = stats.summary.providers;
+  const providerStats = stats.window.providers;
   if (providerStats.length === 0) return renderBox(["No provider data available"], width, "Providers");
 
   const lines: string[] = [];
@@ -410,14 +424,14 @@ export function renderProviders(stats: UsageStats, width: number): string {
 }
 
 export function renderTokens(stats: UsageStats, width: number): string {
-  const totals = stats.summary.totals;
-  const modelStats = stats.summary.models;
+  const totals = stats.window.totals;
+  const modelStats = stats.window.models;
   const summaryLines = [
     `${COLORS.bold}Total Prompt Tokens:${COLORS.reset} ${formatNumber(totals.promptTokens)}`,
     `${COLORS.bold}Total Completion Tokens:${COLORS.reset} ${formatNumber(totals.completionTokens)}`,
     `${COLORS.bold}Total Tokens:${COLORS.reset} ${formatNumber(totals.totalTokens)}`,
     `${COLORS.bold}Prompt/Completion Ratio:${COLORS.reset} ${(totals.promptTokens / Math.max(1, totals.completionTokens)).toFixed(2)}x`,
-    `${COLORS.bold}Avg Tokens/Request:${COLORS.reset} ${(totals.totalTokens / Math.max(1, stats.totalEntries)).toFixed(0)}`,
+    `${COLORS.bold}Avg Tokens/Request:${COLORS.reset} ${(totals.totalTokens / Math.max(1, totals.requests)).toFixed(0)}`,
   ];
 
   let output = renderBox(summaryLines, width, "Token Summary");
@@ -431,7 +445,7 @@ export function renderTokens(stats: UsageStats, width: number): string {
     output += "\n" + renderBox(tokenLines, width, "Tokens by Model");
   }
 
-  const sizeBuckets = stats.summary.sizeBuckets;
+  const sizeBuckets = stats.window.sizeBuckets;
 
   const sizeLines = Object.entries(sizeBuckets).map(([name, bucket]) => `${name.padEnd(6)}: ${formatReqs(bucket.count).padStart(5)} reqs, ${formatCost(bucket.cost)} sats`);
   output += "\n" + renderBox(sizeLines, width, "Request Size Distribution");
@@ -439,11 +453,11 @@ export function renderTokens(stats: UsageStats, width: number): string {
 }
 
 export function renderClients(stats: UsageStats, width: number): string {
-  const clientStats = stats.summary.clients;
+  const clientStats = stats.window.clients;
   if (clientStats.length === 0) return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
 
-  // Use totalSatsCost (all-time) for percentage calculations to match header
-  const totalCost = stats.totalSatsCost;
+  // Percentages are relative to the selected window's total cost.
+  const totalCost = stats.window.totals.satsCost;
   const maxCost = clientStats[0]!.satsCost;
   const lines: string[] = [];
 
@@ -488,7 +502,7 @@ export function renderClients(stats: UsageStats, width: number): string {
   if (stats.summary) {
     // Use pre-aggregated topModels from summary; exclude the "unknown" bucket
     // (null client rows have no meaningful model attribution to display here).
-    for (const topClient of stats.summary.clients.filter((c) => c.client !== "unknown").slice(0, 3)) {
+    for (const topClient of stats.window.clients.filter((c) => c.client !== "unknown").slice(0, 3)) {
       if (topClient.topModels.length === 0) continue;
       clientModelLines.push(`${COLORS.bold}${topClient.client}${COLORS.reset} (${formatReqs(topClient.requests)} reqs, ${formatCost(topClient.satsCost)} sats)`);
       for (const m of topClient.topModels) {
@@ -505,13 +519,13 @@ export function renderClients(stats: UsageStats, width: number): string {
 }
 
 export function renderNpubs(stats: UsageStats, naming: ClientNaming, width: number): string {
-  const npubStats = stats.summary.npubs;
+  const npubStats = stats.window.npubs;
   if (npubStats.length === 0) return renderBox(["No npub data available"], width, "Npub Breakdown");
 
   // Index configured npubs by their npub so usage rows can show names/roles.
   const configured = new Map(naming.npubs.map((entry) => [entry.npub, entry]));
 
-  const totalCost = stats.totalSatsCost;
+  const totalCost = stats.window.totals.satsCost;
   const maxCost = npubStats[0]!.satsCost;
   const lines: string[] = [];
 
@@ -560,7 +574,7 @@ export function renderNpubs(stats: UsageStats, naming: ClientNaming, width: numb
 
   if (stats.summary) {
     // Use pre-aggregated topModels from summary
-    for (const topNpub of stats.summary.npubs.slice(0, 5)) {
+    for (const topNpub of stats.window.npubs.slice(0, 5)) {
       if (topNpub.topModels.length === 0) continue;
       const name = configured.get(topNpub.npub)?.name?.trim();
       const label = name || truncateNpub(topNpub.npub);

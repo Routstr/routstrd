@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderBox, renderNpubs, renderRecent, renderStackedBar, tokenSegments } from "./render.ts";
+import { renderBox, renderModels, renderNpubs, renderRecent, renderStackedBar, renderWindowBar, tokenSegments } from "./render.ts";
 import { stripAnsi } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { buildClientNaming, resolveClientLabel, type ClientInfo, type NpubEntry } from "./data.ts";
@@ -8,6 +8,24 @@ import type { UsageStats } from "./types.ts";
 const NPUB = "npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopq";
 
 function statsFor(npub: string): UsageStats {
+  const npubSummary = {
+    npub,
+    requests: 3,
+    promptTokens: 10,
+    completionTokens: 20,
+    totalTokens: 30,
+    cost: 0,
+    satsCost: 42,
+    topModels: [
+      {
+        modelId: "gpt-5.4",
+        requests: 3,
+        satsCost: 42,
+        totalTokens: 30,
+      },
+    ],
+  };
+
   return {
     entries: [],
     totalEntries: 3,
@@ -15,29 +33,23 @@ function statsFor(npub: string): UsageStats {
     recentSatsCost: 100,
     limit: 50,
     summary: {
-      npubs: [
-        {
-          npub,
-          requests: 3,
-          promptTokens: 10,
-          completionTokens: 20,
-          totalTokens: 30,
-          cost: 0,
-          satsCost: 42,
-          topModels: [
-            {
-              modelId: "gpt-5.4",
-              requests: 3,
-              satsCost: 42,
-              totalTokens: 30,
-              promptTokens: 10,
-              completionTokens: 20,
-              cost: 0,
-            } as never,
-          ],
-        },
-      ],
+      npubs: [npubSummary],
     } as never,
+    window: {
+      window: "all",
+      totals: { requests: 3, promptTokens: 10, completionTokens: 20, totalTokens: 30, cost: 0, satsCost: 42 },
+      models: [],
+      providers: [],
+      clients: [],
+      npubs: [npubSummary],
+      sizeBuckets: {
+        tiny: { count: 0, cost: 0 },
+        small: { count: 0, cost: 0 },
+        medium: { count: 0, cost: 0 },
+        large: { count: 0, cost: 0 },
+        huge: { count: 0, cost: 0 },
+      },
+    },
   };
 }
 
@@ -259,6 +271,56 @@ describe("renderRecent token bars", () => {
 function visibleWidths(box: string): number[] {
   return box.split("\n").map((line) => stripAnsi(line).length);
 }
+
+describe("renderWindowBar", () => {
+  test("lists every window and marks the active one", () => {
+    const out = stripAnsi(renderWindowBar("7d", "models"));
+    expect(out).toContain("window:");
+    expect(out).toContain("All");
+    expect(out).toContain("24h");
+    expect(out).toContain("7d");
+    expect(out).toContain("30d");
+    // The active window is highlighted (not rendered dim).
+    expect(renderWindowBar("7d", "models")).toContain(`${COLORS.bgGreen}${COLORS.bold} 7d ${COLORS.reset}`);
+  });
+
+  test("flags the selector as not applicable on tabs that ignore the window", () => {
+    for (const tab of ["overview", "today", "recent"] as const) {
+      expect(stripAnsi(renderWindowBar("7d", tab))).toContain("n/a on this tab");
+    }
+    expect(stripAnsi(renderWindowBar("7d", "tokens"))).not.toContain("n/a on this tab");
+  });
+});
+
+describe("windowed rendering", () => {
+  test("renderModels reads the window block, not the all-time aggregates", () => {
+    const stats = {
+      ...statsFor(NPUB),
+      summary: {
+        models: [{ modelId: "all-time-model", requests: 9, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, satsCost: 99 }],
+      } as never,
+      window: {
+        window: "7d",
+        totals: { requests: 1, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, satsCost: 5 },
+        models: [{ modelId: "windowed-model", requests: 1, promptTokens: 0, completionTokens: 10, totalTokens: 10, cost: 0, satsCost: 5 }],
+        providers: [],
+        clients: [],
+        npubs: [],
+        sizeBuckets: {
+          tiny: { count: 0, cost: 0 },
+          small: { count: 0, cost: 0 },
+          medium: { count: 0, cost: 0 },
+          large: { count: 0, cost: 0 },
+          huge: { count: 0, cost: 0 },
+        },
+      },
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderModels(stats, 100));
+    expect(out).toContain("windowed-model");
+    expect(out).not.toContain("all-time-model");
+  });
+});
 
 describe("renderBox", () => {
   test("renders every line at the requested width when given a title", () => {

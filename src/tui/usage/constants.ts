@@ -1,4 +1,4 @@
-import type { Tab } from "./types.ts";
+import type { Tab, TimeWindow } from "./types.ts";
 
 export const ALL_TABS: Tab[] = [
   { id: "overview", name: "Overview", key: "1" },
@@ -22,6 +22,31 @@ export function getVisibleTabs(hasNpubs: boolean): Tab[] {
 
 /** Default tab list (no npub data yet). */
 export const TABS: Tab[] = getVisibleTabs(false);
+
+// ─── Time windows ─────────────────────────────────────────────────────────────
+
+/** Cycle order for the `[W]` key: all → today → 7d → 30d → all. */
+export const WINDOW_ORDER: readonly TimeWindow[] = ["all", "today", "7d", "30d"];
+
+/** Short labels shown in the window selector bar. */
+export const WINDOW_LABELS: Record<TimeWindow, string> = {
+  all: "All",
+  today: "24h",
+  "7d": "7d",
+  "30d": "30d",
+};
+
+/** Advance/rewind through {@link WINDOW_ORDER}, wrapping at either end. */
+export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWindow {
+  const idx = WINDOW_ORDER.indexOf(current);
+  const next = (idx + direction + WINDOW_ORDER.length) % WINDOW_ORDER.length;
+  return WINDOW_ORDER[next]!;
+}
+
+/** Whether the active window applies to a given tab. */
+export function tabSupportsWindow(tabId: Tab["id"]): boolean {
+  return tabId !== "overview" && tabId !== "today" && tabId !== "recent";
+}
 
 export const COLORS = {
   reset: "\x1b[0m",

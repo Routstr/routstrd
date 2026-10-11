@@ -1,8 +1,11 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
-import type { UpdateCheckResult } from "../../utils/update-checker.ts";
+import type {
+  TimeWindow,
+  UsageSummary,
+  WindowedStats,
+} from "../../daemon/http/usage-summary.ts";
 
-export type { UsageSummary };
+export type { UsageSummary, TimeWindow, WindowedStats };
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -16,6 +19,8 @@ export interface UsageStats {
   recentSatsCost: number;
   limit: number;
   summary: UsageSummary;
+  /** Aggregates for the currently selected time window. */
+  window: WindowedStats;
 }
 
 export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
