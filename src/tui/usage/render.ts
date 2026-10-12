@@ -60,17 +60,17 @@ export function renderTabs(activeTab: TabId, visibleTabs: Tab[]): string {
 }
 
 /**
- * Time-window selector line. The active window is highlighted; on tabs that
- * ignore the window (Overview/Today/Recent) nothing is highlighted and a hint
- * explains why.
+ * Time-window selector line. The active window is highlighted. Tabs that
+ * ignore the window (Overview/Today/Recent) render nothing at all: a selector
+ * that cannot be acted on is noise.
  */
 export function renderWindowBar(activeWindow: TimeWindow, activeTab: TabId): string {
-  const applicable = tabSupportsWindow(activeTab);
+  if (!tabSupportsWindow(activeTab)) return "";
+
   const parts = WINDOW_ORDER.map((id) => id === activeWindow
     ? `${COLORS.bgGreen}${COLORS.bold} ${WINDOW_LABELS[id]} ${COLORS.reset}`
     : `${COLORS.dim}${WINDOW_LABELS[id]}${COLORS.reset}`);
-  const label = applicable ? "window" : "window (n/a on this tab)";
-  return `  ${COLORS.dim}${label}:${COLORS.reset} ${parts.join("  ")}\n`;
+  return `  ${COLORS.dim}window:${COLORS.reset} ${parts.join("  ")}\n`;
 }
 
 export function renderSeparator(width: number): string {
