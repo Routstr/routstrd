@@ -150,16 +150,28 @@ export async function probeMintReachability(
 
   await Promise.all(
     mintUrls.map(async (mintUrl) => {
+      const controller = new AbortController();
       try {
-        await fetcher(`${normalizeMintUrl(mintUrl)}/v1/info`, {
-          signal: AbortSignal.timeout(timeoutMs),
-        });
+        // Cancellation alone is not a deadline: some fetch implementations
+        // do not settle promptly when a blocked connection is aborted. Bound
+        // our wait independently; this GET is read-only, so late completion
+        // cannot race wallet recovery writes. The race also handles late errors.
+        await waitForRecoveryWork(
+          fetcher(`${normalizeMintUrl(mintUrl)}/v1/info`, {
+            signal: controller.signal,
+          }),
+          timeoutMs,
+        );
       } catch (error) {
         logger.debug("Mint did not answer recovery probe", {
           mintUrl,
           error: error instanceof Error ? error.message : String(error),
         });
         unreachable.add(mintUrl);
+      } finally {
+        // Best-effort cancellation, including the unused response body. Never
+        // wait for fetch to acknowledge it before opening the recovery gate.
+        controller.abort();
       }
     }),
   );
