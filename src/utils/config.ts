@@ -58,8 +58,14 @@ export interface RoutstrdConfig {
     enabled?: boolean;
     /** Upstream TLS hostnames trusted for the other end (exact, `*.x`, `**.x`). */
     trusted_hosts?: string[];
-    /** Node signing keys (hex or npub) whose offers are accepted. */
+    /**
+     * Node signing keys (hex or npub) whose offers are accepted. When unset,
+     * the keys that announced the node's URL on Nostr (kind 38421) are used,
+     * for https and onion nodes only.
+     */
     node_pubkeys?: string[];
+    /** Set false to require `node_pubkeys` (no pin from the Nostr announcement). */
+    pin_from_announcement?: boolean;
     /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
     prover_path?: string;
     /**

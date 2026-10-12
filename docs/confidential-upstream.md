@@ -26,7 +26,8 @@ In `~/.routstrd/config.json`:
 | Key | Meaning |
 |---|---|
 | `trusted_hosts` | upstream TLS hostnames you accept (exact, `*.x` = one label, `**.x` = any depth). Empty refuses every session. |
-| `node_pubkeys` | node Nostr keys whose signed offers you accept (hex or npub) |
+| `node_pubkeys` | node Nostr keys whose signed offers you accept (hex or npub). Without it, the key that announced the node's URL on Nostr (kind 38421) is used, for https and onion nodes only |
+| `pin_from_announcement` | `false` requires `node_pubkeys` (no pin taken from the announcement) |
 | `prover_path` | `cu-prover` binary (else `CU_PROVER_BIN` / `CU_PROVER` / `PATH`) |
 
 Requests opt in with the header `x-routstr-verify: confidential`. They are

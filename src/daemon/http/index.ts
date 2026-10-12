@@ -165,6 +165,16 @@ function normalizeProviderBaseUrl(url: string): string {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
+/** The keys of the provider announcements (kind 38421) for `baseUrl`, from
+ *  the SDK's provider index (same evidence and trust gates as discovery). */
+async function announcedNodePubkeys(
+  deps: { modelManager: { getProviderReviewIndex(): Promise<{ providerNodes: Map<string, Set<string>> }> } },
+  baseUrl: string,
+): Promise<string[]> {
+  const { providerNodes } = await deps.modelManager.getProviderReviewIndex();
+  return [...(providerNodes.get(normalizeProviderBaseUrl(baseUrl)) ?? [])];
+}
+
 /** Read a tag value by name from a Nostr event's tag array. */
 function tagValue(tags: string[][], name: string): string | null {
   for (const tag of tags) {
@@ -2344,6 +2354,12 @@ export function createDaemonRequestHandler(deps: {
         ? {
             trustedHosts: confidentialConfig.trusted_hosts ?? [],
             nodePubkeys: confidentialConfig.node_pubkeys,
+            // Without configured pins, the keys that announced the node's URL
+            // on Nostr: the offer must then be signed by the key that
+            // announced the URL it is served from.
+            ...(confidentialConfig.pin_from_announcement === false
+              ? {}
+              : { nodePubkeysFor: (baseUrl: string) => announcedNodePubkeys(deps, baseUrl) }),
             proverPath: confidentialConfig.prover_path,
             prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
           }
@@ -2445,7 +2461,14 @@ export function createDaemonRequestHandler(deps: {
         res.once("finish", finish);
         res.once("close", finish);
         res.once("error", fail);
-        nodeReadable.once("error", fail);
+        // `pipe` does not end the destination on a source error. A stream
+        // the SDK aborts after the body (a confidential settlement check
+        // that failed: proof, receipt, usage or cost) must end the client's
+        // connection with an error instead of leaving it open.
+        nodeReadable.once("error", (err) => {
+          res.destroy(err instanceof Error ? err : new Error(String(err)));
+          fail(err);
+        });
         nodeReadable.pipe(res);
       });
 
@@ -2460,6 +2483,13 @@ export function createDaemonRequestHandler(deps: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[daemon] Error: ${message}`);
+
+      // The response head is already on the wire (a stream that failed after
+      // it started): nothing more can be written, make sure it is closed.
+      if (res.headersSent) {
+        if (!res.destroyed) res.destroy();
+        return;
+      }
 
       if (error instanceof InsufficientBalanceError) {
         const balanceError = error as {
