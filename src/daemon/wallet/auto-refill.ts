@@ -26,7 +26,28 @@ const FATAL_ERROR_PATTERNS = [
   /forbidden/i,
   /unauthorized/i,
   /invoice.*expired/i,
+  // An NWC wallet answers a pay_invoice it cannot complete with a NIP-47
+  // error reply (code INSUFFICIENT_BALANCE, PAYMENT_FAILED, …). applesauce
+  // surfaces that as a generic "Unexpected response type: error" instead of a
+  // typed WalletBaseError, so without this pattern the loop treated a failed
+  // payment as transient and created a brand-new mint quote on every backoff
+  // attempt. Cooldown instead, so a broken funding wallet cannot churn quotes.
+  /unexpected response type/i,
 ];
+
+/**
+ * How long to stop retrying after a fatal error or an underfunded NWC wallet.
+ * The loop keeps running so a funded wallet recovers without a daemon restart.
+ */
+const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * Extra sats the NWC funding wallet must hold beyond the invoice amount to
+ * cover Lightning routing fees. Without this buffer a wallet holding exactly
+ * `amount` fails every payment, and each attempt leaves behind a fresh mint
+ * quote created by `receiveBolt11`.
+ */
+const NWC_FEE_BUFFER_SATS = 500;
 
 function isFatalError(message: string): boolean {
   return FATAL_ERROR_PATTERNS.some((pattern) => pattern.test(message));
@@ -46,6 +67,12 @@ export function startAutoRefillLoop(
     }
     return wallet.payInvoice(invoice);
   },
+  /**
+   * Reads the funding (NWC) wallet balance in sats, or returns undefined when
+   * the wallet does not expose it. Used as a pre-flight check so we never
+   * create a BOLT-11 invoice the funding wallet cannot pay.
+   */
+  getNwcBalance?: () => Promise<number | undefined>,
 ): () => void {
   let lastRefillAt = 0;
   let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
@@ -103,6 +130,37 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
+      // Pre-flight: confirm the funding (NWC) wallet can pay before we ask the
+      // mint for an invoice. `receiveBolt11` creates a new pending mint quote
+      // as a side effect, so requesting one the NWC wallet cannot cover leaves
+      // a stuck quote behind and guarantees a failed payment.
+      if (getNwcBalance) {
+        let nwcBalance: number | undefined;
+        try {
+          nwcBalance = await getNwcBalance();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(
+            `[auto-refill] Could not read NWC balance (${message}); proceeding without pre-check`,
+          );
+        }
+
+        if (nwcBalance !== undefined) {
+          const needed = config.amount + NWC_FEE_BUFFER_SATS;
+          if (nwcBalance < needed) {
+            logger.error(
+              `[auto-refill] NWC funding wallet has ${nwcBalance} sats but needs ${needed} ` +
+                `(${config.amount} + ${NWC_FEE_BUFFER_SATS} fee buffer); skipping refill ` +
+                `(no invoice created). Fund the NWC wallet and auto-refill will retry automatically.`,
+            );
+            // Push the cooldown into the future so every time-gate blocks until
+            // the funding wallet is topped up.
+            lastRefillAt = now + FATAL_COOLDOWN_MS;
+            return;
+          }
+        }
+      }
+
       const mintUrl = await walletClient.getDefaultMint();
       if (!mintUrl) {
         logger.error("[auto-refill] No default mint configured");
@@ -155,7 +213,6 @@ export function startAutoRefillLoop(
         // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
         // We don't stop permanently so it auto-recovers without a restart.
         // Set lastRefillAt into the future so all time-gate checks block.
-        const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
         logger.error(
           `[auto-refill] FATAL: ${message}. The funding wallet (NWC) cannot pay. ` +
             `Cooling down for ${FATAL_COOLDOWN_MS / 60000} minutes. ` +
