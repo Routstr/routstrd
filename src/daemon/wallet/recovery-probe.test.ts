@@ -307,7 +307,7 @@ it("classifies malformed persisted URLs as unreachable without fetching", async 
   expect(calls).toEqual([]);
 });
 
-it("bounds a hanging probe with an abort signal", async () => {
+it("bounds a hanging probe and aborts the request", async () => {
   const fetchImpl = (async (_url: unknown, options: RequestInit) =>
     new Promise<Response>((_resolve, reject) => {
       options.signal!.addEventListener("abort", () => reject(options.signal!.reason), { once: true });
@@ -318,6 +318,36 @@ it("bounds a hanging probe with an abort signal", async () => {
   expect([...unreachable]).toEqual(["https://slow.example.com"]);
 });
 
+
+it("bounds probes even when fetch ignores abort, without blocking healthy mints", async () => {
+  let blockedSignal: AbortSignal | undefined;
+  let rejectLate!: (error: Error) => void;
+  const fetchImpl = (async (url: unknown, options: RequestInit) => {
+    if (String(url).includes("live")) return new Response("{}");
+    blockedSignal = options.signal!;
+    return new Promise<Response>((_resolve, reject) => { rejectLate = reject; });
+  }) as unknown as typeof fetch;
+  // A broken implementation would hang forever; use a generous independent
+  // test watchdog so the regression fails promptly rather than stalling tests.
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const unreachable = await Promise.race([
+      probeMintReachability(["https://blocked.example.com", "https://live.example.com"], {
+        fetchImpl, timeoutMs: 10,
+      }),
+      new Promise<never>((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error("Probe deadline was not enforced")), 1000);
+      }),
+    ]);
+    expect([...unreachable]).toEqual(["https://blocked.example.com"]);
+    expect(blockedSignal?.aborted).toBe(true);
+    // The detached fetch may reject later; its rejection must remain handled.
+    rejectLate(new Error("late connection timeout"));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  } finally {
+    clearTimeout(watchdog);
+  }
+});
 
 it("shares timed-out mint observations across quote recovery, targeted recovery and the sweep", async () => {
   const source = makeSource({ mint: [op("q1", "https://live.example.com")] });
