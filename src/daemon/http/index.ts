@@ -153,34 +153,6 @@ function normalizeProviderBaseUrl(url: string): string {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-/** Extract the provider base URLs a kind 38421 event advertises.
- *  Parses `u` tags first, then falls back to `content` endpoint URLs,
- *  mirroring ModelManager.bootstrapFromNostr. */
-function collectProviderUrlsFromEvent(event: {
-  tags: string[][];
-  content: string;
-}): string[] {
-  const urls: string[] = [];
-  for (const tag of event.tags) {
-    if (tag[0] === "u" && typeof tag[1] === "string" && tag[1]) {
-      urls.push(normalizeProviderBaseUrl(tag[1]));
-    }
-  }
-  if (urls.length > 0) return urls;
-  try {
-    const content = JSON.parse(event.content);
-    const providers = Array.isArray(content)
-      ? content
-      : content.providers || [];
-    for (const p of providers) {
-      if (p?.endpoint_url) urls.push(normalizeProviderBaseUrl(p.endpoint_url));
-    }
-  } catch {
-    /* unparseable content — ignore */
-  }
-  return urls;
-}
-
 /** Read a tag value by name from a Nostr event's tag array. */
 function tagValue(tags: string[][], name: string): string | null {
   for (const tag of tags) {
@@ -1296,12 +1268,18 @@ export function createDaemonRequestHandler(deps: {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const indices = body.indices as number[] | undefined;
+        const labels = (body.labels as string[] | undefined)
+          ?.map((label) => String(label).trim())
+          .filter((label) => label.length > 0);
 
-        if (!Array.isArray(indices)) {
+        const hasIndices = Array.isArray(indices);
+        const hasLabels = Array.isArray(labels) && labels.length > 0;
+        if (!hasIndices && !hasLabels) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error: "Missing or invalid 'indices' field (expected number[]).",
+              error:
+                "Missing or invalid target field (expected 'indices': number[] and/or 'labels': string[]).",
             }),
           );
           return;
@@ -1322,7 +1300,8 @@ export function createDaemonRequestHandler(deps: {
         ];
 
         const toDisable: string[] = [];
-        for (const idx of indices) {
+        // 1) Explicit indices.
+        for (const idx of indices ?? []) {
           if (
             typeof idx === "number" &&
             idx >= 0 &&
@@ -1331,12 +1310,32 @@ export function createDaemonRequestHandler(deps: {
             const baseUrl = baseUrlsList[idx]!;
             if (!manuallyDisabledProviders.includes(baseUrl)) {
               manuallyDisabledProviders.push(baseUrl);
-              toDisable.push(baseUrl);
             }
             const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
             if (enabledPos !== -1) {
               manuallyEnabledProviders.splice(enabledPos, 1);
             }
+            if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
+          }
+        }
+
+        // 2) Review labels: drop the label from the SDK's enabled set, so the
+        // review verdict applies again and the matching providers go back to
+        // their Nostr state (disabled unless they carry another enabled label).
+        let matchedLabels: string[] = [];
+        let unmatchedLabels: string[] = [];
+        if (hasLabels) {
+          const match = await deps.modelManager.matchProviderUrlsByLabels(
+            labels,
+            baseUrlsList,
+          );
+          matchedLabels = match.matchedLabels;
+          unmatchedLabels = match.unmatchedLabels;
+          for (const label of labels) {
+            deps.modelManager.removeUserEnabledReviewLabel(label);
+          }
+          for (const baseUrl of match.matchedUrls) {
+            if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
           }
         }
 
@@ -1345,12 +1344,28 @@ export function createDaemonRequestHandler(deps: {
         deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
         deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
+        // Recompute the review verdict so a label-based disable takes effect now.
+        const reviewed =
+          await deps.modelManager.syncReviewedProvidersFromNostr(baseUrlsList);
+        if (reviewed !== null) {
+          deps.store.getState().setDisabledProviders(reviewed);
+        }
+
+        const parts = [`Disabled ${toDisable.length} provider(s)`];
+        if (matchedLabels.length > 0) {
+          parts.push(`by label: ${matchedLabels.join(", ")}`);
+        }
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
-              message: `Disabled ${toDisable.length} provider(s)`,
+              message: parts.join(" "),
               disabled: toDisable,
+              enabledLabels:
+                deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
+              ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
             },
           }),
         );
@@ -1366,12 +1381,20 @@ export function createDaemonRequestHandler(deps: {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const indices = body.indices as number[] | undefined;
+        // Numeric targets are provider indices; everything else is a kind-38425
+        // review label (e.g. `sandbox`). Labels are normalised by the SDK.
+        const labels = (body.labels as string[] | undefined)
+          ?.map((label) => String(label).trim())
+          .filter((label) => label.length > 0);
 
-        if (!Array.isArray(indices)) {
+        const hasIndices = Array.isArray(indices);
+        const hasLabels = Array.isArray(labels) && labels.length > 0;
+        if (!hasIndices && !hasLabels) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error: "Missing or invalid 'indices' field (expected number[]).",
+              error:
+                "Missing or invalid target field (expected 'indices': number[] and/or 'labels': string[]).",
             }),
           );
           return;
@@ -1379,9 +1402,9 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        // Re-enabling clears the manual disable and records a manual-enable
-        // override so the review sync (which disables providers without an
-        // lgtm review) does not silently re-disable it on the next pass.
+        // Re-enabling by index clears the manual disable and records a
+        // manual-enable override so the review sync (which disables providers
+        // without an lgtm review) does not silently re-disable it.
         const manuallyDisabledProviders: string[] = [
           ...(state.manuallyDisabledProviders || []),
         ];
@@ -1390,21 +1413,49 @@ export function createDaemonRequestHandler(deps: {
         ];
 
         const toEnable: string[] = [];
-        for (const idx of indices) {
+        const enableProvider = (baseUrl: string) => {
+          const pos = manuallyDisabledProviders.indexOf(baseUrl);
+          if (pos !== -1) {
+            manuallyDisabledProviders.splice(pos, 1);
+          }
+          if (!manuallyEnabledProviders.includes(baseUrl)) {
+            manuallyEnabledProviders.push(baseUrl);
+          }
+          if (!toEnable.includes(baseUrl)) {
+            toEnable.push(baseUrl);
+          }
+        };
+
+        // 1) Explicit indices (e.g. `routstrd providers enable 0 2 5`).
+        for (const idx of indices ?? []) {
           if (
             typeof idx === "number" &&
             idx >= 0 &&
             idx < baseUrlsList.length
           ) {
-            const baseUrl = baseUrlsList[idx]!;
-            const pos = manuallyDisabledProviders.indexOf(baseUrl);
-            if (pos !== -1) {
-              manuallyDisabledProviders.splice(pos, 1);
-            }
-            if (!manuallyEnabledProviders.includes(baseUrl)) {
-              manuallyEnabledProviders.push(baseUrl);
-            }
-            toEnable.push(baseUrl);
+            enableProvider(baseUrlsList[idx]!);
+          }
+        }
+
+        // 2) Review labels (e.g. `routstrd providers enable sandbox`). This is
+        // the SDK's label policy, not a per-URL override: the label joins the
+        // enabled set, so the review sync keeps every provider whose latest
+        // kind-38425 review carries it enabled — including providers discovered
+        // later. `sandbox` is off until a user opts it in here.
+        let matchedLabels: string[] = [];
+        let unmatchedLabels: string[] = [];
+        if (hasLabels) {
+          const match = await deps.modelManager.matchProviderUrlsByLabels(
+            labels,
+            baseUrlsList,
+          );
+          matchedLabels = match.matchedLabels;
+          unmatchedLabels = match.unmatchedLabels;
+          for (const label of labels) {
+            deps.modelManager.addUserEnabledReviewLabel(label);
+          }
+          for (const baseUrl of match.matchedUrls) {
+            if (!toEnable.includes(baseUrl)) toEnable.push(baseUrl);
           }
         }
 
@@ -1413,12 +1464,29 @@ export function createDaemonRequestHandler(deps: {
         deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
         deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
+        // Recompute the review verdict so a label-based enable takes effect
+        // now rather than on the next scheduled review pass.
+        const reviewed =
+          await deps.modelManager.syncReviewedProvidersFromNostr(baseUrlsList);
+        if (reviewed !== null) {
+          deps.store.getState().setDisabledProviders(reviewed);
+        }
+
+        const parts = [`Enabled ${toEnable.length} provider(s)`];
+        if (matchedLabels.length > 0) {
+          parts.push(`by label: ${matchedLabels.join(", ")}`);
+        }
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
-              message: `Enabled ${toEnable.length} provider(s)`,
+              message: parts.join(" "),
               enabled: toEnable,
+              enabledLabels:
+                deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
+              ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
             },
           }),
         );
@@ -1873,27 +1941,12 @@ export function createDaemonRequestHandler(deps: {
           ].filter((u: string) => !manuallyEnabled.has(u)),
         );
 
-        // url -> set of node pubkeys advertised by that provider's 38421 event(s)
-        const providerNodes = new Map<string, Set<string>>();
-        // All stored kind 38425 review events
-        const reviewEvents: any[] = [];
-
-        const eventStore = await deps.modelManager.getEventStore();
-        if (eventStore) {
-          const providerEvents = eventStore.getTimeline({ kinds: [38421] });
-          for (const ev of providerEvents) {
-            const pubkey = ev.pubkey;
-            for (const u of collectProviderUrlsFromEvent(ev)) {
-              let set = providerNodes.get(u);
-              if (!set) {
-                set = new Set<string>();
-                providerNodes.set(u, set);
-              }
-              set.add(pubkey);
-            }
-          }
-          reviewEvents.push(...eventStore.getTimeline({ kinds: [38425] }));
-        }
+        // Provider/review index lives in the SDK (same evidence and trust gates
+        // as the review sync), so the daemon only maps it for display.
+        const { providerNodes, reviewEvents, latestLabelByNode } =
+          await deps.modelManager.getProviderReviewIndex();
+        const enabledLabels: string[] =
+          deps.modelManager.getEnabledReviewLabels?.() ?? [];
 
         const mapReview = (rv: any) => ({
           eventId: rv.id,
@@ -1901,8 +1954,6 @@ export function createDaemonRequestHandler(deps: {
           authorPubkey: rv.pubkey,
           nodePubkey: tagValue(rv.tags, "node"),
           label: tagValue(rv.tags, "t") ?? "",
-          isLgtm:
-            (tagValue(rv.tags, "t") ?? "").toLowerCase() === "lgtm",
           tags: rv.tags,
         });
 
@@ -1912,17 +1963,23 @@ export function createDaemonRequestHandler(deps: {
             providerNodes.get(normalized) || new Set<string>(),
           );
           const reviews = reviewEvents
-            .filter((rv) => {
+            .filter((rv: any) => {
               const node = tagValue(rv.tags, "node");
               return node ? nodePubkeys.includes(node) : false;
             })
-            .sort((a, b) => b.created_at - a.created_at)
+            .sort((a: any, b: any) => b.created_at - a.created_at)
             .map(mapReview);
+          // Latest label of each advertising node, and which of those the
+          // current policy actually enables (defaults ∪ user opt-ins).
+          const labels = nodePubkeys
+            .map((pk) => latestLabelByNode.get(pk))
+            .filter((label): label is string => Boolean(label));
           return {
             index,
             baseUrl,
             disabled: disabledSet.has(baseUrl),
             nodePubkeys,
+            labels,
             reviewCount: reviews.length,
             reviews,
           };
@@ -1935,11 +1992,11 @@ export function createDaemonRequestHandler(deps: {
           for (const pk of set) knownNodePubkeys.add(pk);
         }
         const unmatchedReviews = reviewEvents
-          .filter((rv) => {
+          .filter((rv: any) => {
             const node = tagValue(rv.tags, "node");
             return node ? !knownNodePubkeys.has(node) : false;
           })
-          .sort((a, b) => b.created_at - a.created_at)
+          .sort((a: any, b: any) => b.created_at - a.created_at)
           .map(mapReview);
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -1948,6 +2005,7 @@ export function createDaemonRequestHandler(deps: {
             output: {
               providers,
               unmatchedReviews,
+              enabledLabels,
               totalCount: baseUrlsList.length,
               reviewEventCount: reviewEvents.length,
             },

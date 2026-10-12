@@ -1279,6 +1279,24 @@ const parseProviderIndices = (raw: string[]): number[] => {
   return valid;
 };
 
+// Enable/disable targets: a pure-digit argument is a provider index, anything
+// else is a kind-38425 review label (e.g. `sandbox`). Indices and labels can be
+// mixed, and the split is shared by both commands so they stay symmetric.
+const splitProviderTargets = (
+  raw: string[],
+): { indices: number[]; labels: string[] } => {
+  const indices: number[] = [];
+  const labels: string[] = [];
+  for (const target of raw) {
+    if (/^\d+$/.test(target)) {
+      indices.push(parseInt(target, 10));
+    } else if (target.trim().length > 0) {
+      labels.push(target.trim());
+    }
+  }
+  return { indices, labels };
+};
+
 providersCmd
   .command("list")
   .description("List all providers with their enabled/disabled status")
@@ -1328,22 +1346,22 @@ providersCmd
   });
 
 providersCmd
-  .command("disable <indices...>")
+  .command("disable <targets...>")
   .description(
-    "Disable providers by their indices (e.g., routstrd providers disable 0 2 5)",
+    "Disable providers by index or by Nostr review label (e.g., routstrd providers disable 0 2 5, or routstrd providers disable sandbox)",
   )
-  .action(async (indices: string[]) => {
+  .action(async (targets: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = parseProviderIndices(indices);
-    if (indexNums.length === 0) {
-      console.log("No valid indices provided.");
+    const { indices, labels } = splitProviderTargets(targets);
+    if (indices.length === 0 && labels.length === 0) {
+      console.log("No valid indices or labels provided.");
       process.exit(1);
     }
 
     const result = await callDaemon("/providers/disable", {
       method: "POST",
-      body: { indices: indexNums },
+      body: { indices, labels },
     });
 
     if (result.error) {
@@ -1352,33 +1370,52 @@ providersCmd
     }
 
     const output = result.output as
-      | { message: string; disabled: string[] }
+      | {
+          message: string;
+          disabled: string[];
+          enabledLabels?: string[];
+          unmatchedLabels?: string[];
+        }
       | undefined;
     if (output) {
       console.log(output.message);
       for (const url of output.disabled) {
         console.log(`  - ${url}`);
       }
+      if (output.enabledLabels && output.enabledLabels.length > 0) {
+        console.log(
+          `Enabled review labels: ${output.enabledLabels.join(", ")}`,
+        );
+      }
+      if (output.unmatchedLabels && output.unmatchedLabels.length > 0) {
+        console.log(
+          `No providers matched review label(s): ${output.unmatchedLabels.join(", ")}`,
+        );
+      }
     }
   });
 
 providersCmd
-  .command("enable <indices...>")
+  .command("enable <targets...>")
   .description(
-    "Enable providers by their indices (e.g., routstrd providers enable 0 2 5)",
+    "Enable providers by index or by Nostr review label (e.g., routstrd providers enable 0 2 5, or routstrd providers enable sandbox)",
   )
-  .action(async (indices: string[]) => {
+  .action(async (targets: string[]) => {
     await ensureDaemonRunning();
 
-    const indexNums = parseProviderIndices(indices);
-    if (indexNums.length === 0) {
-      console.log("No valid indices provided.");
+    // Numeric targets are provider indices; everything else is a kind-38425
+    // review label (e.g. `sandbox`). A label opts into the daemon's review
+    // label policy, so every provider with that label is kept enabled.
+    const { indices, labels } = splitProviderTargets(targets);
+
+    if (indices.length === 0 && labels.length === 0) {
+      console.log("No valid indices or labels provided.");
       process.exit(1);
     }
 
     const result = await callDaemon("/providers/enable", {
       method: "POST",
-      body: { indices: indexNums },
+      body: { indices, labels },
     });
 
     if (result.error) {
@@ -1387,12 +1424,28 @@ providersCmd
     }
 
     const output = result.output as
-      | { message: string; enabled: string[] }
+      | {
+          message: string;
+          enabled: string[];
+          enabledLabels?: string[];
+          matchedLabels?: string[];
+          unmatchedLabels?: string[];
+        }
       | undefined;
     if (output) {
       console.log(output.message);
       for (const url of output.enabled) {
         console.log(`  - ${url}`);
+      }
+      if (output.enabledLabels && output.enabledLabels.length > 0) {
+        console.log(
+          `Enabled review labels: ${output.enabledLabels.join(", ")}`,
+        );
+      }
+      if (output.unmatchedLabels && output.unmatchedLabels.length > 0) {
+        console.log(
+          `No providers matched review label(s): ${output.unmatchedLabels.join(", ")}`,
+        );
       }
     }
   });
@@ -1463,6 +1516,7 @@ providersCmd
             baseUrl: string;
             disabled: boolean;
             nodePubkeys: string[];
+            labels: string[];
             reviewCount: number;
             reviews: Array<{
               eventId: string;
@@ -1470,7 +1524,6 @@ providersCmd
               authorPubkey: string | null;
               nodePubkey: string | null;
               label: string;
-              isLgtm: boolean;
               tags: string[][];
             }>;
           }>;
@@ -1480,9 +1533,9 @@ providersCmd
             authorPubkey: string | null;
             nodePubkey: string | null;
             label: string;
-            isLgtm: boolean;
             tags: string[][];
           }>;
+          enabledLabels: string[];
           totalCount: number;
           reviewEventCount: number;
         }
@@ -1496,6 +1549,9 @@ providersCmd
     console.log(
       `Providers (${output.totalCount} total, ${output.reviewEventCount} stored review events):\n`,
     );
+    console.log(
+      `Enabled review labels: ${output.enabledLabels.length > 0 ? output.enabledLabels.join(", ") : "(defaults only)"}\n`,
+    );
 
     for (const provider of output.providers) {
       const status = provider.disabled ? "DISABLED" : "enabled ";
@@ -1505,6 +1561,9 @@ providersCmd
 
       if (provider.nodePubkeys.length > 0) {
         console.log(`      node pubkeys: ${provider.nodePubkeys.join(", ")}`);
+      }
+      if (provider.labels.length > 0) {
+        console.log(`      labels:       ${provider.labels.join(", ")}`);
       }
 
       for (const review of provider.reviews) {

@@ -147,21 +147,38 @@ Providers (12 total, 2 disabled):
   [2] DISABLED  https://provider3.example.com
 ```
 
-#### `routstrd providers disable <indices...>`
+#### `routstrd providers disable <targets...>`
 
-Disable providers by their index numbers.
+Disable providers by index number, by review label, or a mix of both.
+
+Numeric targets are provider indices. Any non-numeric target is treated as a
+kind-38425 Nostr review label: the label is removed from the daemon's enabled
+label set, so providers carrying it fall back to their review verdict.
 
 ```sh
 routstrd providers disable 0 2 5
+routstrd providers disable sandbox
 ```
 
-#### `routstrd providers enable <indices...>`
+#### `routstrd providers enable <targets...>`
 
-Enable providers by their index numbers.
+Enable providers by index number, by review label, or a mix of both.
+
+Numeric targets are provider indices and record a per-provider manual override.
+Any non-numeric target is a kind-38425 Nostr review label and opts that label
+into the daemon's review label policy: every provider whose latest review
+carries it is kept enabled — including providers discovered later — until the
+label is removed with `providers disable <label>`. Default-enabled labels are
+`lgtm`, `lgtm2`, `trusted` and `verified`; experimental labels such as `sandbox`
+are disabled until a user opts them in this way.
 
 ```sh
 routstrd providers enable 0 2 5
+routstrd providers enable sandbox
 ```
+
+Use `routstrd providers reviews` to see the labels attached to each provider.
+Labels that match no provider are reported back.
 
 #### `routstrd providers reviews`
 
