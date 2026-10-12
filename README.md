@@ -326,6 +326,16 @@ setting and take precedence. Restart the daemon after changing `autoModelPath`.
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
 router pick the cheapest eligible provider and fail over between nodes.
 
+The OpenCode integration writes the native v2 config shape (`providers` with a
+per-provider `package`) and no longer writes the v1 `provider.routstr` block,
+which OpenCode v1 does not read. OpenCode picks the transport with that runtime
+package, so the integration pins it per model: `claude*` models go to
+`{root}/messages` and `gpt-*` models to `{root}/responses` (the same families
+the pi integration pins), and every other model uses `{root}/chat/completions`,
+the provider default. A `package` you curate by hand on a model outside those
+two families survives a refresh, as do the other keys you add to a model entry
+(`limit`, `capabilities`, `variants`).
+
 ### Environment Variables
 
 - `ROUTSTRD_DIR` - Config directory (default: `~/.routstrd`)
