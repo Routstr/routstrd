@@ -98,6 +98,7 @@ function makeAdapter(baseUrlsList: string[]) {
 function makeModelManager(
   adapter: ReturnType<typeof makeAdapter>,
   reviewRejected: Set<string>,
+  events: any[] = [],
 ) {
   return {
     syncReviewedProvidersFromNostr: async (baseUrls?: string[]) => {
@@ -109,18 +110,27 @@ function makeModelManager(
       adapter.setDisabledProviders(recomputed);
       return recomputed;
     },
+    getEventStore: async () => ({
+      getTimeline: ({ kinds }: { kinds: number[] }) =>
+        events.filter((e) => kinds.includes(e.kind)),
+    }),
   };
 }
 
 function makeDeps(overrides: {
   baseUrlsList?: string[];
   reviewRejected?: Set<string>;
+  events?: any[];
 }) {
   const baseUrlsList = overrides.baseUrlsList ?? [PROVIDER_A, PROVIDER_B];
   const store = makeStore(baseUrlsList);
   const adapter = makeAdapter(baseUrlsList);
   const reviewRejected = overrides.reviewRejected ?? new Set<string>();
-  const modelManager = makeModelManager(adapter, reviewRejected);
+  const modelManager = makeModelManager(
+    adapter,
+    reviewRejected,
+    overrides.events ?? [],
+  );
   const handler = createDaemonRequestHandler({
     store,
     discoveryAdapter: adapter,
@@ -267,6 +277,142 @@ describe("POST /providers/nostr-sync", () => {
     const { handler } = makeDeps({});
     const res = await call(handler, "POST", "/providers/nostr-sync", {});
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /providers/enable (review labels)", () => {
+  const providerEvent = (pubkey: string, url: string, id: string) => ({
+    id,
+    pubkey,
+    kind: 38421,
+    created_at: 1,
+    content: "",
+    tags: [["u", url]],
+  });
+  const reviewEvent = (
+    node: string,
+    label: string,
+    createdAt: number,
+    id = `${node}-${label}-${createdAt}`,
+  ) => ({
+    id,
+    pubkey: "routstr",
+    kind: 38425,
+    created_at: createdAt,
+    content: "",
+    tags: [
+      ["node", node],
+      ["t", label],
+    ],
+  });
+
+  const baseEvents = [
+    providerEvent("nodeA", PROVIDER_A, "pa"),
+    providerEvent("nodeB", PROVIDER_B, "pb"),
+  ];
+
+  it("enables every provider whose latest review label matches", async () => {
+    const { handler, adapter } = makeDeps({
+      reviewRejected: new Set([PROVIDER_B]),
+      events: [...baseEvents, reviewEvent("nodeB", "sandbox", 10)],
+    });
+    adapter._setReviewDisabled([PROVIDER_B]);
+
+    const res = await call(handler, "POST", "/providers/enable", {
+      labels: ["sandbox"],
+    });
+    expect(res.status).toBe(200);
+    const out = res.json().output;
+    expect(out.enabled).toEqual([PROVIDER_B]);
+    expect(out.matchedLabels).toEqual(["sandbox"]);
+    // Manual-enable override survives the review sync (fail-closed otherwise).
+    expect(adapter.getManuallyEnabledProviders()).toContain(PROVIDER_B);
+    expect(adapter.getDisabledProviders()).not.toContain(PROVIDER_B);
+  });
+
+  it("matches against the newest review label per node", async () => {
+    const { handler } = makeDeps({
+      events: [
+        ...baseEvents,
+        // Older sandbox review is superseded by a newer lgtm: no match.
+        reviewEvent("nodeB", "sandbox", 10),
+        reviewEvent("nodeB", "lgtm", 20),
+      ],
+    });
+    const res = await call(handler, "POST", "/providers/enable", {
+      labels: ["sandbox"],
+    });
+    expect(res.json().output.enabled).toEqual([]);
+    expect(res.json().output.unmatchedLabels).toEqual(["sandbox"]);
+  });
+
+  it("reports labels that matched no provider", async () => {
+    const { handler } = makeDeps({ events: baseEvents });
+    const res = await call(handler, "POST", "/providers/enable", {
+      labels: ["sandbox", "nope"],
+    });
+    expect(res.status).toBe(200);
+    expect(res.json().output.enabled).toEqual([]);
+    expect(res.json().output.unmatchedLabels).toEqual(["sandbox", "nope"]);
+  });
+
+  it("accepts indices and labels together", async () => {
+    const { handler, adapter } = makeDeps({
+      events: [...baseEvents, reviewEvent("nodeB", "sandbox", 10)],
+    });
+    const res = await call(handler, "POST", "/providers/enable", {
+      indices: [0],
+      labels: ["sandbox"],
+    });
+    expect(res.status).toBe(200);
+    expect(adapter.getManuallyEnabledProviders().sort()).toEqual(
+      [PROVIDER_A, PROVIDER_B].sort(),
+    );
+  });
+
+  it("rejects a request with neither indices nor labels", async () => {
+    const { handler } = makeDeps({ events: baseEvents });
+    const res = await call(handler, "POST", "/providers/enable", {});
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /providers/reviews", () => {
+  it("reports each provider's review events and labels", async () => {
+    const { handler } = makeDeps({
+      events: [
+        {
+          id: "pa",
+          pubkey: "nodeA",
+          kind: 38421,
+          created_at: 1,
+          content: "",
+          tags: [["u", PROVIDER_A]],
+        },
+        {
+          id: "rv1",
+          pubkey: "routstr",
+          kind: 38425,
+          created_at: 10,
+          content: "",
+          tags: [
+            ["node", "nodeA"],
+            ["t", "sandbox"],
+          ],
+        },
+      ],
+    });
+    const res = await call(handler, "GET", "/providers/reviews");
+    expect(res.status).toBe(200);
+    const out = res.json().output;
+    const providerA = out.providers.find((p: any) => p.baseUrl === PROVIDER_A);
+    expect(providerA.reviewCount).toBe(1);
+    expect(providerA.reviews[0]).toMatchObject({
+      eventId: "rv1",
+      label: "sandbox",
+      isLgtm: false,
+      nodePubkey: "nodeA",
+    });
   });
 });
 

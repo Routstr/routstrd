@@ -189,6 +189,115 @@ function tagValue(tags: string[][], name: string): string | null {
   return null;
 }
 
+/**
+ * Index the stored provider (kind 38421) and review (kind 38425) events:
+ * provider URL -> advertising node pubkeys, plus each node's latest review
+ * label.
+ *
+ * "Latest" mirrors the SDK review sync (`fetchReviewLabels`): the newest
+ * `created_at` wins, tie-broken by event id. Shared by `GET /providers/reviews`
+ * and label-based provider enabling so both agree on a node's label.
+ */
+async function buildProviderReviewIndex(deps: { modelManager: any }): Promise<{
+  providerNodes: Map<string, Set<string>>;
+  reviewEvents: any[];
+  latestLabelByNode: Map<string, string>;
+}> {
+  // url -> set of node pubkeys advertised by that provider's 38421 event(s)
+  const providerNodes = new Map<string, Set<string>>();
+  // All stored kind 38425 review events
+  const reviewEvents: any[] = [];
+
+  const eventStore = await deps.modelManager.getEventStore?.();
+  if (eventStore) {
+    const providerEvents = eventStore.getTimeline({ kinds: [38421] });
+    for (const ev of providerEvents) {
+      const pubkey = ev.pubkey;
+      for (const u of collectProviderUrlsFromEvent(ev)) {
+        let set = providerNodes.get(u);
+        if (!set) {
+          set = new Set<string>();
+          providerNodes.set(u, set);
+        }
+        set.add(pubkey);
+      }
+    }
+    reviewEvents.push(...eventStore.getTimeline({ kinds: [38425] }));
+  }
+
+  const latestReviewByNode = new Map<
+    string,
+    { createdAt: number; id: string; label: string }
+  >();
+  for (const rv of reviewEvents) {
+    const node = tagValue(rv.tags, "node");
+    const label = (tagValue(rv.tags, "t") ?? "").toLowerCase();
+    if (!node || !label) continue;
+    const previous = latestReviewByNode.get(node);
+    if (
+      !previous ||
+      rv.created_at > previous.createdAt ||
+      (rv.created_at === previous.createdAt && rv.id > previous.id)
+    ) {
+      latestReviewByNode.set(node, {
+        createdAt: rv.created_at,
+        id: rv.id,
+        label,
+      });
+    }
+  }
+
+  const latestLabelByNode = new Map<string, string>();
+  for (const [node, review] of latestReviewByNode) {
+    latestLabelByNode.set(node, review.label);
+  }
+
+  return { providerNodes, reviewEvents, latestLabelByNode };
+}
+
+/**
+ * Provider URLs whose latest review label matches any requested label.
+ * A provider matches when at least one of the node pubkeys it advertises in
+ * its kind 38421 event(s) carries a matching latest kind 38425 label.
+ */
+function matchProviderUrlsByLabel(
+  baseUrlsList: string[],
+  providerNodes: Map<string, Set<string>>,
+  latestLabelByNode: Map<string, string>,
+  labels: string[],
+): { matchedUrls: string[]; matchedLabels: string[]; unmatchedLabels: string[] } {
+  const matchedUrls: string[] = [];
+  const matchedLabels: string[] = [];
+  const unmatchedLabels: string[] = [];
+
+  for (const rawLabel of labels) {
+    const label = String(rawLabel).trim().toLowerCase();
+    if (!label) continue;
+
+    let labelMatched = false;
+    for (const baseUrl of baseUrlsList) {
+      const normalized = normalizeProviderBaseUrl(baseUrl);
+      const nodePubkeys = providerNodes.get(normalized);
+      if (!nodePubkeys) continue;
+      const matches = Array.from(nodePubkeys).some(
+        (pubkey) => latestLabelByNode.get(pubkey) === label,
+      );
+      if (matches) {
+        labelMatched = true;
+        if (!matchedUrls.includes(baseUrl)) matchedUrls.push(baseUrl);
+      }
+    }
+
+    if (labelMatched) {
+      if (!matchedLabels.includes(label)) matchedLabels.push(label);
+    } else if (!unmatchedLabels.includes(label)) {
+      unmatchedLabels.push(label);
+    }
+  }
+
+  return { matchedUrls, matchedLabels, unmatchedLabels };
+}
+
 function sendJson(
   res: ServerResponse,
   status: number,
@@ -1366,12 +1475,16 @@ export function createDaemonRequestHandler(deps: {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const indices = body.indices as number[] | undefined;
+        const labels = body.labels as string[] | undefined;
 
-        if (!Array.isArray(indices)) {
+        const hasIndices = Array.isArray(indices);
+        const hasLabels = Array.isArray(labels);
+        if (!hasIndices && !hasLabels) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error: "Missing or invalid 'indices' field (expected number[]).",
+              error:
+                "Missing or invalid target field (expected 'indices': number[] and/or 'labels': string[]).",
             }),
           );
           return;
@@ -1390,22 +1503,47 @@ export function createDaemonRequestHandler(deps: {
         ];
 
         const toEnable: string[] = [];
-        for (const idx of indices) {
+        const enableProvider = (baseUrl: string) => {
+          const pos = manuallyDisabledProviders.indexOf(baseUrl);
+          if (pos !== -1) {
+            manuallyDisabledProviders.splice(pos, 1);
+          }
+          if (!manuallyEnabledProviders.includes(baseUrl)) {
+            manuallyEnabledProviders.push(baseUrl);
+          }
+          if (!toEnable.includes(baseUrl)) {
+            toEnable.push(baseUrl);
+          }
+        };
+
+        // 1) Explicit indices (e.g. `routstrd providers enable 0 2 5`).
+        for (const idx of indices ?? []) {
           if (
             typeof idx === "number" &&
             idx >= 0 &&
             idx < baseUrlsList.length
           ) {
-            const baseUrl = baseUrlsList[idx]!;
-            const pos = manuallyDisabledProviders.indexOf(baseUrl);
-            if (pos !== -1) {
-              manuallyDisabledProviders.splice(pos, 1);
-            }
-            if (!manuallyEnabledProviders.includes(baseUrl)) {
-              manuallyEnabledProviders.push(baseUrl);
-            }
-            toEnable.push(baseUrl);
+            enableProvider(baseUrlsList[idx]!);
           }
+        }
+
+        // 2) Review labels (e.g. `routstrd providers enable sandbox`):
+        // enable every provider whose latest kind-38425 review carries the
+        // requested label. This is how sandbox-labelled nodes are opted in.
+        let matchedLabels: string[] = [];
+        let unmatchedLabels: string[] = [];
+        if (labels && labels.length > 0) {
+          const { providerNodes, latestLabelByNode } =
+            await buildProviderReviewIndex(deps);
+          const matched = matchProviderUrlsByLabel(
+            baseUrlsList,
+            providerNodes,
+            latestLabelByNode,
+            labels,
+          );
+          for (const baseUrl of matched.matchedUrls) enableProvider(baseUrl);
+          matchedLabels = matched.matchedLabels;
+          unmatchedLabels = matched.unmatchedLabels;
         }
 
         deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
@@ -1413,12 +1551,23 @@ export function createDaemonRequestHandler(deps: {
         deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
         deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
 
+        const parts = [`Enabled ${toEnable.length} provider(s)`];
+        if (matchedLabels.length > 0) {
+          parts.push(`by label: ${matchedLabels.join(", ")}`);
+        }
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
-              message: `Enabled ${toEnable.length} provider(s)`,
+              message: parts.join(" "),
               enabled: toEnable,
+              ...(matchedLabels.length > 0
+                ? { matchedLabels }
+                : {}),
+              ...(unmatchedLabels.length > 0
+                ? { unmatchedLabels }
+                : {}),
             },
           }),
         );
@@ -1873,27 +2022,8 @@ export function createDaemonRequestHandler(deps: {
           ].filter((u: string) => !manuallyEnabled.has(u)),
         );
 
-        // url -> set of node pubkeys advertised by that provider's 38421 event(s)
-        const providerNodes = new Map<string, Set<string>>();
-        // All stored kind 38425 review events
-        const reviewEvents: any[] = [];
-
-        const eventStore = await deps.modelManager.getEventStore();
-        if (eventStore) {
-          const providerEvents = eventStore.getTimeline({ kinds: [38421] });
-          for (const ev of providerEvents) {
-            const pubkey = ev.pubkey;
-            for (const u of collectProviderUrlsFromEvent(ev)) {
-              let set = providerNodes.get(u);
-              if (!set) {
-                set = new Set<string>();
-                providerNodes.set(u, set);
-              }
-              set.add(pubkey);
-            }
-          }
-          reviewEvents.push(...eventStore.getTimeline({ kinds: [38425] }));
-        }
+        const { providerNodes, reviewEvents } =
+          await buildProviderReviewIndex(deps);
 
         const mapReview = (rv: any) => ({
           eventId: rv.id,

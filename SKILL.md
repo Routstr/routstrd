@@ -155,13 +155,22 @@ Disable providers by their index numbers.
 routstrd providers disable 0 2 5
 ```
 
-#### `routstrd providers enable <indices...>`
+#### `routstrd providers enable <targets...>`
 
-Enable providers by their index numbers.
+Enable providers by index number, by review label, or a mix of both.
+
+Numeric targets are provider indices. Any non-numeric target is treated as a
+kind-38425 Nostr review label, and enables every provider whose latest review
+carries that label (e.g. `sandbox`). Label-based enabling records a manual
+override, so the review sync will not re-disable the provider.
 
 ```sh
 routstrd providers enable 0 2 5
+routstrd providers enable sandbox
 ```
+
+Use `routstrd providers reviews` to see the labels attached to each provider.
+Labels that match no provider are reported back.
 
 #### `routstrd providers reviews`
 
