@@ -12,7 +12,8 @@
   "type": "module",
   "private": false,
   "bin": {
-    "routstrd": "./dist/index.js"
+    "routstrd": "./dist/index.js",
+    "rout": "./dist/index.js"
   },
   "files": [
     "dist/index.js",
