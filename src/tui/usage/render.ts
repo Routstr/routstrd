@@ -1,4 +1,4 @@
-import { CLIENT_COLORS, COLORS, MODEL_COLORS, WINDOW_LABELS, WINDOW_ORDER, tabSupportsWindow } from "./constants.ts";
+import { CLIENT_COLORS, COLORS, MODEL_COLORS, WINDOW_LABELS, WINDOW_ORDER, tabShowsWindowBarInChrome } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import {
   formatNumber,
@@ -59,18 +59,32 @@ export function renderTabs(activeTab: TabId, visibleTabs: Tab[]): string {
   return `${" ".repeat(2)}${tabStr}\n`;
 }
 
+/** The `All 24h 7d 30d` choices with the active one highlighted. */
+function windowChoices(activeWindow: TimeWindow): string {
+  return WINDOW_ORDER.map((id) => id === activeWindow
+    ? `${COLORS.bgGreen}${COLORS.bold} ${WINDOW_LABELS[id]} ${COLORS.reset}`
+    : `${COLORS.dim}${WINDOW_LABELS[id]}${COLORS.reset}`).join("  ");
+}
+
 /**
- * Time-window selector line. The active window is highlighted. Tabs that
- * ignore the window (Overview/Today/Recent) render nothing at all: a selector
- * that cannot be acted on is noise.
+ * Time-window selector line for the top chrome. Tabs that ignore the window
+ * (Today/Recent) render nothing at all — a selector that cannot be acted on is
+ * noise — and Overview renders it inline instead (see
+ * {@link renderWindowSelector}).
  */
 export function renderWindowBar(activeWindow: TimeWindow, activeTab: TabId): string {
-  if (!tabSupportsWindow(activeTab)) return "";
+  if (!tabShowsWindowBarInChrome(activeTab)) return "";
 
-  const parts = WINDOW_ORDER.map((id) => id === activeWindow
-    ? `${COLORS.bgGreen}${COLORS.bold} ${WINDOW_LABELS[id]} ${COLORS.reset}`
-    : `${COLORS.dim}${WINDOW_LABELS[id]}${COLORS.reset}`);
-  return `  ${COLORS.dim}window:${COLORS.reset} ${parts.join("  ")}\n`;
+  return `  ${COLORS.dim}window:${COLORS.reset} ${windowChoices(activeWindow)}\n`;
+}
+
+/**
+ * Inline window selector. Overview draws this inside its content, directly
+ * under the Balance box, because the chrome bar scrolls away from the figures
+ * it scopes. It carries its own `[W]` hint since the header isn't next to it.
+ */
+export function renderWindowSelector(activeWindow: TimeWindow): string {
+  return `${windowChoices(activeWindow)}   ${COLORS.dim}[W] cycle${COLORS.reset}`;
 }
 
 export function renderSeparator(width: number): string {
@@ -132,10 +146,32 @@ export function renderBarChart(
 }
 
 
-export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number): string {
-  const totals = stats.summary.totals;
-  const totalRequests = stats.totalEntries; // Use server's total count, not entries.length
-  const totalVisibleCost = stats.totalSatsCost; // <-- Use server's total, not client-side sum of limited entries
+/** Merge two rendered boxes into rows of full width, padding the shorter one. */
+function combineSideBySide(left: string, right: string, leftWidth: number, rightWidth: number): string {
+  const leftLines = left.split("\n");
+  const rightLines = right.split("\n");
+  const rows = Math.max(leftLines.length, rightLines.length);
+  const lines: string[] = [];
+  for (let i = 0; i < rows; i++) {
+    const l = leftLines[i] || " ".repeat(leftWidth);
+    const r = rightLines[i] || " ".repeat(rightWidth);
+    lines.push(l + r);
+  }
+  return lines.join("\n");
+}
+
+export function renderOverview(
+  stats: UsageStats,
+  balance: BalanceInfo | null,
+  status: StatusInfo | null,
+  width: number,
+  activeWindow: TimeWindow,
+): string {
+  // Overview honours the [W] window selector: every figure below is scoped to
+  // the selected window, so "Total Spent" means "spent in this window".
+  const totals = stats.window.totals;
+  const totalRequests = totals.requests;
+  const totalVisibleCost = totals.satsCost;
   const avgCost = totalRequests > 0 ? totalVisibleCost / totalRequests : 0;
   const avgTokens = totalRequests > 0 ? totals.totalTokens / totalRequests : 0;
 
@@ -154,23 +190,6 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
   const halfWidth1 = Math.floor(width / 2);
   const halfWidth2 = width - halfWidth1;
 
-  const leftBoxStr = renderBox(leftBox, halfWidth1, "Stats of Sats");
-  const rightBoxStr = renderBox(rightBox, halfWidth2, "Token Stats");
-
-  const leftLines = leftBoxStr.split("\n");
-  const rightLines = rightBoxStr.split("\n");
-  const maxLines = Math.max(leftLines.length, rightLines.length);
-
-  const combinedLines: string[] = [];
-  for (let i = 0; i < maxLines; i++) {
-    const l = leftLines[i] || " ".repeat(halfWidth1);
-    const r = rightLines[i] || " ".repeat(halfWidth2);
-    combinedLines.push(l + r);
-  }
-
-  let output = combinedLines.join("\n");
-
-  // Status and Balance boxes side by side
   const statusLines: string[] = [];
   if (status) {
     const daemonColor = status.daemon === "running" ? COLORS.green : COLORS.red;
@@ -194,8 +213,10 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
     statusLines.push(`${COLORS.dim}Status unavailable${COLORS.reset}`);
   }
 
-  // Display all balances (wallet, cached tokens, API keys) if available
-  if (balance && balance.keys.length > 0) {
+  const sections: string[] = [];
+
+  // Balance and status boxes side by side.
+  if (balance) {
     const balanceLines: string[] = [];
     const totalBalance = balance.total;
 
@@ -222,45 +243,30 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
       balanceLines.push(`${COLORS.dim}No funds available${COLORS.reset}`);
     }
 
-    // Render status and balance boxes side by side
-    const balanceBoxStr = renderBox(balanceLines, halfWidth1, "Balance");
-    const statusBoxStr = renderBox(statusLines, halfWidth2, "System Status");
-    const balanceBoxLines = balanceBoxStr.split("\n");
-    const statusBoxLines = statusBoxStr.split("\n");
-    const statusBalanceMaxLines = Math.max(balanceBoxLines.length, statusBoxLines.length);
-
-    const statusBalanceLines: string[] = [];
-    for (let i = 0; i < statusBalanceMaxLines; i++) {
-      const b = balanceBoxLines[i] || " ".repeat(halfWidth1);
-      const s = statusBoxLines[i] || " ".repeat(halfWidth2);
-      statusBalanceLines.push(b + s);
-    }
-    output = statusBalanceLines.join("\n") + "\n" + output;
-  } else if (balance && balance.keys.length === 0) {
-    // Only balance is empty, show status next to empty balance box
-    const balanceLines: string[] = [
-      `${COLORS.bold}Total Balance:${COLORS.reset} ${COLORS.red}0 sat${COLORS.reset}`,
-      `${COLORS.dim}No funds available${COLORS.reset}`,
-    ];
-    const balanceBoxStr = renderBox(balanceLines, halfWidth1, "Balance");
-    const statusBoxStr = renderBox(statusLines, halfWidth2, "System Status");
-    const balanceBoxLines = balanceBoxStr.split("\n");
-    const statusBoxLines = statusBoxStr.split("\n");
-    const statusBalanceMaxLines = Math.max(balanceBoxLines.length, statusBoxLines.length);
-
-    const statusBalanceLines: string[] = [];
-    for (let i = 0; i < statusBalanceMaxLines; i++) {
-      const b = balanceBoxLines[i] || " ".repeat(halfWidth1);
-      const s = statusBoxLines[i] || " ".repeat(halfWidth2);
-      statusBalanceLines.push(b + s);
-    }
-    output = statusBalanceLines.join("\n") + "\n" + output;
+    sections.push(combineSideBySide(
+      renderBox(balanceLines, halfWidth1, "Balance"),
+      renderBox(statusLines, halfWidth2, "System Status"),
+      halfWidth1,
+      halfWidth2,
+    ));
   } else {
-    // No balance data, just show status box full width
-    output = renderBox(statusLines, width, "System Status") + "\n" + output;
+    // No balance data — status takes the full width.
+    sections.push(renderBox(statusLines, width, "System Status"));
   }
 
-  const modelStats = stats.summary.models;
+  // Window selector, directly under the Balance box: it scopes everything that
+  // follows, so it reads as part of the balance/status header rather than as
+  // tab chrome (which the Overview content scrolls away from).
+  sections.push(renderBox([renderWindowSelector(activeWindow)], width, "Time Window"));
+
+  sections.push(combineSideBySide(
+    renderBox(leftBox, halfWidth1, "Stats of Sats"),
+    renderBox(rightBox, halfWidth2, "Token Stats"),
+    halfWidth1,
+    halfWidth2,
+  ));
+
+  const modelStats = stats.window.models;
   if (modelStats.length > 0) {
     const maxCost = modelStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
@@ -276,10 +282,10 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
       "models",
     ));
     endBarSection("models");
-    output += "\n" + renderBox(modelLines, width, "Top Models by Cost");
+    sections.push(renderBox(modelLines, width, "Top Models by Cost"));
   }
 
-  const clientStats = stats.summary.clients;
+  const clientStats = stats.window.clients;
   if (clientStats.length > 0) {
     const maxCost = clientStats[0]!.satsCost;
     const totalCost = Math.max(totalVisibleCost, 1);
@@ -295,10 +301,10 @@ export function renderOverview(stats: UsageStats, balance: BalanceInfo | null, s
       "clients",
     ));
     endBarSection("clients");
-    output += "\n" + renderBox(clientLines, width, "Usage by Client");
+    sections.push(renderBox(clientLines, width, "Usage by Client"));
   }
 
-  return output;
+  return sections.join("\n");
 }
 
 export function renderToday(stats: UsageStats, width: number): string {
@@ -793,9 +799,9 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow): string {
   switch (activeTab) {
-    case "overview": return renderOverview(stats, balance, status, width);
+    case "overview": return renderOverview(stats, balance, status, width, activeWindow);
     case "today": return renderToday(stats, width);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);

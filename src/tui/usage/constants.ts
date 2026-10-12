@@ -45,7 +45,16 @@ export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWin
 
 /** Whether the active window applies to a given tab. */
 export function tabSupportsWindow(tabId: Tab["id"]): boolean {
-  return tabId !== "overview" && tabId !== "today" && tabId !== "recent";
+  return tabId !== "today" && tabId !== "recent";
+}
+
+/**
+ * Whether the window selector belongs in the top chrome. Overview honours the
+ * window but renders the selector inside its own content (right under the
+ * Balance box) instead, so it is excluded from the chrome bar.
+ */
+export function tabShowsWindowBarInChrome(tabId: Tab["id"]): boolean {
+  return tabSupportsWindow(tabId) && tabId !== "overview";
 }
 
 export const COLORS = {

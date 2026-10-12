@@ -310,9 +310,11 @@ Changing mode restarts the daemon automatically.
 Open an interactive TUI (htop-like) for usage monitoring. `top` is an alias.
 
 Press `W` to cycle the stats time window (`All` → `24h` → `7d` → `30d`). The
-window applies to the **Models**, **Providers**, **Tokens**, **Clients** and
-**Npubs** tabs. **Overview**, **Today** and **Recent** keep their own
-all-time/today granularity, and the selector is marked `n/a` on those tabs.
+window applies to the **Overview**, **Models**, **Providers**, **Tokens**,
+**Clients** and **Npubs** tabs. On **Overview** the selector is drawn inside
+the tab, directly under the Balance box, and scopes the totals and the model
+and client breakdowns. **Today** and **Recent** keep their own today/all-time
+granularity and hide the selector.
 
 ### `routstrd logs`
 
