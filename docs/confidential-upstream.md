@@ -27,17 +27,33 @@ In `~/.routstrd/config.json`:
 |---|---|
 | `trusted_hosts` | upstream TLS hostnames you accept (exact, `*.x` = one label, `**.x` = any depth). Empty refuses every session. |
 | `node_pubkeys` | node Nostr keys whose signed offers you accept (hex or npub). Without it, the key that announced the node's URL on Nostr (kind 38421) is used, for https and onion nodes only |
-| `pin_from_announcement` | `false` requires `node_pubkeys` (no pin taken from the announcement) |
+| `pin_from_announcement` | `false` (any value other than `true`) requires `node_pubkeys` (no pin taken from the announcement) |
 | `prover_path` | `cu-prover` binary (else `CU_PROVER_BIN` / `CU_PROVER` / `PATH`) |
+| `allow_insecure_transport` | development only: also run sessions with plain-`http://` nodes that are not loopback or `.onion` (refused by default, since the node credential would cross the network unencrypted, pinned key or not) |
 
-Requests opt in with the header `x-routstr-verify: confidential`. They are
+Requests opt in with the header `x-routstr-verify: confidential` (case and
+surrounding whitespace are ignored). Any other value of that header (a typo,
+a list, an empty value) is refused with 400, never sent on the plain path.
+They are
 routed only to nodes that advertise confidential mode for the model, and fail
 rather than silently downgrade: with the header, routstrd answers 400 when
 `confidentialUpstream` is not enabled or the endpoint is not
 `POST /v1/chat/completions` (the only one the protocol supports), and a
 failed proof, receipt or cost check fails the request (or ends the stream
-with an error). Streaming responses stream as they decrypt;
-non-streaming requests receive one `chat.completion`.
+with an error). Streaming responses stream as they decrypt, except the final
+`data: [DONE]` line: it is sent only once the settlement checks (usage proof,
+signed receipt and attestation, cost) have passed. If one fails, the
+connection is closed without `[DONE]` and without a clean end of the chunked
+body, so a client that reads until `[DONE]` sees an error, not a complete
+answer. Text already streamed was authenticated by TLS record by record, so it
+is the provider's; the late checks concern billing and the session binding.
+Non-streaming requests receive one `chat.completion` only after every check.
+
+Confidential requests are never written by the raw request/response logging
+(`requestResponseLogging` or `ROUTSTRD_REQUEST_RESPONSE_LOG_DIR`): it would
+store the prompt and the decrypted response in plaintext, so the SDK skips
+its log sink for them. The daemon log records routing and settlement
+metadata only, never the body.
 
 Requires the `cu-prover` binary (build it
 from <https://github.com/jooray/routstr-confidential>: `cd crypto && cargo build
@@ -119,6 +135,13 @@ an active key that goes idle pays one abandon fee per idle period. Set
 then runs cold). The deposit routstrd tops up for a request includes the
 larger fee and any rate surcharge; the receipt check allows usage × signed
 rates + the session fee.
+
+**Failures.** A failed arm, and an armed session that dies before it is used
+(the node or the network ended it, or it failed when a request claimed it),
+pause arming for that key: 30 s, doubling up to 10 min. The count of dead
+armed sessions resets only when a request served from an armed session
+settles, so a node that keeps ending armed sessions costs a few arms (and
+abandon fees), not one per minute.
 
 Pool activity is logged at info level in the daemon log (`[confidential-prewarm]`:
 arming, armed, claim, retire, backoff), without credentials. Responses carry

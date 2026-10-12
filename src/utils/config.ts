@@ -69,6 +69,11 @@ export interface RoutstrdConfig {
     /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
     prover_path?: string;
     /**
+     * Development only: allow plain-http nodes that are neither loopback nor
+     * onion services. The node credential then travels unencrypted.
+     */
+    allow_insecure_transport?: boolean;
+    /**
      * Traffic-driven pre-warming of protocol v2 sessions (the 2PC
      * preprocessing runs before a request arrives). Only keys with recent
      * traffic keep armed sessions; an idle daemon keeps none.

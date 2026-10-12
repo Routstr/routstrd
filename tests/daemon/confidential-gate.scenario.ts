@@ -37,6 +37,7 @@ const stubDeps = {
 async function post(
   deps: Record<string, unknown>,
   path: string,
+  verify: string = "confidential",
 ): Promise<{ status: number; body: string }> {
   const server = createServer(createDaemonRequestHandler(deps as never));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -46,7 +47,7 @@ async function post(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-routstr-verify": "confidential",
+        "x-routstr-verify": verify,
       },
       body: JSON.stringify({
         model: "m",
@@ -81,6 +82,24 @@ for (const path of ["/v1/responses", "/v1/embeddings", "/v1/completions"]) {
   const r = await post(enabled, path);
   assert(r.status === 400, `${path}: status ${r.status}`);
   assert(r.body.includes("only POST /v1/chat/completions"), `${path}: body ${r.body}`);
+}
+
+// Case and surrounding whitespace do not matter for the accepted value: it is
+// recognized (and then refused here because the feature is off).
+for (const v of ["Confidential", " CONFIDENTIAL\t"]) {
+  const r = await post(stubDeps, "/v1/chat/completions", v);
+  assert(r.status === 400, `${JSON.stringify(v)}: status ${r.status}`);
+  assert(r.body.includes("not enabled"), `${JSON.stringify(v)}: body ${r.body}`);
+}
+
+// Any other value is refused, never routed on the plain path, whether or not
+// the feature is on.
+for (const deps of [stubDeps, enabled]) {
+  for (const v of ["confidentail", "confidential, confidential", "confidential;strict", "true", "1", ""]) {
+    const r = await post(deps, "/v1/chat/completions", v);
+    assert(r.status === 400, `${JSON.stringify(v)}: status ${r.status}`);
+    assert(r.body.includes("Unrecognized x-routstr-verify"), `${JSON.stringify(v)}: body ${r.body}`);
+  }
 }
 
 console.log("SCENARIO-OK");

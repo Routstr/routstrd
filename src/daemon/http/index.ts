@@ -26,6 +26,7 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
+import { CONFIDENTIAL_OPT_IN_HEADER, parseConfidentialOptIn } from "./confidential-opt-in";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -2293,9 +2294,14 @@ export function createDaemonRequestHandler(deps: {
 
     // Confidential upstream is opt-in per request; the node never sees the
     // prompt or response. Fail closed: a request that asks for it is refused
-    // here, never sent on the plain path, when it cannot run confidentially.
-    const wantsConfidential =
-      String(req.headers["x-routstr-verify"] ?? "").toLowerCase() === "confidential";
+    // here, never sent on the plain path, when it cannot run confidentially,
+    // and so is one whose opt-in header carries any other value.
+    const optIn = parseConfidentialOptIn(req.headers[CONFIDENTIAL_OPT_IN_HEADER]);
+    if (optIn.kind === "invalid") {
+      sendJson(res, 400, { error: optIn.error });
+      return;
+    }
+    const wantsConfidential = optIn.kind === "confidential";
     if (wantsConfidential) {
       if (deps.confidentialUpstream?.enabled !== true) {
         sendJson(res, 400, {
@@ -2357,10 +2363,17 @@ export function createDaemonRequestHandler(deps: {
             // Without configured pins, the keys that announced the node's URL
             // on Nostr: the offer must then be signed by the key that
             // announced the URL it is served from.
-            ...(confidentialConfig.pin_from_announcement === false
+            // Only an absent or literal `true` setting pins from the
+            // announcement; anything else (`false`, `"false"`, …) requires
+            // the configured `node_pubkeys`.
+            ...(confidentialConfig.pin_from_announcement !== undefined &&
+            confidentialConfig.pin_from_announcement !== true
               ? {}
               : { nodePubkeysFor: (baseUrl: string) => announcedNodePubkeys(deps, baseUrl) }),
             proverPath: confidentialConfig.prover_path,
+            ...(confidentialConfig.allow_insecure_transport === true
+              ? { allowInsecureTransport: true }
+              : {}),
             prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
           }
         : undefined;
