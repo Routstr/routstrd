@@ -326,6 +326,26 @@ setting and take precedence. Restart the daemon after changing `autoModelPath`.
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
 router pick the cheapest eligible provider and fail over between nodes.
 
+`opencodeModelApiFormats` pins the API shape OpenCode sends a model's requests
+in, as `daemon model id -> "chat" | "responses" | "messages"`:
+
+```json
+{
+  "opencodeModelApiFormats": { "gemini-3.8-flash": "responses" }
+}
+```
+
+OpenCode chooses the shape with a per-model runtime package, and routstrd
+regenerates that map on every refresh. Without a pin, `claude*` models go to
+`{root}/messages` and `gpt-*` models to `{root}/responses` (the same families
+the pi integration pins), every other model uses `{root}/chat/completions`, and
+a `package` curated by hand in `opencode.json` is kept for models outside those
+two families. A pin here wins over all of it, so the one case the family guess
+gets wrong stays fixable from this file. Other keys you add to a model entry
+(`limit`, `capabilities`, `variants`) survive a refresh too. The integration
+writes the OpenCode v2 config shape (`providers` with a per-provider `package`),
+which OpenCode v1 does not read.
+
 ### Environment Variables
 
 - `ROUTSTRD_DIR` - Config directory (default: `~/.routstrd`)

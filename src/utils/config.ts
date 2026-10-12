@@ -42,6 +42,13 @@ export interface NwcConfig {
   autoRefill?: NwcAutoRefillConfig;
 }
 
+/**
+ * API shape a client talks to the daemon with. `chat` is
+ * `{root}/chat/completions`, `responses` is `{root}/responses`, and
+ * `messages` is `{root}/messages` (the Anthropic wire format).
+ */
+export type OpenCodeApiFormat = "chat" | "responses" | "messages";
+
 export interface RoutstrdConfig {
   port: number;
   host: string;
@@ -72,6 +79,14 @@ export interface RoutstrdConfig {
   nwc?: NwcConfig;
   /** Scheduled refresh job settings (see AutoRefreshConfig). */
   autoRefresh?: AutoRefreshConfig;
+  /**
+   * Per-model transport pins for the OpenCode integration: daemon model id ->
+   * the API shape OpenCode should send that model's requests in. Wins over the
+   * family heuristic (claude* -> messages, gpt-* -> responses) and over a
+   * `package` curated by hand in opencode.json, which is otherwise preserved.
+   * Only the OpenCode integration reads this.
+   */
+  opencodeModelApiFormats?: Record<string, OpenCodeApiFormat>;
   /**
    * Default max_tokens (chat/completions) and max_output_tokens (responses)
    * injected into proxied requests when the client does not supply one.
