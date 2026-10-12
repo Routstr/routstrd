@@ -58,13 +58,13 @@ metadata only, never the body.
 Requires the `cu-prover` binary (build it
 from <https://github.com/jooray/routstr-confidential>: `cd crypto && cargo build
 --release -p zkbench --bin cu-prover`, binary in `crypto/zkbench/target/release/`),
-and for protocol v2 nodes `cu-2pc` next to it. Protocol v1 sessions also need
-Bun ≥ 1.4, because their TLS handshake uses WebCrypto X25519 (the SDK checks
-this only for v1); v2 uses a joint P-256 key share.
+and `cu-2pc` next to it. The SDK speaks only protocol v2 (the two-party
+handshake over a joint P-256 key share); a node that still offers only the
+retired protocol v1 is refused (`offer_unsupported_version`).
 
-## Pre-warming (protocol v2)
+## Pre-warming
 
-With a protocol v2 node, most of a cold request is the two-party
+Most of a cold request is the two-party
 preprocessing: about 22 MB from the node and 1.2 MB to it, about 7 s on a home
 link with a 2 Mbit/s uplink. routstrd
 can run it before a request arrives. It keeps a few **armed** sessions per
