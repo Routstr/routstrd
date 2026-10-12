@@ -263,38 +263,6 @@ describe("installOpencodeIntegration", () => {
     expect(models["claude-opus-5.5"]?.package).toBe(OPENCODE_PACKAGES.messages);
   });
 
-  it("honours an explicit config pin over the family heuristic", async () => {
-    const configPath = tempConfigPath();
-    await installOpencodeIntegration(
-      { ...CONFIG, opencodeModelApiFormats: { "claude-opus-5.5": "chat", "glm-5.3": "responses" } },
-      "key",
-      makeIntegration(configPath),
-      MOCK_DEPS,
-    );
-
-    const { models } = readProvider(configPath);
-    // `chat` is the provider default, so the override is dropped, not written.
-    expect("package" in models["claude-opus-5.5"]!).toBe(false);
-    expect(models["glm-5.3"]?.package).toBe(OPENCODE_PACKAGES.responses);
-  });
-
-  it("ignores a pin that is not a known format", async () => {
-    const configPath = tempConfigPath();
-    await installOpencodeIntegration(
-      {
-        ...CONFIG,
-        // A typo must not take the model off its family default.
-        opencodeModelApiFormats: { "glm-5.3": "completions" as never },
-      },
-      "key",
-      makeIntegration(configPath),
-      MOCK_DEPS,
-    );
-
-    const { models } = readProvider(configPath);
-    expect("package" in models["glm-5.3"]!).toBe(false);
-  });
-
   it("leaves the file unchanged when it cannot be parsed", async () => {
     const configPath = tempConfigPath();
     writeFileSync(configPath, "{ not json");
@@ -338,25 +306,6 @@ describe("deriveOpenCodeApiFormat", () => {
 });
 
 describe("resolveOpenCodePackage", () => {
-  it("prefers an explicit pin over the family heuristic", () => {
-    expect(
-      resolveOpenCodePackage("claude-opus-5.5", undefined, {
-        "claude-opus-5.5": "chat",
-      }),
-    ).toBeUndefined();
-    expect(
-      resolveOpenCodePackage("glm-5.3", undefined, { "glm-5.3": "messages" }),
-    ).toBe(OPENCODE_PACKAGES.messages);
-  });
-
-  it("ignores unknown pins so a typo cannot break a family default", () => {
-    expect(
-      resolveOpenCodePackage("claude-opus-5.5", undefined, {
-        "claude-opus-5.5": "nope" as never,
-      }),
-    ).toBe(OPENCODE_PACKAGES.messages);
-  });
-
   it("falls back to the curated package, then to no override at all", () => {
     expect(
       resolveOpenCodePackage("glm-5.3", OPENCODE_PACKAGES.responses),
@@ -377,16 +326,6 @@ describe("resolveOpenCodePackage", () => {
 });
 
 describe("buildOpenCodeModelEntry", () => {
-  it("removes the override when a pin resolves the model back to chat", () => {
-    const entry = buildOpenCodeModelEntry(
-      model({ id: "claude-opus-5.5", name: "Claude Opus 5.5" }),
-      { name: "old", package: OPENCODE_PACKAGES.messages },
-      { formats: { "claude-opus-5.5": "chat" } },
-    );
-
-    expect(entry).toEqual({ name: "Claude Opus 5.5" });
-  });
-
   it("falls back to the model id when the daemon publishes no name", () => {
     const entry = buildOpenCodeModelEntry(model({ id: "glm-5.3" }));
 

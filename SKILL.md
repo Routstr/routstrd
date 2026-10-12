@@ -522,7 +522,6 @@ Config file: `~/.routstrd/config.json`
 | `provider` | string\|null | null | Pinned provider URL; all requests go only to this node (no cross-provider failover) |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
 | `maxTokens` | number | 64000 | Completion budget applied when a client sets no output-token limit |
-| `opencodeModelApiFormats` | object | — | Per-model API shape for the OpenCode integration (`chat`, `responses`, `messages`), keyed by model id; overrides the built-in `claude*`/`gpt-*` defaults |
 | `daemonUrl` | string | — | Remote daemon URL (set by `routstrd remote`) |
 | `authUrl` | string | — | Auth proxy URL for management commands |
 | `nsec` | string | — | Nostr secret key for NIP-98 auth |

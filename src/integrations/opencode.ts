@@ -1,11 +1,18 @@
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
-import type { OpenCodeApiFormat, RoutstrdConfig } from "../utils/config";
+import type { RoutstrdConfig } from "../utils/config";
 import type { IntegrationConfig, RoutstrModel } from "./registry";
 import { callDaemon, getDaemonBaseUrl } from "../utils/daemon-client";
 
 const OPENCODE_SMALL_MODEL = "routstr/minimax-m2.5";
+
+/**
+ * API shape a model is served over: `chat` is `{root}/chat/completions`,
+ * `responses` is `{root}/responses`, and `messages` is `{root}/messages` (the
+ * Anthropic wire format).
+ */
+export type OpenCodeApiFormat = "chat" | "responses" | "messages";
 
 /**
  * OpenCode picks the API shape with a runtime *package*, so a model's transport
@@ -25,21 +32,6 @@ export const OPENCODE_PACKAGES = {
   responses: "@opencode/ai/providers/openai-compatible/responses",
   messages: "@opencode/ai/providers/anthropic-compatible",
 } as const satisfies Record<OpenCodeApiFormat, string>;
-
-export const OPENCODE_API_FORMATS: readonly OpenCodeApiFormat[] = [
-  "chat",
-  "responses",
-  "messages",
-];
-
-export function isOpenCodeApiFormat(
-  value: unknown,
-): value is OpenCodeApiFormat {
-  return (
-    typeof value === "string" &&
-    (OPENCODE_API_FORMATS as readonly string[]).includes(value)
-  );
-}
 
 /**
  * The daemon publishes no transport metadata, so the model id is the only
@@ -67,35 +59,19 @@ export type OpenCodeModelEntry = {
   [key: string]: unknown;
 };
 
-export type OpenCodeModelEntryOptions = {
-  /**
-   * Explicit per-model pins from `opencodeModelApiFormats` in
-   * `~/.routstrd/config.json`. These win over every guess, so the one case the
-   * family heuristic gets wrong stays fixable from routstrd's own config.
-   */
-  formats?: Record<string, OpenCodeApiFormat>;
-};
-
 /**
  * The package a model should be served over, in precedence order:
- *   1. an explicit pin from routstrd's config;
- *   2. the family heuristic, which is authoritative for the two families that
- *      only work over one shape — a stale pin on `claude-*` would silently
- *      pick the endpoint the daemon is not expecting;
- *   3. whatever the user already curated in opencode.json, for models outside
+ *   1. the family heuristic, which is authoritative for the two families that
+ *      only work over one shape — a stale `package` on `claude-*` would
+ *      silently pick the endpoint the daemon is not expecting;
+ *   2. whatever the user already curated in opencode.json, for models outside
  *      those families;
- *   4. chat/completions, i.e. no override at all.
+ *   3. chat/completions, i.e. no override at all.
  */
 export function resolveOpenCodePackage(
   modelId: string,
   previousPackage: unknown,
-  formats?: Record<string, OpenCodeApiFormat>,
 ): string | undefined {
-  const pinned = formats?.[modelId];
-  if (isOpenCodeApiFormat(pinned)) {
-    return pinned === "chat" ? undefined : OPENCODE_PACKAGES[pinned];
-  }
-
   const derived = deriveOpenCodeApiFormat(modelId);
   if (derived !== null) {
     return derived === "chat" ? undefined : OPENCODE_PACKAGES[derived];
@@ -120,14 +96,13 @@ export function resolveOpenCodePackage(
 export function buildOpenCodeModelEntry(
   model: RoutstrModel,
   previous?: OpenCodeModelEntry,
-  options: OpenCodeModelEntryOptions = {},
 ): OpenCodeModelEntry {
   const entry: OpenCodeModelEntry = {
     ...(previous ?? {}),
     name: model.name || model.id,
   };
 
-  const pkg = resolveOpenCodePackage(model.id, previous?.package, options.formats);
+  const pkg = resolveOpenCodePackage(model.id, previous?.package);
   if (pkg === undefined) delete entry.package;
   else entry.package = pkg;
 
@@ -154,28 +129,6 @@ export type OpenCodeIntegrationDeps = {
   getDaemonBaseUrl: typeof getDaemonBaseUrl;
 };
 
-/** Pins that are not a known format are reported once, then ignored. */
-function validFormatPins(
-  formats: Record<string, OpenCodeApiFormat> | undefined,
-): Record<string, OpenCodeApiFormat> | undefined {
-  if (!formats) return undefined;
-
-  const pins: Record<string, OpenCodeApiFormat> = {};
-  const invalid: string[] = [];
-  for (const [modelId, value] of Object.entries(formats)) {
-    if (isOpenCodeApiFormat(value)) pins[modelId] = value;
-    else invalid.push(`${modelId} (${String(value)})`);
-  }
-  if (invalid.length > 0) {
-    console.error(
-      `Ignoring unknown opencodeModelApiFormats value(s) (expected ${OPENCODE_API_FORMATS.join(
-        "|",
-      )}): ${invalid.join(", ")}`,
-    );
-  }
-  return pins;
-}
-
 export async function installOpencodeIntegration(
   config: RoutstrdConfig,
   apiKey: string,
@@ -192,7 +145,6 @@ export async function installOpencodeIntegration(
   console.log(`Using API key for ${name}`);
 
   const baseUrl = getDaemonBaseUrlFn(config);
-  const formats = validFormatPins(config.opencodeModelApiFormats);
 
   let opencodeConfig: OpenCodeConfig;
 
@@ -232,7 +184,6 @@ export async function installOpencodeIntegration(
       modelsObj[model.id] = buildOpenCodeModelEntry(
         model,
         previousModels[model.id],
-        { formats },
       );
     }
 
