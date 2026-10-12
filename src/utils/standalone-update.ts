@@ -154,11 +154,15 @@ export async function getLatestStandaloneRelease(
   platform: NodeJS.Platform = process.platform,
   arch: string = process.arch,
   fetchImpl: typeof fetch = fetch,
+  timeouts: UpdateTimeouts = {},
 ): Promise<StandaloneRelease> {
   const release = await fetchOrThrow(
     RELEASES_API,
     fetchImpl,
-    {},
+    {
+      connectTimeoutMs: timeouts.connectMs,
+      transferTimeoutMs: timeouts.transferMs,
+    },
     async (response) => (await response.json()) as GithubRelease,
   );
   const version = normalizeVersion(release.tag_name || "");

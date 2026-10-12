@@ -70,6 +70,7 @@ import { generateSecretKey, nip19 } from "nostr-tools";
 import { generateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import {
+  checkRoutstrdUpdate,
   compareVersions,
   getGlobalPackageVersion,
   getLatestNpmVersion,
@@ -252,10 +253,13 @@ export function getLivePidFileOwner(
  * effect immediately. Failures are collected and reported but never
  * roll back the update itself.
  *
+ * Returns false when a daemon could not be restarted (callers decide whether
+ * that is fatal).
+ *
  * Note: cocod is no longer a separate process — the wallet now runs
  * in-process via coco-core, so there is nothing else to restart.
  */
-async function restartDaemonsAfterUpdate(): Promise<void> {
+async function restartDaemonsAfterUpdate(): Promise<boolean> {
   const config = await loadConfig();
   const isRemote = !!config.daemonUrl;
   const failures: string[] = [];
@@ -312,10 +316,132 @@ async function restartDaemonsAfterUpdate(): Promise<void> {
     console.error(
       "The update was applied but may not take effect until the daemon is manually restarted.",
     );
-    process.exit(1);
+    return false;
   }
 
   console.log("\n✓ Daemon restarted successfully.");
+  return true;
+}
+
+/**
+ * Install the newest routstrd, whichever way it was installed: standalone
+ * binaries are replaced in place from the GitHub Release, and npm/bun installs
+ * are upgraded through the package manager.
+ *
+ * Returns true when a newer version was installed, false when already current.
+ * Throws when the install itself fails so callers can decide what to do.
+ */
+async function applyRoutstrdUpdate(): Promise<boolean> {
+  if (isStandaloneExecutable()) {
+    const release = await getLatestStandaloneRelease();
+    if ((compareVersions(VERSION, release.version) ?? -1) >= 0) {
+      console.log(`routstrd is already up to date (v${VERSION}).`);
+      return false;
+    }
+
+    console.log(`Updating routstrd from v${VERSION} to v${release.version}...`);
+    await installStandaloneRelease(release);
+    console.log("routstrd updated successfully.\n");
+    return true;
+  }
+
+  const installed = await getGlobalPackageVersion("routstrd");
+  const latest = await getLatestNpmVersion("routstrd");
+
+  // Only skip when we're confident the installed version is current.
+  // If we can't determine either version we fall through to installing.
+  if (
+    installed &&
+    latest &&
+    (compareVersions(installed, latest) ?? -1) >= 0
+  ) {
+    console.log(`routstrd is already up to date (v${installed}).`);
+    return false;
+  }
+
+  const fromPart = installed ? ` from v${installed}` : "";
+  const toPart = latest ? ` to v${latest}` : "";
+  console.log(`Updating routstrd${fromPart}${toPart}...`);
+
+  const proc = Bun.spawn(["bun", "install", "-g", "routstrd"], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  if ((await proc.exited) !== 0) {
+    throw new Error("Failed to update routstrd.");
+  }
+  console.log("routstrd updated successfully.\n");
+  return true;
+}
+
+/**
+ * Ask whether to install an available update. Yes is the default: an empty
+ * answer (bare Enter) is treated as yes.
+ */
+async function confirmUpdate(current: string, latest: string): Promise<boolean> {
+  const rl = require("readline").createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = await new Promise<string>((resolve) => {
+      let settled = false;
+      const done = (value: string) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      rl.question(
+        `A new routstrd version is available (v${current} -> v${latest}). Update now? [Y/n] `,
+        (value: string) => done(value.trim().toLowerCase()),
+      );
+      // Ctrl+D / EOF closes the interface without answering; treat as "no".
+      rl.once("close", () => done("n"));
+    });
+    return answer === "" || answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Offer to update routstrd before the daemon starts. Interactive only: piped
+ * and CI/PM2 invocations skip the check entirely so scripts never block on a
+ * prompt or pay for a network round-trip. Update failures are reported but
+ * never stop the daemon from starting.
+ *
+ * Returns true only when an update was actually installed, so callers can
+ * restart the daemon so the new build takes effect.
+ *
+ * Set ROUTSTRD_NO_UPDATE_CHECK=1 to opt out even on a terminal.
+ */
+async function maybePromptForUpdate(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return false;
+
+  let info;
+  try {
+    info = await checkRoutstrdUpdate();
+  } catch {
+    return false; // Update checks are best-effort.
+  }
+  if (!info.hasUpdate || !info.latest) return false;
+
+  if (!(await confirmUpdate(info.current, info.latest))) {
+    console.log("Skipping update.\n");
+    return false;
+  }
+
+  try {
+    await applyRoutstrdUpdate();
+    return true;
+  } catch (error) {
+    console.error(
+      `\n⚠ Could not update routstrd: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    console.error("Continuing with the current version.\n");
+    return false;
+  }
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -406,62 +532,19 @@ program
   .command("update")
   .description("Update routstrd to the latest version")
   .action(async () => {
-    if (isStandaloneExecutable()) {
-      const release = await getLatestStandaloneRelease();
-      if ((compareVersions(VERSION, release.version) ?? -1) >= 0) {
-        console.log(`routstrd is already up to date (v${VERSION}).`);
-        return;
-      }
-
-      console.log(`Updating routstrd from v${VERSION} to v${release.version}...`);
-      await installStandaloneRelease(release);
-      console.log("routstrd updated successfully.\n");
-      await restartDaemonsAfterUpdate();
-      return;
-    }
-
-    const packages = [{ name: "routstrd", label: "routstrd" }];
-
-    let updatedAny = false;
-
-    for (const { name, label } of packages) {
-      const installed = await getGlobalPackageVersion(name);
-      const latest = await getLatestNpmVersion(name);
-
-      // Only skip when we're confident the installed version is current.
-      // If we can't determine either version we fall through to installing.
-      if (
-        installed &&
-        latest &&
-        (compareVersions(installed, latest) ?? -1) >= 0
-      ) {
-        console.log(`${label} is already up to date (v${installed}).`);
-        continue;
-      }
-
-      const fromPart = installed ? ` from v${installed}` : "";
-      const toPart = latest ? ` to v${latest}` : "";
-      console.log(`Updating ${label}${fromPart}${toPart}...`);
-
-      const proc = Bun.spawn(["bun", "install", "-g", name], {
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const code = await proc.exited;
-      if (code !== 0) {
-        console.error(`Failed to update ${label}.`);
-        process.exit(1);
-      }
-      console.log(`${label} updated successfully.\n`);
-      updatedAny = true;
+    let updatedAny: boolean;
+    try {
+      updatedAny = await applyRoutstrdUpdate();
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
     }
 
     if (updatedAny) {
       console.log("All requested updates have been applied!");
       // Restart daemons so the new binaries take effect immediately.
-      await restartDaemonsAfterUpdate();
-    } else {
-      console.log("\nAll packages are already up to date — nothing to do.");
+      const restarted = await restartDaemonsAfterUpdate();
+      if (!restarted) process.exit(1);
     }
   });
 
@@ -787,6 +870,11 @@ program
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
+    // If an update was installed, restart the running daemon so the new build
+    // takes effect; otherwise startDaemon would no-op on the old process.
+    if (await maybePromptForUpdate()) {
+      await restartDaemonsAfterUpdate();
+    }
     const config = await loadConfig();
     await stopLegacyCocod();
     try {
@@ -2757,6 +2845,7 @@ program
   .option("-p, --provider <provider>", "Default provider to use")
   .action(async (options: { port?: string; host?: string; provider?: string }) => {
     await requireLocalDaemon();
+    await maybePromptForUpdate();
     const config = await loadConfig();
     const wasRunning = await isDaemonRunning();
 

@@ -290,6 +290,11 @@ clients. Equivalent to `routstrd clients --manual-refresh`.
 Update routstrd to the latest version. Standalone-binary installs update
 in place; npm/bun installs are updated through the package manager.
 
+`routstrd start` and `routstrd restart` also check for a newer version first and
+prompt `Update now? [Y/n]` (yes is the default) before bringing the daemon up.
+The check runs only on an interactive terminal, so scripts, CI and PM2 are
+unaffected; set `ROUTSTRD_NO_UPDATE_CHECK=1` to skip it entirely.
+
 ### `routstrd mode`
 
 Interactive prompt to set the client mode:
