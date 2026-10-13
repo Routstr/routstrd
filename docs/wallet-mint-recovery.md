@@ -46,6 +46,27 @@ and NUT-09 restore, allocate fresh deterministic counters safely, and coordinate
 with coco's watcher/processor. It needs its own integration tests before handling
 real funds.
 
+## Wallet doctor
+
+`routstrd wallet doctor` runs read-only health checks before the legacy
+migration diagnosis:
+
+1. **Mint reachability** — a NUT-06 probe against every trusted mint.
+2. **Recent unpaid quotes** — pending quotes from the last hour the mint
+   still reports UNPAID (an invoice awaiting payment; informational).
+3. **Paid but not issued** — the stuck scenario this recovery feature
+   fixes. Each finding prints its `wallet recover --op <id>` remediation,
+   with `--include-failed` when the operation must be re-opened first.
+4. **Stuck melts** — prepared melts holding reserved proofs, in-flight
+   melts, and failed melts whose input proofs were never released.
+
+The doctor never mutates wallet state: quote checks are plain NUT-04 reads,
+not coco's observe-and-persist path, and remediation is always left to the
+operator. It exits non-zero when money is provably at risk (unreachable
+mint, paid-but-unissued quote, failed melt with locked proofs) or the
+migration diagnosis finds a conflict, so it can gate scripts. When the
+daemon is down only the offline migration section runs.
+
 ## Cleanup preview and force
 
 `wallet cleanup --dry-run` is local-only: it reports `mintQuoteCandidates`, not

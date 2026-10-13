@@ -40,6 +40,18 @@ import type {
 } from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
+  classifyPaidUnissued,
+  classifyStuckMelt,
+  mintQuoteStateToCategory,
+  selectPaidUnissuedCandidates,
+  selectRecentMintQuotes,
+  toUnpaidQuote,
+  type DoctorMeltOperation,
+  type DoctorMintOperation,
+  type DoctorMintProbe,
+  type WalletDoctorReport,
+} from "./doctor";
+import {
   classifyMintQuoteObservation,
   selectMintQuotesForRecovery,
   type MintQuoteRecoveryCandidate,
@@ -730,6 +742,31 @@ async function enableCocoManager(coco: Manager): Promise<void> {
  * recovery promise that gates value-moving operations) far longer than this.
  */
 const EXPIRED_MINT_OBSERVATION_DEADLINE_MS = 15_000;
+
+/** Per-request timeout for the doctor's NUT-06/NUT-04 mint probes. */
+const DOCTOR_MINT_PROBE_TIMEOUT_MS = 4_000;
+/** Overall budget for the doctor's quote-state probe round. */
+const DOCTOR_QUOTE_PROBE_BUDGET_MS = 15_000;
+/** How many doctor quote-state probes run at once. */
+const DOCTOR_QUOTE_PROBE_CONCURRENCY = 4;
+
+/**
+ * Private coco repositories the doctor reads failed operations and locked
+ * proofs through. Read-only access only; resolved fail-closed (see
+ * doctorRepositories) so a coco upgrade that renames them surfaces
+ * immediately instead of silently skipping health checks.
+ */
+interface MintOperationRepositoryDoctor {
+  getByState(state: string): Promise<DoctorMintOperation[]>;
+}
+
+interface MeltOperationRepositoryDoctor {
+  getByState(state: string): Promise<Array<Record<string, unknown>>>;
+}
+
+interface ProofRepositoryDoctor {
+  getInflightProofs(mintUrls?: string[]): Promise<Array<{ secret: string }>>;
+}
 
 /** Rejects when `timeoutMs` elapses before `promise` settles. */
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -1810,6 +1847,240 @@ export async function runWalletRecovery(
   }
 }
 
+/**
+ * Structural source for the wallet doctor, so the orchestration is testable
+ * without a wallet database or network access (mirrors
+ * MintQuoteRecoverySource). Every method is a READ: the doctor never
+ * observes-and-persists, finalizes, or fails operations.
+ */
+export interface WalletDoctorSource {
+  listTrustedMintUrls(): Promise<string[]>;
+  /** Pending and executing mint operations. */
+  listPendingMintOps(): Promise<DoctorMintOperation[]>;
+  /** Terminally failed mint operations (via coco's private repository). */
+  listFailedMintOps(): Promise<DoctorMintOperation[]>;
+  listPreparedMelts(): Promise<Array<Record<string, unknown>>>;
+  listInFlightMelts(): Promise<Array<Record<string, unknown>>>;
+  listFailedMelts(): Promise<Array<Record<string, unknown>>>;
+  /** Secrets of proofs currently locked (`inflight`). */
+  getInflightProofSecrets(): Promise<string[]>;
+  /** NUT-06 reachability probe for one mint. */
+  probeMint(mintUrl: string): Promise<DoctorMintProbe>;
+  /** Read-only NUT-04 quote state fetch (no persistence). */
+  fetchQuoteState(mintUrl: string, quoteId: string): Promise<string>;
+  /** Probe budget/concurrency overrides for tests. */
+  quoteProbeBudgetMs?: number;
+  quoteProbeConcurrency?: number;
+}
+
+/**
+ * Run the read-only wallet health checks behind `routstrd wallet doctor`.
+ *
+ * Four checks, all driven by the pure helpers in doctor.ts:
+ *
+ * 1. Mint reachability: every trusted mint gets a NUT-06 probe, in parallel.
+ * 2. Recent unpaid quotes: pending quotes created in the last hour whose
+ *    mint still reports UNPAID - informational, an invoice awaiting payment.
+ * 3. Paid but not issued: the stuck scenario `wallet recover` remediates.
+ *    Candidates share recovery's selection rules; the remote state is
+ *    classified by the same helper recovery uses, so doctor and recovery
+ *    never disagree about what is claimable.
+ * 4. Stuck melts: prepared melts holding reserved proofs, in-flight melts,
+ *    and failed melts whose input proofs were never released.
+ *
+ * Quote-state probes are read-only NUT-04 fetches (never coco's
+ * observe-and-persist path), bounded by an overall budget and a concurrency
+ * limit so a slow mint cannot stall the whole report. Quotes that could not
+ * be checked are counted in `uncheckedQuotes` rather than silently dropped.
+ */
+export async function runWalletDoctor(
+  source: WalletDoctorSource,
+): Promise<WalletDoctorReport> {
+  const nowMs = Date.now();
+  const report: WalletDoctorReport = {
+    generatedAt: nowMs,
+    mints: [],
+    unpaidQuotes: [],
+    paidUnissued: [],
+    stuckMelts: [],
+    uncheckedQuotes: 0,
+  };
+
+  const trustedMintUrls = await source.listTrustedMintUrls();
+  report.mints = await Promise.all(
+    trustedMintUrls.map((mintUrl) => source.probeMint(mintUrl)),
+  );
+
+  const [pendingMintOps, failedMintOps] = await Promise.all([
+    source.listPendingMintOps(),
+    source.listFailedMintOps(),
+  ]);
+  const recentQuotes = selectRecentMintQuotes(pendingMintOps, nowMs);
+  const recentIds = new Set(recentQuotes.map((op) => op.id));
+  const candidates = selectPaidUnissuedCandidates([
+    ...pendingMintOps,
+    ...failedMintOps,
+  ]);
+
+  const targets = new Map<string, DoctorMintOperation>();
+  for (const op of [...recentQuotes, ...candidates]) {
+    if (!targets.has(op.id)) targets.set(op.id, op);
+  }
+  const queue = [...targets.values()];
+  const budgetMs = source.quoteProbeBudgetMs ?? DOCTOR_QUOTE_PROBE_BUDGET_MS;
+  const concurrency =
+    source.quoteProbeConcurrency ?? DOCTOR_QUOTE_PROBE_CONCURRENCY;
+  const deadlineAt = nowMs + budgetMs;
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (next < queue.length && Date.now() < deadlineAt) {
+        const op = queue[next++];
+        if (!op) break;
+        try {
+          const remoteState = await source.fetchQuoteState(
+            op.mintUrl,
+            op.quoteId as string,
+          );
+          if (
+            recentIds.has(op.id) &&
+            mintQuoteStateToCategory(remoteState) === "waiting"
+          ) {
+            report.unpaidQuotes.push(toUnpaidQuote(op, nowMs));
+          }
+          const finding = classifyPaidUnissued(op, remoteState);
+          if (finding) report.paidUnissued.push(finding);
+        } catch {
+          report.uncheckedQuotes++;
+        }
+      }
+    }),
+  );
+  report.uncheckedQuotes += queue.length - next;
+  // Concurrent workers push in completion order; sort for a stable report.
+  report.unpaidQuotes.sort((a, b) => a.operationId.localeCompare(b.operationId));
+  report.paidUnissued.sort((a, b) => a.operationId.localeCompare(b.operationId));
+
+  const [preparedMelts, inFlightMelts, failedMelts, inflightSecretsList] =
+    await Promise.all([
+      source.listPreparedMelts(),
+      source.listInFlightMelts(),
+      source.listFailedMelts(),
+      source.getInflightProofSecrets(),
+    ]);
+  const inflightSecrets = new Set(inflightSecretsList);
+  for (const raw of [...preparedMelts, ...inFlightMelts, ...failedMelts]) {
+    const finding = classifyStuckMelt(toDoctorMeltOperation(raw), {
+      nowMs,
+      inflightSecrets,
+    });
+    if (finding) report.stuckMelts.push(finding);
+  }
+  report.stuckMelts.sort((a, b) => a.operationId.localeCompare(b.operationId));
+
+  return report;
+}
+
+/** Map coco's melt operation rows onto the doctor's structural subset. */
+function toDoctorMeltOperation(
+  raw: Record<string, unknown>,
+): DoctorMeltOperation {
+  return {
+    id: String(raw.id),
+    mintUrl: String(raw.mintUrl),
+    quoteId: typeof raw.quoteId === "string" ? raw.quoteId : undefined,
+    state: String(raw.state),
+    amount: Number(raw.amount ?? 0),
+    feeReserve: Number(raw.fee_reserve ?? 0),
+    inputProofSecrets: Array.isArray(raw.inputProofSecrets)
+      ? raw.inputProofSecrets.map((secret) => String(secret))
+      : [],
+    createdAt: Number(raw.createdAt ?? 0),
+    updatedAt: Number(raw.updatedAt ?? 0),
+    error: typeof raw.error === "string" ? raw.error : undefined,
+  };
+}
+
+/**
+ * Resolve coco's private repositories for the doctor. Fails closed - a coco
+ * upgrade that renames them must surface here and in the doctor tests, not
+ * silently skip the failed-operation and locked-proof checks.
+ */
+function doctorRepositories(coco: Manager): {
+  mintOps: MintOperationRepositoryDoctor;
+  meltOps: MeltOperationRepositoryDoctor;
+  proofs: ProofRepositoryDoctor;
+} {
+  const inner = coco as unknown as {
+    mintOperationRepository?: MintOperationRepositoryDoctor;
+    meltOperationRepository?: MeltOperationRepositoryDoctor;
+    proofRepository?: ProofRepositoryDoctor;
+  };
+  const checks: Array<[string, object | undefined, string]> = [
+    ["mintOperationRepository", inner.mintOperationRepository, "getByState"],
+    ["meltOperationRepository", inner.meltOperationRepository, "getByState"],
+    ["proofRepository", inner.proofRepository, "getInflightProofs"],
+  ];
+  for (const [name, repo, method] of checks) {
+    if (
+      !repo ||
+      typeof (repo as Record<string, unknown>)[method] !== "function"
+    ) {
+      throw new Error(
+        `coco ${name}.${method} is unavailable; refusing to run wallet doctor with partial health checks`,
+      );
+    }
+  }
+  return {
+    mintOps: inner.mintOperationRepository as MintOperationRepositoryDoctor,
+    meltOps: inner.meltOperationRepository as MeltOperationRepositoryDoctor,
+    proofs: inner.proofRepository as ProofRepositoryDoctor,
+  };
+}
+
+/** Read-only NUT-06 reachability probe for one mint. */
+export async function probeMintInfo(mintUrl: string): Promise<DoctorMintProbe> {
+  const startedAt = Date.now();
+  try {
+    const response = await fetch(`${mintUrl.replace(/\/+$/, "")}/v1/info`, {
+      signal: AbortSignal.timeout(DOCTOR_MINT_PROBE_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return {
+      mintUrl,
+      reachable: true,
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      mintUrl,
+      reachable: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Read-only NUT-04 quote state fetch. Unlike coco's
+ * observePendingOperation this persists nothing, which is what keeps the
+ * doctor free of side effects.
+ */
+export async function fetchMintQuoteState(
+  mintUrl: string,
+  quoteId: string,
+): Promise<string> {
+  const response = await fetch(
+    `${mintUrl.replace(/\/+$/, "")}/v1/mint/quote/bolt11/${encodeURIComponent(quoteId)}`,
+    { signal: AbortSignal.timeout(DOCTOR_MINT_PROBE_TIMEOUT_MS) },
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const body = (await response.json()) as { state?: unknown };
+  if (typeof body.state !== "string") {
+    throw new Error("mint response missing quote state");
+  }
+  return body.state;
+}
+
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<WalletClient> {
@@ -2600,6 +2871,39 @@ export async function createCocoClient(
         skipped,
         errors,
       };
+    },
+
+    async diagnoseWallet() {
+      const repos = doctorRepositories(coco);
+      return runWalletDoctor({
+        listTrustedMintUrls: async () =>
+          (await coco.mint.getAllTrustedMints()).map((mint) => mint.mintUrl),
+        listPendingMintOps: async () => {
+          // listInFlight can overlap with listPending; dedupe by id.
+          const byId = new Map<string, DoctorMintOperation>();
+          for (const op of [
+            ...(await coco.ops.mint.listPending()),
+            ...(await coco.ops.mint.listInFlight()),
+          ] as unknown as DoctorMintOperation[]) {
+            byId.set(op.id, op);
+          }
+          return [...byId.values()];
+        },
+        listFailedMintOps: () => repos.mintOps.getByState("failed"),
+        listPreparedMelts: async () =>
+          coco.ops.melt.listPrepared() as unknown as Array<
+            Record<string, unknown>
+          >,
+        listInFlightMelts: async () =>
+          coco.ops.melt.listInFlight() as unknown as Array<
+            Record<string, unknown>
+          >,
+        listFailedMelts: () => repos.meltOps.getByState("failed"),
+        getInflightProofSecrets: async () =>
+          (await repos.proofs.getInflightProofs()).map((proof) => proof.secret),
+        probeMint: probeMintInfo,
+        fetchQuoteState: fetchMintQuoteState,
+      });
     },
 
     async recoverMintQuotes(options, onProgress) {
