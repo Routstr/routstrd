@@ -2558,8 +2558,9 @@ export function confidentialPrewarmOptions(
     activityWindowMs: minutes !== undefined ? minutes * 60_000 : undefined,
     maxPerKey: num(cfg?.maxPerKey),
     maxTotal: num(cfg?.maxTotal),
-    // The node and the sidecar end a session 600 s after setup.
-    maxAgeMs: seconds !== undefined ? Math.min(seconds, 570) * 1000 : undefined,
+    // The node and the sidecar end a session 600 s after setup; below 60 s
+    // sessions would be armed and retired (traffic, abandon fees) every tick.
+    maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
     maxSessionFeeMsat: num(cfg?.maxSessionFeeMsat),
     maxArmedWithFee: num(cfg?.maxArmedWithFee),
     log: (message: string) => logger.log(message),

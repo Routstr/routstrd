@@ -98,7 +98,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 | `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
 | `maxPerKey` | 6 | armed sessions per key |
 | `maxTotal` | 6 | armed sessions in total. Nodes limit unused sessions per client address (default 12, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
-| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends a session 600 s after accepting its websocket; capped at 570) |
+| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends a session 600 s after accepting its websocket; clamped to 60–570) |
 | `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
 | `maxArmedWithFee` | 6 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
 
