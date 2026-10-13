@@ -28,6 +28,12 @@ describe("confidentialUpstream.prewarm → SDK options", () => {
     expect(confidentialPrewarmOptions({ maxAgeSeconds: 300 })?.maxAgeMs).toBe(300_000);
   });
 
+  test("floors the age at 60 s so sessions are not armed and retired every tick", () => {
+    expect(confidentialPrewarmOptions({ maxAgeSeconds: 0 })?.maxAgeMs).toBe(60_000);
+    expect(confidentialPrewarmOptions({ maxAgeSeconds: 5 })?.maxAgeMs).toBe(60_000);
+    expect(confidentialPrewarmOptions({ maxAgeSeconds: 60 })?.maxAgeMs).toBe(60_000);
+  });
+
   test("passes the session-fee limit through (default: the SDK's)", () => {
     expect(confidentialPrewarmOptions(undefined)?.maxSessionFeeMsat).toBeUndefined();
     expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 0 })?.maxSessionFeeMsat).toBe(0);
