@@ -352,11 +352,28 @@ describe("getUsageSummary time windows", () => {
     expect(summary.window!.totals.satsCost).toBe(5 + 7 + 11);
   });
 
-  it("today only includes entries from the current day", async () => {
+  it("today covers the last 24 hours, not just the calendar day", async () => {
     const summary = await getUsageSummary(driver, [], TZ0, undefined, "today");
     expect(summary.window!.totals.requests).toBe(1);
     expect(summary.window!.models).toHaveLength(1);
     expect(summary.window!.models[0]!.modelId).toBe("model-recent");
+  });
+
+  it("today includes yesterday's hours but drops entries older than 24h", async () => {
+    __resetUsageSummaryCacheForTest();
+    const boundaryDriver = createMemoryUsageTrackingDriver([
+      windowEntry("b-recent", NOW, "model-recent", 500, 5),
+      windowEntry("b-yesterday", NOW - 20 * 3_600_000, "model-yesterday", 600, 7),
+      windowEntry("b-outside", NOW - 25 * 3_600_000, "model-outside", 700, 11),
+    ]);
+    const summary = await getUsageSummary(boundaryDriver, [], TZ0, undefined, "today");
+
+    expect(summary.window!.totals.requests).toBe(2);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7);
+    expect(summary.window!.models.map((m) => m.modelId).sort()).toEqual([
+      "model-recent",
+      "model-yesterday",
+    ]);
   });
 
   it("scopes the windowed size buckets", async () => {
@@ -397,6 +414,10 @@ describe("getUsageSummary time windows", () => {
     // The recent entry lands in the bucket for its local (UTC) hour.
     const currentHour = String(new Date(RECENT).getUTCHours()).padStart(2, "0");
     expect(points.find((p) => p.key === currentHour)!.satsCost).toBe(5);
+
+    // The chart covers exactly the windowed range: bars sum to the totals.
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);
+    expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
   });
 
   it("builds a 7-day timeline ending today", async () => {
@@ -411,6 +432,10 @@ describe("getUsageSummary time windows", () => {
     // Newest bucket is today, oldest is exactly six days earlier.
     expect(points[6]!.key).toBe(new Date(RECENT).toISOString().slice(0, 10));
     expect(points[0]!.timestamp).toBe(points[6]!.timestamp - 6 * 86_400_000);
+
+    // Bars sum to the windowed totals (whole local days, not `now - 7*24h`).
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);
+    expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
   });
 
   it("builds a 30-day timeline but folds the all window into months", async () => {
@@ -418,6 +443,9 @@ describe("getUsageSummary time windows", () => {
     expect(month.window!.timeline.bucket).toBe("day");
     expect(month.window!.timeline.points).toHaveLength(30);
     expect(month.window!.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
+    expect(month.window!.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(
+      month.window!.totals.satsCost,
+    );
 
     const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
     const { bucket, points } = all.window!.timeline;

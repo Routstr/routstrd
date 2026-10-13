@@ -93,8 +93,10 @@ export interface Timeline {
 }
 
 /**
- * Selectable time range for the usage monitor. `today` is the current local
- * day, `7d`/`30d` are rolling windows, `all` is unbounded.
+ * Selectable time range for the usage monitor. `today` is the last 24
+ * hours (hour-aligned), `7d`/`30d` cover that many whole local days ending
+ * today, `all` is unbounded. Windowed aggregates and the History timeline
+ * share the same range, so tab totals match the sum of the chart bars.
  */
 export type TimeWindow = "all" | "today" | "7d" | "30d";
 
@@ -221,26 +223,44 @@ function startOfLocalDayUtc(now: number, tzOffsetMinutes: number): number {
   );
 }
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+/**
+ * Start (UTC ms) of the oldest bucket the History chart draws for a window,
+ * or `undefined` for the unbounded `all` window. The windowed aggregates use
+ * the same boundary, so a tab's totals always match the sum of its bars:
+ *
+ * - `today` → the current local hour minus 23h (24 whole hour buckets).
+ * - `7d` / `30d` → start of the local day 6 / 29 days ago (whole days).
+ */
+function windowRangeStartUtc(
+  window: TimeWindow,
+  now: number,
+  tzOffsetMinutes: number,
+): number | undefined {
+  if (window === "all") return undefined;
+  const bucketMs = window === "today" ? HOUR_MS : DAY_MS;
+  const slotCount = window === "today" ? 24 : window === "7d" ? 7 : 30;
+  const shiftedNow = now - tzOffsetMinutes * 60_000;
+  const newestShifted = Math.floor(shiftedNow / bucketMs) * bucketMs;
+  const oldestShifted = newestShifted - (slotCount - 1) * bucketMs;
+  return oldestShifted + tzOffsetMinutes * 60_000;
+}
+
 /**
  * The `after` boundary (exclusive, as the driver defines it) for a window, or
- * `undefined` for the unbounded `all` window.
+ * `undefined` for the unbounded `all` window. Aligned with the History chart
+ * via {@link windowRangeStartUtc}; the driver's strict `timestamp > after`
+ * makes the 1ms nudge include entries exactly at the first bucket's start.
  */
 function windowAfter(
   window: TimeWindow,
   now: number,
   tzOffsetMinutes: number,
 ): number | undefined {
-  switch (window) {
-    case "today":
-      // Strict `timestamp > after`, so a 1ms nudge makes local midnight inclusive.
-      return startOfLocalDayUtc(now, tzOffsetMinutes) - 1;
-    case "7d":
-      return now - 7 * 86400000;
-    case "30d":
-      return now - 30 * 86400000;
-    case "all":
-      return undefined;
-  }
+  const start = windowRangeStartUtc(window, now, tzOffsetMinutes);
+  return start === undefined ? undefined : start - 1;
 }
 
 /** Filter shared by every aggregate/list/count call. */
@@ -250,9 +270,6 @@ interface UsageFilter {
 }
 
 // ─── History timeline ────────────────────────────────────────────────────────
-
-const HOUR_MS = 3_600_000;
-const DAY_MS = 86_400_000;
 
 const pad2 = (n: number): string => String(n).padStart(2, "0");
 
@@ -331,13 +348,11 @@ async function buildTimeline(
   const bucketMs = isHourly ? HOUR_MS : DAY_MS;
   const slotCount = isHourly ? 24 : window === "7d" ? 7 : 30;
 
-  // Align the newest slot to the current local hour/day so the window covers
-  // whole buckets (each hour-of-day appears at most once, which matters
-  // because the SDK's `hour` keys carry no date).
-  const shiftedNow = now - tzOffsetMinutes * 60_000;
-  const newestShifted = Math.floor(shiftedNow / bucketMs) * bucketMs;
-  const oldestShifted = newestShifted - (slotCount - 1) * bucketMs;
-  const oldestUtc = oldestShifted + tzOffsetMinutes * 60_000;
+  // Same boundary the windowed aggregates use, so the chart bars sum to the
+  // tab's totals. Aligning the newest slot to the current local hour/day also
+  // keeps each hour-of-day unique (the SDK's `hour` keys carry no date).
+  const oldestUtc = windowRangeStartUtc(window, now, tzOffsetMinutes)!;
+  const oldestShifted = oldestUtc - tzOffsetMinutes * 60_000;
 
   const rows = await driver.aggregate({
     ...baseFilter,
