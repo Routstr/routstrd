@@ -4,6 +4,7 @@ import {
   addDaemonClient,
   type DaemonClient,
 } from "../utils/clients";
+import { callDaemon } from "../utils/daemon-client";
 import { getClientsList } from "../utils/clients";
 import { installOpencodeIntegration } from "./opencode";
 import { installOpenClawIntegration } from "./openclaw";
@@ -136,24 +137,125 @@ async function installIntegrationByKey(
     console.log(`Using existing API key for ${integrationConfig.name}`);
   }
 
-  switch (key) {
-    case "opencode":
-      await installOpencodeIntegration(config, client.apiKey, integrationConfig);
+  if (MODEL_INTEGRATIONS.has(key)) {
+    const ready = await waitForModels();
+    if (!ready.ok) {
+      warnIntegrationSkipped(integrationConfig.name, ready.reason);
       return;
-    case "openclaw":
-      await installOpenClawIntegration(config, client.apiKey, integrationConfig);
-      return;
-    case "pi-agent":
-      await installPiIntegration(config, client.apiKey, integrationConfig);
-      return;
-    case "claude-code":
-      await installClaudeCodeIntegration(config, client.apiKey, integrationConfig);
-      return;
-    case "hermes":
-      await installHermesIntegration(config, client.apiKey, integrationConfig);
-      return;
-    default:
+    }
+  }
+
+  // The installers throw so scheduled/bulk refreshes count failures. During
+  // onboarding the daemon and API key already exist and `routstrd refresh`
+  // completes the setup later, so a failure here must not abort onboarding.
+  try {
+    const install = INSTALLERS[key];
+    if (!install) {
       console.log(`Unknown integration: ${key}`);
+      return;
+    }
+    await install(config, client.apiKey, integrationConfig);
+  } catch (error) {
+    warnIntegrationSkipped(
+      integrationConfig.name,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+const INSTALLERS: Record<string, IntegrationInstaller> = {
+  opencode: installOpencodeIntegration,
+  openclaw: installOpenClawIntegration,
+  "pi-agent": installPiIntegration,
+  "claude-code": installClaudeCodeIntegration,
+  hermes: installHermesIntegration,
+};
+
+type IntegrationInstaller = (
+  config: RoutstrdConfig,
+  apiKey: string,
+  integrationConfig: IntegrationConfig,
+) => Promise<void>;
+
+/** Integrations whose config embeds the daemon's model list. */
+const MODEL_INTEGRATIONS = new Set<string>(["opencode", "openclaw", "pi-agent"]);
+
+function warnIntegrationSkipped(name: string, reason: string): void {
+  console.warn(`\nWarning: ${name} integration was not configured: ${reason}`);
+  console.warn(
+    "The daemon and API key are ready. Run 'routstrd refresh' once models are available to finish the setup.",
+  );
+}
+
+/** Upper bound for onboarding to wait on the daemon's first model load. */
+export const ONBOARD_MODELS_TIMEOUT_MS = 5 * 60 * 1000;
+
+export interface WaitForModelsDeps {
+  callDaemon: typeof callDaemon;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  log: (message: string) => void;
+  timeoutMs: number;
+  retryDelayMs: number;
+  heartbeatMs: number;
+}
+
+/**
+ * Wait until the daemon serves a non-empty `/models` list. `startDaemon` only
+ * waits for `/health`; on a fresh install the first `/models` call blocks
+ * while providers bootstrap and the Nostr model list loads, and may still come
+ * back empty if relays are slow. Retries until `timeoutMs`, printing progress.
+ */
+export async function waitForModels(
+  overrides: Partial<WaitForModelsDeps> = {},
+): Promise<{ ok: true; count: number } | { ok: false; reason: string }> {
+  const deps: WaitForModelsDeps = {
+    callDaemon,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: Date.now,
+    log: (message) => console.log(message),
+    timeoutMs: ONBOARD_MODELS_TIMEOUT_MS,
+    retryDelayMs: 3_000,
+    heartbeatMs: 10_000,
+    ...overrides,
+  };
+  const startedAt = deps.now();
+  const elapsed = () => Math.round((deps.now() - startedAt) / 1000);
+  deps.log("Waiting for models to load...");
+  // A single /models request can block for a while, so heartbeat on a timer
+  // rather than between attempts.
+  const heartbeat = setInterval(
+    () => deps.log(`  Still waiting for models (${elapsed()}s elapsed)...`),
+    deps.heartbeatMs,
+  );
+  let reason = "no models were returned";
+  try {
+    while (true) {
+      try {
+        const data = await deps.callDaemon("/models");
+        if (data.error) {
+          reason = data.error;
+        } else {
+          const models = (data.output as { models?: unknown[] } | undefined)?.models ?? [];
+          if (models.length > 0) {
+            deps.log(`Loaded ${models.length} models (${elapsed()}s).`);
+            return { ok: true, count: models.length };
+          }
+          reason = "no models were returned";
+        }
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
+      }
+      if (deps.now() - startedAt + deps.retryDelayMs >= deps.timeoutMs) {
+        return {
+          ok: false,
+          reason: `models did not load within ${Math.round(deps.timeoutMs / 1000)}s (${reason})`,
+        };
+      }
+      await deps.sleep(deps.retryDelayMs);
+    }
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 
