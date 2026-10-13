@@ -12,7 +12,7 @@ import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { VERSION } from "../../version";
-import { readUpdateState } from "../../utils/update-state";
+import { readUpdateState, type UpdateState } from "../../utils/update-state";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
   WalletHttpError,
@@ -433,6 +433,8 @@ export function createDaemonRequestHandler(deps: {
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
+  /** Reads the cached update state for GET /version; defaults to the on-disk cache. */
+  loadUpdateState?: () => UpdateState | null;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -471,7 +473,7 @@ export function createDaemonRequestHandler(deps: {
     // background update check. Read-only and cheap: the daemon refreshes the
     // cache on its own schedule, so CLI/TUI clients just read it.
     if (req.method === "GET" && url.pathname === "/version") {
-      const state = readUpdateState();
+      const state = (deps.loadUpdateState ?? readUpdateState)();
       sendJson(res, 200, {
         output: {
           version: VERSION,

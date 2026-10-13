@@ -206,6 +206,16 @@ The daemon exposes an HTTP server (default port 8008) with the following endpoin
 GET /health
 ```
 
+#### Version
+```
+GET /version
+```
+
+Returns the running daemon version plus the cached result of its background
+update check (`{ version, current, latest, hasUpdate, checkedAt }`). The daemon
+refreshes that cache every 6 hours; the TUI banner and the CLI's
+"update available" notice both read it, so no client polls the registry itself.
+
 #### Cooldowns
 ```
 GET /cooldowns
@@ -379,6 +389,12 @@ Standalone installations update directly from GitHub Releases with
 `routstrd update`. npm installations continue to update through Bun. PM2 is an
 optional external dependency used only by `routstrd service`; normal daemon
 operation does not require it.
+
+A background check in the daemon caches whether a newer routstrd exists in
+`~/.routstrd/update-state.json` (refreshed every 6 hours) and serves it from
+`GET /version`. The usage TUI shows an update banner from that cache, and after
+most commands the CLI prints a one-line notice pointing at `routstrd update`.
+Set `ROUTSTRD_NO_UPDATE_CHECK=1` to disable all of it.
 
 When an update finds a process on the configured daemon port, it only stops that
 process if the wallet PID file confirms a live daemon owned by the same routstrd
