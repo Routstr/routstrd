@@ -3,6 +3,7 @@ import type {
   UsageTrackingDriver,
   UsageTrackingEntry,
 } from "@routstr/sdk/storage";
+import { createUsageCalendar } from "./usage-calendar";
 import type { ClientEntry } from "../../utils/clients";
 
 // ─── Public shape ────────────────────────────────────────────────────────────
@@ -251,21 +252,6 @@ function windowRangeStartUtc(
   return oldestShifted + tzOffsetMinutes * 60_000;
 }
 
-/**
- * The `after` boundary (exclusive, as the driver defines it) for a window, or
- * `undefined` for the unbounded `all` window. Aligned with the History chart
- * via {@link windowRangeStartUtc}; the driver's strict `timestamp > after`
- * makes the 1ms nudge include entries exactly at the first bucket's start.
- */
-function windowAfter(
-  window: TimeWindow,
-  now: number,
-  tzOffsetMinutes: number,
-): number | undefined {
-  const start = windowRangeStartUtc(window, now, tzOffsetMinutes);
-  return start === undefined ? undefined : start - 1;
-}
-
 /** Filter shared by every aggregate/list/count call. */
 interface UsageFilter {
   clients?: string[];
@@ -508,6 +494,79 @@ async function buildWeeklyTimeline(
   return { bucket: "week", points };
 }
 
+/** IANA grouping is local because the SDK accepts only a single UTC offset. */
+function calendarRows(
+  entries: UsageTrackingEntry[],
+  calendar: ReturnType<typeof createUsageCalendar>,
+  keyForWall: (wall: number) => string,
+): Map<string, StatRow> {
+  const rows = new Map<string, StatRow>();
+  for (const entry of entries) {
+    const key = keyForWall(calendar.wallTime(entry.timestamp));
+    const row = rows.get(key) ?? zeroStatRow();
+    row.requests++;
+    row.cost += entry.cost;
+    row.satsCost += entry.satsCost;
+    row.totalTokens += entry.totalTokens;
+    row.promptTokens += entry.promptTokens;
+    row.completionTokens += entry.completionTokens;
+    rows.set(key, row);
+  }
+  return rows;
+}
+
+async function buildCalendarTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  window: TimeWindow,
+  now: number,
+  calendar: ReturnType<typeof createUsageCalendar>,
+  start: number | undefined,
+): Promise<Timeline> {
+  const entries = await driver.list({ ...baseFilter, ...(start === undefined ? {} : { after: start - 1 }) });
+  const points: TimelinePoint[] = [];
+  if (window === "today") {
+    // 24 elapsed hours, preserving both occurrences of a repeated DST hour.
+    const slots = new Map<number, TimelineAccumulator>();
+    for (const entry of entries) {
+      const slot = Math.floor((entry.timestamp - start!) / HOUR_MS);
+      const row = slots.get(slot) ?? zeroAccumulator();
+      row.requests++;
+      row.satsCost += entry.satsCost;
+      row.totalTokens += entry.totalTokens;
+      row.promptTokens += entry.promptTokens;
+      row.completionTokens += entry.completionTokens;
+      slots.set(slot, row);
+    }
+    for (let i = 0; i < 24; i++) {
+      const timestamp = start! + i * HOUR_MS;
+      points.push({ key: pad2(new Date(calendar.wallTime(timestamp)).getUTCHours()), timestamp,
+        ...(slots.get(i) ?? zeroAccumulator()) });
+    }
+    return { bucket: "hour", points };
+  }
+  const keyForWall = window === "all"
+    ? (wall: number) => shiftedDayKey(startOfWeekShifted(wall))
+    : window === "7d"
+      ? (wall: number) => shiftedDayKey(wall).slice(5) + " " + pad2(Math.floor(new Date(wall).getUTCHours() / 6) * 6)
+      : shiftedDayKey;
+  const rows = calendarRows(entries, calendar, keyForWall);
+  if (window === "all" && rows.size === 0) return emptyTimeline(window);
+  const first = window === "all"
+    ? dayKeyToShifted([...rows.keys()].sort()[0]!)
+    : calendar.dayStart(now) - (window === "7d" ? 6 : 29) * DAY_MS;
+  const last = window === "all" ? startOfWeekShifted(calendar.wallTime(now)) : calendar.dayStart(now);
+  const step = window === "all" ? 7 * DAY_MS : DAY_MS;
+  for (let day = first; day <= last; day += step) {
+    for (let hour = 0; hour < (window === "7d" ? 24 : 1); hour += window === "7d" ? 6 : 1) {
+      const wall = day + hour * HOUR_MS;
+      const key = keyForWall(wall);
+      points.push({ key, timestamp: calendar.toUtc(wall), ...accumulatorFromRow(rows.get(key) ?? zeroAccumulator()) });
+    }
+  }
+  return { bucket: bucketForWindow(window), points };
+}
+
 // ─── Module-level memo cache ─────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -669,13 +728,27 @@ export async function getUsageSummary(
   clientFilter?: string[],
   /** Time window for the `summary.window` block. Defaults to `all`. */
   window: TimeWindow = "all",
+  /** IANA timezone for historical calendar boundaries; omitted uses fixed-offset days. */
+  timeZone?: string,
 ): Promise<UsageSummary> {
   // Cache key: total row count + per-client identity + filter + tz + window.
-  const count = await driver.count(clientFilter ? { clients: clientFilter } : {});
+  // The SDK interprets clients: [] as unfiltered; an explicitly empty owner
+  // selection must instead match nothing, without touching its query path.
+  const count = clientFilter?.length === 0
+    ? 0
+    : await driver.count(clientFilter ? { clients: clientFilter } : {});
   const clientIdentity = clients.map((c) => `${c.clientId}:${c.ownerNpub ?? ""}`).join(",");
-  const filterKey = clientFilter ? `:f:${clientFilter.sort().join(",")}` : "";
-  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}${filterKey}:${window}`;
+  const filterKey = clientFilter ? `:f:${[...clientFilter].sort().join(",")}` : "";
+  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}${filterKey}:${window}:${timeZone ?? "fixed"}`;
   const now = Date.now();
+  const calendar = timeZone ? createUsageCalendar(timeZone) : undefined;
+  // Align elapsed-hour windows using the actual current offset, not an
+  // ambiguous wall-hour conversion during the autumn repeat.
+  const rangeStart = calendar && window !== "all"
+    ? window === "today"
+      ? now - (calendar.wallTime(now) % HOUR_MS) - (now % 1000) - 23 * HOUR_MS
+      : calendar.toUtc(calendar.dayStart(now) - (window === "7d" ? 6 : 29) * DAY_MS)
+    : windowRangeStartUtc(window, now, tzOffsetMinutes);
 
   if (
     _cache !== null &&
@@ -707,7 +780,9 @@ export async function getUsageSummary(
   const allTime = await buildAggregates(driver, baseFilter, clients, tzOffsetMinutes);
 
   // History chart series — bucketed per the selected window (hours/days/months).
-  const timeline = await buildTimeline(driver, baseFilter, window, now, tzOffsetMinutes);
+  const timeline = calendar
+    ? await buildCalendarTimeline(driver, baseFilter, window, now, calendar, rangeStart)
+    : await buildTimeline(driver, baseFilter, window, now, tzOffsetMinutes);
 
   // Windowed aggregates — drive Models/Providers/Tokens/Clients/Npubs.
   // For `all` we reuse the all-time block, so the default view pays no extra cost.
@@ -720,34 +795,29 @@ export async function getUsageSummary(
           baseFilter,
           clients,
           tzOffsetMinutes,
-          windowAfter(window, now, tzOffsetMinutes),
+          rangeStart === undefined ? undefined : rangeStart - 1,
         )),
         timeline,
       };
 
   // ── Days (last 30, most-recent-first) ─────────────────────────────────────
-  const dayRows = await driver.aggregate({
-    ...baseFilter,
-    groupBy: "day",
-    tzOffsetMinutes,
-    after: now - 30 * 86400000,
-  });
-  const days: DaySummary[] = dayRows
-    .map((r) => ({ date: r.group!, ...rowToStat(r) }))
-    .reverse(); // aggregate returns ascending; we want most-recent-first
-
-  // ── Hours today ────────────────────────────────────────────────────────────
-  const todayStartUtc = startOfLocalDayUtc(now, tzOffsetMinutes);
-  const hourRows = await driver.aggregate({
-    ...baseFilter,
-    groupBy: "hour",
-    tzOffsetMinutes,
-    after: todayStartUtc - 1,
-  });
-  const hoursToday: HourSummary[] = hourRows.map((r) => ({
-    hour: Number(r.group),
-    ...rowToStat(r),
-  }));
+  let days: DaySummary[];
+  let hoursToday: HourSummary[];
+  if (calendar) {
+    const todayStartUtc = calendar.toUtc(calendar.dayStart(now));
+    const entries = await driver.list({ ...baseFilter, after: Math.min(now - 30 * DAY_MS, todayStartUtc - 1) });
+    days = [...calendarRows(entries.filter((e) => e.timestamp > now - 30 * DAY_MS), calendar, shiftedDayKey)]
+      .sort(([a], [b]) => b.localeCompare(a)).map(([date, row]) => ({ date, ...row }));
+    hoursToday = [...calendarRows(entries.filter((e) => e.timestamp >= todayStartUtc), calendar,
+      (wall) => pad2(new Date(wall).getUTCHours()))]
+      .sort(([a], [b]) => a.localeCompare(b)).map(([hour, row]) => ({ hour: Number(hour), ...row }));
+  } else {
+    const dayRows = await driver.aggregate({ ...baseFilter, groupBy: "day", tzOffsetMinutes, after: now - 30 * DAY_MS });
+    days = dayRows.map((r) => ({ date: r.group!, ...rowToStat(r) })).reverse();
+    const hourRows = await driver.aggregate({ ...baseFilter, groupBy: "hour", tzOffsetMinutes,
+      after: startOfLocalDayUtc(now, tzOffsetMinutes) - 1 });
+    hoursToday = hourRows.map((r) => ({ hour: Number(r.group), ...rowToStat(r) }));
+  }
 
   // ── Recent entries ─────────────────────────────────────────────────────────
   const recent = await driver.list({ ...baseFilter, limit: 50 });

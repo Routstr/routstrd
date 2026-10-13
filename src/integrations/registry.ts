@@ -52,7 +52,7 @@ export type IntegrationFn = (
 
 /** Outcome of rewriting every registered client integration. */
 export interface IntegrationRunResult {
-  /** Integrations rewritten from the daemon's API keys. */
+  /** Integrations successfully installed or already up to date. */
   refreshed: number;
   /** Integrations that threw; each failure is logged as it happens. */
   failed: number;

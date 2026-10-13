@@ -250,7 +250,7 @@ export async function installPiIntegration(
     }
   } catch (error) {
     console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   if (!piConfig.providers) {
@@ -262,11 +262,11 @@ export async function installPiIntegration(
     mkdirSync(dirname(configPath), { recursive: true });
 
     const data = await callDaemonFn("/models");
+    if (data.error) throw new Error(`Failed to fetch models: ${data.error}`);
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      console.log("No models found from routstr daemon.");
-      return;
+      throw new Error("No models found from routstr daemon; integration was not refreshed.");
     }
 
     // Rebuild every model entry from scratch from the daemon, so the generated
@@ -299,5 +299,6 @@ export async function installPiIntegration(
     console.log(`Added "routstr" provider with ${models.length} models to pi models.json`);
   } catch (error) {
     console.error("Failed to install models in pi models.json:", error);
+    throw error;
   }
 }

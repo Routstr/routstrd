@@ -1,4 +1,4 @@
-import { cycleTimeWindow, getVisibleTabs } from "./constants.ts";
+import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
@@ -28,8 +28,9 @@ import {
 } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs, renderWindowBar } from "./render.ts";
-import type { TabId, TimeWindow, UpdateInfo, UsageStats } from "./types.ts";
+import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
 import { createUpdatePoller } from "./update-poller.ts";
+import { createWindowSelection } from "./window-selection.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();
@@ -58,8 +59,7 @@ export async function runUsageTui(): Promise<void> {
 
   // Selected time window and a per-window cache so switching is instant and
   // the 2s auto-refresh only recomputes the active window.
-  let currentWindow: TimeWindow = "all";
-  const windowCache = new Map<TimeWindow, UsageStats>();
+  const windowSelection = createWindowSelection();
   let fetchQueued = false;
 
   const UPDATE_CHECK_DELAY_MS = 3000;
@@ -111,7 +111,7 @@ export async function runUsageTui(): Promise<void> {
     }
     fetching = true;
     try {
-      const requestedWindow = currentWindow;
+      const requestedWindow = windowSelection.currentWindow;
       const running = await isDaemonRunning();
       if (!running) {
         stats = null;
@@ -124,9 +124,8 @@ export async function runUsageTui(): Promise<void> {
           fetchClients(),
         ]);
         if (newStats) {
-          windowCache.set(requestedWindow, newStats);
-          // Only display the result if the user hasn't switched windows since.
-          if (requestedWindow === currentWindow) stats = newStats;
+          const accepted = windowSelection.accept(requestedWindow, newStats);
+          if (accepted) stats = accepted;
         }
         if (newBalance) balance = newBalance;
         if (newStatus) status = newStatus;
@@ -180,14 +179,15 @@ export async function runUsageTui(): Promise<void> {
       return;
     }
 
-    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [W] window, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
+    const windowHelp = windowSelection.supportsWindows ? "[W] window" : windowSelection.notice;
+    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, ${windowHelp}, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
+    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(windowSelection.currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, naming, currentWindow, contentViewportHeight);
+    const content = renderTabContent(currentTab, stats, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight);
     const visibleContent = applyScrollToContent(content, contentViewportHeight);
     const visibleLines = visibleContent === "" ? 0 : visibleContent.split("\n").length;
     // Pin the footer to the bottom even when a tab's content is short.
@@ -241,10 +241,13 @@ export async function runUsageTui(): Promise<void> {
     }
 
     if (key === "w" || key === "W") {
-      currentWindow = cycleTimeWindow(currentWindow, key === "W" ? -1 : 1);
-      // Render the cached result for this window immediately (when we have
-      // one), then refresh it from the daemon in the background.
-      const cached = windowCache.get(currentWindow);
+      // Legacy daemons have no filtered summaries. Keep the all-time selector
+      // and upgrade notice rather than repainting all-time data as filtered.
+      if (!windowSelection.supportsWindows) {
+        render();
+        return;
+      }
+      const cached = windowSelection.cycle(key === "W" ? -1 : 1);
       if (cached) stats = cached;
       vimState.scrollPos = 0;
       render();

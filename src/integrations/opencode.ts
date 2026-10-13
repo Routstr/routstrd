@@ -157,7 +157,7 @@ export async function installOpencodeIntegration(
     }
   } catch (error) {
     console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   if (!opencodeConfig.providers) {
@@ -168,11 +168,11 @@ export async function installOpencodeIntegration(
     mkdirSync(dirname(configPath), { recursive: true });
 
     const data = await callDaemonFn("/models");
+    if (data.error) throw new Error(`Failed to fetch models: ${data.error}`);
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      console.log("No models found from routstr daemon.");
-      return;
+      throw new Error("No models found from routstr daemon; integration was not refreshed.");
     }
 
     // Rebuild the models map from the daemon, keeping the keys a user curated
@@ -215,5 +215,6 @@ export async function installOpencodeIntegration(
     console.log(`Added "routstr" provider with ${models.length} models to opencode.json`);
   } catch (error) {
     console.error("Failed to install models in opencode.json:", error);
+    throw error;
   }
 }

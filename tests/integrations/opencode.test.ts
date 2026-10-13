@@ -267,24 +267,43 @@ describe("installOpencodeIntegration", () => {
     const configPath = tempConfigPath();
     writeFileSync(configPath, "{ not json");
 
-    await installOpencodeIntegration(
+    await expect(installOpencodeIntegration(
       CONFIG,
       "key",
       makeIntegration(configPath),
       MOCK_DEPS,
-    );
+    )).rejects.toThrow();
 
     expect(readFileSync(configPath, "utf-8")).toBe("{ not json");
+  });
+
+  it("rejects daemon error responses without changing the config", async () => {
+    const configPath = tempConfigPath();
+    const original = JSON.stringify({ providers: {} });
+    writeFileSync(configPath, original);
+    await expect(installOpencodeIntegration(CONFIG, "key", makeIntegration(configPath), {
+      ...MOCK_DEPS,
+      callDaemon: async () => ({ error: "daemon unavailable" }),
+    })).rejects.toThrow("daemon unavailable");
+    expect(readFileSync(configPath, "utf8")).toBe(original);
+  });
+
+  it("rejects config directory write failures", async () => {
+    const parentFile = tempConfigPath();
+    writeFileSync(parentFile, "not a directory");
+    await expect(installOpencodeIntegration(CONFIG, "key", makeIntegration(join(parentFile, "models.json")), MOCK_DEPS))
+      .rejects.toThrow();
+    expect(readFileSync(parentFile, "utf8")).toBe("not a directory");
   });
 
   it("leaves the file unchanged when the daemon serves no models", async () => {
     const configPath = tempConfigPath();
     writeFileSync(configPath, JSON.stringify({ providers: {} }));
 
-    await installOpencodeIntegration(CONFIG, "key", makeIntegration(configPath), {
+    await expect(installOpencodeIntegration(CONFIG, "key", makeIntegration(configPath), {
       ...MOCK_DEPS,
       callDaemon: async () => ({ output: { models: [] } }),
-    });
+    })).rejects.toThrow("No models found");
 
     expect(readRaw(configPath).providers?.["routstr"]).toBeUndefined();
   });

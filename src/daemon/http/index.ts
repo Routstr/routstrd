@@ -2086,10 +2086,13 @@ export function createDaemonRequestHandler(deps: {
               .filter((c) => c.ownerNpub === npubFilter)
               .map((c) => c.clientId)
           : undefined;
-        const output = await deps.usageTrackingDriver.list({
-          limit: parseLimit(url.searchParams.get("limit")),
-          ...(clientFilter ? { clients: clientFilter } : {}),
-        });
+        // An unmatched owner is an empty selection, not an unfiltered query.
+        const output = clientFilter?.length === 0
+          ? []
+          : await deps.usageTrackingDriver.list({
+              limit: parseLimit(url.searchParams.get("limit")),
+              ...(clientFilter ? { clients: clientFilter } : {}),
+            });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
       } catch (error) {
@@ -2102,6 +2105,18 @@ export function createDaemonRequestHandler(deps: {
       try {
         const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
         const window = parseTimeWindow(url.searchParams.get("window"));
+        const requestedTimeZone = url.searchParams.get("timezone")?.trim();
+        let timeZone: string | undefined;
+        if (requestedTimeZone) {
+          try {
+            timeZone = new Intl.DateTimeFormat("en-US", {
+              timeZone: requestedTimeZone,
+            }).resolvedOptions().timeZone;
+          } catch {
+            sendJson(res, 400, { error: "Invalid 'timezone': expected an IANA timezone." });
+            return;
+          }
+        }
         const npubFilter = url.searchParams.get("npub")?.trim();
         const clients = getClientsFromStore(deps.store);
         const clientFilter = npubFilter
@@ -2109,7 +2124,7 @@ export function createDaemonRequestHandler(deps: {
               .filter((c) => c.ownerNpub === npubFilter)
               .map((c) => c.clientId)
           : undefined;
-        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter, window);
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter, window, timeZone);
         sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });

@@ -28,7 +28,7 @@ export async function installClaudeCodeIntegration(
     }
   } catch (error) {
     console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   if (!settings.env) {
@@ -69,5 +69,6 @@ export async function installClaudeCodeIntegration(
     console.log(`Successfully updated ${configPath} with routstr settings.`);
   } catch (error) {
     console.error(`Failed to write to ${configPath}:`, error);
+    throw error;
   }
 }

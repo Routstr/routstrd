@@ -125,10 +125,15 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
   }
 }
 
-export async function fetchUsageSummary(windowId: TimeWindow = "all"): Promise<UsageStats | null> {
+export async function fetchUsageSummary(
+  windowId: TimeWindow = "all",
+  request: typeof callDaemon = callDaemon,
+): Promise<UsageStats | null> {
   try {
     const tz = new Date().getTimezoneOffset();
-    const result = await callDaemon(`/usage/summary?tz=${tz}&window=${windowId}`);
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const timezoneQuery = timeZone ? `&timezone=${encodeURIComponent(timeZone)}` : "";
+    const result = await request(`/usage/summary?tz=${tz}&window=${windowId}${timezoneQuery}`);
     if (result.error) return null;
 
     const summary = result.output as UsageSummary | undefined;
@@ -141,6 +146,7 @@ export async function fetchUsageSummary(windowId: TimeWindow = "all"): Promise<U
       recentSatsCost: summary.totals.satsCost,
       limit: 50,
       summary,
+      supportsWindows: Boolean(summary.window),
       window: summary.window ?? windowFromAllTime(summary),
     };
   } catch {

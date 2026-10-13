@@ -45,6 +45,24 @@ line and the chart grows to fill the terminal height.
   and attached to both the all-time and windowed blocks. The zero-data
   short-circuit returns an empty timeline.
 
+### Historical timezone handling
+
+The monitor sends its IANA `timezone` (for example `America/New_York`) alongside
+`tz` on `/usage/summary`. Invalid timezone identifiers return HTTP 400. When
+`timezone` is absent, the daemon retains fixed-offset behavior for older clients.
+
+IANA-aware calendar arithmetic uses historical offsets, not today's offset:
+`7d`/`30d` start at midnight 6/29 local dates ago. The `7d` series retains 28
+wall-clock six-hour buckets; a DST transition can make a bucket cover five or
+seven elapsed hours. The `24h` view retains 24 elapsed-hour buckets and counts
+both occurrences of a repeated hour. Weekly buckets begin on local Mondays.
+Overview day/hour grouping also uses historical local dates.
+
+The SDK supports only fixed-offset grouping, so IANA chart/overview grouping is
+performed locally over driver entries (bounded for selected windows; unbounded
+for all-time). Non-calendar totals still use SDK aggregates. Timezone identity
+is included in the summary cache key.
+
 ## TUI
 
 - `types.ts` — `TabId` `"today"` → `"history"`; re-export the timeline types.
@@ -57,7 +75,8 @@ line and the chart grows to fill the terminal height.
 - `app.ts` — passes the content height into the tab renderer and pads the
   content so the footer stays pinned to the bottom.
 - `data.ts` — the old-daemon fallback `windowFromAllTime` supplies an empty
-  timeline.
+  timeline and marks selectable windows unsupported. The selection/cache is
+  reset to all-time; window cycling is disabled with an upgrade notice.
 
 ## Tests
 
@@ -71,9 +90,9 @@ line and the chart grows to fill the terminal height.
 - Daemons too old to return `timeline` still render: the History tab falls
   back to an empty chart rather than erroring.
 - The 24h window is hour-aligned rather than a rolling `now - 24h`, so each
-  hour-of-day appears once and the `HH` keys stay unambiguous.
+  elapsed-hour bucket is separate; repeated DST hours may share an `HH` label.
 - The windowed aggregates use the same bucket-aligned boundary as the chart
-  (`windowRangeStartUtc`), so a tab's totals always equal the sum of its bars:
+  (fixed-offset or IANA-aware), so a tab's totals always equal the sum of its bars:
   24 whole hours for `24h`, whole local days for `7d`/`30d`. Before this, the
   `24h` totals were calendar-day (since local midnight) while the chart drew
   a rolling 24h, and `7d`/`30d` totals were exact rolling windows while the

@@ -139,7 +139,7 @@ export async function installHermesIntegration(
     }
   } catch (error) {
     console.error(`Failed to read ${configPath}; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   let newContent: string;
@@ -151,7 +151,7 @@ export async function installHermesIntegration(
     });
   } catch (error) {
     console.error(`Failed to parse ${configPath} as YAML; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   try {
@@ -165,5 +165,6 @@ export async function installHermesIntegration(
     console.log(`Successfully updated ${configPath} with routstr settings.`);
   } catch (error) {
     console.error(`Failed to write to ${configPath}:`, error);
+    throw error;
   }
 }

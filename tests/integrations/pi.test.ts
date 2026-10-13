@@ -83,6 +83,15 @@ describe("installPiIntegration", () => {
     expect(parsed.providers["routstr"].api).toBe("openai-completions");
   });
 
+  it("rejects empty model lists instead of silently skipping the refresh", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
+    const configPath = join(dir, "models.json");
+    await expect(installPiIntegration(CONFIG, "key", makeIntegration(configPath), {
+      ...MOCK_DEPS,
+      callDaemon: async () => ({ output: { models: [] } }),
+    })).rejects.toThrow("No models found");
+  });
+
   it("pins anthropic-messages and the root base URL for claude* models", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-models-"));
     const configPath = join(dir, "models.json");

@@ -22,6 +22,8 @@ export interface UsageStats {
   recentSatsCost: number;
   limit: number;
   summary: UsageSummary;
+  /** False when connected to a daemon without selectable-window summaries. */
+  supportsWindows?: boolean;
   /** Aggregates for the currently selected time window. */
   window: WindowedStats;
 }
