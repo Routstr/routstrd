@@ -11,7 +11,9 @@ import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
-import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
+import { VERSION } from "../../version";
+import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
+import { loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "../config-store";
 import {
   WalletHttpError,
   type WalletClient,
@@ -431,6 +433,9 @@ export function createDaemonRequestHandler(deps: {
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
+  /** Reads the cached update state for GET /version; defaults to the on-disk cache. */
+  loadUpdateState?: () => UpdateState | null;
+  updateChecksEnabled?: () => boolean;
 }) {
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
@@ -462,6 +467,25 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/status") {
       const output = await buildStatusOutput(deps);
       sendJson(res, 200, { output });
+      return;
+    }
+
+    // Version of the running daemon plus the cached result of its last
+    // background update check. Read-only and cheap: the daemon refreshes the
+    // cache on its own schedule, so CLI/TUI clients just read it.
+    if (req.method === "GET" && url.pathname === "/version") {
+      const state = (deps.loadUpdateState ?? readUpdateState)();
+      const enabled = (deps.updateChecksEnabled ??
+        (() => loadDaemonConfigSync().updateCheck !== false))();
+      sendJson(res, 200, {
+        output: {
+          version: VERSION,
+          current: VERSION,
+          latest: state?.latest ?? null,
+          hasUpdate: enabled && !!state && isUpdateStateApplicable(state, VERSION),
+          checkedAt: state?.checkedAt ?? null,
+        },
+      });
       return;
     }
 

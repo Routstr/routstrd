@@ -80,6 +80,8 @@ export interface RoutstrdConfig {
    * disable injection and always forward the client's value as-is.
    */
   maxTokens?: number;
+  /** Automatic update checks, startup prompts and notices. Defaults to true. */
+  updateCheck?: boolean;
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
@@ -88,5 +90,6 @@ export const DEFAULT_CONFIG: RoutstrdConfig = {
   provider: null,
   mode: "apikeys",
   autoModelPath: false,
+  updateCheck: true,
   maxTokens: 64000,
 };

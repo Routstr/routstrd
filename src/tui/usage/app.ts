@@ -29,7 +29,7 @@ import {
 import { COLORS } from "./constants.ts";
 import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs, renderWindowBar } from "./render.ts";
 import type { TabId, TimeWindow, UpdateInfo, UsageStats } from "./types.ts";
-import { checkForUpdates } from "../../utils/update-checker.ts";
+import { createUpdatePoller } from "./update-poller.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();
@@ -62,38 +62,14 @@ export async function runUsageTui(): Promise<void> {
   const windowCache = new Map<TimeWindow, UsageStats>();
   let fetchQueued = false;
 
-  // Update-check state — re-checked at most every 210 minutes to avoid
-  // spamming the npm registry. The first check happens shortly after
-  // startup so the TUI doesn't block on a network call.
-  const UPDATE_CHECK_INTERVAL_MS = 210 * 60 * 1000;
   const UPDATE_CHECK_DELAY_MS = 3000;
   let updateInfo: UpdateInfo | null = null;
-  let lastUpdateCheck = 0;
-  let updateCheckInProgress = false;
-
-  async function maybeCheckForUpdates(): Promise<void> {
-    if (updateCheckInProgress) return;
-    const now = Date.now();
-    if (updateInfo && now - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
-
-    updateCheckInProgress = true;
-    lastUpdateCheck = now;
-    try {
-      const result = await checkForUpdates();
-      const outdated = result.packages.filter((p) => p.hasUpdate);
-      updateInfo = {
-        hasUpdate: result.hasUpdate,
-        text: outdated.length > 0
-          ? `Update available: ${outdated.map((p) => p.label).join(", ")} ${outdated.map((p) => p.latest).join(", ")}`
-          : "",
-      };
+  const maybeCheckForUpdates = createUpdatePoller({
+    publish: (info) => {
+      updateInfo = info;
       render();
-    } catch {
-      // Silently ignore — update checks are best-effort
-    } finally {
-      updateCheckInProgress = false;
-    }
-  }
+    },
+  });
 
   if (isInteractive) {
     stdout.write(enterAlternateScreen() + hideCursor());
