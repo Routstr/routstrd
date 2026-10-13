@@ -5,13 +5,8 @@ import {
 } from "../utils/update-checker";
 import { writeUpdateState, type UpdateState } from "../utils/update-state";
 
-/**
- * How often the daemon re-checks for a newer routstrd. Slow on purpose: the
- * check is a politeness courtesy, not something anyone should route traffic by
- * — an hour keeps the cached answer reasonably current without hammering the
- * registry/GitHub.
- */
-export const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+/** How often the daemon re-checks for a newer routstrd. Deliberately slow. */
+export const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /** Let startup/model bootstrap settle before the first background check. */
 export const DEFAULT_UPDATE_CHECK_INITIAL_DELAY_MS = 30 * 1000;
