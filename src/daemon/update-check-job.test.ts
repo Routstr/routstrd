@@ -129,3 +129,53 @@ describe("createUpdateCheckJob", () => {
     job.stop();
   });
 });
+
+
+describe("update check cache and config regressions", () => {
+  test("a null lookup leaves the last successful cache and timestamp intact", async () => {
+    let cached: UpdateState | undefined;
+    let info = behind;
+    let time = Date.parse("2026-01-02T03:04:05.000Z");
+    const job = createUpdateCheckJob({
+      check: async () => info,
+      save: (state) => { cached = state; },
+      now: () => time,
+    });
+    await job.runOnce();
+    const previous = cached;
+    time += 6 * 60 * 60 * 1000;
+    info = { ...behind, latest: null, hasUpdate: false };
+    await job.runOnce();
+    expect(cached).toBe(previous);
+  });
+
+  test("config disables checks and can be re-enabled", async () => {
+    let enabled = false;
+    let calls = 0;
+    const job = createUpdateCheckJob({
+      enabled: () => enabled,
+      check: async () => { calls++; return behind; },
+      save: () => {},
+    });
+    await job.runOnce();
+    expect(calls).toBe(0);
+    enabled = true;
+    await job.runOnce();
+    expect(calls).toBe(1);
+    enabled = false;
+    await job.runOnce();
+    expect(calls).toBe(1);
+  });
+
+  test("does not save if config is disabled during a check", async () => {
+    let enabled = true;
+    let saves = 0;
+    const job = createUpdateCheckJob({
+      enabled: () => enabled,
+      check: async () => { enabled = false; return behind; },
+      save: () => { saves++; },
+    });
+    await job.runOnce();
+    expect(saves).toBe(0);
+  });
+});

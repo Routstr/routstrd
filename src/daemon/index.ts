@@ -408,7 +408,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   // Low-frequency background update check. It only caches the answer in
   // update-state.json for the CLI/TUI to read; it never installs anything.
   const updateCheckJob = createUpdateCheckJob({
-    enabled: !process.env.ROUTSTRD_NO_UPDATE_CHECK,
+    enabled: () => loadDaemonConfigSync().updateCheck !== false,
   });
 
   let walletDisposePromise: Promise<void> | undefined;

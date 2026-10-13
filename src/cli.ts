@@ -78,7 +78,7 @@ import {
 import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
 import { VERSION } from "./version";
 import {
-  isUpdateStateFresh,
+  isUpdateStateApplicable,
   readUpdateState,
   updateNotice,
   writeUpdateState,
@@ -439,11 +439,11 @@ async function confirmUpdate(current: string, latest: string): Promise<boolean> 
  * Returns true only when an update was actually installed, so callers can
  * restart the daemon so the new build takes effect.
  *
- * Set ROUTSTRD_NO_UPDATE_CHECK=1 to opt out even on a terminal.
+ * Set updateCheck: false in config.json to opt out even on a terminal.
  */
 async function maybePromptForUpdate(): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return false;
+  if ((await loadConfig()).updateCheck === false) return false;
 
   let info;
   try {
@@ -479,12 +479,12 @@ let updateNoticeShown = false;
  * to run after every command, and it writes to stderr so stdout stays clean
  * for piping/JSON. At most one notice per process.
  */
-function maybeShowUpdateNotice(): void {
+async function maybeShowUpdateNotice(): Promise<void> {
   if (updateNoticeShown) return;
-  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return;
+  if ((await loadConfig()).updateCheck === false) return;
 
   const state = readUpdateState();
-  if (!state || !isUpdateStateFresh(state)) return;
+  if (!state || !isUpdateStateApplicable(state, VERSION)) return;
 
   const notice = updateNotice(state);
   if (!notice) return;
@@ -3349,7 +3349,7 @@ program
 // notice (balance, send, receive, ...). Commands that manage updates themselves
 // or own the terminal are excluded. The notice goes to stderr so stdout stays
 // machine-readable.
-program.hook("postAction", (_thisCommand, actionCommand) => {
+program.hook("postAction", async (_thisCommand, actionCommand) => {
   if (!actionCommand) return;
   const parent = actionCommand.parent;
   if (parent === program) {
@@ -3360,7 +3360,7 @@ program.hook("postAction", (_thisCommand, actionCommand) => {
   }
   // `service ...` is pm2 plumbing (`service logs` follows forever).
   if (parent?.name() === "service") return;
-  maybeShowUpdateNotice();
+  await maybeShowUpdateNotice();
 });
 
 export function cli(args: string[]) {

@@ -29,7 +29,7 @@ export interface UpdateCheckJobDeps {
   intervalMs?: number;
   initialDelayMs?: number;
   timeoutMs?: number;
-  enabled?: boolean;
+  enabled?: boolean | (() => boolean);
   /** Injectable clock (tests). */
   now?: () => number;
 }
@@ -58,7 +58,8 @@ export function createUpdateCheckJob(
   const initialDelayMs =
     deps.initialDelayMs ?? DEFAULT_UPDATE_CHECK_INITIAL_DELAY_MS;
   const timeoutMs = deps.timeoutMs ?? BACKGROUND_UPDATE_CHECK_TIMEOUT_MS;
-  const enabled = deps.enabled ?? true;
+  const isEnabled = () => typeof deps.enabled === "function"
+    ? deps.enabled() : deps.enabled !== false;
   const now = deps.now ?? Date.now;
   const check: UpdateCheckFn =
     deps.check ?? (({ timeoutMs: ms }) => checkRoutstrdUpdate({ timeoutMs: ms }));
@@ -70,10 +71,13 @@ export function createUpdateCheckJob(
   let lastAdvertisedUpdate = false;
 
   const runOnce = async (): Promise<void> => {
-    if (running) return;
+    if (running || !isEnabled()) return;
     running = true;
     try {
       const info = await check({ timeoutMs });
+      // The shared checker reports lookup failures as unknown, not exceptions.
+      // Preserve the last successful result and its original expiry timestamp.
+      if (info.latest === null || !isEnabled()) return;
       save({
         current: info.current,
         latest: info.latest,
@@ -106,7 +110,7 @@ export function createUpdateCheckJob(
   };
 
   const start = (): void => {
-    if (!enabled || active) return;
+    if (deps.enabled === false || active) return;
     active = true;
     logger.log(
       `Starting background update check (every ${Math.round(intervalMs / 3_600_000)}h)`,

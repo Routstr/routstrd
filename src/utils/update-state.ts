@@ -8,6 +8,7 @@ import {
 } from "fs";
 import { dirname } from "path";
 import { CONFIG_DIR } from "./config";
+import { compareVersions } from "./update-checker";
 
 /** Where the daemon caches the result of its last update check. */
 export const UPDATE_STATE_FILE = `${CONFIG_DIR}/update-state.json`;
@@ -77,7 +78,18 @@ export function isUpdateStateFresh(
   now: number = Date.now(),
 ): boolean {
   const checkedAt = Date.parse(state.checkedAt);
-  return Number.isFinite(checkedAt) && now - checkedAt <= maxAgeMs;
+  return Number.isFinite(checkedAt) && now >= checkedAt && now - checkedAt <= maxAgeMs;
+}
+
+/** Trust only a recent update detected by this running version. */
+export function isUpdateStateApplicable(
+  state: UpdateState,
+  current: string,
+  now: number = Date.now(),
+): boolean {
+  return isUpdateStateFresh(state, undefined, now) &&
+    state.current === current && state.hasUpdate && !!state.latest &&
+    (compareVersions(state.latest, current) ?? 0) > 0;
 }
 
 /** One-line "update available" notice, or null when there is nothing to say. */

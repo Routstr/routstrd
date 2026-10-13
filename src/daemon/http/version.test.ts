@@ -31,9 +31,10 @@ function makeRes() {
   return res;
 }
 
-async function callVersion(state: UpdateState | null) {
+async function callVersion(state: UpdateState | null, enabled = true) {
   const handler = createDaemonRequestHandler({
     loadUpdateState: () => state,
+    updateChecksEnabled: () => enabled,
   } as any);
   const res = makeRes();
   await handler(makeReq("GET", "/version"), res);
@@ -41,10 +42,10 @@ async function callVersion(state: UpdateState | null) {
 }
 
 const behind: UpdateState = {
-  current: "0.4.14",
+  current: VERSION,
   latest: "0.5.0",
   hasUpdate: true,
-  checkedAt: "2026-01-02T03:04:05.000Z",
+  checkedAt: new Date().toISOString(),
 };
 
 describe("GET /version", () => {
@@ -53,10 +54,10 @@ describe("GET /version", () => {
     expect(res.status).toBe(200);
     expect(res.json().output).toEqual({
       version: VERSION,
-      current: "0.4.14",
+      current: VERSION,
       latest: "0.5.0",
       hasUpdate: true,
-      checkedAt: "2026-01-02T03:04:05.000Z",
+      checkedAt: behind.checkedAt,
     });
   });
 
@@ -71,4 +72,23 @@ describe("GET /version", () => {
       checkedAt: null,
     });
   });
+  it("does not advertise stale, mismatched, invalid or already installed updates", async () => {
+    for (const state of [
+      { ...behind, checkedAt: "2020-01-01T00:00:00.000Z" },
+      { ...behind, current: "0.1.0" },
+      { ...behind, latest: VERSION },
+      { ...behind, latest: "invalid" },
+    ]) {
+      const res = await callVersion(state);
+      expect(res.json().output.hasUpdate).toBe(false);
+      expect(res.json().output.current).toBe(VERSION);
+      expect(res.json().output.checkedAt).toBe(state.checkedAt);
+    }
+  });
+
+  it("suppresses cached updates when disabled in config", async () => {
+    const res = await callVersion(behind, false);
+    expect(res.json().output.hasUpdate).toBe(false);
+  });
+
 });
