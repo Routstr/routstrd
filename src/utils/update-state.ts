@@ -14,9 +14,9 @@ import { compareVersions } from "./update-checker";
 export const UPDATE_STATE_FILE = `${CONFIG_DIR}/update-state.json`;
 
 /**
- * How long a cached check is trusted. The daemon refreshes hourly, so a day
- * tolerates a long outage (host asleep, daemon stopped) before the CLI/TUI
- * treat the state as unknown instead of nagging with stale data.
+ * How long a cached check is trusted. The daemon refreshes every 6 hours, so a
+ * day tolerates several missed passes (host asleep, daemon stopped) before the
+ * CLI/TUI treat the state as unknown instead of nagging with stale data.
  */
 export const MAX_UPDATE_STATE_AGE_MS = 24 * 60 * 60 * 1000;
 
