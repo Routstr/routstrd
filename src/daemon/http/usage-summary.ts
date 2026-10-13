@@ -326,12 +326,32 @@ function accumulatorFromRow(row: {
   };
 }
 
+/** Sum consecutive points into `groupSize`-wide buckets (e.g. 6 hours). */
+function foldTimelinePoints(points: TimelinePoint[], groupSize: number): TimelinePoint[] {
+  const folded: TimelinePoint[] = [];
+  for (let i = 0; i < points.length; i += groupSize) {
+    const chunk = points.slice(i, i + groupSize);
+    const first = chunk[0]!;
+    folded.push({
+      key: first.key,
+      timestamp: first.timestamp,
+      requests: chunk.reduce((sum, p) => sum + p.requests, 0),
+      satsCost: chunk.reduce((sum, p) => sum + p.satsCost, 0),
+      totalTokens: chunk.reduce((sum, p) => sum + p.totalTokens, 0),
+      promptTokens: chunk.reduce((sum, p) => sum + p.promptTokens, 0),
+      completionTokens: chunk.reduce((sum, p) => sum + p.completionTokens, 0),
+    });
+  }
+  return folded;
+}
+
 /**
  * Build the zero-filled history series for a window.
  *
  * - `today` (24h) → 24 hourly buckets, aligned to the local hour.
- * - `7d` → 7 × 24 hourly buckets (per local day; the SDK's `hour` key carries
- *   no date, so each day is aggregated over its own range).
+ * - `7d` → 6-hour buckets (7 × 4), built from hourly aggregates per local day
+ *   and then folded. The SDK's `hour` key carries no date, so each day is
+ *   aggregated over its own range.
  * - `30d` → 30 daily buckets.
  * - `all` → one bucket per ISO week (Monday start) since the first week with
  *   usage. The SDK has no `week` grouping, so all days are aggregated and
@@ -386,9 +406,9 @@ async function buildTimeline(
 }
 
 /**
- * 7 days of hourly buckets (7 × 24), oldest first. The SDK's `hour` grouping
- * keys on hour-of-day only (no date), so each local day is aggregated over its
- * own `[start, end)` range and the buckets concatenated.
+ * 7 days of hourly aggregates (7 × 24), oldest first, folded into 6-hour
+ * buckets (7 × 4). The SDK's `hour` grouping keys on hour-of-day only (no
+ * date), so each local day is aggregated over its own `[start, end)` range.
  */
 async function buildHourlyWeekTimeline(
   driver: UsageTrackingDriver,
@@ -427,7 +447,7 @@ async function buildHourlyWeekTimeline(
     }
   }
 
-  return { bucket: "hour", points };
+  return { bucket: "hour", points: foldTimelinePoints(points, 6) };
 }
 
 /** Shifted-local Monday midnight of the week containing `shiftedMs`. */

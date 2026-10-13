@@ -15,14 +15,15 @@ selector.
 | `[W]` window | Bucket | Bars |
 | ------------ | ------ | ---- |
 | `24h`        | hour   | 24   |
-| `7d`         | hour   | 7 × 24, merged to fit the width |
+| `7d`         | 6h     | 7 × 4 |
 | `30d`        | day    | 30   |
 | `All`        | week (ISO, Monday) | one per week since first usage |
 
 Each bucket draws two grouped bars — orange **spend** (left axis, sats) and
 red **tokens** (right axis, tokens) — flush inside the pair with a gap
-between buckets. The summary is a single compact line and the chart grows to
-fill the terminal height.
+between buckets. A headroom row holds the peak ticks above the tallest bar so
+blocks never appear to overshoot the axis. The summary is a single compact
+line and the chart grows to fill the terminal height.
 
 ## Backend — `src/daemon/http/usage-summary.ts`
 
@@ -32,9 +33,9 @@ fill the terminal height.
   - `today` (24h) → `aggregate({ groupBy: "hour" })` over the last 24
     local-aligned hours. The SDK's `hour` key is `HH` with no date, so the
     window is aligned to whole hours (each hour-of-day appears at most once).
-  - `7d` → 7 × 24 hourly buckets. Because the `hour` key has no date, each
-    local day is aggregated over its own `[start, end)` range and the buckets
-    concatenated.
+  - `7d` → 6-hour buckets (7 × 4), built from per-day hourly aggregates and
+    then folded. Because the `hour` key has no date, each local day is
+    aggregated over its own `[start, end)` range.
   - `30d` → `aggregate({ groupBy: "day" })` over the last 30 days.
   - `all` → `aggregate({ groupBy: "day" })` with no `after`, folded into ISO
     weeks (Monday start). The SDK has no `week` grouping, hence the fold.

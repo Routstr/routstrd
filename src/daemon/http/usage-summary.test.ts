@@ -420,22 +420,22 @@ describe("getUsageSummary time windows", () => {
     expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
   });
 
-  it("builds 7 days of hourly buckets ending now", async () => {
+  it("builds 7 days of 6-hour buckets ending now", async () => {
     const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
     const { bucket, points } = summary.window!.timeline;
 
     expect(bucket).toBe("hour");
-    expect(points).toHaveLength(7 * 24);
-    for (const p of points) expect(p.key).toMatch(/^\d{2}-\d{2} \d{2}$/);
+    expect(points).toHaveLength(7 * 4);
+    for (const p of points) expect(p.key).toMatch(/^\d{2}-\d{2} (00|06|12|18)$/);
 
-    // Oldest bucket is 6 days ago at local midnight; newest is today 23:00.
+    // Oldest bucket is 6 days ago at local midnight; newest is today 18:00.
     const todayStart = Math.floor(RECENT / 86_400_000) * 86_400_000;
     expect(points[0]!.timestamp).toBe(todayStart - 6 * 86_400_000);
-    expect(points[points.length - 1]!.timestamp).toBe(todayStart + 23 * 3_600_000);
+    expect(points[points.length - 1]!.timestamp).toBe(todayStart + 18 * 3_600_000);
 
-    // The recent entry lands in today's bucket for its hour.
+    // The recent entry lands in today's 6-hour bucket.
     const currentHour = new Date(RECENT).getUTCHours();
-    expect(points[6 * 24 + currentHour]!.satsCost).toBe(5);
+    expect(points[6 * 4 + Math.floor(currentHour / 6)]!.satsCost).toBe(5);
 
     // Bars sum to the windowed totals (whole local days, not `now - 7*24h`).
     expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);

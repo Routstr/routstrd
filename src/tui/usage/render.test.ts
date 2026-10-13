@@ -409,10 +409,11 @@ describe("renderTimelineChart", () => {
     const lines = stripAnsi(renderTimelineChart(TIMELINE_POINTS, "hour", 60).join("\n")).split("\n");
     const text = lines.join("\n");
 
-    // Default height 10 + bottom axis + x labels + legend.
-    expect(lines).toHaveLength(13);
+    // Default height 10 + headroom + bottom axis + x labels + legend.
+    expect(lines).toHaveLength(14);
     expect(lines[0]).toContain("30"); // peak sats (left axis)
     expect(lines[0]).toContain("400"); // peak tokens (right axis)
+    expect(lines[0]).not.toContain("█"); // headroom row carries ticks only
     expect(text).toContain("00");
     expect(text).toContain("03");
     expect(text).toContain("spend");

@@ -394,6 +394,14 @@ export function renderTimelineChart(
   const tokenHeights = slots.map((p) => (maxTokens > 0 ? Math.round((p.totalTokens / maxTokens) * rows) : 0));
 
   const lines: string[] = [];
+  // Headroom row: the peak ticks float one row above the tallest bar, so a
+  // full-cell block glyph can never look like it overshoots its own axis.
+  lines.push(
+    costTicks[0]!.padStart(leftCol) + " " + COLORS.dim + "┤" + COLORS.reset +
+    " ".repeat(Math.max(0, plotWidth)) +
+    COLORS.dim + "├" + COLORS.reset + " " + tokenTicks[0]!.padEnd(rightCol),
+  );
+
   const midRow = Math.floor((rows - 1) / 2);
   for (let row = 0; row < rows; row++) {
     const filledFromBottom = rows - row;
@@ -408,8 +416,8 @@ export function renderTimelineChart(
     }
     plot += plotPad;
 
-    const leftLabel = row === 0 ? costTicks[0]! : row === midRow ? costTicks[1]! : "";
-    const rightLabel = row === 0 ? tokenTicks[0]! : row === midRow ? tokenTicks[1]! : "";
+    const leftLabel = row === midRow ? costTicks[1]! : "";
+    const rightLabel = row === midRow ? tokenTicks[1]! : "";
     const left = leftLabel.padStart(leftCol) + " " + COLORS.dim + "┤" + COLORS.reset;
     const right = COLORS.dim + "├" + COLORS.reset + " " + rightLabel.padEnd(rightCol);
     lines.push(left + plot + COLORS.reset + right);
@@ -438,9 +446,9 @@ export function renderTimelineChart(
   const legendLimit = Math.max(0, width - leftGutter);
   const legendSegments: Array<{ text: string; color: string }> = [
     { text: "█", color: COLORS.orange },
-    { text: " spend   ", color: COLORS.dim },
+    { text: " spend   ", color: "" },
     { text: "█", color: COLORS.red },
-    { text: " tokens   ", color: COLORS.dim },
+    { text: " tokens   ", color: "" },
     { text: "left: sats · right: tokens", color: COLORS.dim },
   ];
   let legend = "";
@@ -448,7 +456,8 @@ export function renderTimelineChart(
   for (const segment of legendSegments) {
     if (legendUsed >= legendLimit) break;
     const text = segment.text.slice(0, legendLimit - legendUsed);
-    legend += segment.color + text;
+    // Reset first so an earlier `dim` segment can't wash out this swatch.
+    legend += COLORS.reset + segment.color + text;
     legendUsed += text.length;
   }
   lines.push(" ".repeat(leftGutter) + legend + COLORS.reset);
@@ -463,10 +472,11 @@ const HISTORY_WINDOW_LABELS: Record<TimeWindow, string> = {
   "30d": "last 30 days",
 };
 
-const TIMELINE_TITLES: Record<TimelineBucket, string> = {
-  hour: "Spend per hour",
-  day: "Spend per day",
-  week: "Spend per week",
+const HISTORY_CHART_TITLES: Record<TimeWindow, string> = {
+  all: "Spend per week",
+  today: "Spend per hour",
+  "7d": "Spend per 6 hours",
+  "30d": "Spend per day",
 };
 
 export function renderHistory(stats: UsageStats, width: number, height?: number): string {
@@ -482,16 +492,16 @@ export function renderHistory(stats: UsageStats, width: number, height?: number)
     formatCost(totals.requests > 0 ? totals.satsCost / totals.requests : 0) + " sats" + COLORS.reset;
 
   // Fill the viewport: summary box (3) + chart box borders (2) + the chart's
-  // own axis/labels/legend (3) are chrome around the bar rows.
+  // own headroom/axis/labels/legend (4) are chrome around the bar rows.
   const chartHeight = height === undefined
     ? 10
-    : Math.max(4, Math.min(40, height - 8));
+    : Math.max(4, Math.min(40, height - 9));
 
   const summary = renderBox([summaryLine], width, "History — " + HISTORY_WINDOW_LABELS[win.window]);
   const chart = renderBox(
     renderTimelineChart(timeline.points, timeline.bucket, width - 4, chartHeight),
     width,
-    TIMELINE_TITLES[timeline.bucket],
+    HISTORY_CHART_TITLES[win.window],
   );
   return summary + "\n" + chart;
 }
