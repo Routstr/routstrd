@@ -1348,9 +1348,8 @@ export function createDaemonRequestHandler(deps: {
           }
         }
 
-        // 2) Review labels: drop the label from the SDK's enabled set, so the
-        // review verdict applies again and the matching providers go back to
-        // their Nostr state (disabled unless they carry another enabled label).
+        // 2) Review labels: remove user opt-ins. Default labels, other enabled
+        // labels and manual overrides can keep matching providers enabled.
         let matchedLabels: string[] = [];
         let unmatchedLabels: string[] = [];
         if (hasLabels && labelMatch) {
@@ -1381,9 +1380,17 @@ export function createDaemonRequestHandler(deps: {
           deps.store.getState().setDisabledProviders(reviewed);
         }
 
-        const parts = [`Disabled ${toDisable.length} provider(s)`];
-        if (matchedLabels.length > 0) {
-          parts.push(`by label: ${matchedLabels.join(", ")}`);
+        // Label matches are targets, not proof of an effective policy change.
+        // Report current state after sync, including preserved manual overrides.
+        const effectiveDisabled = new Set<string>(deps.discoveryAdapter.getDisabledProviders());
+        const disabled = toDisable.filter((url) => effectiveDisabled.has(url));
+        const remainingEnabled = toDisable.filter((url) => !effectiveDisabled.has(url));
+        const parts = [`${disabled.length} targeted provider(s) currently disabled.`];
+        if (hasLabels) {
+          parts.push(`Review-label opt-out requested: ${labels.join(", ")}. Manual overrides and default labels are preserved.`);
+        }
+        if (remainingEnabled.length > 0) {
+          parts.push(`${remainingEnabled.length} targeted provider(s) remain enabled under the effective policy.`);
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -1391,9 +1398,13 @@ export function createDaemonRequestHandler(deps: {
           JSON.stringify({
             output: {
               message: parts.join(" "),
-              disabled: toDisable,
+              disabled,
+              remainingEnabled,
+              matchedUrls: labelMatch?.matchedUrls ?? [],
               enabledLabels:
                 deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              enabledReviewLabels:
+                deps.modelManager.getEnabledReviewLabels?.() ?? [],
               ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
               ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
             },
@@ -1508,9 +1519,17 @@ export function createDaemonRequestHandler(deps: {
           deps.store.getState().setDisabledProviders(reviewed);
         }
 
-        const parts = [`Enabled ${toEnable.length} provider(s)`];
-        if (matchedLabels.length > 0) {
-          parts.push(`by label: ${matchedLabels.join(", ")}`);
+        // Label matches are targets, not proof of an effective policy change.
+        // Report current state after sync, including preserved manual overrides.
+        const effectiveDisabled = new Set<string>(deps.discoveryAdapter.getDisabledProviders());
+        const enabled = toEnable.filter((url) => !effectiveDisabled.has(url));
+        const remainingDisabled = toEnable.filter((url) => effectiveDisabled.has(url));
+        const parts = [`${enabled.length} targeted provider(s) currently enabled.`];
+        if (hasLabels) {
+          parts.push(`Review-label opt-in requested: ${labels.join(", ")}. Manual overrides and default labels are preserved.`);
+        }
+        if (remainingDisabled.length > 0) {
+          parts.push(`${remainingDisabled.length} targeted provider(s) remain disabled under the effective policy.`);
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -1518,9 +1537,13 @@ export function createDaemonRequestHandler(deps: {
           JSON.stringify({
             output: {
               message: parts.join(" "),
-              enabled: toEnable,
+              enabled,
+              remainingDisabled,
+              matchedUrls: labelMatch?.matchedUrls ?? [],
               enabledLabels:
                 deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              enabledReviewLabels:
+                deps.modelManager.getEnabledReviewLabels?.() ?? [],
               ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
               ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
             },

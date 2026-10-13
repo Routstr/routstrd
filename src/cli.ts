@@ -1422,6 +1422,8 @@ providersCmd
       | {
           message: string;
           disabled: string[];
+          remainingEnabled?: string[];
+          enabledReviewLabels?: string[];
           enabledLabels?: string[];
           unmatchedLabels?: string[];
         }
@@ -1431,9 +1433,13 @@ providersCmd
       for (const url of output.disabled) {
         console.log(`  - ${url}`);
       }
-      if (output.enabledLabels && output.enabledLabels.length > 0) {
+      for (const url of output.remainingEnabled ?? []) {
+        console.log(`  - Remains enabled (effective policy): ${url}`);
+      }
+      const effectiveLabels = output.enabledReviewLabels ?? output.enabledLabels;
+      if (effectiveLabels && effectiveLabels.length > 0) {
         console.log(
-          `Enabled review labels: ${output.enabledLabels.join(", ")}`,
+          `Enabled review labels: ${effectiveLabels.join(", ")}`,
         );
       }
       if (output.unmatchedLabels && output.unmatchedLabels.length > 0) {
@@ -1454,7 +1460,7 @@ providersCmd
 
     // Numeric targets are provider indices; everything else is a kind-38425
     // review label (e.g. `sandbox`). A label opts into the daemon's review
-    // label policy, so every provider with that label is kept enabled.
+    // label policy; manual overrides and negative review verdicts still apply.
     const { indices, labels } = splitProviderTargets(targets);
 
     if (indices.length === 0 && labels.length === 0) {
@@ -1476,6 +1482,8 @@ providersCmd
       | {
           message: string;
           enabled: string[];
+          remainingDisabled?: string[];
+          enabledReviewLabels?: string[];
           enabledLabels?: string[];
           matchedLabels?: string[];
           unmatchedLabels?: string[];
@@ -1486,9 +1494,13 @@ providersCmd
       for (const url of output.enabled) {
         console.log(`  - ${url}`);
       }
-      if (output.enabledLabels && output.enabledLabels.length > 0) {
+      for (const url of output.remainingDisabled ?? []) {
+        console.log(`  - Remains disabled (effective policy): ${url}`);
+      }
+      const effectiveLabels = output.enabledReviewLabels ?? output.enabledLabels;
+      if (effectiveLabels && effectiveLabels.length > 0) {
         console.log(
-          `Enabled review labels: ${output.enabledLabels.join(", ")}`,
+          `Enabled review labels: ${effectiveLabels.join(", ")}`,
         );
       }
       if (output.unmatchedLabels && output.unmatchedLabels.length > 0) {

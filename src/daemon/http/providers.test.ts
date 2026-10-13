@@ -483,6 +483,69 @@ describe("POST /providers/disable (review labels)", () => {
   });
 });
 
+describe("provider policy effective results", () => {
+  const sandboxFixture = {
+    reviews: [
+      { node: "nodeA", label: "lgtm", createdAt: 10 },
+      { node: "nodeB", label: "sandbox", createdAt: 10 },
+    ],
+  };
+
+  it("does not report a manually disabled label match as enabled", async () => {
+    const { handler, adapter } = makeDeps(sandboxFixture);
+    await call(handler, "POST", "/providers/disable", { indices: [1] });
+    const res = await call(handler, "POST", "/providers/enable", { labels: ["sandbox"] });
+    expect(res.status).toBe(200);
+    expect(res.json().output).toMatchObject({
+      enabled: [], matchedUrls: [PROVIDER_B], remainingDisabled: [PROVIDER_B],
+      enabledLabels: ["sandbox"],
+    });
+    expect(res.json().output.message).toContain("0 targeted provider(s) currently enabled");
+    expect(adapter.getManuallyDisabledProviders()).toEqual([PROVIDER_B]);
+    expect(adapter.getDisabledProviders()).toContain(PROVIDER_B);
+  });
+
+  it("does not report a manually enabled label match as disabled", async () => {
+    const { handler, adapter } = makeDeps(sandboxFixture);
+    await call(handler, "POST", "/providers/enable", { indices: [1], labels: ["sandbox"] });
+    const res = await call(handler, "POST", "/providers/disable", { labels: ["sandbox"] });
+    expect(res.json().output).toMatchObject({
+      disabled: [], matchedUrls: [PROVIDER_B], remainingEnabled: [PROVIDER_B],
+      enabledLabels: [],
+    });
+    expect(res.json().output.message).toContain("0 targeted provider(s) currently disabled");
+    expect(adapter.getManuallyEnabledProviders()).toEqual([PROVIDER_B]);
+    expect(adapter.getDisabledProviders()).not.toContain(PROVIDER_B);
+  });
+
+  it("reports immutable default labels and providers that remain enabled", async () => {
+    const { handler, adapter } = makeDeps({});
+    const res = await call(handler, "POST", "/providers/disable", { labels: ["LGTM"] });
+    expect(res.json().output).toMatchObject({
+      disabled: [], matchedUrls: [PROVIDER_A, PROVIDER_B],
+      remainingEnabled: [PROVIDER_A, PROVIDER_B], enabledLabels: [],
+      enabledReviewLabels: DEFAULT_LABELS,
+    });
+    expect(adapter.getDisabledProviders()).toEqual([]);
+  });
+
+  it("partitions mixed index and label targets by effective state", async () => {
+    const { handler } = makeDeps(sandboxFixture);
+    await call(handler, "POST", "/providers/disable", { indices: [1] });
+    const res = await call(handler, "POST", "/providers/enable", { indices: [0], labels: ["sandbox"] });
+    expect(res.json().output).toMatchObject({
+      enabled: [PROVIDER_A], matchedUrls: [PROVIDER_B], remainingDisabled: [PROVIDER_B],
+    });
+  });
+
+  it("does not claim a transition when an index is already enabled", async () => {
+    const { handler } = makeDeps({});
+    const res = await call(handler, "POST", "/providers/enable", { indices: [0] });
+    expect(res.json().output.enabled).toEqual([PROVIDER_A]);
+    expect(res.json().output.message).toBe("1 targeted provider(s) currently enabled.");
+  });
+});
+
 describe("provider policy concurrent requests", () => {
   for (const action of ["enable", "disable"] as const) {
     for (const mixed of [false, true]) {
