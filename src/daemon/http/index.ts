@@ -1309,8 +1309,13 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
+        const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+        // Label matching can await relay evidence. Resolve it before reading
+        // manual overrides so concurrent index edits cannot be overwritten.
+        const labelMatch = hasLabels
+          ? await deps.modelManager.matchProviderUrlsByLabels(labels, baseUrlsList)
+          : null;
         const state = deps.store.getState();
-        const baseUrlsList: string[] = state.baseUrlsList || [];
         // User-driven disables belong in the *manual* disabled list. The
         // review-based list (setDisabledProviders) is owned by the Nostr
         // kind-38425 review sync, which overwrites it and would otherwise
@@ -1348,11 +1353,8 @@ export function createDaemonRequestHandler(deps: {
         // their Nostr state (disabled unless they carry another enabled label).
         let matchedLabels: string[] = [];
         let unmatchedLabels: string[] = [];
-        if (hasLabels) {
-          const match = await deps.modelManager.matchProviderUrlsByLabels(
-            labels,
-            baseUrlsList,
-          );
+        if (hasLabels && labelMatch) {
+          const match = labelMatch;
           matchedLabels = match.matchedLabels;
           unmatchedLabels = match.unmatchedLabels;
           for (const label of labels) {
@@ -1363,10 +1365,14 @@ export function createDaemonRequestHandler(deps: {
           }
         }
 
-        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
-        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
-        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
-        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        // Label policy never changes per-provider manual overrides. Keep index
+        // mutations and their replacement writes synchronous after matching.
+        if (hasIndices && indices.length > 0) {
+          deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+          deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        }
 
         // Recompute the review verdict so a label-based disable takes effect now.
         const reviewed =
@@ -1424,8 +1430,13 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
+        const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+        // Label matching can await relay evidence. Resolve it before reading
+        // manual overrides so concurrent index edits cannot be overwritten.
+        const labelMatch = hasLabels
+          ? await deps.modelManager.matchProviderUrlsByLabels(labels, baseUrlsList)
+          : null;
         const state = deps.store.getState();
-        const baseUrlsList: string[] = state.baseUrlsList || [];
         // Re-enabling by index clears the manual disable and records a
         // manual-enable override so the review sync (which disables providers
         // without an lgtm review) does not silently re-disable it.
@@ -1468,11 +1479,8 @@ export function createDaemonRequestHandler(deps: {
         // later. `sandbox` is off until a user opts it in here.
         let matchedLabels: string[] = [];
         let unmatchedLabels: string[] = [];
-        if (hasLabels) {
-          const match = await deps.modelManager.matchProviderUrlsByLabels(
-            labels,
-            baseUrlsList,
-          );
+        if (hasLabels && labelMatch) {
+          const match = labelMatch;
           matchedLabels = match.matchedLabels;
           unmatchedLabels = match.unmatchedLabels;
           for (const label of labels) {
@@ -1483,10 +1491,14 @@ export function createDaemonRequestHandler(deps: {
           }
         }
 
-        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
-        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
-        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
-        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        // Label policy never changes per-provider manual overrides. Keep index
+        // mutations and their replacement writes synchronous after matching.
+        if (hasIndices && indices.length > 0) {
+          deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+          deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        }
 
         // Recompute the review verdict so a label-based enable takes effect
         // now rather than on the next scheduled review pass.

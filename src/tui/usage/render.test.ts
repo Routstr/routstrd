@@ -411,8 +411,8 @@ describe("renderTimelineChart", () => {
 
     // Default height 10 + headroom + bottom axis + x labels + legend.
     expect(lines).toHaveLength(14);
-    expect(lines[0]).toContain("30"); // peak sats (left axis)
-    expect(lines[0]).toContain("400"); // peak tokens (right axis)
+    expect(lines[0]).toContain("50"); // rounded sats ceiling (left axis)
+    expect(lines[0]).toContain("500"); // rounded token ceiling (right axis)
     expect(lines[0]).not.toContain("█"); // headroom row carries ticks only
     expect(text).toContain("00");
     expect(text).toContain("03");
@@ -420,6 +420,35 @@ describe("renderTimelineChart", () => {
     expect(text).toContain("left: sats · right: tokens");
     // The all-zero bucket has no bars while its neighbours do.
     expect(text).toContain("█");
+  });
+
+  test("rounds both axis ceilings up instead of using the exact peaks", () => {
+    const points = [{ ...TIMELINE_POINTS[0]!, satsCost: 8900, totalTokens: 8_900_000 }];
+    const lines = renderTimelineChart(points, "hour", 76, 10).map(stripAnsi);
+    expect(lines[0]).toContain("10.0k");
+    expect(lines[0]).toContain("10.0M");
+    expect(lines[0]).not.toContain("8.9");
+    expect(lines[1]).not.toContain("█"); // 89% of the rounded scale
+    expect(lines[2]).toContain("█");
+    expect(lines[5]).toContain("5.0k");
+    expect(lines[5]).toContain("5.0M");
+  });
+
+  test("scales merged buckets against their summed peaks at narrow widths", () => {
+    const points = Array.from({ length: 28 }, (_, i) => ({
+      ...TIMELINE_POINTS[0]!, key: String(i), timestamp: i,
+      satsCost: i < 2 ? 10 : 6, totalTokens: i < 2 ? 100 : 60,
+    }));
+    const lines = renderTimelineChart(points, "hour", 76, 10).map(stripAnsi);
+    expect(lines[0]).toContain("20");
+    expect(lines[0]).toContain("200");
+    const plotRows = lines.slice(1, 11).map((line) => line.split("┤")[1]!.split("├")[0]!);
+    // Two adjacent original buckets become one pair: 20/200 vs 12/120.
+    expect(plotRows.filter((row) => row[0] === "█")).toHaveLength(10);
+    expect(plotRows.filter((row) => row[1] === "█")).toHaveLength(10);
+    expect(plotRows.filter((row) => row[4] === "█")).toHaveLength(6);
+    expect(plotRows.filter((row) => row[5] === "█")).toHaveLength(6);
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(76);
   });
 
   test("labels day/week buckets as MM-DD", () => {

@@ -483,6 +483,71 @@ describe("POST /providers/disable (review labels)", () => {
   });
 });
 
+describe("provider policy concurrent requests", () => {
+  for (const action of ["enable", "disable"] as const) {
+    for (const mixed of [false, true]) {
+      it(`${action} with ${mixed ? "indices and labels" : "labels only"} preserves concurrent manual changes`, async () => {
+        const { handler, store, adapter, modelManager } = makeDeps({});
+        const opposite = action === "enable" ? "disable" : "enable";
+        if (action === "disable") {
+          await call(handler, "POST", "/providers/disable", { indices: [0] });
+        }
+
+        let signalEntered!: () => void;
+        let release!: () => void;
+        const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+        const gate = new Promise<void>((resolve) => { release = resolve; });
+        const match = modelManager.matchProviderUrlsByLabels;
+        modelManager.matchProviderUrlsByLabels = async (...args) => {
+          signalEntered();
+          await gate;
+          return match(...args);
+        };
+
+        // A label-only operation must not even persist replacement manual arrays.
+        let manualWrites = 0;
+        const state = store.getState();
+        const setDisabled = state.setManuallyDisabledProviders;
+        const setEnabled = state.setManuallyEnabledProviders;
+        state.setManuallyDisabledProviders = (urls: string[]) => {
+          manualWrites++;
+          setDisabled(urls);
+        };
+        state.setManuallyEnabledProviders = (urls: string[]) => {
+          manualWrites++;
+          setEnabled(urls);
+        };
+
+        const pending = call(handler, "POST", `/providers/${action}`, {
+          labels: ["lgtm"],
+          ...(mixed ? { indices: [1] } : {}),
+        });
+        await entered;
+        let concurrentWrites = 0;
+        try {
+          const concurrent = await call(handler, "POST", `/providers/${opposite}`, {
+            indices: [0],
+          });
+          expect(concurrent.status).toBe(200);
+          concurrentWrites = manualWrites;
+        } finally {
+          release();
+        }
+        expect((await pending).status).toBe(200);
+        expect(manualWrites - concurrentWrites).toBe(mixed ? 2 : 0);
+
+        const disabled = action === "enable" ? [PROVIDER_A] : mixed ? [PROVIDER_B] : [];
+        const enabled = action === "disable" ? [PROVIDER_A] : mixed ? [PROVIDER_B] : [];
+        expect(store.state.manuallyDisabledProviders).toEqual(disabled);
+        expect(store.state.manuallyEnabledProviders).toEqual(enabled);
+        expect(adapter.getManuallyDisabledProviders()).toEqual(disabled);
+        expect(adapter.getManuallyEnabledProviders()).toEqual(enabled);
+        expect(adapter.getDisabledProviders()).toEqual(disabled);
+      });
+    }
+  }
+});
+
 describe("GET /providers/reviews", () => {
   it("reports each provider's review events, latest labels and enabled labels", async () => {
     const { handler } = makeDeps({

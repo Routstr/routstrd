@@ -20,9 +20,10 @@ selector.
 | `All`        | week (ISO, Monday) | one per week since first usage |
 
 Each bucket draws two grouped bars — orange **spend** (left axis, sats) and
-red **tokens** (right axis, tokens) — flush inside the pair with a gap
+cyan **tokens** (right axis, tokens) — flush inside the pair with a gap
 between buckets. A headroom row holds the peak ticks above the tallest bar so
-blocks never appear to overshoot the axis. The summary is a single compact
+blocks never appear to overshoot the axis; both axes round up to a readable
+ceiling (1/2/5 × 10ⁿ) rather than the exact peak. The summary is a single compact
 line and the chart grows to fill the terminal height.
 
 ## Backend — `src/daemon/http/usage-summary.ts`

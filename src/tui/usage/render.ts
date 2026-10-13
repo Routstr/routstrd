@@ -314,7 +314,16 @@ function formatSatsAxis(value: number): string {
   if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
   if (value >= 1_000) return (value / 1_000).toFixed(1) + "k";
   if (value >= 100 || Number.isInteger(value)) return String(Math.round(value));
-  return value.toFixed(1);
+  return String(Number(value.toPrecision(3)));
+}
+
+/** Round up to a readable 1/2/5 × power-of-ten axis ceiling. */
+function niceAxisCeiling(peak: number): number {
+  if (peak <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(peak));
+  const normalized = peak / magnitude;
+  const step = [1, 2, 5, 10].find((value) => normalized <= value)!;
+  return step * magnitude;
 }
 
 /** Axis tick label for a bucket: `09` (hour) or `05-20` (day/week). */
@@ -349,7 +358,7 @@ const BAR_GROUP_GAP = 1;
 
 /**
  * Dual-axis grouped bar chart. For every bucket an orange spend bar (left axis,
- * sats) is drawn flush against a red token bar (right axis, tokens), with a
+ * sats) is drawn flush against a cyan token bar (right axis, tokens), with a
  * gap between buckets so pairs read as pairs.
  *
  * `width` is the columns available inside the surrounding box; `height` is the
@@ -368,20 +377,35 @@ export function renderTimelineChart(
   if (maxCost <= 0 && maxTokens <= 0) return ["No activity in this window"];
 
   const rows = Math.max(1, Math.floor(height));
-  const costTicks = [formatSatsAxis(maxCost), formatSatsAxis(maxCost / 2), "0"];
-  const tokenTicks = [formatNumber(maxTokens), formatNumber(maxTokens / 2), "0"];
-  const leftCol = Math.max(...costTicks.map((t) => t.length));
-  const rightCol = Math.max(...tokenTicks.map((t) => t.length));
-  const leftGutter = leftCol + 2; // "<label> ┤"
-  const rightGutter = rightCol + 2; // "├ <label>"
-  const plotWidth = Math.max(1, width - leftGutter - rightGutter);
-
-  // Merge buckets until at least one column per bar, plus the gaps, fits.
   const minGroupCols = 2 + BAR_INNER_GAP + BAR_GROUP_GAP;
-  const maxGroups = Math.max(1, Math.floor(plotWidth / minGroupCols));
-  const slots = points.length > maxGroups
-    ? mergeTimelinePoints(points, Math.ceil(points.length / maxGroups))
-    : points;
+  let groupSize = 1;
+  let slots = points;
+  let costCeiling: number;
+  let tokenCeiling: number;
+  let costTicks: string[];
+  let tokenTicks: string[];
+  let leftCol: number;
+  let rightCol: number;
+  let leftGutter: number;
+  let plotWidth: number;
+
+  // Merging changes peaks and potentially label widths. Recompute the axes
+  // after each merge; groupSize only grows, so this always terminates.
+  for (;;) {
+    slots = groupSize === 1 ? points : mergeTimelinePoints(points, groupSize);
+    costCeiling = niceAxisCeiling(Math.max(...slots.map((p) => p.satsCost), 0));
+    tokenCeiling = niceAxisCeiling(Math.max(...slots.map((p) => p.totalTokens), 0));
+    costTicks = [formatSatsAxis(costCeiling), formatSatsAxis(costCeiling / 2), "0"];
+    tokenTicks = [formatNumber(tokenCeiling), formatNumber(tokenCeiling / 2), "0"];
+    leftCol = Math.max(...costTicks.map((t) => t.length));
+    rightCol = Math.max(...tokenTicks.map((t) => t.length));
+    leftGutter = leftCol + 2; // "<label> ┤"
+    const rightGutter = rightCol + 2; // "├ <label>"
+    plotWidth = Math.max(1, width - leftGutter - rightGutter);
+    const maxGroups = Math.max(1, Math.floor(plotWidth / minGroupCols));
+    if (slots.length <= maxGroups) break;
+    groupSize = Math.max(groupSize + 1, Math.ceil(points.length / maxGroups));
+  }
   const n = slots.length;
 
   const groupCols = Math.max(minGroupCols, Math.floor(plotWidth / n));
@@ -390,8 +414,8 @@ export function renderTimelineChart(
   const trailing = " ".repeat(Math.max(0, groupCols - groupUsed));
   const plotPad = " ".repeat(Math.max(0, plotWidth - n * groupCols));
 
-  const costHeights = slots.map((p) => (maxCost > 0 ? Math.round((p.satsCost / maxCost) * rows) : 0));
-  const tokenHeights = slots.map((p) => (maxTokens > 0 ? Math.round((p.totalTokens / maxTokens) * rows) : 0));
+  const costHeights = slots.map((p) => Math.round((p.satsCost / costCeiling) * rows));
+  const tokenHeights = slots.map((p) => Math.round((p.totalTokens / tokenCeiling) * rows));
 
   const lines: string[] = [];
   // Headroom row: the peak ticks float one row above the tallest bar, so a
@@ -411,7 +435,7 @@ export function renderTimelineChart(
       const tokenOn = tokenHeights[c]! >= filledFromBottom;
       plot += costOn ? COLORS.orange + "█".repeat(barWidth) : " ".repeat(barWidth);
       plot += " ".repeat(BAR_INNER_GAP);
-      plot += tokenOn ? COLORS.red + "█".repeat(barWidth) : " ".repeat(barWidth);
+      plot += tokenOn ? COLORS.cyan + "█".repeat(barWidth) : " ".repeat(barWidth);
       plot += trailing + " ".repeat(BAR_GROUP_GAP);
     }
     plot += plotPad;
@@ -447,7 +471,7 @@ export function renderTimelineChart(
   const legendSegments: Array<{ text: string; color: string }> = [
     { text: "█", color: COLORS.orange },
     { text: " spend   ", color: "" },
-    { text: "█", color: COLORS.red },
+    { text: "█", color: COLORS.cyan },
     { text: " tokens   ", color: "" },
     { text: "left: sats · right: tokens", color: COLORS.dim },
   ];
