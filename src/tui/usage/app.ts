@@ -180,15 +180,19 @@ export async function runUsageTui(): Promise<void> {
       return;
     }
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, naming, currentWindow);
     const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [W] window, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
     const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
+
+    const content = renderTabContent(currentTab, stats, balance, status, width, naming, currentWindow, contentViewportHeight);
     const visibleContent = applyScrollToContent(content, contentViewportHeight);
-    const footerBlock = (visibleContent ? "\n" : "") + footerSeparator + footer;
+    const visibleLines = visibleContent === "" ? 0 : visibleContent.split("\n").length;
+    // Pin the footer to the bottom even when a tab's content is short.
+    const padLines = Math.max(0, contentViewportHeight - visibleLines);
+    const footerBlock = (visibleContent ? "\n" : "") + "\n".repeat(padLines) + footerSeparator + footer;
 
     stdout.write(moveCursor(1, 1) + eraseDown() + chrome + visibleContent + footerBlock);
   }

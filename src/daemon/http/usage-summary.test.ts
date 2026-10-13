@@ -420,25 +420,29 @@ describe("getUsageSummary time windows", () => {
     expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
   });
 
-  it("builds a 7-day timeline ending today", async () => {
+  it("builds 7 days of hourly buckets ending now", async () => {
     const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
     const { bucket, points } = summary.window!.timeline;
 
-    expect(bucket).toBe("day");
-    expect(points).toHaveLength(7);
-    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(12);
-    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(bucket).toBe("hour");
+    expect(points).toHaveLength(7 * 24);
+    for (const p of points) expect(p.key).toMatch(/^\d{2}-\d{2} \d{2}$/);
 
-    // Newest bucket is today, oldest is exactly six days earlier.
-    expect(points[6]!.key).toBe(new Date(RECENT).toISOString().slice(0, 10));
-    expect(points[0]!.timestamp).toBe(points[6]!.timestamp - 6 * 86_400_000);
+    // Oldest bucket is 6 days ago at local midnight; newest is today 23:00.
+    const todayStart = Math.floor(RECENT / 86_400_000) * 86_400_000;
+    expect(points[0]!.timestamp).toBe(todayStart - 6 * 86_400_000);
+    expect(points[points.length - 1]!.timestamp).toBe(todayStart + 23 * 3_600_000);
+
+    // The recent entry lands in today's bucket for its hour.
+    const currentHour = new Date(RECENT).getUTCHours();
+    expect(points[6 * 24 + currentHour]!.satsCost).toBe(5);
 
     // Bars sum to the windowed totals (whole local days, not `now - 7*24h`).
     expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);
     expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
   });
 
-  it("builds a 30-day timeline but folds the all window into months", async () => {
+  it("builds a 30-day timeline and folds the all window into weeks", async () => {
     const month = await getUsageSummary(driver, [], TZ0, undefined, "30d");
     expect(month.window!.timeline.bucket).toBe("day");
     expect(month.window!.timeline.points).toHaveLength(30);
@@ -449,11 +453,15 @@ describe("getUsageSummary time windows", () => {
 
     const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
     const { bucket, points } = all.window!.timeline;
-    expect(bucket).toBe("month");
-    // Entries span ~10 days, so one or two contiguous months.
+    expect(bucket).toBe("week");
+    // Entries span ~10 days, so at most three contiguous Monday weeks.
     expect(points.length).toBeGreaterThanOrEqual(1);
-    expect(points.length).toBeLessThanOrEqual(2);
+    expect(points.length).toBeLessThanOrEqual(3);
     expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
-    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}$/);
+    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Weeks are 7 days apart.
+    for (let i = 1; i < points.length; i++) {
+      expect(points[i]!.timestamp - points[i - 1]!.timestamp).toBe(7 * 86_400_000);
+    }
   });
 });

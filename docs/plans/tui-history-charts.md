@@ -2,6 +2,8 @@
 
 > **Status:** implemented. Branch `feat/tui-history-charts`
 > (worktree `.worktrees/tui-history-charts`, based on `main` @ `5069b2d`).
+> The dual-axis grouped-bar revision lives on `main` (uncommitted at the time
+> of writing).
 
 ## Goal
 
@@ -13,25 +15,29 @@ selector.
 | `[W]` window | Bucket | Bars |
 | ------------ | ------ | ---- |
 | `24h`        | hour   | 24   |
-| `7d`         | day    | 7    |
+| `7d`         | hour   | 7 × 24, merged to fit the width |
 | `30d`        | day    | 30   |
-| `All`        | month  | one per calendar month since first usage |
+| `All`        | week (ISO, Monday) | one per week since first usage |
 
-Y-axis is total spend; a token sparkline shares the x-axis (scaled
-independently to peak tokens, with both totals in the legend). This also makes
-the tab window-aware: the selector was previously hidden on it.
+Each bucket draws two grouped bars — orange **spend** (left axis, sats) and
+red **tokens** (right axis, tokens) — flush inside the pair with a gap
+between buckets. The summary is a single compact line and the chart grows to
+fill the terminal height.
 
 ## Backend — `src/daemon/http/usage-summary.ts`
 
-- New `TimelineBucket` (`hour` | `day` | `month`), `TimelinePoint` and
+- New `TimelineBucket` (`hour` | `day` | `week`), `TimelinePoint` and
   `Timeline` types; `WindowedStats` gains a required `timeline: Timeline`.
 - `buildTimeline(driver, baseFilter, window, now, tzOffsetMinutes)`:
   - `today` (24h) → `aggregate({ groupBy: "hour" })` over the last 24
     local-aligned hours. The SDK's `hour` key is `HH` with no date, so the
     window is aligned to whole hours (each hour-of-day appears at most once).
-  - `7d` / `30d` → `aggregate({ groupBy: "day" })` over the last N days.
-  - `all` → `aggregate({ groupBy: "day" })` with no `after`, folded into
-    `YYYY-MM` months. The SDK has no `month` grouping, hence the fold.
+  - `7d` → 7 × 24 hourly buckets. Because the `hour` key has no date, each
+    local day is aggregated over its own `[start, end)` range and the buckets
+    concatenated.
+  - `30d` → `aggregate({ groupBy: "day" })` over the last 30 days.
+  - `all` → `aggregate({ groupBy: "day" })` with no `after`, folded into ISO
+    weeks (Monday start). The SDK has no `week` grouping, hence the fold.
   - Every series is zero-filled so the x-axis is evenly spaced.
 - `buildTimeline` is called once per summary build (after `buildAggregates`)
   and attached to both the all-time and windowed blocks. The zero-data
@@ -43,17 +49,20 @@ the tab window-aware: the selector was previously hidden on it.
 - `constants.ts` — tab renamed to `History`; `tabSupportsWindow` now excludes
   only Overview and Recent.
 - `render.ts` — `renderToday` replaced by `renderHistory` +
-  `renderTimelineChart` (vertical bars, y-axis gutter, x labels, token
-  sparkline, legend). Long series are merged to fit narrow terminals.
+  `renderTimelineChart` (dual-axis grouped bars, y-axis gutters, x labels,
+  legend). Buckets are merged when they no longer fit; the chart height is
+  derived from the viewport so the tab fills the terminal.
+- `app.ts` — passes the content height into the tab renderer and pads the
+  content so the footer stays pinned to the bottom.
 - `data.ts` — the old-daemon fallback `windowFromAllTime` supplies an empty
   timeline.
 
 ## Tests
 
-- `src/daemon/http/usage-summary.test.ts` — hourly / 7-day / 30-day /
-  month-folded timelines, including zero-fill and window totals.
-- `src/tui/usage/render.test.ts` — axis, labels, sparkline, legend, empty
-  state, and full-width alignment of every rendered line.
+- `src/daemon/http/usage-summary.test.ts` — hourly / 7-day-hourly / 30-day /
+  week-folded timelines, including zero-fill and window totals.
+- `src/tui/usage/render.test.ts` — dual-axis grouped bars, labels, legend,
+  empty state, height-filling, and full-width alignment of every line.
 
 ## Notes / limits
 

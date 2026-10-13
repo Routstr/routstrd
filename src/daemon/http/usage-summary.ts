@@ -64,16 +64,19 @@ export interface SizeBuckets {
 
 /**
  * Bucket size used to render the usage history chart. Chosen from the selected
- * {@link TimeWindow}: hours for the last 24h, days for 7d/30d, and months for
- * the unbounded `all` view.
+ * {@link TimeWindow}: hours for the last 24h and 7d, days for 30d, and weeks
+ * for the unbounded `all` view.
  */
-export type TimelineBucket = "hour" | "day" | "month";
+export type TimelineBucket = "hour" | "day" | "week";
 
-/** One bar in the history chart: one hour, day or month of usage. */
+/** One bar in the history chart: one hour, day or week of usage. */
 export interface TimelinePoint {
-  /** Bucket key: `HH` (hour), `YYYY-MM-DD` (day) or `YYYY-MM` (month). */
+  /**
+   * Bucket key: `HH` (24h hour), `MM-DD HH` (7d hour), `YYYY-MM-DD` (day or
+   * week start).
+   */
   key: string;
-  /** Bucket start, UTC ms. Month points are anchored to the 1st of the month. */
+  /** Bucket start, UTC ms. Week points are anchored to their Monday midnight. */
   timestamp: number;
   requests: number;
   satsCost: number;
@@ -278,10 +281,10 @@ function emptyTimeline(window: TimeWindow): Timeline {
   return { bucket: bucketForWindow(window), points: [] };
 }
 
-/** Which bucket the chart uses for a window: hours, days or months. */
+/** Which bucket the chart uses for a window: hours, days or weeks. */
 function bucketForWindow(window: TimeWindow): TimelineBucket {
-  if (window === "today") return "hour";
-  if (window === "all") return "month";
+  if (window === "today" || window === "7d") return "hour";
+  if (window === "all") return "week";
   return "day";
 }
 
@@ -326,11 +329,13 @@ function accumulatorFromRow(row: {
 /**
  * Build the zero-filled history series for a window.
  *
- * - `today` (24h) → 24 hourly buckets, aligned to the local hour, newest last.
- * - `7d` / `30d` → that many daily buckets, newest last.
- * - `all` → one bucket per calendar month, from the first month with usage to
- *   the current month. The SDK has no `month` grouping, so all days are
- *   aggregated and folded here.
+ * - `today` (24h) → 24 hourly buckets, aligned to the local hour.
+ * - `7d` → 7 × 24 hourly buckets (per local day; the SDK's `hour` key carries
+ *   no date, so each day is aggregated over its own range).
+ * - `30d` → 30 daily buckets.
+ * - `all` → one bucket per ISO week (Monday start) since the first week with
+ *   usage. The SDK has no `week` grouping, so all days are aggregated and
+ *   folded here.
  */
 async function buildTimeline(
   driver: UsageTrackingDriver,
@@ -340,13 +345,16 @@ async function buildTimeline(
   tzOffsetMinutes: number,
 ): Promise<Timeline> {
   if (window === "all") {
-    return buildMonthlyTimeline(driver, baseFilter, now, tzOffsetMinutes);
+    return buildWeeklyTimeline(driver, baseFilter, now, tzOffsetMinutes);
+  }
+  if (window === "7d") {
+    return buildHourlyWeekTimeline(driver, baseFilter, now, tzOffsetMinutes);
   }
 
   const isHourly = window === "today";
   const bucket = isHourly ? "hour" : "day";
   const bucketMs = isHourly ? HOUR_MS : DAY_MS;
-  const slotCount = isHourly ? 24 : window === "7d" ? 7 : 30;
+  const slotCount = isHourly ? 24 : 30;
 
   // Same boundary the windowed aggregates use, so the chart bars sum to the
   // tab's totals. Aligning the newest slot to the current local hour/day also
@@ -377,8 +385,66 @@ async function buildTimeline(
   return { bucket, points };
 }
 
-/** Fold all-time daily aggregates into calendar months, zero-filling gaps. */
-async function buildMonthlyTimeline(
+/**
+ * 7 days of hourly buckets (7 × 24), oldest first. The SDK's `hour` grouping
+ * keys on hour-of-day only (no date), so each local day is aggregated over its
+ * own `[start, end)` range and the buckets concatenated.
+ */
+async function buildHourlyWeekTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  const DAYS = 7;
+  const shiftedNow = now - tzOffsetMinutes * 60_000;
+  const todayStartShifted = Math.floor(shiftedNow / DAY_MS) * DAY_MS;
+
+  const points: TimelinePoint[] = [];
+  for (let d = DAYS - 1; d >= 0; d--) {
+    const dayStartShifted = todayStartShifted - d * DAY_MS;
+    const dayStartUtc = dayStartShifted + tzOffsetMinutes * 60_000;
+    const dayEndUtc = dayStartUtc + DAY_MS;
+
+    const rows = await driver.aggregate({
+      ...baseFilter,
+      groupBy: "hour",
+      tzOffsetMinutes,
+      after: dayStartUtc - 1, // strict `>`, inclusive of the day's first ms
+      before: dayEndUtc, // strict `<`, exclusive of the next day
+    });
+    const byHour = new Map(rows.map((row) => [row.group ?? "", row]));
+    const dateLabel = shiftedDayKey(dayStartShifted).slice(5); // MM-DD
+
+    for (let h = 0; h < 24; h++) {
+      const slotShifted = dayStartShifted + h * HOUR_MS;
+      const row = byHour.get(pad2(h));
+      points.push({
+        key: dateLabel + " " + pad2(h),
+        timestamp: slotShifted + tzOffsetMinutes * 60_000,
+        ...(row ? accumulatorFromRow(row) : zeroAccumulator()),
+      });
+    }
+  }
+
+  return { bucket: "hour", points };
+}
+
+/** Shifted-local Monday midnight of the week containing `shiftedMs`. */
+function startOfWeekShifted(shiftedMs: number): number {
+  const day = new Date(shiftedMs).getUTCDay(); // 0 = Sunday
+  const daysSinceMonday = (day + 6) % 7;
+  return Math.floor(shiftedMs / DAY_MS) * DAY_MS - daysSinceMonday * DAY_MS;
+}
+
+/** Shifted-local ms for a `YYYY-MM-DD` key (`Date.UTC` == shifted-local). */
+function dayKeyToShifted(key: string): number {
+  const [y, m, d] = key.split("-").map(Number) as [number, number, number];
+  return Date.UTC(y, m - 1, d);
+}
+
+/** Fold all-time daily aggregates into ISO weeks (Monday), zero-filling gaps. */
+async function buildWeeklyTimeline(
   driver: UsageTrackingDriver,
   baseFilter: UsageFilter,
   now: number,
@@ -390,48 +456,36 @@ async function buildMonthlyTimeline(
     tzOffsetMinutes,
   });
 
-  const byMonth = new Map<string, TimelineAccumulator>();
+  const byWeek = new Map<string, TimelineAccumulator>();
   for (const row of rows) {
-    const key = (row.group ?? "").slice(0, 7); // YYYY-MM
-    if (key.length !== 7) continue;
-    const acc = byMonth.get(key) ?? zeroAccumulator();
+    const dayKey = row.group ?? "";
+    if (dayKey.length !== 10) continue;
+    const weekKey = shiftedDayKey(startOfWeekShifted(dayKeyToShifted(dayKey)));
+    const acc = byWeek.get(weekKey) ?? zeroAccumulator();
     const add = accumulatorFromRow(row);
     acc.requests += add.requests;
     acc.satsCost += add.satsCost;
     acc.totalTokens += add.totalTokens;
     acc.promptTokens += add.promptTokens;
     acc.completionTokens += add.completionTokens;
-    byMonth.set(key, acc);
+    byWeek.set(weekKey, acc);
   }
 
-  const months = [...byMonth.keys()].sort();
-  if (months.length === 0) return { bucket: "month", points: [] };
+  const weeks = [...byWeek.keys()].sort();
+  if (weeks.length === 0) return { bucket: "week", points: [] };
 
-  const [firstYear, firstMonth] = months[0]!.split("-").map(Number) as [number, number];
-  const nowShifted = new Date(now - tzOffsetMinutes * 60_000);
-  const lastYear = nowShifted.getUTCFullYear();
-  const lastMonth = nowShifted.getUTCMonth() + 1;
-
+  const lastShifted = startOfWeekShifted(now - tzOffsetMinutes * 60_000);
   const points: TimelinePoint[] = [];
-  let year = firstYear;
-  let month = firstMonth;
-  while (year < lastYear || (year === lastYear && month <= lastMonth)) {
-    const key = `${year}-${pad2(month)}`;
-    // `Date.UTC` gives the shifted-local first-of-month; add the offset back.
-    const shiftedStart = Date.UTC(year, month - 1, 1);
+  for (let cur = dayKeyToShifted(weeks[0]!); cur <= lastShifted; cur += 7 * DAY_MS) {
+    const key = shiftedDayKey(cur);
     points.push({
       key,
-      timestamp: shiftedStart + tzOffsetMinutes * 60_000,
-      ...(byMonth.get(key) ?? zeroAccumulator()),
+      timestamp: cur + tzOffsetMinutes * 60_000,
+      ...(byWeek.get(key) ?? zeroAccumulator()),
     });
-    month += 1;
-    if (month > 12) {
-      month = 1;
-      year += 1;
-    }
   }
 
-  return { bucket: "month", points };
+  return { bucket: "week", points };
 }
 
 // ─── Module-level memo cache ─────────────────────────────────────────────────

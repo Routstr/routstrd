@@ -317,13 +317,9 @@ function formatSatsAxis(value: number): string {
   return value.toFixed(1);
 }
 
-const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-
-/** Axis tick label for a bucket: `09` (hour), `05-20` (day) or `Jan` (month). */
+/** Axis tick label for a bucket: `09` (hour) or `05-20` (day/week). */
 function timelineAxisLabel(point: TimelinePoint, bucket: TimelineBucket): string {
   if (bucket === "hour") return point.key;
-  if (bucket === "month") return MONTH_ABBR[Number(point.key.slice(5, 7)) - 1] ?? point.key;
   return point.key.slice(5); // MM-DD
 }
 
@@ -346,93 +342,116 @@ function mergeTimelinePoints(points: TimelinePoint[], groupSize: number): Timeli
   return merged;
 }
 
+/** Columns kept between the spend bar and the token bar of one bucket (none). */
+const BAR_INNER_GAP = 0;
+/** Columns kept between two buckets. */
+const BAR_GROUP_GAP = 1;
+
 /**
- * Vertical bar chart of spend over time, with a token sparkline sharing the
- * x-axis. Bars are scaled to the peak spend; the sparkline is scaled
- * independently to peak tokens, and the legend states both totals.
+ * Dual-axis grouped bar chart. For every bucket an orange spend bar (left axis,
+ * sats) is drawn flush against a red token bar (right axis, tokens), with a
+ * gap between buckets so pairs read as pairs.
  *
- * `width` is the number of columns available inside the surrounding box.
+ * `width` is the columns available inside the surrounding box; `height` is the
+ * number of bar rows.
  */
 export function renderTimelineChart(
   points: TimelinePoint[],
   bucket: TimelineBucket,
   width: number,
-  height = 8,
+  height = 10,
 ): string[] {
   if (points.length === 0) return ["No activity in this window"];
 
   const maxCost = Math.max(...points.map((p) => p.satsCost), 0);
   const maxTokens = Math.max(...points.map((p) => p.totalTokens), 0);
-  const totalTokens = points.reduce((sum, p) => sum + p.totalTokens, 0);
   if (maxCost <= 0 && maxTokens <= 0) return ["No activity in this window"];
 
-  // Left gutter: right-aligned y labels against the axis line.
-  const peakLabel = formatSatsAxis(maxCost);
-  const axisCol = peakLabel.length;
-  const gutter = axisCol + 2; // "<label> ┤"
-  const plotWidth = Math.max(1, width - gutter);
+  const rows = Math.max(1, Math.floor(height));
+  const costTicks = [formatSatsAxis(maxCost), formatSatsAxis(maxCost / 2), "0"];
+  const tokenTicks = [formatNumber(maxTokens), formatNumber(maxTokens / 2), "0"];
+  const leftCol = Math.max(...costTicks.map((t) => t.length));
+  const rightCol = Math.max(...tokenTicks.map((t) => t.length));
+  const leftGutter = leftCol + 2; // "<label> ┤"
+  const rightGutter = rightCol + 2; // "├ <label>"
+  const plotWidth = Math.max(1, width - leftGutter - rightGutter);
 
-  let slots = points;
-  if (slots.length > plotWidth) {
-    slots = mergeTimelinePoints(slots, Math.ceil(slots.length / plotWidth));
-  }
-  const cols = slots.length;
-  const colWidth = Math.max(1, Math.floor(plotWidth / cols));
-  const usedWidth = colWidth * cols;
+  // Merge buckets until at least one column per bar, plus the gaps, fits.
+  const minGroupCols = 2 + BAR_INNER_GAP + BAR_GROUP_GAP;
+  const maxGroups = Math.max(1, Math.floor(plotWidth / minGroupCols));
+  const slots = points.length > maxGroups
+    ? mergeTimelinePoints(points, Math.ceil(points.length / maxGroups))
+    : points;
+  const n = slots.length;
 
-  const axisRow = (label: string): string =>
-    `${label.padStart(axisCol)} ${COLORS.dim}┤${COLORS.reset}`;
-  const blankAxisRow = (): string =>
-    " ".repeat(axisCol) + " " + COLORS.dim + "┤" + COLORS.reset;
+  const groupCols = Math.max(minGroupCols, Math.floor(plotWidth / n));
+  const barWidth = Math.max(1, Math.floor((groupCols - BAR_INNER_GAP - BAR_GROUP_GAP) / 2));
+  const groupUsed = 2 * barWidth + BAR_INNER_GAP + BAR_GROUP_GAP;
+  const trailing = " ".repeat(Math.max(0, groupCols - groupUsed));
+  const plotPad = " ".repeat(Math.max(0, plotWidth - n * groupCols));
+
+  const costHeights = slots.map((p) => (maxCost > 0 ? Math.round((p.satsCost / maxCost) * rows) : 0));
+  const tokenHeights = slots.map((p) => (maxTokens > 0 ? Math.round((p.totalTokens / maxTokens) * rows) : 0));
 
   const lines: string[] = [];
-  const midRow = Math.floor((height - 1) / 2);
-  for (let row = 0; row < height; row++) {
-    const filledFromBottom = height - row;
-    let barRow = "";
-    for (let c = 0; c < cols; c++) {
-      const barHeight = Math.round((slots[c]!.satsCost / maxCost) * height);
-      barRow += barHeight >= filledFromBottom
-        ? COLORS.green + "█".repeat(colWidth)
-        : " ".repeat(colWidth);
+  const midRow = Math.floor((rows - 1) / 2);
+  for (let row = 0; row < rows; row++) {
+    const filledFromBottom = rows - row;
+    let plot = "";
+    for (let c = 0; c < n; c++) {
+      const costOn = costHeights[c]! >= filledFromBottom;
+      const tokenOn = tokenHeights[c]! >= filledFromBottom;
+      plot += costOn ? COLORS.orange + "█".repeat(barWidth) : " ".repeat(barWidth);
+      plot += " ".repeat(BAR_INNER_GAP);
+      plot += tokenOn ? COLORS.red + "█".repeat(barWidth) : " ".repeat(barWidth);
+      plot += trailing + " ".repeat(BAR_GROUP_GAP);
     }
-    const axis = row === 0
-      ? axisRow(peakLabel)
-      : row === midRow
-        ? axisRow(formatSatsAxis(maxCost / 2))
-        : blankAxisRow();
-    lines.push(axis + barRow + COLORS.reset);
+    plot += plotPad;
+
+    const leftLabel = row === 0 ? costTicks[0]! : row === midRow ? costTicks[1]! : "";
+    const rightLabel = row === 0 ? tokenTicks[0]! : row === midRow ? tokenTicks[1]! : "";
+    const left = leftLabel.padStart(leftCol) + " " + COLORS.dim + "┤" + COLORS.reset;
+    const right = COLORS.dim + "├" + COLORS.reset + " " + rightLabel.padEnd(rightCol);
+    lines.push(left + plot + COLORS.reset + right);
   }
 
-  // Bottom axis, then x labels and the token sparkline on the same grid.
-  lines.push(" ".repeat(axisCol) + " " + COLORS.dim + "└" + "─".repeat(usedWidth) + COLORS.reset);
+  // Bottom axis, carrying the `0` tick on both sides.
+  lines.push(
+    "0".padStart(leftCol) + " " + COLORS.dim + "└" + "─".repeat(plotWidth) + "┘" + COLORS.reset +
+    " " + "0".padEnd(rightCol),
+  );
 
+  // X labels, placed under the first column of their bucket.
   const labelLine: string[] = [];
   let cursor = 0;
-  for (let c = 0; c < cols; c++) {
-    const column = c * colWidth;
+  for (let c = 0; c < n; c++) {
+    const column = c * groupCols;
     if (column < cursor) continue;
-    const label = timelineAxisLabel(slots[c]!, bucket);
+    const text = timelineAxisLabel(slots[c]!, bucket);
     while (labelLine.length < column) labelLine.push(" ");
-    labelLine.push(...label);
-    cursor = column + label.length + 1;
+    labelLine.push(...text);
+    cursor = column + text.length + 1;
   }
-  lines.push(" ".repeat(gutter) + COLORS.dim + labelLine.slice(0, usedWidth).join("") + COLORS.reset);
+  lines.push(" ".repeat(leftGutter) + COLORS.dim + labelLine.slice(0, plotWidth).join("") + COLORS.reset);
 
-  let sparkRow = "";
-  for (let c = 0; c < cols; c++) {
-    const tokens = slots[c]!.totalTokens;
-    const level = maxTokens > 0 ? Math.round((tokens / maxTokens) * (SPARK_CHARS.length - 1)) : 0;
-    sparkRow += tokens > 0 ? SPARK_CHARS[level]!.repeat(colWidth) : " ".repeat(colWidth);
+  // Legend, truncated so it can never widen the box.
+  const legendLimit = Math.max(0, width - leftGutter);
+  const legendSegments: Array<{ text: string; color: string }> = [
+    { text: "█", color: COLORS.orange },
+    { text: " spend   ", color: COLORS.dim },
+    { text: "█", color: COLORS.red },
+    { text: " tokens   ", color: COLORS.dim },
+    { text: "left: sats · right: tokens", color: COLORS.dim },
+  ];
+  let legend = "";
+  let legendUsed = 0;
+  for (const segment of legendSegments) {
+    if (legendUsed >= legendLimit) break;
+    const text = segment.text.slice(0, legendLimit - legendUsed);
+    legend += segment.color + text;
+    legendUsed += text.length;
   }
-  const sparkLabel = "tok".slice(-axisCol).padStart(axisCol);
-  lines.push(sparkLabel + " " + COLORS.dim + "┤" + COLORS.reset + COLORS.cyan + sparkRow + COLORS.reset);
-
-  lines.push(
-    COLORS.green + "█" + COLORS.reset + " " + COLORS.dim + "spent" + COLORS.reset + "    " +
-    COLORS.cyan + SPARK_CHARS[0] + SPARK_CHARS[3] + SPARK_CHARS[7] + COLORS.reset + " " +
-    COLORS.dim + "tokens (" + formatNumber(totalTokens) + " total)" + COLORS.reset,
-  );
+  lines.push(" ".repeat(leftGutter) + legend + COLORS.reset);
 
   return lines;
 }
@@ -447,26 +466,34 @@ const HISTORY_WINDOW_LABELS: Record<TimeWindow, string> = {
 const TIMELINE_TITLES: Record<TimelineBucket, string> = {
   hour: "Spend per hour",
   day: "Spend per day",
-  month: "Spend per month",
+  week: "Spend per week",
 };
 
-export function renderHistory(stats: UsageStats, width: number): string {
+export function renderHistory(stats: UsageStats, width: number, height?: number): string {
   const win = stats.window;
   const timeline = win.timeline ?? { bucket: "day" as const, points: [] };
   const totals = win.totals;
 
-  const summaryLines = [
-    COLORS.bold + "Total Spent:" + COLORS.reset + " " + COLORS.green + formatCost(totals.satsCost) + " sats" + COLORS.reset,
-    COLORS.bold + "Requests:" + COLORS.reset + " " + formatReqs(totals.requests),
-    COLORS.bold + "Total Tokens:" + COLORS.reset + " " + formatNumber(totals.totalTokens) +
-      " (p: " + formatNumber(totals.promptTokens) + " + c: " + formatNumber(totals.completionTokens) + ")",
-    COLORS.bold + "Avg Cost/Req:" + COLORS.reset + " " +
-      formatCost(totals.requests > 0 ? totals.satsCost / totals.requests : 0) + " sats",
-  ];
+  const summaryLine =
+    COLORS.dim + "spent " + COLORS.reset + COLORS.green + formatCost(totals.satsCost) + " sats" + COLORS.reset +
+    COLORS.dim + "   reqs " + COLORS.reset + formatReqs(totals.requests) +
+    COLORS.dim + "   tokens " + COLORS.reset + formatNumber(totals.totalTokens) +
+    COLORS.dim + "   avg " + COLORS.reset +
+    formatCost(totals.requests > 0 ? totals.satsCost / totals.requests : 0) + " sats" + COLORS.reset;
 
-  const title = "History — " + HISTORY_WINDOW_LABELS[win.window];
-  const chart = renderTimelineChart(timeline.points, timeline.bucket, width - 4);
-  return renderBox(summaryLines, width, title) + "\n" + renderBox(chart, width, TIMELINE_TITLES[timeline.bucket]);
+  // Fill the viewport: summary box (3) + chart box borders (2) + the chart's
+  // own axis/labels/legend (3) are chrome around the bar rows.
+  const chartHeight = height === undefined
+    ? 10
+    : Math.max(4, Math.min(40, height - 8));
+
+  const summary = renderBox([summaryLine], width, "History — " + HISTORY_WINDOW_LABELS[win.window]);
+  const chart = renderBox(
+    renderTimelineChart(timeline.points, timeline.bucket, width - 4, chartHeight),
+    width,
+    TIMELINE_TITLES[timeline.bucket],
+  );
+  return summary + "\n" + chart;
 }
 
 export function renderModels(stats: UsageStats, width: number): string {
@@ -882,10 +909,10 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow, height?: number): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width, activeWindow);
-    case "history": return renderHistory(stats, width);
+    case "history": return renderHistory(stats, width, height);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);
     case "tokens": return renderTokens(stats, width);

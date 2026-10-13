@@ -405,29 +405,30 @@ const TIMELINE_POINTS: TimelinePoint[] = [
 ];
 
 describe("renderTimelineChart", () => {
-  test("draws the y-axis, bars, x labels, token sparkline and legend", () => {
+  test("draws grouped spend/token bars with dual axes and a legend", () => {
     const lines = stripAnsi(renderTimelineChart(TIMELINE_POINTS, "hour", 60).join("\n")).split("\n");
     const text = lines.join("\n");
 
-    // Default height 8 + bottom axis + x labels + sparkline + legend.
-    expect(lines).toHaveLength(12);
-    expect(lines[0]).toContain("30"); // peak sats on the top axis row
+    // Default height 10 + bottom axis + x labels + legend.
+    expect(lines).toHaveLength(13);
+    expect(lines[0]).toContain("30"); // peak sats (left axis)
+    expect(lines[0]).toContain("400"); // peak tokens (right axis)
     expect(text).toContain("00");
     expect(text).toContain("03");
-    expect(text).toContain("spent");
-    expect(text).toContain("tokens (550 total)");
-    // The all-zero bucket has no bar while its neighbours do.
+    expect(text).toContain("spend");
+    expect(text).toContain("left: sats · right: tokens");
+    // The all-zero bucket has no bars while its neighbours do.
     expect(text).toContain("█");
   });
 
-  test("labels month buckets with month abbreviations", () => {
-    const months: TimelinePoint[] = [
-      { key: "2026-01", timestamp: 0, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
-      { key: "2026-02", timestamp: 1, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
+  test("labels day/week buckets as MM-DD", () => {
+    const weeks: TimelinePoint[] = [
+      { key: "2026-01-05", timestamp: 0, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
+      { key: "2026-01-12", timestamp: 1, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
     ];
-    const text = stripAnsi(renderTimelineChart(months, "month", 60).join("\n"));
-    expect(text).toContain("Jan");
-    expect(text).toContain("Feb");
+    const text = stripAnsi(renderTimelineChart(weeks, "week", 60).join("\n"));
+    expect(text).toContain("01-05");
+    expect(text).toContain("01-12");
   });
 
   test("reports an empty window instead of drawing", () => {
@@ -463,9 +464,15 @@ describe("renderHistory", () => {
   test("shows the window totals above the spend/token chart", () => {
     const out = stripAnsi(renderHistory(stats, 100));
     expect(out).toContain("History — last 24 hours");
-    expect(out).toContain("Total Spent:");
+    expect(out).toContain("spent");
+    expect(out).toContain("11.70k sats");
     expect(out).toContain("Spend per hour");
-    expect(out).toContain("tokens (550 total)");
+    expect(out).toContain("left: sats · right: tokens");
+  });
+
+  test("grows the chart to fill the requested height", () => {
+    expect(stripAnsi(renderHistory(stats, 100, 20)).split("\n")).toHaveLength(20);
+    expect(stripAnsi(renderHistory(stats, 100, 40)).split("\n")).toHaveLength(40);
   });
 
   test("keeps every rendered line at the requested width", () => {

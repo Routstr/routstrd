@@ -350,9 +350,9 @@ window applies to the **Overview**, **History**, **Models**, **Providers**,
 **Tokens**, **Clients** and **Npubs** tabs. On **Overview** the selector is
 drawn inside the tab, directly under the Balance box, and scopes the totals and
 the model and client breakdowns. On **History** it chooses the chart's bucket —
-hours for `24h`, days for `7d`/`30d`, and calendar months for `All` — where
-spend is drawn as bars and tokens as a sparkline sharing the x-axis. **Recent**
-keeps its own all-time view and hides the selector.
+hours for `24h` and `7d`, days for `30d`, and ISO weeks for `All` — where spend
+and tokens are drawn as grouped bars against left (sats) and right (tokens)
+axes. **Recent** keeps its own all-time view and hides the selector.
 
 ### `routstrd logs`
 

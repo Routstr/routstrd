@@ -72,6 +72,7 @@ export const COLORS = {
   magenta: "\x1b[35m",
   cyan: "\x1b[36m",
   white: "\x1b[37m",
+  orange: "\x1b[38;5;208m",
   bgBlue: "\x1b[44m",
   bgGreen: "\x1b[42m",
   bgYellow: "\x1b[43m",
