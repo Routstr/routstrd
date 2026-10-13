@@ -2,7 +2,7 @@ import type { Tab, TimeWindow } from "./types.ts";
 
 export const ALL_TABS: Tab[] = [
   { id: "overview", name: "Overview", key: "1" },
-  { id: "today", name: "Today", key: "2" },
+  { id: "history", name: "History", key: "2" },
   { id: "models", name: "Models", key: "3" },
   { id: "providers", name: "Providers", key: "4" },
   { id: "tokens", name: "Tokens", key: "5" },
@@ -43,9 +43,13 @@ export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWin
   return WINDOW_ORDER[next]!;
 }
 
-/** Whether the active window applies to a given tab. */
+/**
+ * Whether the active window applies to a given tab. Only Recent is exempt:
+ * Overview honours the window but draws the selector inline, and History,
+ * Models, Providers, Tokens, Clients and Npubs all follow it.
+ */
 export function tabSupportsWindow(tabId: Tab["id"]): boolean {
-  return tabId !== "today" && tabId !== "recent";
+  return tabId !== "recent";
 }
 
 /**

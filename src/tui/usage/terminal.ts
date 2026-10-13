@@ -37,3 +37,14 @@ export function getHeight(): number {
 export function stripAnsi(str: string): string {
   return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
+
+/**
+ * Truncate a string to `maxWidth` visible columns. Lines that fit are returned
+ * untouched; overlong lines lose their colouring rather than being cut in the
+ * middle of an escape sequence.
+ */
+export function truncateAnsi(str: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  const visible = stripAnsi(str);
+  return visible.length <= maxWidth ? str : visible.slice(0, maxWidth);
+}

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { renderBox, renderModels, renderNpubs, renderOverview, renderRecent, renderStackedBar, renderWindowBar, renderWindowSelector, tokenSegments } from "./render.ts";
+import { renderBox, renderHistory, renderModels, renderNpubs, renderOverview, renderRecent, renderStackedBar, renderTimelineChart, renderWindowBar, renderWindowSelector, tokenSegments } from "./render.ts";
 import { stripAnsi } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { buildClientNaming, resolveClientLabel, type ClientInfo, type NpubEntry } from "./data.ts";
-import type { UsageStats } from "./types.ts";
+import type { TimelinePoint, UsageStats } from "./types.ts";
 
 const NPUB = "npub1abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopq";
 
@@ -49,6 +49,7 @@ function statsFor(npub: string): UsageStats {
         large: { count: 0, cost: 0 },
         huge: { count: 0, cost: 0 },
       },
+      timeline: { bucket: "day", points: [] },
     },
   };
 }
@@ -285,10 +286,12 @@ describe("renderWindowBar", () => {
   });
 
   test("is hidden on tabs that ignore the window", () => {
-    for (const tab of ["overview", "today", "recent"] as const) {
+    for (const tab of ["overview", "recent"] as const) {
       expect(renderWindowBar("7d", tab)).toBe("");
     }
     expect(stripAnsi(renderWindowBar("7d", "tokens"))).toContain("window:");
+    // History is driven by the window (its chart re-buckets per range).
+    expect(stripAnsi(renderWindowBar("7d", "history"))).toContain("window:");
   });
 
   test("leaves the chrome to the tabs that render it inline", () => {
@@ -394,6 +397,85 @@ describe("windowed rendering", () => {
   });
 });
 
+const TIMELINE_POINTS: TimelinePoint[] = [
+  { key: "00", timestamp: 0, requests: 1, satsCost: 10, totalTokens: 100, promptTokens: 60, completionTokens: 40 },
+  { key: "01", timestamp: 1, requests: 2, satsCost: 30, totalTokens: 400, promptTokens: 300, completionTokens: 100 },
+  { key: "02", timestamp: 2, requests: 0, satsCost: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0 },
+  { key: "03", timestamp: 3, requests: 3, satsCost: 20, totalTokens: 50, promptTokens: 30, completionTokens: 20 },
+];
+
+describe("renderTimelineChart", () => {
+  test("draws the y-axis, bars, x labels, token sparkline and legend", () => {
+    const lines = stripAnsi(renderTimelineChart(TIMELINE_POINTS, "hour", 60).join("\n")).split("\n");
+    const text = lines.join("\n");
+
+    // Default height 8 + bottom axis + x labels + sparkline + legend.
+    expect(lines).toHaveLength(12);
+    expect(lines[0]).toContain("30"); // peak sats on the top axis row
+    expect(text).toContain("00");
+    expect(text).toContain("03");
+    expect(text).toContain("spent");
+    expect(text).toContain("tokens (550 total)");
+    // The all-zero bucket has no bar while its neighbours do.
+    expect(text).toContain("█");
+  });
+
+  test("labels month buckets with month abbreviations", () => {
+    const months: TimelinePoint[] = [
+      { key: "2026-01", timestamp: 0, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
+      { key: "2026-02", timestamp: 1, requests: 1, satsCost: 5, totalTokens: 10, promptTokens: 5, completionTokens: 5 },
+    ];
+    const text = stripAnsi(renderTimelineChart(months, "month", 60).join("\n"));
+    expect(text).toContain("Jan");
+    expect(text).toContain("Feb");
+  });
+
+  test("reports an empty window instead of drawing", () => {
+    expect(renderTimelineChart([], "day", 60)).toEqual(["No activity in this window"]);
+    const zeroed: TimelinePoint[] = [
+      { key: "00", timestamp: 0, requests: 0, satsCost: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0 },
+    ];
+    expect(renderTimelineChart(zeroed, "hour", 60)).toEqual(["No activity in this window"]);
+  });
+});
+
+describe("renderHistory", () => {
+  const stats = {
+    ...statsFor(NPUB),
+    window: {
+      window: "today",
+      totals: { requests: 128, promptTokens: 57_300_000, completionTokens: 24_600_000, totalTokens: 81_900_000, cost: 0, satsCost: 11_700 },
+      models: [],
+      providers: [],
+      clients: [],
+      npubs: [],
+      sizeBuckets: {
+        tiny: { count: 0, cost: 0 },
+        small: { count: 0, cost: 0 },
+        medium: { count: 0, cost: 0 },
+        large: { count: 0, cost: 0 },
+        huge: { count: 0, cost: 0 },
+      },
+      timeline: { bucket: "hour", points: TIMELINE_POINTS },
+    },
+  } as unknown as UsageStats;
+
+  test("shows the window totals above the spend/token chart", () => {
+    const out = stripAnsi(renderHistory(stats, 100));
+    expect(out).toContain("History — last 24 hours");
+    expect(out).toContain("Total Spent:");
+    expect(out).toContain("Spend per hour");
+    expect(out).toContain("tokens (550 total)");
+  });
+
+  test("keeps every rendered line at the requested width", () => {
+    for (const width of [120, 100, 80, 60, 40]) {
+      const lines = stripAnsi(renderHistory(stats, width)).split("\n");
+      expect(lines.map((line) => line.length)).toEqual(lines.map(() => width));
+    }
+  });
+});
+
 describe("renderBox", () => {
   test("renders every line at the requested width when given a title", () => {
     const box = renderBox(["Hello World", "Line 2"], 40, "Title");
@@ -425,6 +507,16 @@ describe("renderBox", () => {
     for (const width of visibleWidths(box)) {
       expect(width).toBe(30);
     }
+  });
+
+  test("truncates overlong content lines instead of breaking the border", () => {
+    const long = "x".repeat(100);
+    const box = renderBox([long, "short"], 30);
+
+    for (const width of visibleWidths(box)) {
+      expect(width).toBe(30);
+    }
+    expect(stripAnsi(box)).toContain("x".repeat(26));
   });
 
   test("composes two half-width boxes into rows of the full width", () => {

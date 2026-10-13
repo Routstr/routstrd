@@ -7,9 +7,9 @@ import {
   type ClientNaming,
 } from "./data.ts";
 import { vimState } from "./state.ts";
-import { stripAnsi } from "./terminal.ts";
+import { stripAnsi, truncateAnsi } from "./terminal.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
-import type { TabId, TimeWindow, UpdateInfo, UsageStats } from "./types.ts";
+import type { TabId, TimeWindow, TimelineBucket, TimelinePoint, UpdateInfo, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
 function formatCost(value: number): string {
@@ -68,7 +68,7 @@ function windowChoices(activeWindow: TimeWindow): string {
 
 /**
  * Time-window selector line for the top chrome. Tabs that ignore the window
- * (Today/Recent) render nothing at all — a selector that cannot be acted on is
+ * (Recent) render nothing at all — a selector that cannot be acted on is
  * noise — and Overview renders it inline instead (see
  * {@link renderWindowSelector}).
  */
@@ -103,7 +103,9 @@ export function renderBox(lines: string[], width: number, title?: string): strin
     result.push(`┌${"─".repeat(Math.max(0, width - 2))}┐`);
   }
   
-  for (const line of lines) {
+  for (const rawLine of lines) {
+    // Truncate first so an overlong line can never push the right border out.
+    const line = truncateAnsi(rawLine, innerWidth);
     const padding = Math.max(0, innerWidth - stripAnsi(line).length);
     result.push(`│ ${line}${" ".repeat(padding)} │`);
   }
@@ -307,83 +309,164 @@ export function renderOverview(
   return sections.join("\n");
 }
 
-export function renderToday(stats: UsageStats, width: number): string {
-  const currentHour = new Date().getHours();
-  // Build today's date string from LOCAL date components so it matches the
-  // server's tz-bucketed day keys (which use the client's tzOffsetMinutes).
-  const _now = new Date();
-  const todayDateStr = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
+/** Format a sats value compactly for the chart's y-axis: 0, 42, 1.2k, 3.4M. */
+function formatSatsAxis(value: number): string {
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + "M";
+  if (value >= 1_000) return (value / 1_000).toFixed(1) + "k";
+  if (value >= 100 || Number.isInteger(value)) return String(Math.round(value));
+  return value.toFixed(1);
+}
 
-  let todayStats: { date: string; requests: number; satsCost: number; promptTokens: number; completionTokens: number; totalTokens: number } = {
-    date: todayDateStr,
-    requests: 0,
-    satsCost: 0,
-    promptTokens: 0,
-    completionTokens: 0,
-    totalTokens: 0,
-  };
-  let recentDays: Array<{ date: string; requests: number; satsCost: number; totalTokens: number; promptTokens: number; completionTokens: number }> = [];
-  let hourlyMap: Map<number, { requests: number; satsCost: number }> = new Map();
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const SPARK_CHARS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
 
-  if (stats.summary) {
-    // Use server-aggregated data
-    const { days, hoursToday } = stats.summary;
-    // days[0] is most-recent-first; check if it's today
-    const todayDayStat = days[0]?.date === todayDateStr ? days[0] : undefined;
-    if (todayDayStat) {
-      todayStats = { date: todayDayStat.date, requests: todayDayStat.requests, satsCost: todayDayStat.satsCost, promptTokens: todayDayStat.promptTokens, completionTokens: todayDayStat.completionTokens, totalTokens: todayDayStat.totalTokens };
-    }
-    // Exclude today by date (it has its own box) rather than by position —
-    // days[0] is only today when there was activity today.
-    recentDays = days.filter((d) => d.date !== todayDateStr).slice(0, 6);
-    hourlyMap = new Map(hoursToday.map((h) => [h.hour, { requests: h.requests, satsCost: h.satsCost }]));
+/** Axis tick label for a bucket: `09` (hour), `05-20` (day) or `Jan` (month). */
+function timelineAxisLabel(point: TimelinePoint, bucket: TimelineBucket): string {
+  if (bucket === "hour") return point.key;
+  if (bucket === "month") return MONTH_ABBR[Number(point.key.slice(5, 7)) - 1] ?? point.key;
+  return point.key.slice(5); // MM-DD
+}
+
+/** Fold adjacent buckets together so a long series still fits the columns. */
+function mergeTimelinePoints(points: TimelinePoint[], groupSize: number): TimelinePoint[] {
+  const merged: TimelinePoint[] = [];
+  for (let i = 0; i < points.length; i += groupSize) {
+    const chunk = points.slice(i, i + groupSize);
+    const first = chunk[0]!;
+    merged.push({
+      key: first.key,
+      timestamp: first.timestamp,
+      requests: chunk.reduce((sum, p) => sum + p.requests, 0),
+      satsCost: chunk.reduce((sum, p) => sum + p.satsCost, 0),
+      totalTokens: chunk.reduce((sum, p) => sum + p.totalTokens, 0),
+      promptTokens: chunk.reduce((sum, p) => sum + p.promptTokens, 0),
+      completionTokens: chunk.reduce((sum, p) => sum + p.completionTokens, 0),
+    });
   }
+  return merged;
+}
+
+/**
+ * Vertical bar chart of spend over time, with a token sparkline sharing the
+ * x-axis. Bars are scaled to the peak spend; the sparkline is scaled
+ * independently to peak tokens, and the legend states both totals.
+ *
+ * `width` is the number of columns available inside the surrounding box.
+ */
+export function renderTimelineChart(
+  points: TimelinePoint[],
+  bucket: TimelineBucket,
+  width: number,
+  height = 8,
+): string[] {
+  if (points.length === 0) return ["No activity in this window"];
+
+  const maxCost = Math.max(...points.map((p) => p.satsCost), 0);
+  const maxTokens = Math.max(...points.map((p) => p.totalTokens), 0);
+  const totalTokens = points.reduce((sum, p) => sum + p.totalTokens, 0);
+  if (maxCost <= 0 && maxTokens <= 0) return ["No activity in this window"];
+
+  // Left gutter: right-aligned y labels against the axis line.
+  const peakLabel = formatSatsAxis(maxCost);
+  const axisCol = peakLabel.length;
+  const gutter = axisCol + 2; // "<label> ┤"
+  const plotWidth = Math.max(1, width - gutter);
+
+  let slots = points;
+  if (slots.length > plotWidth) {
+    slots = mergeTimelinePoints(slots, Math.ceil(slots.length / plotWidth));
+  }
+  const cols = slots.length;
+  const colWidth = Math.max(1, Math.floor(plotWidth / cols));
+  const usedWidth = colWidth * cols;
+
+  const axisRow = (label: string): string =>
+    `${label.padStart(axisCol)} ${COLORS.dim}┤${COLORS.reset}`;
+  const blankAxisRow = (): string =>
+    " ".repeat(axisCol) + " " + COLORS.dim + "┤" + COLORS.reset;
+
+  const lines: string[] = [];
+  const midRow = Math.floor((height - 1) / 2);
+  for (let row = 0; row < height; row++) {
+    const filledFromBottom = height - row;
+    let barRow = "";
+    for (let c = 0; c < cols; c++) {
+      const barHeight = Math.round((slots[c]!.satsCost / maxCost) * height);
+      barRow += barHeight >= filledFromBottom
+        ? COLORS.green + "█".repeat(colWidth)
+        : " ".repeat(colWidth);
+    }
+    const axis = row === 0
+      ? axisRow(peakLabel)
+      : row === midRow
+        ? axisRow(formatSatsAxis(maxCost / 2))
+        : blankAxisRow();
+    lines.push(axis + barRow + COLORS.reset);
+  }
+
+  // Bottom axis, then x labels and the token sparkline on the same grid.
+  lines.push(" ".repeat(axisCol) + " " + COLORS.dim + "└" + "─".repeat(usedWidth) + COLORS.reset);
+
+  const labelLine: string[] = [];
+  let cursor = 0;
+  for (let c = 0; c < cols; c++) {
+    const column = c * colWidth;
+    if (column < cursor) continue;
+    const label = timelineAxisLabel(slots[c]!, bucket);
+    while (labelLine.length < column) labelLine.push(" ");
+    labelLine.push(...label);
+    cursor = column + label.length + 1;
+  }
+  lines.push(" ".repeat(gutter) + COLORS.dim + labelLine.slice(0, usedWidth).join("") + COLORS.reset);
+
+  let sparkRow = "";
+  for (let c = 0; c < cols; c++) {
+    const tokens = slots[c]!.totalTokens;
+    const level = maxTokens > 0 ? Math.round((tokens / maxTokens) * (SPARK_CHARS.length - 1)) : 0;
+    sparkRow += tokens > 0 ? SPARK_CHARS[level]!.repeat(colWidth) : " ".repeat(colWidth);
+  }
+  const sparkLabel = "tok".slice(-axisCol).padStart(axisCol);
+  lines.push(sparkLabel + " " + COLORS.dim + "┤" + COLORS.reset + COLORS.cyan + sparkRow + COLORS.reset);
+
+  lines.push(
+    COLORS.green + "█" + COLORS.reset + " " + COLORS.dim + "spent" + COLORS.reset + "    " +
+    COLORS.cyan + SPARK_CHARS[0] + SPARK_CHARS[3] + SPARK_CHARS[7] + COLORS.reset + " " +
+    COLORS.dim + "tokens (" + formatNumber(totalTokens) + " total)" + COLORS.reset,
+  );
+
+  return lines;
+}
+
+const HISTORY_WINDOW_LABELS: Record<TimeWindow, string> = {
+  all: "all time",
+  today: "last 24 hours",
+  "7d": "last 7 days",
+  "30d": "last 30 days",
+};
+
+const TIMELINE_TITLES: Record<TimelineBucket, string> = {
+  hour: "Spend per hour",
+  day: "Spend per day",
+  month: "Spend per month",
+};
+
+export function renderHistory(stats: UsageStats, width: number): string {
+  const win = stats.window;
+  const timeline = win.timeline ?? { bucket: "day" as const, points: [] };
+  const totals = win.totals;
 
   const summaryLines = [
-    `${COLORS.bold}Date:${COLORS.reset} ${todayStats.date}`,
-    `${COLORS.bold}Requests:${COLORS.reset} ${formatReqs(todayStats.requests)}`,
-    `${COLORS.bold}Cost:${COLORS.reset} ${COLORS.green}${formatCost(todayStats.satsCost)} sats${COLORS.reset}`,
-    `${COLORS.bold}Tokens:${COLORS.reset} ${formatNumber(todayStats.totalTokens)} (p: ${formatNumber(todayStats.promptTokens)} + c: ${formatNumber(todayStats.completionTokens)})`,
+    COLORS.bold + "Total Spent:" + COLORS.reset + " " + COLORS.green + formatCost(totals.satsCost) + " sats" + COLORS.reset,
+    COLORS.bold + "Requests:" + COLORS.reset + " " + formatReqs(totals.requests),
+    COLORS.bold + "Total Tokens:" + COLORS.reset + " " + formatNumber(totals.totalTokens) +
+      " (p: " + formatNumber(totals.promptTokens) + " + c: " + formatNumber(totals.completionTokens) + ")",
+    COLORS.bold + "Avg Cost/Req:" + COLORS.reset + " " +
+      formatCost(totals.requests > 0 ? totals.satsCost / totals.requests : 0) + " sats",
   ];
 
-  let output = renderBox(summaryLines, width, "Today");
-
-  if (recentDays.length > 0) {
-    const dayLines = recentDays.map((d) => `${d.date}: ${formatReqs(d.requests)} req, ${formatCost(d.satsCost)} sats, ${formatNumber(d.totalTokens)} tokens`);
-    output += "\n" + renderBox(dayLines, width, "Recent Days");
-  }
-
-  const hourLines: string[] = [];
-  const maxHourCost = Math.max(...Array.from(hourlyMap.values()).map((h) => h.satsCost), 1);
-  const totalTodayCost = Math.max(todayStats.satsCost, 1);
-  const hourLabels: string[] = [];
-  for (let h = currentHour; h >= 0; h--) {
-    const hStat = hourlyMap.get(h);
-    const reqs = hStat?.requests || 0;
-    const cost = hStat?.satsCost || 0;
-    hourLabels.push(`${h.toString().padStart(2, "0")}:00 (${formatReqs(reqs)} req, ${formatCost(cost)} sats) `);
-  }
-  const maxHourLabel = Math.max(...hourLabels.map((l) => l.length));
-  startBarSection("hourly", maxHourLabel);
-  for (let i = currentHour; i >= 0; i--) {
-    const hStat = hourlyMap.get(i);
-    const reqs = hStat?.requests || 0;
-    const cost = hStat?.satsCost || 0;
-    hourLines.push(renderBarChart(
-      hourLabels[currentHour - i]!,
-      cost,
-      maxHourCost,
-      width - 4,
-      i === currentHour ? COLORS.green : COLORS.cyan,
-      (cost / totalTodayCost) * 100,
-      "hourly",
-    ));
-  }
-  endBarSection("hourly");
-
-  output += "\n" + renderBox(hourLines.length > 0 ? hourLines : ["No activity today yet"], width, "Hourly Activity");
-
-  return output;
+  const title = "History — " + HISTORY_WINDOW_LABELS[win.window];
+  const chart = renderTimelineChart(timeline.points, timeline.bucket, width - 4);
+  return renderBox(summaryLines, width, title) + "\n" + renderBox(chart, width, TIMELINE_TITLES[timeline.bucket]);
 }
 
 export function renderModels(stats: UsageStats, width: number): string {
@@ -802,7 +885,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow): string {
   switch (activeTab) {
     case "overview": return renderOverview(stats, balance, status, width, activeWindow);
-    case "today": return renderToday(stats, width);
+    case "history": return renderHistory(stats, width);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);
     case "tokens": return renderTokens(stats, width);

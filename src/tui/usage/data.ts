@@ -118,6 +118,8 @@ function windowFromAllTime(summary: UsageSummary): WindowedStats {
     clients: summary.clients,
     npubs: summary.npubs,
     sizeBuckets: summary.sizeBuckets,
+    // No timeline on old daemons; the History tab falls back to an empty chart.
+    timeline: { bucket: "day", points: [] },
   };
 }
 

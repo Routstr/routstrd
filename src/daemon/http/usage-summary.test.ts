@@ -384,4 +384,48 @@ describe("getUsageSummary time windows", () => {
     expect(week).not.toBe(all);
     expect(week.window!.window).toBe("7d");
   });
+
+  it("builds a zero-filled hourly timeline for the today window", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "today");
+    const { bucket, points } = summary.window!.timeline;
+
+    expect(bucket).toBe("hour");
+    expect(points).toHaveLength(24);
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(5);
+    for (const p of points) expect(p.key).toMatch(/^[0-2][0-9]$/);
+
+    // The recent entry lands in the bucket for its local (UTC) hour.
+    const currentHour = String(new Date(RECENT).getUTCHours()).padStart(2, "0");
+    expect(points.find((p) => p.key === currentHour)!.satsCost).toBe(5);
+  });
+
+  it("builds a 7-day timeline ending today", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    const { bucket, points } = summary.window!.timeline;
+
+    expect(bucket).toBe("day");
+    expect(points).toHaveLength(7);
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(12);
+    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    // Newest bucket is today, oldest is exactly six days earlier.
+    expect(points[6]!.key).toBe(new Date(RECENT).toISOString().slice(0, 10));
+    expect(points[0]!.timestamp).toBe(points[6]!.timestamp - 6 * 86_400_000);
+  });
+
+  it("builds a 30-day timeline but folds the all window into months", async () => {
+    const month = await getUsageSummary(driver, [], TZ0, undefined, "30d");
+    expect(month.window!.timeline.bucket).toBe("day");
+    expect(month.window!.timeline.points).toHaveLength(30);
+    expect(month.window!.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
+
+    const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    const { bucket, points } = all.window!.timeline;
+    expect(bucket).toBe("month");
+    // Entries span ~10 days, so one or two contiguous months.
+    expect(points.length).toBeGreaterThanOrEqual(1);
+    expect(points.length).toBeLessThanOrEqual(2);
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
+    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}$/);
+  });
 });
