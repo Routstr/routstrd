@@ -595,3 +595,26 @@ describe("explicit empty client filter", () => {
     expect(unfiltered.totals.requests).toBe(ENTRIES.length);
   });
 });
+
+describe("IANA summaries stay in SQL", () => {
+  it("never lists rows for timeline, days or hours (only size buckets and recent)", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-03T17:00:00Z"));
+    try {
+      for (const window of ["today", "7d", "30d", "all"] as const) {
+        __resetUsageSummaryCacheForTest();
+        const driver = createMemoryUsageTrackingDriver([
+          makeEntry("a", { id: "a", timestamp: Date.parse("2026-11-01T05:30:00Z"), modelId: "m", totalTokens: 10 }),
+          makeEntry("b", { id: "b", timestamp: Date.parse("2026-03-08T07:30:00Z"), modelId: "m", totalTokens: 10 }),
+        ]);
+        // The memory driver's count() delegates to list(); stub it out so only
+        // the summary's own list() calls are counted.
+        spyOn(driver, "count").mockResolvedValue(2);
+        const list = spyOn(driver, "list");
+        await getUsageSummary(driver, [], 300, undefined, window, "America/New_York");
+        // buildAggregates (all-time + windowed) for size buckets, plus `recent`.
+        const unbounded = list.mock.calls.filter(([options]) => options?.limit === undefined);
+        expect(unbounded.length).toBe(window === "all" ? 1 : 2);
+      }
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+  });
+});
