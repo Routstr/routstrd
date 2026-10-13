@@ -1,16 +1,20 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import type { WalletConnect } from "applesauce-wallet-connect";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
-import type { WalletClient } from "./wallet-client";
+import type { MintQuoteStatus, WalletClient } from "./wallet-client";
 
 /**
  * Regression tests for the auto-refill loop.
  *
- * The loop used to create a BOLT-11 invoice (and therefore a pending mint
- * quote) without checking whether the NWC funding wallet could pay it. When
- * the funding wallet was underfunded, every backoff attempt leaked another
- * quote. These tests pin the pre-flight balance check and the fatal-error
- * cooldown that prevent that churn.
+ * Two independent guards live here:
+ *
+ * 1. Balance pre-flight: the loop used to create a BOLT-11 invoice (and
+ *    therefore a pending mint quote) without checking whether the NWC funding
+ *    wallet could pay it. When it was underfunded, every backoff attempt
+ *    leaked another quote.
+ * 2. Timeout reconciliation: an NWC payment that exceeded the 45 s timeout is
+ *    an unknown outcome, not a failure, so no fresh invoice may be created
+ *    until the wallet settles the one that timed out.
  */
 
 const MINT = "https://mint.example";
@@ -165,4 +169,57 @@ describe("auto-refill fatal payment errors", () => {
     expect(payCalls).toBe(1);
     expect(receiveCalls).toBe(1);
   });
+});
+
+type Quote = (lookup: number) => Promise<MintQuoteStatus | null>;
+const state = (s: MintQuoteStatus["state"]): Quote => async () => ({ state: s }) as MintQuoteStatus;
+
+/** Invoices created in 500 ms when every payment fails with `paymentError`. */
+async function invoicesCreated(paymentError: string, quote: Quote = state("pending")): Promise<number> {
+  let invoices = 0;
+  let lookups = 0;
+  const walletClient = {
+    getBalances: async () => ({ "https://mint.example": 0 }),
+    getDefaultMint: async () => "https://mint.example",
+    receiveBolt11: async () => {
+      invoices++;
+      return { invoice: `lnbc-${invoices}`, operationId: `op-${invoices}` };
+    },
+    getMintQuote: () => quote(++lookups),
+  } as unknown as WalletClient;
+  const stop = startAutoRefillLoop(
+    walletClient,
+    () => ({ service: "ab" }) as unknown as WalletConnect,
+    () => ({ threshold: 500, amount: 100, cooldownMs: 60 * 60 * 1000 }),
+    20,
+    () => Promise.reject(new Error(paymentError)),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  stop();
+  return invoices;
+}
+
+const TIMEOUT = "NWC payment timed out";
+
+it("pays no fresh invoice while a timed-out one may still settle", async () => {
+  expect(await invoicesCreated(TIMEOUT, state("pending"))).toBe(1);
+});
+
+it("fails closed when the timed-out invoice's status is missing or unreadable", async () => {
+  expect(await invoicesCreated(TIMEOUT, async () => null)).toBe(1);
+  expect(await invoicesCreated(TIMEOUT, async () => Promise.reject(new Error("db busy")))).toBe(1);
+});
+
+it("counts a timed-out payment that landed later as the refill", async () => {
+  const landsLater: Quote = (n) => state(n < 3 ? "pending" : "finalized")(n);
+  expect(await invoicesCreated(TIMEOUT, landsLater)).toBe(1);
+});
+
+it("refills again once the timed-out invoice expired unpaid", async () => {
+  const expiresLater: Quote = (n) => state(n < 3 ? "pending" : "failed")(n);
+  expect(await invoicesCreated(TIMEOUT, expiresLater)).toBeGreaterThan(1);
+});
+
+it("still retries a payment that failed for another reason", async () => {
+  expect(await invoicesCreated("relay closed")).toBeGreaterThan(1);
 });
