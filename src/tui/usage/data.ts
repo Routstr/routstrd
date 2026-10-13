@@ -59,6 +59,49 @@ export async function fetchStatus(): Promise<StatusInfo | null> {
   }
 }
 
+export interface VersionInfo {
+  /** Version of the daemon that served this response. */
+  version: string;
+  current: string;
+  latest: string | null;
+  hasUpdate: boolean;
+  checkedAt: string | null;
+}
+
+/**
+ * Read the daemon's cached update state from GET /version. The daemon keeps it
+ * fresh on a low-frequency background schedule, so this is a cheap local read
+ * rather than a registry/GitHub call. Returns null when the endpoint is
+ * unavailable (e.g. an older daemon), letting callers fall back.
+ */
+export async function fetchVersionInfo(): Promise<VersionInfo | null> {
+  try {
+    const result = await callDaemon("/version");
+    if (result.error) return null;
+
+    const output = result.output as
+      | {
+          version?: string;
+          current?: string;
+          latest?: string | null;
+          hasUpdate?: boolean;
+          checkedAt?: string | null;
+        }
+      | undefined;
+    if (!output?.version) return null;
+
+    return {
+      version: output.version,
+      current: output.current ?? output.version,
+      latest: output.latest ?? null,
+      hasUpdate: output.hasUpdate === true,
+      checkedAt: output.checkedAt ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchBalance(): Promise<BalanceInfo | null> {
   try {
     const result = await callDaemon("/keys/balance");

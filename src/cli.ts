@@ -78,6 +78,12 @@ import {
 import { isStandaloneExecutable, pm2DaemonArgs } from "./runtime";
 import { VERSION } from "./version";
 import {
+  isUpdateStateFresh,
+  readUpdateState,
+  updateNotice,
+  writeUpdateState,
+} from "./utils/update-state";
+import {
   getLatestStandaloneRelease,
   installStandaloneRelease,
 } from "./utils/standalone-update";
@@ -342,6 +348,7 @@ async function applyRoutstrdUpdate(): Promise<boolean> {
     console.log(`Updating routstrd from v${VERSION} to v${release.version}...`);
     await installStandaloneRelease(release);
     console.log("routstrd updated successfully.\n");
+    recordUpdateApplied(release.version);
     return true;
   }
 
@@ -371,7 +378,26 @@ async function applyRoutstrdUpdate(): Promise<boolean> {
     throw new Error("Failed to update routstrd.");
   }
   console.log("routstrd updated successfully.\n");
+  recordUpdateApplied(latest);
   return true;
+}
+
+/**
+ * Clear the cached "update available" state right after we install one, so the
+ * CLI notice stops nagging before the daemon's next scheduled check catches up.
+ * Best-effort: a stale cache only costs one extra notice.
+ */
+function recordUpdateApplied(newVersion: string | null): void {
+  try {
+    writeUpdateState({
+      current: newVersion ?? VERSION,
+      latest: newVersion,
+      hasUpdate: false,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch {
+    // Ignore — the daemon will refresh the state on its own schedule.
+  }
 }
 
 /**
@@ -442,6 +468,29 @@ async function maybePromptForUpdate(): Promise<boolean> {
     console.error("Continuing with the current version.\n");
     return false;
   }
+}
+
+let updateNoticeShown = false;
+
+/**
+ * Print a one-line "update available" notice for commands that don't manage
+ * updates themselves (balance, send, receive, ...). It reads the daemon's
+ * cached background check from disk — no network call — so it is cheap enough
+ * to run after every command, and it writes to stderr so stdout stays clean
+ * for piping/JSON. At most one notice per process.
+ */
+function maybeShowUpdateNotice(): void {
+  if (updateNoticeShown) return;
+  if (process.env.ROUTSTRD_NO_UPDATE_CHECK) return;
+
+  const state = readUpdateState();
+  if (!state || !isUpdateStateFresh(state)) return;
+
+  const notice = updateNotice(state);
+  if (!notice) return;
+
+  updateNoticeShown = true;
+  console.error(`\n${notice}`);
 }
 
 async function requireLocalDaemon(): Promise<void> {
@@ -3295,6 +3344,24 @@ program
       }
     },
   );
+
+// After any command, surface the daemon's cached "newer routstrd available"
+// notice (balance, send, receive, ...). Commands that manage updates themselves
+// or own the terminal are excluded. The notice goes to stderr so stdout stays
+// machine-readable.
+program.hook("postAction", (_thisCommand, actionCommand) => {
+  if (!actionCommand) return;
+  const parent = actionCommand.parent;
+  if (parent === program) {
+    const name = actionCommand.name();
+    if (["update", "daemon", "monitor", "top", "start", "restart", "stop"].includes(name)) {
+      return;
+    }
+  }
+  // `service ...` is pm2 plumbing (`service logs` follows forever).
+  if (parent?.name() === "service") return;
+  maybeShowUpdateNotice();
+});
 
 export function cli(args: string[]) {
   return program.parseAsync(args);

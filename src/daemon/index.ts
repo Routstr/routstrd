@@ -20,6 +20,7 @@ import {
   REQUEST_RESPONSE_LOGS_DIR,
 } from "../utils/config";
 import { logger } from "../utils/logger";
+import { createUpdateCheckJob } from "./update-check-job";
 
 
 function makeSdkLogger(prefix?: string): SdkLogger {
@@ -404,6 +405,12 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     }
   };
 
+  // Low-frequency background update check. It only caches the answer in
+  // update-state.json for the CLI/TUI to read; it never installs anything.
+  const updateCheckJob = createUpdateCheckJob({
+    enabled: !process.env.ROUTSTRD_NO_UPDATE_CHECK,
+  });
+
   let walletDisposePromise: Promise<void> | undefined;
   const disposeWallet = (): Promise<void> => {
     walletDisposePromise ??= walletClient.dispose?.() || Promise.resolve();
@@ -413,6 +420,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
+    updateCheckJob.stop();
     void disposeWallet().catch((error) => {
       logger.error("Failed to dispose wallet:", error);
     });
@@ -452,6 +460,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
 
         startModelRefreshJob();
         startRefundJob();
+        updateCheckJob.start();
         // Run an immediate refresh to populate models right away. Client
         // integrations are skipped when the scheduled job is disabled, so a
         // restart does not overwrite hand-edited client configs.
@@ -481,6 +490,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
         // Still start the jobs even if initial refresh fails
         startModelRefreshJob();
         startRefundJob();
+        updateCheckJob.start();
       });
   });
 }

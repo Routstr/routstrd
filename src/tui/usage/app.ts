@@ -1,6 +1,6 @@
 import { cycleTimeWindow, getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
-import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
+import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, fetchVersionInfo, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -62,10 +62,10 @@ export async function runUsageTui(): Promise<void> {
   const windowCache = new Map<TimeWindow, UsageStats>();
   let fetchQueued = false;
 
-  // Update-check state — re-checked at most every 210 minutes to avoid
-  // spamming the npm registry. The first check happens shortly after
-  // startup so the TUI doesn't block on a network call.
-  const UPDATE_CHECK_INTERVAL_MS = 210 * 60 * 1000;
+  // Update badge — sourced from the daemon's low-frequency background check
+  // (GET /version), so the TUI makes no registry/GitHub call of its own.
+  // Re-read periodically to pick up the daemon's refreshed cache.
+  const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
   const UPDATE_CHECK_DELAY_MS = 3000;
   let updateInfo: UpdateInfo | null = null;
   let lastUpdateCheck = 0;
@@ -79,6 +79,20 @@ export async function runUsageTui(): Promise<void> {
     updateCheckInProgress = true;
     lastUpdateCheck = now;
     try {
+      const daemonInfo = await fetchVersionInfo();
+      if (daemonInfo) {
+        updateInfo = {
+          hasUpdate: daemonInfo.hasUpdate,
+          text:
+            daemonInfo.hasUpdate && daemonInfo.latest
+              ? `Update available: routstrd ${daemonInfo.latest}`
+              : "",
+        };
+        render();
+        return;
+      }
+
+      // Fall back to a direct check for daemons predating GET /version.
       const result = await checkForUpdates();
       const outdated = result.packages.filter((p) => p.hasUpdate);
       updateInfo = {

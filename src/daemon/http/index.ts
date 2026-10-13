@@ -11,6 +11,8 @@ import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
+import { VERSION } from "../../version";
+import { readUpdateState } from "../../utils/update-state";
 import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
 import {
   WalletHttpError,
@@ -462,6 +464,23 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/status") {
       const output = await buildStatusOutput(deps);
       sendJson(res, 200, { output });
+      return;
+    }
+
+    // Version of the running daemon plus the cached result of its last
+    // background update check. Read-only and cheap: the daemon refreshes the
+    // cache on its own schedule, so CLI/TUI clients just read it.
+    if (req.method === "GET" && url.pathname === "/version") {
+      const state = readUpdateState();
+      sendJson(res, 200, {
+        output: {
+          version: VERSION,
+          current: state?.current ?? VERSION,
+          latest: state?.latest ?? null,
+          hasUpdate: state?.hasUpdate ?? false,
+          checkedAt: state?.checkedAt ?? null,
+        },
+      });
       return;
     }
 
