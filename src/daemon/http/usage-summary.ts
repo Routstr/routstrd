@@ -63,6 +63,36 @@ export interface SizeBuckets {
 }
 
 /**
+ * Bucket size used to render the usage history chart. Chosen from the selected
+ * {@link TimeWindow}: hours for the last 24h, days for 7d/30d, and months for
+ * the unbounded `all` view.
+ */
+export type TimelineBucket = "hour" | "day" | "month";
+
+/** One bar in the history chart: one hour, day or month of usage. */
+export interface TimelinePoint {
+  /** Bucket key: `HH` (hour), `YYYY-MM-DD` (day) or `YYYY-MM` (month). */
+  key: string;
+  /** Bucket start, UTC ms. Month points are anchored to the 1st of the month. */
+  timestamp: number;
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/**
+ * Zero-filled usage series for the history chart. Every bucket between the
+ * range start and `now` is present (even empty ones) so the chart's x-axis is
+ * evenly spaced; gaps are only possible for a window with no data at all.
+ */
+export interface Timeline {
+  bucket: TimelineBucket;
+  points: TimelinePoint[];
+}
+
+/**
  * Selectable time range for the usage monitor. `today` is the current local
  * day, `7d`/`30d` are rolling windows, `all` is unbounded.
  */
@@ -91,6 +121,8 @@ export interface WindowedStats {
   clients: ClientSummary[];
   npubs: NpubSummary[];
   sizeBuckets: SizeBuckets;
+  /** Zero-filled series for the History tab chart. */
+  timeline: Timeline;
 }
 
 export interface UsageSummary {
@@ -217,6 +249,176 @@ interface UsageFilter {
   after?: number;
 }
 
+// ─── History timeline ────────────────────────────────────────────────────────
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/** Empty series used by the zero-data short-circuit. */
+function emptyTimeline(window: TimeWindow): Timeline {
+  return { bucket: bucketForWindow(window), points: [] };
+}
+
+/** Which bucket the chart uses for a window: hours, days or months. */
+function bucketForWindow(window: TimeWindow): TimelineBucket {
+  if (window === "today") return "hour";
+  if (window === "all") return "month";
+  return "day";
+}
+
+/**
+ * `YYYY-MM-DD` for a timestamp that is already shifted into local wall-clock
+ * time (i.e. `timestamp - tzOffsetMinutes * 60000`), matching the SDK's
+ * `groupBy: "day"` keys.
+ */
+function shiftedDayKey(shiftedMs: number): string {
+  const d = new Date(shiftedMs);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+interface TimelineAccumulator {
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+function zeroAccumulator(): TimelineAccumulator {
+  return { requests: 0, satsCost: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+}
+
+function accumulatorFromRow(row: {
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}): TimelineAccumulator {
+  return {
+    requests: row.requests,
+    satsCost: row.satsCost,
+    totalTokens: row.totalTokens,
+    promptTokens: row.promptTokens,
+    completionTokens: row.completionTokens,
+  };
+}
+
+/**
+ * Build the zero-filled history series for a window.
+ *
+ * - `today` (24h) → 24 hourly buckets, aligned to the local hour, newest last.
+ * - `7d` / `30d` → that many daily buckets, newest last.
+ * - `all` → one bucket per calendar month, from the first month with usage to
+ *   the current month. The SDK has no `month` grouping, so all days are
+ *   aggregated and folded here.
+ */
+async function buildTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  window: TimeWindow,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  if (window === "all") {
+    return buildMonthlyTimeline(driver, baseFilter, now, tzOffsetMinutes);
+  }
+
+  const isHourly = window === "today";
+  const bucket = isHourly ? "hour" : "day";
+  const bucketMs = isHourly ? HOUR_MS : DAY_MS;
+  const slotCount = isHourly ? 24 : window === "7d" ? 7 : 30;
+
+  // Align the newest slot to the current local hour/day so the window covers
+  // whole buckets (each hour-of-day appears at most once, which matters
+  // because the SDK's `hour` keys carry no date).
+  const shiftedNow = now - tzOffsetMinutes * 60_000;
+  const newestShifted = Math.floor(shiftedNow / bucketMs) * bucketMs;
+  const oldestShifted = newestShifted - (slotCount - 1) * bucketMs;
+  const oldestUtc = oldestShifted + tzOffsetMinutes * 60_000;
+
+  const rows = await driver.aggregate({
+    ...baseFilter,
+    groupBy: bucket,
+    tzOffsetMinutes,
+    after: oldestUtc - 1, // strict `>`, so include entries at the bucket start
+  });
+  const byKey = new Map(rows.map((row) => [row.group ?? "", row]));
+
+  const points: TimelinePoint[] = [];
+  for (let i = 0; i < slotCount; i++) {
+    const slotShifted = oldestShifted + i * bucketMs;
+    const key = isHourly ? pad2(new Date(slotShifted).getUTCHours()) : shiftedDayKey(slotShifted);
+    const row = byKey.get(key);
+    points.push({
+      key,
+      timestamp: slotShifted + tzOffsetMinutes * 60_000,
+      ...(row ? accumulatorFromRow(row) : zeroAccumulator()),
+    });
+  }
+
+  return { bucket, points };
+}
+
+/** Fold all-time daily aggregates into calendar months, zero-filling gaps. */
+async function buildMonthlyTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  const rows = await driver.aggregate({
+    ...baseFilter,
+    groupBy: "day",
+    tzOffsetMinutes,
+  });
+
+  const byMonth = new Map<string, TimelineAccumulator>();
+  for (const row of rows) {
+    const key = (row.group ?? "").slice(0, 7); // YYYY-MM
+    if (key.length !== 7) continue;
+    const acc = byMonth.get(key) ?? zeroAccumulator();
+    const add = accumulatorFromRow(row);
+    acc.requests += add.requests;
+    acc.satsCost += add.satsCost;
+    acc.totalTokens += add.totalTokens;
+    acc.promptTokens += add.promptTokens;
+    acc.completionTokens += add.completionTokens;
+    byMonth.set(key, acc);
+  }
+
+  const months = [...byMonth.keys()].sort();
+  if (months.length === 0) return { bucket: "month", points: [] };
+
+  const [firstYear, firstMonth] = months[0]!.split("-").map(Number) as [number, number];
+  const nowShifted = new Date(now - tzOffsetMinutes * 60_000);
+  const lastYear = nowShifted.getUTCFullYear();
+  const lastMonth = nowShifted.getUTCMonth() + 1;
+
+  const points: TimelinePoint[] = [];
+  let year = firstYear;
+  let month = firstMonth;
+  while (year < lastYear || (year === lastYear && month <= lastMonth)) {
+    const key = `${year}-${pad2(month)}`;
+    // `Date.UTC` gives the shifted-local first-of-month; add the offset back.
+    const shiftedStart = Date.UTC(year, month - 1, 1);
+    points.push({
+      key,
+      timestamp: shiftedStart + tzOffsetMinutes * 60_000,
+      ...(byMonth.get(key) ?? zeroAccumulator()),
+    });
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+
+  return { bucket: "month", points };
+}
+
 // ─── Module-level memo cache ─────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -234,7 +436,7 @@ export function __resetUsageSummaryCacheForTest(): void {
 
 // ─── Aggregation ─────────────────────────────────────────────────────────────
 
-function emptyAggregates(): Omit<WindowedStats, "window"> {
+function emptyAggregates(): Omit<WindowedStats, "window" | "timeline"> {
   return {
     totals: zeroStatRow(),
     models: [],
@@ -257,7 +459,7 @@ async function buildAggregates(
   clients: ClientEntry[],
   tzOffsetMinutes: number,
   after?: number,
-): Promise<Omit<WindowedStats, "window">> {
+): Promise<Omit<WindowedStats, "window" | "timeline">> {
   const filter: UsageFilter = after === undefined ? { ...baseFilter } : { ...baseFilter, after };
 
   // ── Totals ─────────────────────────────────────────────────────────────────
@@ -406,7 +608,7 @@ export async function getUsageSummary(
       days: [],
       hoursToday: [],
       recent: [],
-      window: { window, ...aggregates },
+      window: { window, ...aggregates, timeline: emptyTimeline(window) },
     };
     _cache = { key: cacheKey, summary: zeroSummary };
     return zeroSummary;
@@ -415,10 +617,13 @@ export async function getUsageSummary(
   // All-time aggregates — drive Overview and remain window-independent.
   const allTime = await buildAggregates(driver, baseFilter, clients, tzOffsetMinutes);
 
+  // History chart series — bucketed per the selected window (hours/days/months).
+  const timeline = await buildTimeline(driver, baseFilter, window, now, tzOffsetMinutes);
+
   // Windowed aggregates — drive Models/Providers/Tokens/Clients/Npubs.
   // For `all` we reuse the all-time block, so the default view pays no extra cost.
   const windowStats: WindowedStats = window === "all"
-    ? { window, ...allTime }
+    ? { window, ...allTime, timeline }
     : {
         window,
         ...(await buildAggregates(
@@ -428,6 +633,7 @@ export async function getUsageSummary(
           tzOffsetMinutes,
           windowAfter(window, now, tzOffsetMinutes),
         )),
+        timeline,
       };
 
   // ── Days (last 30, most-recent-first) ─────────────────────────────────────
