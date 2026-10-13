@@ -380,3 +380,116 @@ describe("createModelService mint discovery wiring", () => {
   });
 
 });
+
+describe("model population single-flight", () => {
+  const provider = "https://p.example/";
+  const model = { id: "m", name: "Model", sats_pricing: { completion: 1 } };
+  function fixture(ids = ["m"]) {
+    let cached: Record<string, typeof model[]> = {};
+    const calls: boolean[] = [];
+    const idCalls: boolean[] = [];
+    let release!: (models: typeof model[]) => void;
+    let reject!: (error: Error) => void;
+    let gate = new Promise<typeof model[]>((resolve, fail) => { release = resolve; reject = fail; });
+    const state = {
+      baseUrlsList: [provider], disabledProviders: [],
+      manuallyDisabledProviders: [], manuallyEnabledProviders: [],
+      setBaseUrlsList: () => {}, setDisabledProviders: () => {},
+    };
+    const manager = {
+      bootstrapProviders: async () => [provider],
+      syncReviewedProvidersFromNostr: async () => [],
+      getBaseUrls: () => [provider],
+      getAllCachedModels: () => cached,
+      fetchRoutstr21Models: async (force: boolean) => { idCalls.push(force); return ids; },
+      fetchModels: async (_urls: string[], force: boolean) => { calls.push(force); return gate; },
+    };
+    return {
+      service: createModelService(manager as never, {} as never, { getState: () => state } as unknown as SdkStore),
+      calls, idCalls,
+      release: (models = [model]) => release(models), reject: () => reject(new Error("failed pass")),
+      warm: (models = [model]) => { cached = { [provider]: models }; },
+      next: () => { gate = new Promise((resolve, fail) => { release = resolve; reject = fail; }); },
+    };
+  }
+  // Flush bootstrap and the curated-ID prefetch without real network/timeouts.
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+
+  it("coalesces cold readers and a forced refresh into one population pass", async () => {
+    const f = fixture();
+    const readers = [f.service.getRoutstr21Models(), f.service.getRoutstr21Models(), f.service.getRoutstr21Models(true)];
+    await flush();
+    expect(f.calls).toEqual([false]);
+    expect(f.idCalls).toEqual([false]);
+    f.release();
+    const results = await Promise.all(readers);
+    expect(results.map(r => r[0]!.name)).toEqual(["Model", "Model", "Model"]);
+  });
+
+  it("joins a forced population pass but leaves warm reads cache-only", async () => {
+    const f = fixture();
+    f.warm();
+    const forced = f.service.getRoutstr21Models(true);
+    const cold = f.service.getRoutstr21Models();
+    await flush();
+    expect(f.calls).toEqual([true]);
+    f.warm();
+    expect((await f.service.getRoutstr21Models())[0]!.name).toBe("Model");
+    expect(f.calls).toEqual([true]);
+    f.release();
+    await Promise.all([forced, cold]);
+    f.next();
+    const next = f.service.getRoutstr21Models(true);
+    await flush();
+    expect(f.calls).toEqual([true, true]);
+    f.release();
+    await next;
+  });
+
+  it("joins a cold pass after incremental cache publication instead of exposing pending models as stubs", async () => {
+    const f = fixture(["m", "pending"]);
+    const first = f.service.getRoutstr21Models();
+    await flush();
+    f.warm(); // SDK publishes provider A before provider B has answered.
+    let settled = false;
+    const second = f.service.getRoutstr21Models().then(models => { settled = true; return models; });
+    await flush();
+    expect(settled).toBe(false);
+    expect(f.calls).toEqual([false]);
+    const pending = { ...model, id: "pending", name: "Pending provider metadata" };
+    f.release([model, pending]);
+    for (const result of await Promise.all([first, second])) {
+      expect(result[1]!.name).toBe("Pending provider metadata");
+    }
+  });
+
+  for (const freshness of ["fresh", "expired"]) {
+    it(`startup delegates ${freshness} cached payloads to SDK TTL checks without forcing`, async () => {
+      const f = fixture();
+      f.warm();
+      const background = f.service.getRoutstr21Models(false, true);
+      await flush();
+      expect(f.calls).toEqual([false]);
+      expect(f.idCalls).toEqual([false]);
+      // A regular warm read remains independent even while startup checks TTL.
+      expect((await f.service.getRoutstr21Models())[0]!.name).toBe("Model");
+      expect(f.calls).toEqual([false]);
+      f.release([{ ...model, name: freshness === "expired" ? "Refreshed" : "Model" }]);
+      expect((await background)[0]!.name).toBe(freshness === "expired" ? "Refreshed" : "Model");
+    });
+  }
+
+  it("clears a failed pass so the next request can retry", async () => {
+    const f = fixture();
+    const first = f.service.getRoutstr21Models().catch(error => error);
+    await flush();
+    f.reject();
+    expect((await first).message).toBe("failed pass");
+    f.next();
+    const retry = f.service.getRoutstr21Models();
+    await flush();
+    expect(f.calls).toEqual([false, false]);
+    f.release();
+    expect(await retry).toHaveLength(1);
+  });
+});

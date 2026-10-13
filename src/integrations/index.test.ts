@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatModelRefreshSummary } from "./index";
+import { formatModelRefreshSummary, refreshModelsAndIntegrations } from "./index";
 
 describe("formatModelRefreshSummary", () => {
   it("collapses a whole pass into one line", () => {
@@ -40,5 +40,47 @@ describe("formatModelRefreshSummary", () => {
         500,
       ).startsWith("Initial refresh:"),
     ).toBe(true);
+  });
+});
+
+describe("refreshModelsAndIntegrations startup policy", () => {
+  const config = { port: 8008, host: "127.0.0.1", provider: "" };
+  for (const label of ["Scheduled", "Manual"]) {
+    it(`${label} refresh forces models by default`, async () => {
+      const forces: (boolean | undefined)[] = [];
+      const result = await refreshModelsAndIntegrations(
+        async force => { forces.push(force); return [{ id: "m" }]; }, config, label, {},
+        { getClientsList: async () => [], runIntegrationsForClients: async () => { throw new Error("no clients"); } },
+      );
+      expect(forces).toEqual([true]);
+      expect(result.modelCount).toBe(1);
+    });
+  }
+  it("startup reuses bootstrap evidence and still refreshes integrations", async () => {
+    const forces: (boolean | undefined)[] = [];
+    let runs = 0;
+    const result = await refreshModelsAndIntegrations(
+      async force => { forces.push(force); return [{ id: "m" }]; }, config, "Initial", { forceRefresh: false },
+      {
+        getClientsList: async () => [{ clientId: "pi-agent", name: "Pi Agent", apiKey: "key", createdAt: 0 }],
+        runIntegrationsForClients: async () => { runs++; return { refreshed: 1, failed: 0 }; },
+      },
+    );
+    expect(forces).toEqual([false]);
+    expect(runs).toBe(1);
+    expect(result).toEqual({ modelCount: 1, integrationCount: 1, failedCount: 0 });
+  });
+  it("disabled auto-refresh warms models without touching clients or integrations", async () => {
+    const forces: (boolean | undefined)[] = [];
+    const result = await refreshModelsAndIntegrations(
+      async force => { forces.push(force); return [{ id: "m" }]; }, config, "Initial",
+      { forceRefresh: false, refreshIntegrations: false },
+      {
+        getClientsList: async () => { throw new Error("unexpected clients query"); },
+        runIntegrationsForClients: async () => { throw new Error("unexpected installer"); },
+      },
+    );
+    expect(forces).toEqual([false]);
+    expect(result).toEqual({ modelCount: 1, integrationCount: 0, failedCount: 0 });
   });
 });

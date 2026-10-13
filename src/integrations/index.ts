@@ -58,18 +58,25 @@ export async function refreshModelsAndIntegrations(
   getRoutstr21Models: (force?: boolean) => Promise<any[]>,
   config: RoutstrdConfig,
   label: string = "Scheduled",
+  options: { forceRefresh?: boolean; refreshIntegrations?: boolean } = {},
+  deps = { getClientsList, runIntegrationsForClients },
 ): Promise<ModelRefreshResult> {
   logger.debug(`${label} refresh: fetching routstr21 models...`);
-  const models = await getRoutstr21Models(true);
+  const models = await getRoutstr21Models(options.forceRefresh ?? true);
 
-  const clientIds = await getClientsList();
+  // Startup still warms models with auto-refresh disabled, but must not
+  // overwrite hand-edited client configs or even query the client registry.
+  if (options.refreshIntegrations === false) {
+    return { modelCount: models.length, integrationCount: 0, failedCount: 0 };
+  }
+  const clientIds = await deps.getClientsList();
   let integrationCount = 0;
   let failedCount = 0;
   if (clientIds.length > 0) {
     logger.debug(
       `${label} refresh: rewriting ${clientIds.length} client integration(s)...`,
     );
-    const run = await runIntegrationsForClients(clientIds, config);
+    const run = await deps.runIntegrationsForClients(clientIds, config);
     integrationCount = run.refreshed;
     failedCount = run.failed;
   }

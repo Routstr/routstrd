@@ -33,6 +33,8 @@ export function createModelService(
 ) {
   let providerBootstrapPromise: Promise<void> | null = null;
   let mintDiscoveryPromise: Promise<void> | null = null;
+  let modelPopulationPromise: Promise<ExposedModel[]> | null = null;
+  let modelPopulationStartedCold = false;
 
   const scheduleMintDiscovery = (providers: string[]): void => {
     if (!mintDiscovery || mintDiscoveryPromise) return;
@@ -108,6 +110,7 @@ export function createModelService(
   const ensureProvidersBootstrapped = (): Promise<void> => {
     if (!providerBootstrapPromise) {
       providerBootstrapPromise = (async () => {
+        const startedAt = Date.now();
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
@@ -146,7 +149,9 @@ export function createModelService(
           setDisabledProviders(reviewedDisabled);
         }
 
-        logger.log("Provider bootstrap complete.");
+        logger.log(
+          `Provider bootstrap complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
+        );
 
         // Populate the mint cache for every enabled provider. The SDK refuses
         // to spend a mint a provider does not advertise, so without this the
@@ -163,30 +168,10 @@ export function createModelService(
     return providerBootstrapPromise;
   };
 
-  const getRoutstr21Models = async (
-    forceRefresh = false,
-  ): Promise<ExposedModel[]> => {
-    const routstr21ModelIds = Array.from(
-      new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
-    );
-
-    let discoveredModels: ExposedModel[];
-    if (!forceRefresh) {
-      discoveredModels = getCachedModels();
-    } else {
-      discoveredModels = [];
-    }
-
-    // Warm reads are cache-only. A cold start and explicit refresh still
-    // populate models from the provider network.
-    if (forceRefresh || discoveredModels.length === 0) {
-      await ensureProvidersBootstrapped();
-      discoveredModels = await modelManager.fetchModels(
-        modelManager.getBaseUrls(),
-        forceRefresh,
-      );
-    }
-
+  const exposeModels = (
+    routstr21ModelIds: string[],
+    discoveredModels: ExposedModel[],
+  ): ExposedModel[] => {
     // Resolve each routstr21 id against the aggregated provider models. The
     // aggregation folds providers' mapped variant ids/aliases into one entry
     // per canonical id, but the surviving entry is the provider's raw model,
@@ -195,12 +180,57 @@ export function createModelService(
     // A plain id map would miss and degrade the entry to a bare stub, so
     // resolve through the SDK's model mappings (exact native id wins, same as
     // getModelProviders) and always expose the requested canonical id.
-    return routstr21ModelIds.map((modelId) => {
+    return [...new Set(routstr21ModelIds)].map((modelId) => {
       const model = findModelForId(discoveredModels as Model[], modelId);
       return model
         ? { ...model, id: modelId }
         : { id: modelId, name: modelId };
     });
+  };
+
+  const getRoutstr21Models = async (
+    forceRefresh = false,
+    refreshExpired = false,
+  ): Promise<ExposedModel[]> => {
+    // Incremental SDK writes are not a complete warm cache. A pass which
+    // started genuinely cold must finish before any reader exposes its models.
+    if (modelPopulationPromise && modelPopulationStartedCold) {
+      return modelPopulationPromise;
+    }
+    const cachedModels = getCachedModels();
+    // Regular warm reads stay independent of forced/startup refreshes. Startup
+    // opts into SDK TTL checks without forcing every cached provider to refetch.
+    if (!forceRefresh && !refreshExpired && cachedModels.length > 0) {
+      return exposeModels(
+        await modelManager.fetchRoutstr21Models(false),
+        cachedModels,
+      );
+    }
+
+    // Cold readers and startup/explicit refreshes share one population pass.
+    // A force request joins an existing pass rather than launching another.
+    if (!modelPopulationPromise) {
+      modelPopulationStartedCold = cachedModels.length === 0;
+      modelPopulationPromise = (async () => {
+        const startedAt = Date.now();
+        // Bootstrap establishes mappings and review policy before aggregation.
+        // Its curated-list prefetch also avoids a duplicate cold relay query.
+        await ensureProvidersBootstrapped();
+        const ids = await modelManager.fetchRoutstr21Models(forceRefresh);
+        const models = await modelManager.fetchModels(
+          modelManager.getBaseUrls(),
+          forceRefresh,
+        );
+        logger.debug(
+          `Model population complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
+        );
+        return exposeModels(ids, models);
+      })().finally(() => {
+        modelPopulationPromise = null;
+        modelPopulationStartedCold = false;
+      });
+    }
+    return modelPopulationPromise;
   };
 
   const getModelProviders = async (
