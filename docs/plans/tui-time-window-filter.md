@@ -184,3 +184,17 @@ Docs (optional): `README.md` / `SKILL.md` mention `[W]`.
 Half a day to a day. The data path is a straight thread-through of an existing
 `after` option; most of the work is the UI selector, per-window cache, and
 test fixtures.
+
+## Follow-up: Overview joins the filtered tabs
+
+Overview was originally excluded so the all-time aggregates stayed untouched.
+It now honours the same `[W]` window:
+
+- `renderOverview` reads `stats.window.*` (totals, models, clients) instead of
+  the all-time block, so "Total Spent"/"Total Requests"/token figures are
+  scoped to the selected window.
+- The selector is not drawn in the top chrome on Overview. It is rendered
+  inline, directly under the Balance box, where the figures it scopes begin —
+  the tab's chrome scrolls away from them, the in-content selector does not.
+- `tabSupportsWindow` still excludes Today and Recent; Overview is excluded
+  only from the chrome bar (`tabShowsWindowBarInChrome`).

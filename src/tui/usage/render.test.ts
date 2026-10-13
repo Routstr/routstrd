@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderBox, renderModels, renderNpubs, renderRecent, renderStackedBar, renderWindowBar, tokenSegments } from "./render.ts";
+import { renderBox, renderModels, renderNpubs, renderOverview, renderRecent, renderStackedBar, renderWindowBar, renderWindowSelector, tokenSegments } from "./render.ts";
 import { stripAnsi } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { buildClientNaming, resolveClientLabel, type ClientInfo, type NpubEntry } from "./data.ts";
@@ -289,6 +289,78 @@ describe("renderWindowBar", () => {
       expect(renderWindowBar("7d", tab)).toBe("");
     }
     expect(stripAnsi(renderWindowBar("7d", "tokens"))).toContain("window:");
+  });
+
+  test("leaves the chrome to the tabs that render it inline", () => {
+    // Overview still honours the window; only the chrome bar is dropped.
+    expect(renderWindowBar("7d", "overview")).toBe("");
+    expect(stripAnsi(renderWindowSelector("7d"))).toContain("7d");
+    expect(stripAnsi(renderWindowSelector("7d"))).toContain("[W] cycle");
+  });
+});
+
+describe("renderOverview", () => {
+  const balance = { keys: [{ id: "wallet", name: "Wallet", balance: 1000 }], total: 1000, unit: "sat" as const, apikeysCalled: 0 };
+
+  /** All-time figures differ from the windowed ones so each is identifiable. */
+  const windowedStats = {
+    ...statsFor(NPUB),
+    totalEntries: 888,
+    totalSatsCost: 7777,
+    summary: {
+      totals: { requests: 888, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, satsCost: 7777 },
+      models: [],
+      clients: [],
+    },
+    window: {
+      window: "7d",
+      totals: { requests: 5, promptTokens: 100, completionTokens: 50, totalTokens: 150, cost: 0, satsCost: 12.34 },
+      models: [{ modelId: "windowed-model", requests: 5, promptTokens: 100, completionTokens: 50, totalTokens: 150, cost: 0, satsCost: 12.34 }],
+      providers: [],
+      clients: [{ client: "pi-agent", requests: 5, promptTokens: 100, completionTokens: 50, totalTokens: 150, cost: 0, satsCost: 12.34, topModels: [] }],
+      npubs: [],
+      sizeBuckets: {
+        tiny: { count: 0, cost: 0 },
+        small: { count: 0, cost: 0 },
+        medium: { count: 0, cost: 0 },
+        large: { count: 0, cost: 0 },
+        huge: { count: 0, cost: 0 },
+      },
+    },
+  } as unknown as UsageStats;
+
+  test("scopes every total to the active window", () => {
+    const out = stripAnsi(renderOverview(windowedStats, balance, null, 120, "7d"));
+
+    expect(out).toContain("12.34 sats");
+    expect(out).toContain("Total Requests: 5");
+    expect(out).toContain("windowed-model");
+    expect(out).toContain("pi-agent");
+    // The all-time figures are not shown on the Overview tab.
+    expect(out).not.toContain("7.78k");
+    expect(out).not.toContain("888");
+  });
+
+  test("renders the window selector directly under the Balance box", () => {
+    const out = renderOverview(windowedStats, balance, null, 120, "7d");
+    const lines = stripAnsi(out).split("\n");
+
+    const balanceIdx = lines.findIndex((line) => line.includes("Balance"));
+    const windowIdx = lines.findIndex((line) => line.includes("Time Window"));
+    const statsIdx = lines.findIndex((line) => line.includes("Stats of Sats"));
+
+    expect(balanceIdx).toBeGreaterThanOrEqual(0);
+    expect(windowIdx).toBeGreaterThan(balanceIdx);
+    expect(statsIdx).toBeGreaterThan(windowIdx);
+    // The selected window is the highlighted one.
+    expect(out).toContain(`${COLORS.bgGreen}${COLORS.bold} 7d ${COLORS.reset}`);
+  });
+
+  test("renders the selector even without balance data", () => {
+    const out = stripAnsi(renderOverview(windowedStats, null, null, 120, "all"));
+
+    expect(out).toContain("Time Window");
+    expect(out).toContain("Status unavailable");
   });
 });
 
