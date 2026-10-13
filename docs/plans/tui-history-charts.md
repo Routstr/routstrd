@@ -61,3 +61,9 @@ the tab window-aware: the selector was previously hidden on it.
   back to an empty chart rather than erroring.
 - The 24h window is hour-aligned rather than a rolling `now - 24h`, so each
   hour-of-day appears once and the `HH` keys stay unambiguous.
+- The windowed aggregates use the same bucket-aligned boundary as the chart
+  (`windowRangeStartUtc`), so a tab's totals always equal the sum of its bars:
+  24 whole hours for `24h`, whole local days for `7d`/`30d`. Before this, the
+  `24h` totals were calendar-day (since local midnight) while the chart drew
+  a rolling 24h, and `7d`/`30d` totals were exact rolling windows while the
+  chart snapped to whole days.
