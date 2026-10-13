@@ -213,7 +213,7 @@ GET /version
 
 Returns the running daemon version plus the cached result of its background
 update check (`{ version, current, latest, hasUpdate, checkedAt }`). The daemon
-refreshes that cache every 6 hours; the TUI banner and the CLI's
+refreshes that cache every hour; the TUI banner and the CLI's
 "update available" notice both read it. The TUI falls back to direct checks
 every 210 minutes only when the daemon does not support this endpoint.
 
@@ -392,7 +392,7 @@ optional external dependency used only by `routstrd service`; normal daemon
 operation does not require it.
 
 A background check in the daemon caches whether a newer routstrd exists in
-`~/.routstrd/update-state.json` (refreshed every 6 hours) and serves it from
+`~/.routstrd/update-state.json` (refreshed every hour) and serves it from
 `GET /version`. The usage TUI shows an update banner from that cache, and after
 most commands the CLI prints a one-line notice pointing at `routstrd update`.
 Automatic checks are enabled by default. To disable background checks, startup

@@ -312,7 +312,7 @@ prompt `Update now? [Y/n]` (yes is the default) before bringing the daemon up.
 The check runs only on an interactive terminal, so scripts, CI and PM2 are
 unaffected; set `"updateCheck": false` in `config.json` to skip it entirely.
 
-The running daemon also checks for updates on its own, slowly (every 6 hours;
+The running daemon also checks for updates on its own, slowly (every hour;
 first pass ~30s after startup) and caches the answer in
 `~/.routstrd/update-state.json`. `GET /version` exposes that cache, the TUI reads
 it for its update banner, and after any other command (e.g. `balance`, `send`,

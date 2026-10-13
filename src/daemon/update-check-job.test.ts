@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   createUpdateCheckJob,
+  DEFAULT_UPDATE_CHECK_INITIAL_DELAY_MS,
+  DEFAULT_UPDATE_CHECK_INTERVAL_MS,
   type UpdateCheckFn,
 } from "./update-check-job.ts";
 import type { UpdateState } from "../utils/update-state.ts";
@@ -177,5 +179,33 @@ describe("update check cache and config regressions", () => {
     });
     await job.runOnce();
     expect(saves).toBe(0);
+  });
+});
+
+describe("update check cadence policy", () => {
+  test("checks hourly, starting shortly after startup", () => {
+    expect(DEFAULT_UPDATE_CHECK_INTERVAL_MS).toBe(60 * 60 * 1000);
+    expect(DEFAULT_UPDATE_CHECK_INITIAL_DELAY_MS).toBe(30 * 1000);
+  });
+
+  test("the startup log reports whole hours", async () => {
+    const logged: string[] = [];
+    const { logger } = await import("../utils/logger.ts");
+    const original = logger.log;
+    logger.log = ((...args: unknown[]) => {
+      logged.push(args.join(" "));
+    }) as typeof logger.log;
+    try {
+      const job = createUpdateCheckJob({
+        initialDelayMs: 100_000,
+        check: async () => upToDate,
+        save: () => {},
+      });
+      job.start();
+      job.stop();
+    } finally {
+      logger.log = original;
+    }
+    expect(logged.join("\n")).toContain("every 1h");
   });
 });
