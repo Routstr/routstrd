@@ -28,7 +28,7 @@ export interface UsageStats {
   window: WindowedStats;
 }
 
-export type TabId = "overview" | "history" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
+export type TabId = "overview" | "history" | "models" | "providers" | "clients" | "npubs" | "recent";
 
 export interface Tab {
   id: TabId;

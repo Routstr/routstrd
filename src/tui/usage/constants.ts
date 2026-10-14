@@ -5,10 +5,9 @@ export const ALL_TABS: Tab[] = [
   { id: "history", name: "History", key: "2" },
   { id: "models", name: "Models", key: "3" },
   { id: "providers", name: "Providers", key: "4" },
-  { id: "tokens", name: "Tokens", key: "5" },
-  { id: "clients", name: "Clients", key: "6" },
-  { id: "npubs", name: "Npubs", key: "7" },
-  { id: "recent", name: "Recent", key: "8" },
+  { id: "clients", name: "Clients", key: "5" },
+  { id: "npubs", name: "Npubs", key: "6" },
+  { id: "recent", name: "Recent", key: "7" },
 ];
 
 /**
@@ -46,7 +45,7 @@ export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWin
 /**
  * Whether the active window applies to a given tab. Only Recent is exempt:
  * Overview honours the window but draws the selector inline, and History,
- * Models, Providers, Tokens, Clients and Npubs all follow it.
+ * Models, Providers, Clients and Npubs all follow it.
  */
 export function tabSupportsWindow(tabId: Tab["id"]): boolean {
   return tabId !== "recent";
