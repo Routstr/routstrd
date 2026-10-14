@@ -147,6 +147,45 @@ leading `/` and replacing the rest with `-`, wrapped in `--`:
 Pick the file you want inside that directory (or `ls -t … | head -1` for the
 latest).
 
+## Spend per session
+
+`scripts/recent-sessions.ts` rides the same join to answer "what did the last few
+sessions cost?" — it lists the most recently used pi sessions and sums the price
+of the response logs each one points at:
+
+```bash
+bun run sessions                 # last 5 sessions, all projects
+bun run sessions -- --limit 10 --project routstrd
+```
+
+```
+  2026-10-14 11:22  look at @BOOTSTRAP.md fixes review the changes. be thorough.
+      routstrd                 01a13551  33/33 turns    66/118.3k tok    $2.7086  3257.22 sat
+```
+
+`turns` shows priced/total, so aborted turns and pre-logging history stay
+visible instead of silently deflating the total. Flags: `--limit N`,
+`--project SUBSTR`, `--dir PATH`, `--all`, `--json`.
+
+The price is not in the pi session file — pi records tokens but no cost
+(`usage.cost.total` is always 0, since the `routstr` provider in `models.json`
+has no pricing table). It is routstr's own billing line, the SSE event appended
+before `[DONE]`:
+
+```jsonc
+// responses/<id>.jsonl, inside a chunk's escaped text
+{"cost": {"total_msats": 221, "charged_msats": 221,
+          "total_usd": 0.00018576, "sats_cost": 0, "remaining_balance_msats": 1031293}}
+```
+
+The script reads that from the raw log with escape-tolerant regexes (the payload
+is JSON-escaped in the file, as noted above), and picks the newest logs first so
+the early exit can cut the scan short. Cross-checked against the daemon's own
+`usage_tracking` table: identical for OpenAI-style upstreams. For Anthropic
+(`api.anthropic.com`) the two disagree — `usage_tracking.request_id` holds the
+raw request uuid there, while the session stores `msg_<uuid>` — so the response
+logs, not the database, are the reliable source for those.
+
 ## Verified
 
 Against this repo's own history the link is 1:1 and exact:
