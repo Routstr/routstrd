@@ -289,7 +289,7 @@ describe("renderWindowBar", () => {
     for (const tab of ["overview", "recent"] as const) {
       expect(renderWindowBar("7d", tab)).toBe("");
     }
-    expect(stripAnsi(renderWindowBar("7d", "tokens"))).toContain("window:");
+    expect(stripAnsi(renderWindowBar("7d", "models"))).toContain("window:");
     // History is driven by the window (its chart re-buckets per range).
     expect(stripAnsi(renderWindowBar("7d", "history"))).toContain("window:");
   });
