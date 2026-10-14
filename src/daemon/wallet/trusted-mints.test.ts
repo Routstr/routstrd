@@ -136,4 +136,35 @@ describe("seedTrustedMints", () => {
     expect(added).toEqual([...DEFAULT_TRUSTED_MINT_URLS]);
     expect(errors).toEqual([]);
   });
+
+  it("never re-seeds mints the user explicitly removed", async () => {
+    const { wallet, added } = makeHarness(["https://mint.cubabitcoin.org"]);
+
+    await seedTrustedMints(wallet, DEFAULT_MINT_URL, {
+      skipMints: [DEFAULT_MINT_URL, "https://mint.cubabitcoin.org"],
+    });
+
+    expect(added).toEqual([]);
+  });
+
+  it("skips a removed mint even when it is the configured default", async () => {
+    const { wallet, added } = makeHarness();
+
+    await seedTrustedMints(wallet, DEFAULT_MINT_URL, {
+      skipMints: [DEFAULT_MINT_URL],
+    });
+
+    // The removed default is skipped; the still-shipped extra is seeded.
+    expect(added).toEqual(["https://mint.cubabitcoin.org"]);
+  });
+
+  it("matches removed mints after normalization", async () => {
+    const { wallet, added } = makeHarness();
+
+    await seedTrustedMints(wallet, DEFAULT_MINT_URL, {
+      skipMints: [`${DEFAULT_MINT_URL}/`],
+    });
+
+    expect(added).not.toContain(DEFAULT_MINT_URL);
+  });
 });
