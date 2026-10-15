@@ -6,6 +6,7 @@ import {
   collectRecentRequestsFromLines,
   getLivePidFileOwner,
   initializeWallet,
+  parseAutoModelPathArg,
   parseStructuredLogLine,
 } from "./cli";
 
@@ -135,6 +136,36 @@ describe("parseStructuredLogLine", () => {
       modelId: undefined,
       isRouting: false,
     });
+  });
+});
+
+describe("parseAutoModelPathArg", () => {
+  test("reports the current setting when no state is given", () => {
+    expect(parseAutoModelPathArg(undefined)).toEqual({ kind: "status" });
+    expect(parseAutoModelPathArg("status")).toEqual({ kind: "status" });
+    expect(parseAutoModelPathArg(" ")).toEqual({ kind: "status" });
+  });
+
+  test("accepts case-insensitive on/off spellings", () => {
+    for (const raw of ["on", "ENABLE", " Enabled ", "true"]) {
+      expect(parseAutoModelPathArg(raw)).toEqual({ kind: "set", enabled: true });
+    }
+    for (const raw of ["off", "Disable", "disabled", "false"]) {
+      expect(parseAutoModelPathArg(raw)).toEqual({ kind: "set", enabled: false });
+    }
+  });
+
+  test("recognises toggle separately from an explicit value", () => {
+    expect(parseAutoModelPathArg("toggle")).toEqual({ kind: "toggle" });
+  });
+
+  test("rejects anything else instead of guessing", () => {
+    // "yes"/"no"/"1" must not silently map onto on/off.
+    expect(parseAutoModelPathArg("yes")).toEqual({
+      kind: "invalid",
+      value: "yes",
+    });
+    expect(parseAutoModelPathArg("1")).toEqual({ kind: "invalid", value: "1" });
   });
 });
 
