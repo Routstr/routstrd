@@ -139,7 +139,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   const mintDiscovery = new MintDiscovery(discoveryAdapter, {
     logger: daemonSdkLogger,
   });
-  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
+  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, getModelPaths, refreshProvidersAndModels } =
     createModelService(modelManager, providerManager, store, mintDiscovery);
 
   // The daemon may be launched directly (or by an older/global CLI), so do
@@ -218,6 +218,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       ensureProvidersBootstrapped,
       getRoutstr21Models,
       getModelProviders,
+      getModelPaths,
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
       autoModelPath: config.autoModelPath === true,

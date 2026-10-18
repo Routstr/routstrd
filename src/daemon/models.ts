@@ -1,14 +1,31 @@
 import {
   canonicalIdForModel,
+  canonicalizeModelId,
+  canonicalModelPath,
+  clearModelPathsCache,
+  DEEPSEEK_AUTO_MODEL_ID,
   findModelForId,
+  getNodeModelPathsForModel,
   ModelManager,
+  MODEL_PATH_RANKING_BUDGET_MS,
   ProviderManager,
+  resolveDeepSeekModelPathSelectors,
   type MintDiscovery,
   type Model,
+  type NodeModelPaths,
   type SdkStore,
 } from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
+import {
+  decodeModelPathSelector,
+  rankModelPathNodes,
+  type ModelPathNode,
+  type ModelPathPricingSource,
+  type ModelPathRoute,
+  type ModelPathSkipped,
+  type ModelPathsOutput,
+} from "../utils/model-paths";
 
 export type ModelProviderInfo = {
   baseUrl: string;
@@ -25,12 +42,54 @@ export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
 };
 
+/** Per-model path lookup, injectable so tests never touch the network. */
+export type NodeModelPathsFetcher = typeof getNodeModelPathsForModel;
+
+/**
+ * Sentinel for a node whose model-path lookup outlived the ranking budget.
+ * The SDK bounds its own routing ranking the same way: one slow node must not
+ * hold up the whole inventory. The lookup itself keeps running and fills the
+ * SDK's cache for the next caller.
+ */
+const PATHS_BUDGET_EXCEEDED = Symbol("model-paths-budget-exceeded");
+
+function withBudget<T>(
+  work: Promise<T>,
+  budgetMs: number,
+): Promise<T | typeof PATHS_BUDGET_EXCEEDED> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(PATHS_BUDGET_EXCEEDED), budgetMs);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(PATHS_BUDGET_EXCEEDED);
+      },
+    );
+  });
+}
+
+/**
+ * Why a node that serves the model is missing from the path inventory. Kept
+ * as stable strings: they are rendered verbatim by the CLI.
+ */
+const SKIP_ON_COOLDOWN = "on cooldown";
+const SKIP_NO_PATHS = "no model paths advertised";
+const SKIP_LOOKUP_TIMEOUT = "model-path lookup timed out";
+const SKIP_LOOKUP_FAILED = "model-path lookup failed";
+
 export function createModelService(
   modelManager: ModelManager,
   providerManager: ProviderManager,
   store: SdkStore,
   mintDiscovery?: MintDiscovery,
+  deps: { fetchNodeModelPaths?: NodeModelPathsFetcher } = {},
 ) {
+  const fetchNodeModelPaths =
+    deps.fetchNodeModelPaths ?? getNodeModelPathsForModel;
   let providerBootstrapPromise: Promise<void> | null = null;
   let mintDiscoveryPromise: Promise<void> | null = null;
   let modelPopulationPromise: Promise<ExposedModel[]> | null = null;
@@ -308,6 +367,230 @@ export function createModelService(
   };
 
   /**
+   * One node's advertised model paths for a model, decoded and priced.
+   *
+   * Routes are gathered across every spelling the node files the model under
+   * (the fetcher probes the canonical id, its mapping variants, and the
+   * node's own id/alias_ids), then deduplicated by the selector's canonical
+   * identity — two selectors naming the same upstream route must not be
+   * listed twice, while a route with a different upstream model-id spelling
+   * stays distinct, because pinning it also changes the request body.
+   *
+   * Pricing is the route's own `sats_pricing`; a node that advertises no
+   * per-route metadata falls back to its model-level catalog price, which is
+   * what routing ranks such a node on too. When `pinWhitelistedRoutes` is
+   * set, the pinned route is the first whitelisted route the node advertises
+   * (`resolveDeepSeekModelPathSelectors` order, skipping routes on cooldown)
+   * — the same route routing would use.
+   */
+  const buildModelPathRoutes = (
+    baseUrl: string,
+    nodePaths: NodeModelPaths,
+    model: Model,
+    requestedId: string,
+    mappings: ReturnType<ModelManager["getModelIdMappings"]>,
+    pinWhitelistedRoutes: boolean,
+  ): ModelPathRoute[] => {
+    type StagedRoute = ModelPathRoute & { identity: string };
+
+    const preferredOrder: string[] = [];
+    if (pinWhitelistedRoutes) {
+      const resolved = resolveDeepSeekModelPathSelectors(
+        nodePaths,
+        requestedId,
+        mappings,
+      );
+      for (const selector of resolved?.selectors ?? []) {
+        if (!selector) continue;
+        const identity = canonicalModelPath(selector) ?? selector;
+        if (!preferredOrder.includes(identity)) preferredOrder.push(identity);
+      }
+    }
+
+    const byIdentity = new Map<string, StagedRoute>();
+    const modelPricing = model.sats_pricing;
+    for (const entry of nodePaths.data) {
+      for (const { path, model: pathMeta } of entry.paths) {
+        if (!path) continue;
+        const identity = canonicalModelPath(path) ?? path;
+        if (byIdentity.has(identity)) continue;
+        const decoded = decodeModelPathSelector(path);
+        const pathPricing = pathMeta?.sats_pricing ?? null;
+        const pricing = pathPricing ?? modelPricing ?? null;
+        const pricingSource: ModelPathPricingSource = pathPricing
+          ? "path"
+          : modelPricing
+            ? "model"
+            : "none";
+        byIdentity.set(identity, {
+          identity,
+          path,
+          upstream: decoded?.upstream ?? path,
+          endpoint: decoded?.endpoint ?? null,
+          modelId: decoded?.modelId ?? null,
+          pricing: pricing
+            ? {
+                prompt: pricing.prompt ?? 0,
+                completion: pricing.completion ?? 0,
+                request: pricing.request ?? 0,
+                max_cost: pricing.max_cost ?? 0,
+              }
+            : null,
+          pricingSource,
+          contextLength:
+            pathMeta?.context_length ?? model.context_length ?? null,
+          maxCompletionTokens: pathMeta?.max_completion_tokens ?? null,
+          onCooldown: providerManager.isOnCooldown(
+            baseUrl,
+            requestedId,
+            identity,
+          ),
+          pinned: false,
+        });
+      }
+    }
+
+    const routes = [...byIdentity.values()];
+    const pin = preferredOrder
+      .map((identity) => routes.find((route) => route.identity === identity))
+      .find((route) => route !== undefined && !route.onCooldown);
+    if (pin) pin.pinned = true;
+
+    return routes.map(({ identity: _identity, ...route }) => route);
+  };
+
+  /**
+   * The advertised model-path inventory of one model, across every enabled
+   * node that serves it.
+   *
+   * Ranking matches the router (`rankModelPathNodes`): a node's metric is the
+   * completion price of the route routing would use first — its preferred
+   * whitelisted route when it advertises one, else its cheapest route — so the
+   * display order is the order a request would actually pick from.
+   *
+   * Nodes on model/provider cooldown, nodes that advertise no paths for the
+   * model (an older node without the model-paths endpoint, or one filing the
+   * model elsewhere), and lookups that fail or outlive the SDK's ranking
+   * budget are reported in `skipped` instead of being silently dropped.
+   * Returns null only when no node serves the model at all.
+   *
+   * `refresh` drops the SDK's cached model-path payloads first, so
+   * `models -m <id> --paths --refresh` shows live data; routing refetches on
+   * its next request as a result.
+   */
+  const getModelPaths = async (
+    modelId: string,
+    refresh = false,
+  ): Promise<ModelPathsOutput | null> => {
+    await ensureProvidersBootstrapped();
+    if (refresh) clearModelPathsCache();
+
+    const s = store.getState();
+    const manuallyEnabled = new Set<string>(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledSet = new Set<string>(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
+    );
+
+    const mappings = modelManager.getModelIdMappings();
+    const allModels = modelManager.getAllCachedModels();
+    // The whitelist governs one model only: the SDK auto-pins DeepSeek V4.1
+    // Flash, and every other model is routed by price. Marking a "pinned"
+    // route elsewhere would describe failover routing that never happens.
+    const pinWhitelistedRoutes =
+      canonicalizeModelId(modelId.trim().toLowerCase(), mappings) ===
+      DEEPSEEK_AUTO_MODEL_ID;
+    const nodes: ModelPathNode[] = [];
+    const skipped: ModelPathSkipped[] = [];
+
+    // Deterministic input order: the inventory must not depend on the cached
+    // model map's insertion order (nor may the model metadata it reports).
+    const baseUrls = Object.keys(allModels).sort();
+    const providersInOrder = baseUrls.map(
+      (baseUrl) => (allModels[baseUrl] ?? []) as Model[],
+    );
+
+    await Promise.all(
+      baseUrls.map(async (baseUrl) => {
+        if (disabledSet.has(normalizeBaseUrl(baseUrl))) return;
+        const models = (allModels[baseUrl] ?? []) as Model[];
+        const model = findModelForId(models, modelId, mappings);
+        if (!model) return;
+
+        if (providerManager.isOnCooldown(baseUrl, modelId)) {
+          skipped.push({ baseUrl, reason: SKIP_ON_COOLDOWN });
+          return;
+        }
+
+        const nodePaths = await withBudget(
+          fetchNodeModelPaths(baseUrl, modelId, {
+            mappings,
+            extraSpellings: [model.id, ...(model.alias_ids ?? [])],
+          }),
+          MODEL_PATH_RANKING_BUDGET_MS,
+        );
+        if (nodePaths === PATHS_BUDGET_EXCEEDED) {
+          skipped.push({ baseUrl, reason: SKIP_LOOKUP_TIMEOUT });
+          return;
+        }
+        if (!nodePaths) {
+          skipped.push({ baseUrl, reason: SKIP_LOOKUP_FAILED });
+          return;
+        }
+
+        const routes = buildModelPathRoutes(
+          baseUrl,
+          nodePaths,
+          model,
+          modelId,
+          mappings,
+          pinWhitelistedRoutes,
+        );
+        if (routes.length === 0) {
+          skipped.push({ baseUrl, reason: SKIP_NO_PATHS });
+          return;
+        }
+
+        nodes.push({ baseUrl, routes, rankCompletion: null, rankedOnPin: false });
+      }),
+    );
+
+    // Model metadata: prefer a node that serves the requested id natively
+    // (nicest name/description), then any node matched through the SDK's
+    // mappings, which may only know a variant spelling.
+    let modelInfo: Model | undefined;
+    for (const models of providersInOrder) {
+      const exact = models.find((m) => m.id === modelId);
+      if (exact) {
+        modelInfo = exact;
+        break;
+      }
+    }
+    if (!modelInfo) {
+      for (const models of providersInOrder) {
+        modelInfo = findModelForId(models, modelId, mappings);
+        if (modelInfo) break;
+      }
+    }
+    if (!modelInfo) return null;
+
+    return {
+      id: modelId,
+      name: modelInfo.name,
+      description: modelInfo.description,
+      contextLength: modelInfo.context_length,
+      nodes: rankModelPathNodes(nodes),
+      skipped: skipped.sort((a, b) => a.baseUrl.localeCompare(b.baseUrl)),
+    };
+  };
+
+  /**
    * Force-refresh everything: re-fetch Nostr provider discovery events,
    * routstr21 model list, Nostr review events, and models from all enabled
    * providers. Syncs the discovered provider list into the store.
@@ -368,6 +651,7 @@ export function createModelService(
     ensureProvidersBootstrapped,
     getRoutstr21Models,
     getModelProviders,
+    getModelPaths,
     refreshProvidersAndModels,
   };
 }

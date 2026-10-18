@@ -73,6 +73,8 @@ type DaemonDeps = {
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  /** Advertised model paths for one model, ranked like the router. */
+  getModelPaths: (modelId: string, refresh?: boolean) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
@@ -419,6 +421,8 @@ export function createDaemonRequestHandler(deps: {
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (modelId: string) => Promise<any>;
+  /** Advertised model paths for one model, ranked like the router. */
+  getModelPaths: (modelId: string, refresh?: boolean) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
   /** Default max_tokens/max_output_tokens to inject when the client omits one. */
@@ -983,6 +987,27 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
         sendJson(res, 200, { output: modelWithProviders });
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    // Get the model-path inventory for a specific model
+    const modelPathsMatch = url.pathname.match(/^\/models\/([^\/]+)\/paths$/);
+    if (req.method === "GET" && modelPathsMatch && modelPathsMatch[1]) {
+      try {
+        const modelId = decodeURIComponent(modelPathsMatch[1]);
+        // `refresh=true` drops the SDK's cached path payloads so the inventory
+        // is live; routing refetches on its next request as a result.
+        const refresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+        const modelPaths = await deps.getModelPaths(modelId, refresh);
+        if (!modelPaths) {
+          sendJson(res, 404, { error: `Model '${modelId}' not found` });
+          return;
+        }
+        sendJson(res, 200, { output: modelPaths });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }

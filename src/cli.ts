@@ -19,6 +19,10 @@ import {
   type CooldownsOutput,
   type CooldownsResetOutput,
 } from "./utils/cooldowns";
+import {
+  formatModelPaths,
+  type ModelPathsOutput,
+} from "./utils/model-paths";
 import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
@@ -1145,7 +1149,17 @@ program
   .description("List available routstr21 models")
   .option("-r, --refresh", "Force refresh routstr21 models from Nostr", false)
   .option("-m, --model <id>", "Show providers for a specific model")
-  .action(async (options: { refresh: boolean; model?: string }) => {
+  .option(
+    "-p, --paths",
+    "With --model: also show the model-path inventory (upstream routes per node, ranked like the router)",
+    false,
+  )
+  .action(async (options: { refresh: boolean; model?: string; paths: boolean }) => {
+    if (options.paths && !options.model) {
+      console.log("--paths requires --model <id>");
+      process.exit(1);
+    }
+
     await ensureDaemonRunning();
 
     if (options.model) {
@@ -1155,7 +1169,9 @@ program
       );
       if (result.error) {
         console.log(result.error);
-        process.exit(1);
+        // With --paths the inventory is still worth showing: a node can serve
+        // the model's routes while the provider ranking cannot price it.
+        if (!options.paths) process.exit(1);
       }
 
       const modelData = result.output as
@@ -1178,38 +1194,63 @@ program
         | undefined;
 
       if (!modelData) {
-        console.log("Model not found");
-        process.exit(1);
+        if (!result.error) console.log("Model not found");
+        if (!options.paths) process.exit(1);
       }
 
-      console.log(`\n${modelData.name || modelData.id}`);
-      if (modelData.description) {
-        console.log(`  ${modelData.description}`);
+      if (modelData) {
+        console.log(`\n${modelData.name || modelData.id}`);
+        if (modelData.description) {
+          console.log(`  ${modelData.description}`);
+        }
+        if (modelData.context_length) {
+          console.log(
+            `  Context: ${modelData.context_length.toLocaleString()} tokens`,
+          );
+        }
+        console.log(`\n  Providers (${modelData.providers.length}):`);
+        for (const provider of modelData.providers) {
+          console.log(
+            `\n    ${provider.baseUrl}${provider.disabled ? "  [Disabled]" : ""}`,
+          );
+          console.log(
+            `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
+          );
+          console.log(
+            `      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`,
+          );
+          console.log(
+            `      Request:    ${provider.pricing.request.toFixed(2)} sats`,
+          );
+          console.log(
+            `      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`,
+          );
+        }
+        console.log("");
       }
-      if (modelData.context_length) {
-        console.log(
-          `  Context: ${modelData.context_length.toLocaleString()} tokens`,
+
+      if (options.paths) {
+        // The advertised upstream routes per node, ordered the way the router
+        // ranks them (see utils/model-paths). `--refresh` drops the SDK's
+        // cached path payloads so the inventory is live.
+        const pathsQuery = options.refresh ? "?refresh=true" : "";
+        const pathsResult = await callDaemon(
+          `/models/${encodeURIComponent(options.model)}/paths${pathsQuery}`,
         );
+        if (pathsResult.error) {
+          console.log(pathsResult.error);
+          process.exit(1);
+        }
+        const pathsOutput = pathsResult.output as ModelPathsOutput | undefined;
+        console.log("");
+        console.log(
+          pathsOutput
+            ? formatModelPaths(pathsOutput)
+            : "No model paths available",
+        );
+        console.log("");
       }
-      console.log(`\n  Providers (${modelData.providers.length}):`);
-      for (const provider of modelData.providers) {
-        console.log(
-          `\n    ${provider.baseUrl}${provider.disabled ? "  [Disabled]" : ""}`,
-        );
-        console.log(
-          `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
-        );
-        console.log(
-          `      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`,
-        );
-        console.log(
-          `      Request:    ${provider.pricing.request.toFixed(2)} sats`,
-        );
-        console.log(
-          `      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`,
-        );
-      }
-      console.log("");
+
       return;
     }
 
@@ -1233,7 +1274,8 @@ program
       } else {
         console.log(`\nFound ${models.length} routstr21 models:`);
         console.log(
-          "(Use 'routstrd models -m <model_id>' to see providers and pricing)\n",
+          "(Use 'routstrd models -m <model_id>' to see providers and pricing; add --paths for the" +
+            " model-path inventory)\n",
         );
         models.forEach((model, i) => {
           const details = [
