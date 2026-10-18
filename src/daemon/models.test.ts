@@ -493,3 +493,238 @@ describe("model population single-flight", () => {
     expect(await retry).toHaveLength(1);
   });
 });
+
+/**
+ * `getModelPaths` is the `routstrd models -m <id> --paths` inventory: every
+ * enabled node that serves the model, with its advertised upstream routes.
+ *
+ * The ranking it must reproduce is the router's, not "cheapest route wins":
+ * the SDK ranks a node on the completion price of the route it would use first
+ * (a whitelisted route when the node advertises one), so the display order
+ * matches what a request would actually pick. Nodes the inventory cannot cover
+ * (cooldown, no paths, failed lookup) are reported instead of vanishing.
+ */
+describe("createModelService.getModelPaths", () => {
+  const MODEL_ID = "deepseek-v4.1-flash";
+  const PIN_DEEPSEEK =
+    "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=deepseek-v4.1-flash&endpoint=deepseek";
+  const PIN_FIREWORKS =
+    "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=deepseek-v4.1-flash&endpoint=fireworks";
+  const CHEAP_DECART =
+    "url=https%3A%2F%2Fopenrouter.ai%2Fapi%2Fv1&model-id=deepseek-v4.1-flash&endpoint=decart%2Ffp4";
+  const VENICE_ALIAS =
+    "url=https%3A%2F%2Fapi.venice.ai%2Fapi%2Fv1&model-id=deepseek-v4-1-flash";
+
+  const catalogModel = (overrides: Record<string, unknown> = {}) => ({
+    id: MODEL_ID,
+    name: "DeepSeek V4.1 Flash",
+    description: "flashy",
+    context_length: 1_000_000,
+    sats_pricing: { prompt: 0.0002, completion: 0.0008, request: 0, max_cost: 0 },
+    ...overrides,
+  });
+
+  const nodePaths = (
+    paths: Array<{ path: string; model?: unknown }>,
+    id: string = MODEL_ID,
+    aliasIds: string[] = [],
+  ) => ({ data: [{ id, paths, alias_ids: aliasIds }], updatedAt: null });
+
+  const priced = (prompt: number, completion: number) => ({
+    sats_pricing: { prompt, completion, request: 0, max_cost: 0 },
+  });
+
+  function makeService(options: {
+    cached: Record<string, unknown[]>;
+    disabled?: string[];
+    cooledNodes?: string[];
+    cooledPaths?: string[];
+    fetchNodeModelPaths: (baseUrl: string) => unknown;
+    mappings?: Record<string, string>;
+  }) {
+    const state: Record<string, unknown> = {
+      baseUrlsList: Object.keys(options.cached),
+      setBaseUrlsList: () => {},
+      disabledProviders: options.disabled ?? [],
+      setDisabledProviders: () => {},
+      manuallyDisabledProviders: [],
+      manuallyEnabledProviders: [],
+    };
+    const cooledNodes = new Set(options.cooledNodes ?? []);
+    const cooledPaths = new Set(options.cooledPaths ?? []);
+    const service = createModelService(
+      {
+        bootstrapProviders: async () => Object.keys(options.cached),
+        syncReviewedProvidersFromNostr: async () => null,
+        getAllCachedModels: () => options.cached,
+        getBaseUrls: () => Object.keys(options.cached),
+        getModelIdMappings: () => options.mappings ?? {},
+      } as never,
+      {
+        isOnCooldown: (baseUrl: string, _modelId?: string, path?: string) =>
+          cooledNodes.has(baseUrl) ||
+          (path !== undefined && cooledPaths.has(`${baseUrl}|${path}`)),
+      } as never,
+      { getState: () => state } as never,
+      undefined,
+      {
+        fetchNodeModelPaths: (async (baseUrl: string) =>
+          options.fetchNodeModelPaths(baseUrl)) as never,
+      },
+    );
+    return service;
+  }
+
+  it("ranks nodes on the route routing would use first, not the cheapest route", async () => {
+    const service = makeService({
+      cached: {
+        "https://a.example/": [catalogModel()],
+        "https://b.example/": [catalogModel()],
+      },
+      fetchNodeModelPaths: (baseUrl) =>
+        baseUrl === "https://b.example/"
+          ? nodePaths([{ path: PIN_FIREWORKS, model: priced(0.0004, 0.0005) }])
+          : nodePaths([
+              { path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) },
+              // Cheaper than any pinned route, so a "cheapest wins" ranking
+              // would put a.example/ first — routing would not.
+              { path: CHEAP_DECART, model: priced(0.0001, 0.0001) },
+            ]),
+    });
+
+    const output = (await service.getModelPaths(MODEL_ID))!;
+
+    expect(output.nodes.map((node) => node.baseUrl)).toEqual([
+      "https://b.example/",
+      "https://a.example/",
+    ]);
+    expect(output.nodes[1]!.rankCompletion).toBe(0.0015);
+    expect(output.nodes[1]!.rankedOnPin).toBe(true);
+    expect(output.nodes[1]!.routes.map((route) => route.path)).toEqual([
+      CHEAP_DECART,
+      PIN_DEEPSEEK,
+    ]);
+    expect(
+      output.nodes[1]!.routes.find((route) => route.path === PIN_DEEPSEEK)!.pinned,
+    ).toBe(true);
+    expect(output.name).toBe("DeepSeek V4.1 Flash");
+    expect(output.skipped).toEqual([]);
+  });
+
+  it("falls back to the model-level price and metadata for path-less per-route metadata", async () => {
+    const service = makeService({
+      cached: { "https://a.example/": [catalogModel()] },
+      fetchNodeModelPaths: () => nodePaths([{ path: PIN_DEEPSEEK }]),
+    });
+
+    const route = (await service.getModelPaths(MODEL_ID))!.nodes[0]!.routes[0]!;
+
+    expect(route.pricingSource).toBe("model");
+    expect(route.pricing).toEqual({
+      prompt: 0.0002,
+      completion: 0.0008,
+      request: 0,
+      max_cost: 0,
+    });
+    expect(route.contextLength).toBe(1_000_000);
+    expect(route.pinned).toBe(true);
+  });
+
+  it("dedupes a route advertised under two spellings but keeps a different upstream model-id", async () => {
+    const service = makeService({
+      cached: { "https://a.example/": [catalogModel()] },
+      fetchNodeModelPaths: () =>
+        nodePaths(
+          [
+            { path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) },
+            { path: VENICE_ALIAS, model: priced(0.0005, 0.0018) },
+          ],
+          MODEL_ID,
+          ["deepseek-v4-1-flash"],
+        ),
+    });
+
+    const routes = (await service.getModelPaths(MODEL_ID))!.nodes[0]!.routes;
+
+    expect(routes).toHaveLength(2);
+    const venice = routes.find((route) => route.upstream.includes("venice"))!;
+    expect(venice.endpoint).toBeNull();
+    expect(venice.modelId).toBe("deepseek-v4-1-flash");
+    expect(routes.find((route) => route.path === PIN_DEEPSEEK)!.modelId).toBe(
+      MODEL_ID,
+    );
+  });
+
+  it("marks no pinned route for a model the SDK does not auto-pin", async () => {
+    // venice/api.ppq.ai are whitelisted upstreams, but the whitelist only
+    // governs the auto-pinned model: claiming a pin for glm-5.3 would describe
+    // failover routing that never happens.
+    const service = makeService({
+      cached: { "https://a.example/": [{ ...catalogModel(), id: "glm-5.3" }] },
+      fetchNodeModelPaths: () =>
+        nodePaths([{ path: VENICE_ALIAS, model: priced(0.0005, 0.0018) }], "glm-5.3"),
+    });
+
+    const node = (await service.getModelPaths("glm-5.3"))!.nodes[0]!;
+
+    expect(node.routes[0]!.pinned).toBe(false);
+    expect(node.rankedOnPin).toBe(false);
+    expect(node.rankCompletion).toBe(0.0018);
+  });
+
+  it("reports nodes it could not cover instead of dropping them silently", async () => {
+    const service = makeService({
+      cached: {
+        "https://disabled.example/": [catalogModel()],
+        "https://cooled.example/": [catalogModel()],
+        "https://legacy.example/": [catalogModel()],
+        "https://broken.example/": [catalogModel()],
+        "https://other.example/": [{ ...catalogModel(), id: "glm-5.3" }],
+      },
+      disabled: ["https://disabled.example/"],
+      cooledNodes: ["https://cooled.example/"],
+      fetchNodeModelPaths: (baseUrl) => {
+        if (baseUrl === "https://legacy.example/") return nodePaths([]);
+        if (baseUrl === "https://broken.example/") return null;
+        return nodePaths([{ path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) }]);
+      },
+    });
+
+    const output = (await service.getModelPaths(MODEL_ID))!;
+
+    expect(output.nodes).toEqual([]);
+    expect(output.skipped).toEqual([
+      { baseUrl: "https://broken.example/", reason: "model-path lookup failed" },
+      { baseUrl: "https://cooled.example/", reason: "on cooldown" },
+      { baseUrl: "https://legacy.example/", reason: "no model paths advertised" },
+    ]);
+    // A disabled node is never probed, and `other.example/` serves a
+    // different model.
+    expect(output.nodes).toEqual([]);
+  });
+
+  it("lists a node whose routes are all on path-scoped cooldown, without a rank", async () => {
+    const service = makeService({
+      cached: { "https://a.example/": [catalogModel()] },
+      cooledPaths: [`https://a.example/|${PIN_DEEPSEEK}`],
+      fetchNodeModelPaths: () =>
+        nodePaths([{ path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) }]),
+    });
+
+    const node = (await service.getModelPaths(MODEL_ID))!.nodes[0]!;
+
+    expect(node.routes[0]!.onCooldown).toBe(true);
+    expect(node.routes[0]!.pinned).toBe(false);
+    expect(node.rankCompletion).toBeNull();
+    expect(node.rankedOnPin).toBe(false);
+  });
+
+  it("returns null when no node serves the model", async () => {
+    const service = makeService({
+      cached: { "https://a.example/": [{ ...catalogModel(), id: "glm-5.3" }] },
+      fetchNodeModelPaths: () => nodePaths([{ path: PIN_DEEPSEEK }]),
+    });
+
+    expect(await service.getModelPaths(MODEL_ID)).toBeNull();
+  });
+});

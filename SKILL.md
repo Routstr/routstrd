@@ -99,8 +99,27 @@ List available routstr21 models (discovered via Nostr).
 
 | Option | Description |
 |--------|-------------|
-| `-r, --refresh` | Force refresh models from Nostr |
+| `-r, --refresh` | Force refresh models from Nostr (with `--paths`, also drop the SDK's cached model-path payloads) |
 | `-m, --model <id>` | Show the providers serving a specific model |
+| `-p, --paths` | With `--model`: also list the model-path inventory (see below). Requires `--model` |
+
+`--paths` shows every upstream route the enabled nodes advertise for that
+model, one block per node, ranked like the router: nodes by the completion
+price of the route the router would use first — the pinned route (`[pin]`, the
+SDK's model-path whitelist order, which governs its auto-pinned
+`deepseek-v4.1-flash`) when the node advertises one, otherwise its cheapest
+route — and routes cheapest completion first inside each node.
+Prices are sats per million tokens. Routes are shown with the upstream they
+reach (`openrouter.ai/api/v1 [deepseek]`), tagged `[cooldown]` when routing is
+currently skipping them, `[model price]` when the node advertises no per-route
+pricing, and `[id <spelling>]` when the route is only reachable by requesting
+the model under that spelling. Nodes left out (on cooldown, no paths
+advertised, lookup failed or timed out) are listed under `Not shown`.
+
+```sh
+routstrd models -m deepseek-v4.1-flash -p
+routstrd models -m deepseek-v4.1-flash -p --refresh   # live, ignores the 10 min path cache
+```
 
 ### `routstrd usage`
 
@@ -542,6 +561,15 @@ remain every 5 minutes).
 ### `GET /v1/models`
 
 List available models (OpenAI-compatible).
+
+### `GET /models/:id/paths`
+
+The model-path inventory of one model, as rendered by
+`routstrd models -m <id> --paths`: per node, the advertised upstream routes
+(model-path selectors) with their per-route pricing, ordered the way the
+router ranks them. `?refresh=true` drops the SDK's cached path payloads first,
+so the inventory is live. Returns 404 when no node serves the model; nodes the
+inventory could not cover are reported in `skipped`.
 
 ### `POST /v1/chat/completions`
 
