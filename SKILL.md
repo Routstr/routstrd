@@ -347,7 +347,7 @@ Open an interactive TUI (htop-like) for usage monitoring. `top` is an alias.
 
 Press `W` to cycle the stats time window (`All` → `24h` → `7d` → `30d`). The
 window applies to the **Overview**, **History**, **Models**, **Providers**,
-**Tokens**, **Clients** and **Npubs** tabs. On **Overview** the selector is
+**Clients** and **Npubs** tabs. On **Overview** the selector is
 drawn inside the tab, directly under the Balance box, and scopes the totals and
 the model and client breakdowns. On **History** it chooses the chart's bucket —
 hours for `24h` and `7d`, days for `30d`, and ISO weeks for `All` — where spend

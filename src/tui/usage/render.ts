@@ -573,35 +573,6 @@ export function renderProviders(stats: UsageStats, width: number): string {
   return renderBox(lines, width, "Provider Breakdown");
 }
 
-export function renderTokens(stats: UsageStats, width: number): string {
-  const totals = stats.window.totals;
-  const modelStats = stats.window.models;
-  const summaryLines = [
-    `${COLORS.bold}Total Prompt Tokens:${COLORS.reset} ${formatNumber(totals.promptTokens)}`,
-    `${COLORS.bold}Total Completion Tokens:${COLORS.reset} ${formatNumber(totals.completionTokens)}`,
-    `${COLORS.bold}Total Tokens:${COLORS.reset} ${formatNumber(totals.totalTokens)}`,
-    `${COLORS.bold}Prompt/Completion Ratio:${COLORS.reset} ${(totals.promptTokens / Math.max(1, totals.completionTokens)).toFixed(2)}x`,
-    `${COLORS.bold}Avg Tokens/Request:${COLORS.reset} ${(totals.totalTokens / Math.max(1, totals.requests)).toFixed(0)}`,
-  ];
-
-  let output = renderBox(summaryLines, width, "Token Summary");
-
-  if (modelStats.length > 0) {
-    const tokenLines = modelStats.slice(0, 6).map((m) => {
-      const color = MODEL_COLORS[m.modelId] || MODEL_COLORS.default;
-      const promptPct = m.totalTokens > 0 ? ((m.promptTokens / m.totalTokens) * 100).toFixed(0) : "0";
-      return `${color}${m.modelId.padEnd(15)}${COLORS.reset} ${formatNumber(m.totalTokens).padStart(8)} tokens (${promptPct}% prompt)`;
-    });
-    output += "\n" + renderBox(tokenLines, width, "Tokens by Model");
-  }
-
-  const sizeBuckets = stats.window.sizeBuckets;
-
-  const sizeLines = Object.entries(sizeBuckets).map(([name, bucket]) => `${name.padEnd(6)}: ${formatReqs(bucket.count).padStart(5)} reqs, ${formatCost(bucket.cost)} sats`);
-  output += "\n" + renderBox(sizeLines, width, "Request Size Distribution");
-  return output;
-}
-
 export function renderClients(stats: UsageStats, width: number): string {
   const clientStats = stats.window.clients;
   if (clientStats.length === 0) return renderBox(["No client data available (API key auth not used)"], width, "Client Breakdown");
@@ -949,7 +920,6 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "history": return renderHistory(stats, width, height);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);
-    case "tokens": return renderTokens(stats, width);
     case "clients": return renderClients(stats, width);
     case "npubs": return renderNpubs(stats, naming, width);
     case "recent": return renderRecent(stats, width, naming);
