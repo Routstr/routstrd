@@ -9,6 +9,7 @@ import {
 import type {
   HistoryEntry,
   ReceiveOperation,
+  CoreProof,
   Logger as CocoLogger,
   Plugin as CocoPlugin,
 } from "@cashu/coco-core";
@@ -36,9 +37,20 @@ import type {
   NpcUsernameResult,
   WalletCleanupOptions,
   WalletCleanupResult,
+  WalletProofCheckMintResult,
+  WalletProofCheckOptions,
+  WalletProofCheckResult,
   WalletRecoveryProgress,
 } from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
+import {
+  chunk,
+  groupProofsByMint,
+  pairProofStates,
+  partitionCheckedProofs,
+  totalAmount,
+  type CheckedProof,
+} from "./proof-check";
 import {
   classifyMintQuoteObservation,
   selectMintQuotesForRecovery,
@@ -1545,6 +1557,37 @@ async function reconcileDuplicateReceiveOperations(
   return reconcileExecutingReceives(source);
 }
 
+/**
+ * Coco keeps the proof repository, the proof service and the wallet factory
+ * private on the Manager. The watcher coco already runs uses exactly these to
+ * check inflight proofs and mark them spent (`ProofService.checkInflightProofs`),
+ * so routstrd reaches them the same way it already reaches
+ * `mintOperationService` and `receiveOperationService`.
+ */
+interface ProofCheckInternals {
+  proofRepository: {
+    getAllReadyProofs(): Promise<CoreProof[]>;
+    getInflightProofs(mintUrls?: string[]): Promise<CoreProof[]>;
+  };
+  walletService: {
+    getWalletWithActiveKeysetId(mintUrl: string): Promise<{
+      wallet: {
+        /** NUT-07 checkstate; returns one state per proof, in the same order. */
+        checkProofsStates(
+          proofs: Array<{ secret: string; id: string }>,
+        ): Promise<Array<{ state?: string }>>;
+      };
+    }>;
+  };
+  proofService: {
+    setProofState(
+      mintUrl: string,
+      secrets: string[],
+      state: "spent",
+    ): Promise<void>;
+  };
+}
+
 interface RecoveryPhaseProgress {
   phase: string;
   failedMintQuotes: number;
@@ -2599,6 +2642,119 @@ export async function createCocoClient(
         cancelledMelts: selection.meltsToCancel.length,
         skipped,
         errors,
+      };
+    },
+
+    async checkProofs(
+      options: WalletProofCheckOptions = {},
+    ): Promise<WalletProofCheckResult> {
+      await waitForRecovery();
+      assertOpen();
+
+      const dryRun = options.dryRun === true;
+      const timeoutMs = options.timeoutMs ?? 30_000;
+      const internals = coco as unknown as ProofCheckInternals;
+
+      // A ready proof can already be spent by a duplicate token we no longer
+      // know about, and an inflight proof may have been spent by the operation
+      // that reserved it before that operation was interrupted. The mint is
+      // the authority in both cases.
+      const [readyProofs, inflightProofs] = await Promise.all([
+        internals.proofRepository.getAllReadyProofs(),
+        internals.proofRepository.getInflightProofs(),
+      ]);
+
+      // The two reads can overlap for a proof reserved mid-check; keying by
+      // mint+secret keeps us from asking the mint about one secret twice and
+      // from counting it twice in the summary.
+      const seen = new Set<string>();
+      const candidates: CoreProof[] = [];
+      for (const proof of [...readyProofs, ...inflightProofs]) {
+        if (options.mintUrl && proof.mintUrl !== options.mintUrl) continue;
+        const key = `${proof.mintUrl}\u0000${proof.secret}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        candidates.push(proof);
+      }
+
+      const mints: WalletProofCheckMintResult[] = [];
+
+      for (const group of groupProofsByMint(candidates)) {
+        const result: WalletProofCheckMintResult = {
+          mintUrl: group.mintUrl,
+          checked: group.proofs.length,
+          checkedAmount: totalAmount(group.proofs),
+          spent: 0,
+          spentAmount: 0,
+          markedSpent: 0,
+          unspent: 0,
+          unresolved: 0,
+        };
+
+        try {
+          const { wallet } =
+            await internals.walletService.getWalletWithActiveKeysetId(
+              group.mintUrl,
+            );
+
+          const checked: CheckedProof[] = [];
+          for (const batch of chunk(group.proofs)) {
+            const states = await withTimeout(
+              wallet.checkProofsStates(
+                batch.map((proof) => ({ secret: proof.secret, id: proof.id })),
+              ),
+              timeoutMs,
+            );
+            // A response we cannot align to the request would mis-attribute
+            // every later state, so refuse it rather than mark the wrong
+            // proofs spent.
+            const paired = pairProofStates(batch, states);
+            if (!paired) {
+              throw new Error(
+                `mint returned ${states.length} state(s) for ${batch.length} proof(s)`,
+              );
+            }
+            checked.push(...paired);
+          }
+
+          const { spent, unspent, unresolved } = partitionCheckedProofs(checked);
+          result.spent = spent.length;
+          result.spentAmount = totalAmount(spent.map((entry) => entry.proof));
+          result.unspent = unspent.length;
+          result.unresolved = unresolved.length;
+
+          if (!dryRun && spent.length > 0) {
+            // Mark through ProofService, not the repository: it also emits
+            // `proofs:state-changed`, which is what finalizes the send
+            // operations that reserved these inflight proofs.
+            await internals.proofService.setProofState(
+              group.mintUrl,
+              spent.map((entry) => entry.proof.secret),
+              "spent",
+            );
+            result.markedSpent = spent.length;
+          }
+        } catch (error) {
+          // One unreachable mint must not stop the others: leave its proofs
+          // untouched and report it, so a partial run is still useful.
+          result.error = error instanceof Error ? error.message : String(error);
+        }
+
+        mints.push(result);
+      }
+
+      return {
+        dryRun,
+        checked: mints.reduce((sum, mint) => sum + mint.checked, 0),
+        spent: mints.reduce((sum, mint) => sum + mint.spent, 0),
+        spentAmount: mints.reduce((sum, mint) => sum + mint.spentAmount, 0),
+        markedSpent: mints.reduce((sum, mint) => sum + mint.markedSpent, 0),
+        unspent: mints.reduce((sum, mint) => sum + mint.unspent, 0),
+        unresolved: mints.reduce((sum, mint) => sum + mint.unresolved, 0),
+        unreachableMints: mints
+          .filter((mint) => mint.error)
+          .map((mint) => mint.mintUrl),
+        mints,
       };
     },
 

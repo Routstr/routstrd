@@ -2517,6 +2517,138 @@ walletCmd
   );
 
 walletCmd
+  .command("check-proofs")
+  .description(
+    "Ask each mint whether our ready/inflight proofs are spent, and mark the spent ones",
+  )
+  .option("--mint-url <url>", "Only check proofs held for this mint URL")
+  .option("--timeout <ms>", "Per-mint check timeout in milliseconds", "30000")
+  .option(
+    "--dry-run",
+    "Report what would be marked without applying changes",
+    false,
+  )
+  .option("-y, --yes", "Skip confirmation prompt", false)
+  .action(
+    async (options: {
+      mintUrl?: string;
+      timeout: string;
+      dryRun: boolean;
+      yes: boolean;
+    }) => {
+      const timeoutMs = Number.parseInt(options.timeout, 10);
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        console.error(`Invalid --timeout value: ${options.timeout}`);
+        process.exit(1);
+      }
+
+      if (!options.dryRun && !options.yes) {
+        const rl = require("readline").createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+        const answer = await new Promise<string>((resolve) => {
+          rl.question(
+            "This asks every mint whether our ready and inflight proofs are spent, and marks the spent ones as spent locally, reclaiming their balance. Continue? [y/N] ",
+            (value: string) => {
+              rl.close();
+              resolve(value.trim().toLowerCase());
+            },
+          );
+        });
+        if (answer !== "y" && answer !== "yes") {
+          console.log("Aborted.");
+          return;
+        }
+      }
+
+      try {
+        await ensureDaemonRunning();
+
+        const result = await callDaemon("/wallet/check-proofs", {
+          method: "POST",
+          body: {
+            mintUrl: options.mintUrl,
+            dryRun: options.dryRun === true,
+            timeoutMs,
+          },
+        });
+
+        if (result.error) {
+          console.log(result.error);
+          process.exit(1);
+        }
+
+        const output = result.output as
+          | {
+              dryRun?: boolean;
+              checked?: number;
+              spent?: number;
+              spentAmount?: number;
+              markedSpent?: number;
+              unspent?: number;
+              unresolved?: number;
+              unreachableMints?: string[];
+              mints?: Array<{
+                mintUrl: string;
+                checked: number;
+                checkedAmount: number;
+                spent: number;
+                spentAmount: number;
+                markedSpent: number;
+                unspent: number;
+                unresolved: number;
+                error?: string;
+              }>;
+            }
+          | undefined;
+
+        if (output) {
+          for (const mint of output.mints ?? []) {
+            console.log(`\n${mint.mintUrl}`);
+            if (mint.error) {
+              console.log(`  unreachable: ${mint.error}`);
+              continue;
+            }
+            console.log(
+              `  checked:    ${mint.checked} (${mint.checkedAmount} sat)`,
+            );
+            console.log(`  spent:      ${mint.spent} (${mint.spentAmount} sat)`);
+            console.log(`  unspent:    ${mint.unspent}`);
+            console.log(`  unresolved: ${mint.unresolved}`);
+          }
+
+          console.log(output.dryRun ? "\nWould mark as spent:" : "\nMarked as spent:");
+          console.log(
+            `  proofs: ${output.markedSpent ?? 0} of ${output.spent ?? 0} the mints report spent`,
+          );
+          console.log(
+            `  sats ${output.dryRun ? "reclaimable" : "reclaimed"}: ${output.spentAmount ?? 0}`,
+          );
+          console.log(
+            `  examined: ${output.checked ?? 0} (unspent ${output.unspent ?? 0}, unresolved ${output.unresolved ?? 0})`,
+          );
+          const unreachable = output.unreachableMints ?? [];
+          if (unreachable.length > 0) {
+            console.log(`  unreachable mints: ${unreachable.join(", ")}`);
+          }
+        }
+      } catch (error) {
+        const message = (error as Error).message;
+        if (
+          message?.includes("fetch failed") ||
+          message?.includes("Connection refused")
+        ) {
+          console.error("Daemon is not running");
+          process.exit(1);
+        }
+        console.error(message);
+        process.exit(1);
+      }
+    },
+  );
+
+walletCmd
   .command("recover")
   .description(
     "Retry mint quotes using their stored outputs (does not replace rejected outputs)",
