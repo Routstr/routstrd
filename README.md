@@ -345,7 +345,21 @@ package, so the integration pins it per model: `claude*` models go to
 the pi integration pins), and every other model uses `{root}/chat/completions`,
 the provider default. A `package` you curate by hand on a model outside those
 two families survives a refresh, as do the other keys you add to a model entry
-(`limit`, `capabilities`, `variants`).
+(`limit`, `capabilities`, ...).
+
+Reasoning-effort `variants` are derived per model from the daemon's published
+`reasoning.supported_efforts` allowlist (the same metadata the pi integration
+turns into `thinkingLevelMap`), so `opencode run --model
+routstr/glm-5.3#max`, `/models`, and ctrl+t only offer levels the model
+actually accepts. Explicit variants are used because `capabilities.reasoning`
+is not honoured for a custom provider: OpenCode 2.0.28 collapses it to
+`low`/`medium`/`high` for `openai-compatible`, ignores the effort allowlist,
+and produces no variants at all for the responses and anthropic-compatible
+packages. `none` is omitted on models whose reasoning is mandatory, and the
+`messages` package only offers the `low`/`medium`/`high`/`xhigh`/`max` subset
+that the Anthropic route accepts. When the daemon publishes no allowlist the
+`variants` you curated survive a refresh; when it does, the derived set
+replaces them wholesale.
 
 ### Environment Variables
 

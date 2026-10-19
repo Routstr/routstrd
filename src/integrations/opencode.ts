@@ -1,3 +1,15 @@
+/**
+ * OpenCode integration: writes the native v2 `providers.routstr` block.
+ *
+ * Two things are derived per model instead of curated:
+ *   - `package`, because OpenCode selects the API shape (chat/completions,
+ *     responses, messages) with a runtime package (see OPENCODE_PACKAGES), and
+ *     the model family is the only signal for the two single-shape families;
+ *   - `variants`, the reasoning-effort choices OpenCode offers in `/models` and
+ *     cycles with ctrl+t, derived from the daemon's per-model allowlist (see
+ *     deriveOpenCodeVariants).
+ * Every other key in a model entry stays user-curated and survives a refresh.
+ */
 import { existsSync, mkdirSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import { dirname } from "path";
@@ -47,6 +59,19 @@ export function deriveOpenCodeApiFormat(
   return null;
 }
 
+/**
+ * One entry of the per-model `variants` list: the reasoning-effort choices
+ * OpenCode shows under `/models` and cycles with ctrl+t. `settings` is merged
+ * into the request body by the model's runtime package; see
+ * deriveOpenCodeVariants for the package/setting mapping.
+ */
+export type OpenCodeVariant = {
+  id: string;
+  settings?: Record<string, unknown>;
+  headers?: Record<string, string>;
+  body?: Record<string, unknown>;
+};
+
 export type OpenCodeModelEntry = {
   /** Display name shown in the model picker. */
   name: string;
@@ -55,7 +80,12 @@ export type OpenCodeModelEntry = {
    * models, which inherit the provider's package.
    */
   package?: string;
-  /** Anything else the user curated (limit, capabilities, variants, ...). */
+  /**
+   * Reasoning-effort variants. Derived from the daemon's published allowlist
+   * when there is one, otherwise whatever the user curated is left untouched.
+   */
+  variants?: OpenCodeVariant[];
+  /** Anything else the user curated (limit, capabilities, ...). */
   [key: string]: unknown;
 };
 
@@ -85,13 +115,135 @@ export function resolveOpenCodePackage(
 }
 
 /**
+ * The API format a resolved per-model `package` selects. `undefined` means the
+ * provider default (the `openai-compatible` chat package), and an unrecognized
+ * curated package is treated the same way: its request mapping is unknown, so
+ * fall back to the shape the provider itself is configured for.
+ */
+export function openCodeApiFormatForPackage(
+  pkg: string | undefined,
+): OpenCodeApiFormat {
+  if (pkg === OPENCODE_PACKAGES.responses) return "responses";
+  if (pkg === OPENCODE_PACKAGES.messages) return "messages";
+  return "chat";
+}
+
+/** Reasoning-effort ids in the daemon's documented order. */
+const OPENCODE_EFFORT_ORDER: readonly string[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/**
+ * Efforts the daemon's Anthropic `/messages` route accepts under
+ * `output_config.effort`. routstr-core rejects `none` and `minimal` there, so
+ * they are skipped for the `messages` package instead of being emitted as
+ * variants that always fail.
+ */
+const MESSAGES_EFFORTS: ReadonlySet<string> = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+const effortRank = (effort: string): number => {
+  const index = OPENCODE_EFFORT_ORDER.indexOf(effort);
+  // Unknown efforts sort after the known ladder. They are not dropped for the
+  // OpenAI-shaped packages: routstr-core clamps `reasoning_effort` itself, and
+  // passing an effort the vocabulary has grown to is forward-compatible.
+  return index === -1 ? OPENCODE_EFFORT_ORDER.length : index;
+};
+
+/**
+ * Build OpenCode's per-model `variants` from the daemon's reasoning metadata,
+ * the same way pi's deriveThinkingFields builds `thinkingLevelMap`.
+ *
+ * Why explicit variants rather than `capabilities.reasoning`: the models.dev v2
+ * capability is not reliable for our custom provider. Measured against
+ * opencode 2.0.28 with a local mock server:
+ *   - `openai-compatible` (chat): always yields exactly low/medium/high. The
+ *     `effort` allowlist is ignored, `toggle: true` does not add `none`, and an
+ *     unknown effort string collapses the whole capability (even `low` goes).
+ *   - `anthropic-compatible`: yields no variants at all.
+ *   - `openai-compatible/responses`: yields no variants at all.
+ * Explicit per-model `variants` are authoritative for every package and are the
+ * only way to expose `max`/`xhigh`/`none`, so derive them from the allowlist.
+ *
+ * Package -> variant setting -> request body (verified in 2.0.28):
+ *   openai-compatible            settings.reasoningEffort -> reasoning_effort
+ *   openai-compatible/responses  settings.reasoningEffort -> reasoning.effort
+ *   anthropic-compatible         settings.effort          -> output_config.effort
+ *
+ * Returns null when the daemon publishes no usable effort allowlist: those
+ * models are not guessable, so the caller keeps whatever the user curated
+ * (same contract as pi's deriveThinkingFields).
+ */
+export function deriveOpenCodeVariants(
+  model: RoutstrModel,
+  apiFormat: OpenCodeApiFormat,
+): OpenCodeVariant[] | null {
+  const reasoning = model.reasoning;
+  if (!reasoning) return null;
+
+  const supported = (reasoning.supported_efforts ?? [])
+    .filter((effort): effort is string => typeof effort === "string")
+    .map((effort) => effort.trim().toLowerCase())
+    .filter(Boolean);
+
+  const allowed = new Set(supported);
+  // routstr-core strips `none` from mandatory models, so never offer it there.
+  if (reasoning.mandatory === true) allowed.delete("none");
+
+  // Sort by the documented effort ladder instead of the order the allowlist
+  // happened to arrive in, so ctrl+t cycles variants predictably.
+  const efforts = [...allowed].sort(
+    (a, b) => effortRank(a) - effortRank(b) || a.localeCompare(b),
+  );
+
+  const variants: OpenCodeVariant[] = [];
+  for (const effort of efforts) {
+    if (apiFormat === "messages") {
+      // The Anthropic route has no `none`/`minimal`; keep the legal subset and
+      // let the caller preserve curated variants if nothing legal remains.
+      if (!MESSAGES_EFFORTS.has(effort)) continue;
+      variants.push({ id: effort, settings: { effort } });
+    } else {
+      // Both OpenAI-shaped packages take `reasoningEffort`; the runtime maps it
+      // to `reasoning_effort` (chat) or `reasoning.effort` (responses).
+      variants.push({ id: effort, settings: { reasoningEffort: effort } });
+    }
+  }
+
+  return variants.length > 0 ? variants : null;
+}
+
+/**
  * Project one daemon model onto an opencode.json models entry.
  *
  * `previous` is the entry already in the file. OpenCode's model map is the only
  * place a user can curate fields the daemon does not publish (limits,
- * capabilities, variants), so those keys survive a refresh. `package` is the
- * exception: it is rewritten by `resolveOpenCodePackage` every time, so a stale
- * pin cannot keep sending a model to the wrong endpoint unnoticed.
+ * capabilities, ...), so those keys survive a refresh. Two keys are derived
+ * every pass instead:
+ *   - `package` is rewritten by `resolveOpenCodePackage`, so a stale pin cannot
+ *     keep sending a model to the wrong endpoint unnoticed;
+ *   - `variants` is replaced wholesale whenever the daemon publishes an
+ *     allowlist, so a level the model no longer accepts cannot linger in the
+ *     picker.
+ *
+ * Curated variants are a trade-off: opencode's model schema allows only
+ * `id/settings/headers/body` on a variant (`additionalProperties: false`), so
+ * there is no field to tag one as routstrd-managed and tell the two apart.
+ * When the daemon publishes an allowlist the derived set is therefore
+ * authoritative; a hand-curated variant survives only while that model has no
+ * published allowlist (the same rule pi uses for `reasoning`/
+ * `thinkingLevelMap`).
  */
 export function buildOpenCodeModelEntry(
   model: RoutstrModel,
@@ -105,6 +257,18 @@ export function buildOpenCodeModelEntry(
   const pkg = resolveOpenCodePackage(model.id, previous?.package);
   if (pkg === undefined) delete entry.package;
   else entry.package = pkg;
+
+  const variants = deriveOpenCodeVariants(
+    model,
+    openCodeApiFormatForPackage(pkg),
+  );
+  if (variants) {
+    // Replace, never merge: a stale effort must not survive a refresh just
+    // because the user never edited it.
+    entry.variants = variants;
+  }
+  // Otherwise the `variants` spread from `previous` stays verbatim; the daemon
+  // publishes no allowlist for this model, so the curated list is not guessable.
 
   return entry;
 }
@@ -176,7 +340,7 @@ export async function installOpencodeIntegration(
     }
 
     // Rebuild the models map from the daemon, keeping the keys a user curated
-    // by hand; `package` is re-derived every pass (see
+    // by hand; `package` and `variants` are re-derived every pass (see
     // buildOpenCodeModelEntry).
     const previousModels = opencodeConfig.providers["routstr"]?.models ?? {};
     const modelsObj: Record<string, OpenCodeModelEntry> = {};
