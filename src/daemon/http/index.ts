@@ -26,7 +26,7 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
-import { CONFIDENTIAL_OPT_IN_HEADER, parseConfidentialOptIn } from "./confidential-opt-in";
+import { CONFIDENTIAL_OPT_IN_HEADER, isConfidentialPath, parseConfidentialOptIn } from "./confidential-opt-in";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -2310,9 +2310,10 @@ export function createDaemonRequestHandler(deps: {
         });
         return;
       }
-      if (!/^\/(v1\/)?chat\/completions\/?$/.test(url.pathname)) {
+      if (!isConfidentialPath(url.pathname)) {
         sendJson(res, 400, {
-          error: "Confidential requests support only POST /v1/chat/completions.",
+          error:
+            "Confidential requests support only POST /v1/chat/completions and /v1/images/generations.",
         });
         return;
       }
