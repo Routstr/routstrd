@@ -9,7 +9,9 @@ import type {
 import {
   buildOpenCodeModelEntry,
   deriveOpenCodeApiFormat,
+  deriveOpenCodeVariants,
   installOpencodeIntegration,
+  openCodeApiFormatForPackage,
   resolveOpenCodePackage,
   OPENCODE_PACKAGES,
   type OpenCodeIntegrationDeps,
@@ -350,5 +352,288 @@ describe("buildOpenCodeModelEntry", () => {
 
     expect(entry.name).toBe("glm-5.3");
     expect(entry.package).toBeUndefined();
+  });
+});
+
+describe("deriveOpenCodeVariants", () => {
+  it("maps the allowlist to reasoningEffort for the chat package", () => {
+    const variants = deriveOpenCodeVariants(
+      model({ id: "glm-5.3", reasoning: { supported_efforts: ["low", "high", "max"] } }),
+      "chat",
+    );
+
+    expect(variants).toEqual([
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+  });
+
+  it("uses the same setting key for the responses package", () => {
+    const variants = deriveOpenCodeVariants(
+      model({ id: "gpt-6.1-sol", reasoning: { supported_efforts: ["minimal", "max"] } }),
+      "responses",
+    );
+
+    expect(variants).toEqual([
+      { id: "minimal", settings: { reasoningEffort: "minimal" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+  });
+
+  it("keeps only the legal subset for the messages package", () => {
+    // routstr-core's Anthropic /messages route rejects none/minimal under
+    // output_config.effort, so they must not become dead variants.
+    const variants = deriveOpenCodeVariants(
+      model({
+        id: "claude-opus-5.5",
+        reasoning: { supported_efforts: ["none", "minimal", "low", "max"] },
+      }),
+      "messages",
+    );
+
+    expect(variants).toEqual([
+      { id: "low", settings: { effort: "low" } },
+      { id: "max", settings: { effort: "max" } },
+    ]);
+  });
+
+  it("returns null when the messages allowlist has nothing legal", () => {
+    expect(
+      deriveOpenCodeVariants(
+        model({ reasoning: { supported_efforts: ["none", "minimal"] } }),
+        "messages",
+      ),
+    ).toBeNull();
+  });
+
+  it("never offers none on mandatory models", () => {
+    const variants = deriveOpenCodeVariants(
+      model({
+        reasoning: { mandatory: true, supported_efforts: ["none", "high"] },
+      }),
+      "chat",
+    );
+
+    expect(variants?.map((variant) => variant.id)).toEqual(["high"]);
+  });
+
+  it("normalizes case and padding, dedupes, and orders by the effort ladder", () => {
+    const variants = deriveOpenCodeVariants(
+      model({
+        reasoning: { supported_efforts: [" MAX ", "high", "High", "low", 3 as unknown as string] },
+      }),
+      "chat",
+    );
+
+    expect(variants?.map((variant) => variant.id)).toEqual([
+      "low",
+      "high",
+      "max",
+    ]);
+  });
+
+  it("passes unknown efforts through for the OpenAI-shaped packages", () => {
+    const variants = deriveOpenCodeVariants(
+      model({ reasoning: { supported_efforts: ["high", "turbo"] } }),
+      "chat",
+    );
+
+    expect(variants?.map((variant) => variant.id)).toEqual(["high", "turbo"]);
+  });
+
+  it("returns null without a usable allowlist", () => {
+    expect(deriveOpenCodeVariants(model({}), "chat")).toBeNull();
+    expect(deriveOpenCodeVariants(model({ reasoning: null }), "chat")).toBeNull();
+    expect(
+      deriveOpenCodeVariants(model({ reasoning: { mandatory: false } }), "chat"),
+    ).toBeNull();
+    expect(
+      deriveOpenCodeVariants(model({ reasoning: { supported_efforts: [] } }), "chat"),
+    ).toBeNull();
+    expect(
+      deriveOpenCodeVariants(
+        model({ reasoning: { supported_efforts: ["  "] } }),
+        "chat",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("openCodeApiFormatForPackage", () => {
+  it("recovers the format a resolved package selects", () => {
+    expect(openCodeApiFormatForPackage(OPENCODE_PACKAGES.responses)).toBe("responses");
+    expect(openCodeApiFormatForPackage(OPENCODE_PACKAGES.messages)).toBe("messages");
+    // Provider default, and anything we cannot map back, is chat.
+    expect(openCodeApiFormatForPackage(undefined)).toBe("chat");
+    expect(openCodeApiFormatForPackage(OPENCODE_PACKAGES.chat)).toBe("chat");
+    expect(openCodeApiFormatForPackage("@acme/custom")).toBe("chat");
+  });
+});
+
+describe("buildOpenCodeModelEntry variants", () => {
+  it("derives variants with the setting key of the package in effect", () => {
+    const reasoning = { supported_efforts: ["low", "high"] };
+
+    expect(
+      buildOpenCodeModelEntry(model({ id: "glm-5.3", reasoning })).variants,
+    ).toEqual([
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+    ]);
+    expect(
+      buildOpenCodeModelEntry(model({ id: "gpt-6.1-sol", reasoning })).variants,
+    ).toEqual([
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+    ]);
+    expect(
+      buildOpenCodeModelEntry(model({ id: "claude-opus-5.5", reasoning })).variants,
+    ).toEqual([
+      { id: "low", settings: { effort: "low" } },
+      { id: "high", settings: { effort: "high" } },
+    ]);
+  });
+
+  it("derives against a curated package on a non-pinned family", () => {
+    const entry = buildOpenCodeModelEntry(
+      model({ id: "glm-5.3", reasoning: { supported_efforts: ["max"] } }),
+      { name: "GLM", package: OPENCODE_PACKAGES.responses },
+    );
+
+    expect(entry.variants).toEqual([
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+  });
+
+  it("preserves curated variants when there is no allowlist", () => {
+    const curated = [{ id: "turbo", settings: { reasoningEffort: "turbo" } }];
+    const entry = buildOpenCodeModelEntry(model({ id: "glm-5.3" }), {
+      name: "GLM",
+      variants: curated,
+    });
+
+    expect(entry.variants).toEqual(curated);
+  });
+
+  it("replaces the previous variants once an allowlist is published", () => {
+    const entry = buildOpenCodeModelEntry(
+      model({ id: "glm-5.3", reasoning: { supported_efforts: ["high"] } }),
+      { name: "GLM", variants: [{ id: "low", settings: { reasoningEffort: "low" } }] },
+    );
+
+    expect(entry.variants).toEqual([
+      { id: "high", settings: { reasoningEffort: "high" } },
+    ]);
+  });
+});
+
+describe("installOpencodeIntegration variants", () => {
+  const depsWith = (models: RoutstrModel[]): Partial<OpenCodeIntegrationDeps> => ({
+    ...MOCK_DEPS,
+    callDaemon: async () => ({ output: { models } }),
+  });
+
+  it("writes derived variants for each package on install", async () => {
+    const configPath = tempConfigPath();
+    await installOpencodeIntegration(
+      CONFIG,
+      "key",
+      makeIntegration(configPath),
+      depsWith([
+        {
+          id: "glm-5.3",
+          name: "Z.ai: GLM 5.3",
+          reasoning: { supported_efforts: ["low", "high", "max"] },
+        },
+        {
+          id: "gpt-6.1-sol",
+          name: "OpenAI: GPT-6.1 Sol",
+          reasoning: { supported_efforts: ["low", "high", "max"] },
+        },
+        {
+          id: "claude-opus-5.5",
+          name: "Anthropic: Claude Opus 5.5",
+          reasoning: { supported_efforts: ["none", "minimal", "low", "max"] },
+        },
+      ]),
+    );
+
+    const { models } = readProvider(configPath);
+    expect(models["glm-5.3"]?.variants).toEqual([
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+    expect(models["gpt-6.1-sol"]?.variants).toEqual([
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+    expect(models["claude-opus-5.5"]?.variants).toEqual([
+      { id: "low", settings: { effort: "low" } },
+      { id: "max", settings: { effort: "max" } },
+    ]);
+  });
+
+  it("leaves curated variants alone while the daemon publishes no allowlist", async () => {
+    const configPath = tempConfigPath();
+    const curated = [{ id: "turbo", settings: { reasoningEffort: "turbo" } }];
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        providers: {
+          routstr: { models: { "glm-5.3": { name: "GLM", variants: curated } } },
+        },
+      }),
+    );
+
+    await installOpencodeIntegration(
+      CONFIG,
+      "key",
+      makeIntegration(configPath),
+      depsWith([{ id: "glm-5.3", name: "Z.ai: GLM 5.3" }]),
+    );
+
+    expect(readProvider(configPath).models["glm-5.3"]?.variants).toEqual(curated);
+  });
+
+  it("drops a derived variant the allowlist no longer advertises on refresh", async () => {
+    const configPath = tempConfigPath();
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        providers: {
+          routstr: {
+            models: {
+              "glm-5.3": {
+                name: "GLM",
+                variants: [
+                  { id: "low", settings: { reasoningEffort: "low" } },
+                  { id: "max", settings: { reasoningEffort: "max" } },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    await installOpencodeIntegration(
+      CONFIG,
+      "key",
+      makeIntegration(configPath),
+      depsWith([
+        {
+          id: "glm-5.3",
+          name: "Z.ai: GLM 5.3",
+          reasoning: { supported_efforts: ["high"] },
+        },
+      ]),
+    );
+
+    expect(readProvider(configPath).models["glm-5.3"]?.variants).toEqual([
+      { id: "high", settings: { reasoningEffort: "high" } },
+    ]);
   });
 });
