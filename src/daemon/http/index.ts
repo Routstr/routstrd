@@ -2876,6 +2876,15 @@ export function createDaemonRequestHandler(deps: {
         return;
       }
 
+      const confidential = confidentialErrorStatus(error);
+      if (confidential) {
+        res.writeHead(confidential.status, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: message, error_type: confidential.code, request_id: lifecycle.requestId }),
+        );
+        return;
+      }
+
       // Anything reaching here is unstructured: an unclassified transport or
       // runtime failure, not a provider envelope. Never hand those to a client
       // verbatim — `message` is whatever the runtime's fetch threw, e.g.
@@ -2906,6 +2915,19 @@ export function createDaemonRequestHandler(deps: {
       );
     }
   };
+}
+
+/**
+ * The SDK's typed confidential errors as HTTP statuses: a request the
+ * confidential path cannot take is the caller's (400); a failed proof,
+ * receipt or session is the node's or provider's (502). Matched by shape,
+ * since the error may cross bundle boundaries.
+ */
+export function confidentialErrorStatus(error: unknown): { status: number; code: string } | undefined {
+  const e = error as { name?: unknown; code?: unknown } | null;
+  if (!e || e.name !== "ConfidentialError" || typeof e.code !== "string") return undefined;
+  const caller = new Set(["unsupported_endpoint", "offer_no_images", "not_configured"]);
+  return { status: caller.has(e.code) ? 400 : 502, code: e.code };
 }
 
 /**
