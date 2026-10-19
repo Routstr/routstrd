@@ -28,6 +28,7 @@ describe("confidentialErrorStatus", () => {
       code: "unsupported_endpoint",
     });
     expect(confidentialErrorStatus(new ConfidentialError("offer_no_images", "no"))?.status).toBe(400);
+    expect(confidentialErrorStatus(new ConfidentialError("pinned_parameter", "no"))?.status).toBe(400);
   });
   test("the SDK's typed subclasses map by code", () => {
     expect(confidentialErrorStatus(new ReceiptVerificationError("bad"))).toEqual({ status: 502, code: "receipt_verification" });

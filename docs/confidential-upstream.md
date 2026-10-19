@@ -49,6 +49,16 @@ answer. Text already streamed was authenticated by TLS record by record, so it
 is the provider's; the late checks concern billing and the session binding.
 Non-streaming requests receive one `chat.completion` only after every check.
 
+**Pinned parameters.** The model, the token cap, `n`, `stream` and
+`stream_options` always come from the session, whatever the request says. The
+node's signed offer may pin further provider parameters, but only to values
+that switch something off (Venice's `venice_parameters`, for example, turns
+off Venice's own system prompt and web search). Clients refuse an offer that
+pins anything else. A request that sets one of those parameters to the pinned
+value is sent without it. A request that sets one to a different value is
+refused with 400 (`error_type: pinned_parameter`), so your setting is never
+silently replaced.
+
 **Images.** `POST /v1/images/generations` (OpenAI shape) and
 `POST /v1/image/generate` (Venice shape) with the same header run as
 confidential image sessions on nodes whose signed offer lists
