@@ -25,7 +25,7 @@ In `~/.routstrd/config.json`:
 
 | Key | Meaning |
 |---|---|
-| `trusted_hosts` | upstream TLS hostnames you accept (exact, `*.x` = one label, `**.x` = any depth). Empty refuses every session. |
+| `trusted_hosts` | upstream TLS hostnames you accept (exact, `*.x` = one label, `**.x` = any depth). Empty refuses every session. An entry may name the provider's API base, `api.groq.com/openai/v1`: the node's request route must then be exactly that base plus the endpoint. A bare host allows `/v1` and `/api/v1`. |
 | `node_pubkeys` | node Nostr keys whose signed offers you accept (hex or npub). Without it, the key that announced the node's URL on Nostr (kind 38421) is used, for https and onion nodes only |
 | `pin_from_announcement` | `false` (any value other than `true`) requires `node_pubkeys` (no pin taken from the announcement) |
 | `prover_path` | `cu-prover` binary (else `CU_PROVER_BIN` / `CU_PROVER` / `PATH`) |
