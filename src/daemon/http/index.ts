@@ -2546,11 +2546,33 @@ export function createDaemonRequestHandler(deps: {
  * since the error may cross bundle boundaries.
  */
 export function confidentialErrorStatus(error: unknown): { status: number; code: string } | undefined {
-  const e = error as { name?: unknown; code?: unknown } | null;
-  if (!e || e.name !== "ConfidentialError" || typeof e.code !== "string") return undefined;
-  const caller = new Set(["unsupported_endpoint", "offer_no_images", "not_configured"]);
-  return { status: caller.has(e.code) ? 400 : 502, code: e.code };
+  // Every SDK subclass sets its own `name`, so match the stable `code`.
+  const e = error as { code?: unknown } | null;
+  if (!e || !(error instanceof Error) || typeof e.code !== "string") return undefined;
+  if (CONFIDENTIAL_CALLER_CODES.has(e.code)) return { status: 400, code: e.code };
+  if (CONFIDENTIAL_UPSTREAM_CODES.has(e.code)) return { status: 502, code: e.code };
+  return undefined;
 }
+
+/** A request the confidential path cannot take. */
+const CONFIDENTIAL_CALLER_CODES = new Set(["unsupported_endpoint", "offer_no_images", "not_configured"]);
+/** The node's offer, session, proofs or receipt failed (the SDK's other codes). */
+const CONFIDENTIAL_UPSTREAM_CODES = new Set([
+  "offer_unavailable",
+  "offer_malformed",
+  "offer_bad_signature",
+  "offer_unpinned",
+  "offer_pin_mismatch",
+  "offer_unsupported_version",
+  "trusted_host_rejected",
+  "session_protocol",
+  "session_rejected",
+  "prover_failed",
+  "prover_missing",
+  "receipt_verification",
+  "response_verification",
+  "timeout",
+]);
 
 /**
  * routstrd's `confidentialUpstream.prewarm` block → the SDK's pre-warm
