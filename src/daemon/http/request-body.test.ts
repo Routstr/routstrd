@@ -24,10 +24,11 @@ describe("isOpenAiJsonBodyPath", () => {
 });
 
 describe("applyDefaultOutputTokenLimit", () => {
-  it("injects max_tokens on chat/completions", () => {
+  it("injects max_completion_tokens on chat/completions", () => {
     const body: Record<string, unknown> = { model: "glm-5.3-flash", messages: [] };
     expect(applyDefaultOutputTokenLimit("/v1/chat/completions", body, MAX_TOKENS)).toBe(true);
-    expect(body.max_tokens).toBe(MAX_TOKENS);
+    expect(body.max_completion_tokens).toBe(MAX_TOKENS);
+    expect(body).not.toHaveProperty("max_tokens");
   });
 
   it("injects max_output_tokens on /responses", () => {
@@ -35,12 +36,21 @@ describe("applyDefaultOutputTokenLimit", () => {
     expect(applyDefaultOutputTokenLimit("/v1/responses", body, MAX_TOKENS)).toBe(true);
     expect(body.max_output_tokens).toBe(MAX_TOKENS);
     expect(body).not.toHaveProperty("max_tokens");
+    expect(body).not.toHaveProperty("max_completion_tokens");
   });
 
-  it("keeps a client-supplied limit", () => {
+  it("keeps a client-supplied max_completion_tokens", () => {
+    const body: Record<string, unknown> = { messages: [], max_completion_tokens: 5 };
+    expect(applyDefaultOutputTokenLimit("/v1/chat/completions", body, MAX_TOKENS)).toBe(false);
+    expect(body.max_completion_tokens).toBe(5);
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
+  it("keeps a client-supplied legacy max_tokens", () => {
     const body: Record<string, unknown> = { messages: [], max_tokens: 5 };
     expect(applyDefaultOutputTokenLimit("/v1/chat/completions", body, MAX_TOKENS)).toBe(false);
     expect(body.max_tokens).toBe(5);
+    expect(body).not.toHaveProperty("max_completion_tokens");
   });
 
   it("leaves /v1/systemone untouched — the upstream rejects unknown fields", () => {
@@ -58,5 +68,6 @@ describe("applyDefaultOutputTokenLimit", () => {
     const body: Record<string, unknown> = { messages: [] };
     expect(applyDefaultOutputTokenLimit("/v1/chat/completions", body, 0)).toBe(false);
     expect(body).not.toHaveProperty("max_tokens");
+    expect(body).not.toHaveProperty("max_completion_tokens");
   });
 });

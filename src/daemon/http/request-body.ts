@@ -12,7 +12,7 @@
 
 /**
  * OpenAI-compatible endpoints whose bodies define `max_tokens`,
- * `max_output_tokens`, and `stream`.
+ * `max_completion_tokens`, `max_output_tokens`, and `stream`.
  *
  * Matched by path suffix so `/v1/chat/completions`, `/chat/completions`, and
  * custom path-prefixed proxies all qualify. Kept in sync with
@@ -38,8 +38,13 @@ export function isOpenAiJsonBodyPath(pathname: string): boolean {
  * Cap the completion budget when the client does not set an output token
  * limit. Without this, the SDK prices at the provider's worst-case
  * `max_completion_cost`, which varies widely across providers (2.3× for
- * kimi-k3) and balloons during provider failover. Chat/completions use
- * `max_tokens`; the OpenAI Responses API uses `max_output_tokens`.
+ * kimi-k3) and balloons during provider failover. Chat/completions get
+ * `max_completion_tokens` — the OpenAI-standard field; the legacy
+ * `max_tokens` is deprecated and reasoning models reject it. The OpenAI
+ * Responses API uses `max_output_tokens`.
+ *
+ * An explicit client cap is never overridden: chat/completions are left alone
+ * when either `max_completion_tokens` or `max_tokens` is already a number.
  *
  * Non-OpenAI endpoints are left untouched — `/v1/systemone` returns typed
  * judgments rather than generated text, so it has no completion budget, and it
@@ -61,7 +66,12 @@ export function applyDefaultOutputTokenLimit(
     return true;
   }
 
-  if (typeof body.max_tokens === "number") return false;
-  body.max_tokens = maxTokens;
+  if (
+    typeof body.max_completion_tokens === "number" ||
+    typeof body.max_tokens === "number"
+  ) {
+    return false;
+  }
+  body.max_completion_tokens = maxTokens;
   return true;
 }
