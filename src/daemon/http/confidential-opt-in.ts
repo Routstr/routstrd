@@ -36,3 +36,13 @@ export function parseConfidentialOptIn(
       `"${CONFIDENTIAL_OPT_IN_VALUE}". Remove the header to send the request on the plain path.`,
   };
 }
+
+/**
+ * The endpoints a confidential request may use: chat completions, and image
+ * generation (OpenAI `/v1/images/generations` or Venice-style
+ * `/v1/image/generate`), which the node serves when its signed offer has the
+ * `images` capability.
+ */
+export function isConfidentialPath(pathname: string): boolean {
+  return /^\/(v1\/)?(chat\/completions|images\/generations|image\/generate)\/?$/.test(pathname);
+}
