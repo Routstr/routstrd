@@ -38,7 +38,7 @@ They are
 routed only to nodes that advertise confidential mode for the model, and fail
 rather than silently downgrade: with the header, routstrd answers 400 when
 `confidentialUpstream` is not enabled or the endpoint is not
-`POST /v1/chat/completions` (the only one the protocol supports), and a
+`POST /v1/chat/completions` or one of the image paths below, and a
 failed proof, receipt or cost check fails the request (or ends the stream
 with an error). Streaming responses stream as they decrypt, except the final
 `data: [DONE]` line: it is sent only once the settlement checks (usage proof,
@@ -48,6 +48,20 @@ body, so a client that reads until `[DONE]` sees an error, not a complete
 answer. Text already streamed was authenticated by TLS record by record, so it
 is the provider's; the late checks concern billing and the session binding.
 Non-streaming requests receive one `chat.completion` only after every check.
+
+**Images.** `POST /v1/images/generations` (OpenAI shape) and
+`POST /v1/image/generate` (Venice shape) with the same header run as
+confidential image sessions on nodes whose signed offer lists
+`capabilities: ["chat", "images"]`; others are refused with
+`offer_no_images`, never served on the plain path. The node sees the model,
+the priced variant (resolution tier, WebP) and the count (`n`/`variants`, up to
+the offer's `max_count`); the prompt and the other options (`aspect_ratio`,
+`seed`, `negative_prompt`, ...) stay private. The charge is the signed
+`msat_per_image × count` plus the session fee, checked against the receipt.
+The answer is OpenAI-shaped (`{created, data: [{b64_json}]}`) with the headers
+`x-routstr-confidential-variant` and `x-routstr-cost-msats`; a provider error
+keeps its status. Image requests are never pre-warmed: each one sets up its
+own session (about 23 MB of 2PC traffic before the image).
 
 Confidential requests are never written by the raw request/response logging
 (`requestResponseLogging` or `ROUTSTRD_REQUEST_RESPONSE_LOG_DIR`): it would
