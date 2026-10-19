@@ -550,6 +550,37 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/check-proofs") {
+      await respond(res, async () => {
+        if (!deps.walletClient.checkProofs) {
+          throw new WalletHttpError(
+            501,
+            "Proof state checks are not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) ||
+            body.timeoutMs <= 0)
+        ) {
+          throw new WalletHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
+        const result = await deps.walletClient.checkProofs({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          dryRun: body.dryRun === true,
+          timeoutMs: body.timeoutMs as number | undefined,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/recover") {
       await respond(res, async () => {
         if (!deps.walletClient.recoverMintQuotes) {

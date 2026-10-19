@@ -153,6 +153,58 @@ export interface WalletStuckOperationRecoveryResult {
   skippedMints: Record<string, number>;
 }
 
+/** Options for the wallet proof-state check command. */
+export interface WalletProofCheckOptions {
+  /** Only check proofs held for this mint URL. */
+  mintUrl?: string;
+  /** Report what would be marked spent without applying changes. */
+  dryRun?: boolean;
+  /** Per-mint check timeout in milliseconds (defaults to 30s). */
+  timeoutMs?: number;
+}
+
+/** Per-mint outcome of a wallet proof-state check. */
+export interface WalletProofCheckMintResult {
+  mintUrl: string;
+  /** Ready + inflight proofs examined at this mint. */
+  checked: number;
+  /** Value those proofs represented locally, in sat. */
+  checkedAmount: number;
+  /** Proofs the mint reports SPENT. */
+  spent: number;
+  /** Value of the proofs the mint reports SPENT, in sat. */
+  spentAmount: number;
+  /** Proofs actually marked spent locally (always zero in a dry run). */
+  markedSpent: number;
+  /** Proofs the mint reports UNSPENT; left untouched. */
+  unspent: number;
+  /** Proofs the mint reports PENDING (or an unknown state); left to settle. */
+  unresolved: number;
+  /** Set when the mint could not be asked, or answered unusably. */
+  error?: string;
+}
+
+/** Summary of a wallet proof-state check run. */
+export interface WalletProofCheckResult {
+  dryRun: boolean;
+  /** Proofs examined across every mint. */
+  checked: number;
+  /** Proofs the mints report SPENT. */
+  spent: number;
+  /** Value of those proofs, in sat. */
+  spentAmount: number;
+  /** Proofs actually marked spent locally (always zero in a dry run). */
+  markedSpent: number;
+  /** Proofs the mints report UNSPENT. */
+  unspent: number;
+  /** Proofs the mints report PENDING (or an unknown state). */
+  unresolved: number;
+  /** Mints that could not be checked; their proofs were left untouched. */
+  unreachableMints: string[];
+  /** Per-mint breakdown, in check order. */
+  mints: WalletProofCheckMintResult[];
+}
+
 export interface WalletClient {
   ping(): Promise<boolean>;
   getStatus(): Promise<WalletRuntimeState>;
@@ -201,6 +253,15 @@ export interface WalletClient {
    * never driven. Receive stays startup-only (receive dedup classification).
    */
   recoverStuckOperations?(): Promise<WalletStuckOperationRecoveryResult>;
+  /**
+   * Ask every mint holding our ready or inflight proofs what it thinks of
+   * them (NUT-07 checkstate) and mark the ones it reports SPENT as spent
+   * locally, reclaiming their balance. Mints that cannot be asked leave their
+   * proofs untouched and are reported instead of guessed at.
+   */
+  checkProofs?(
+    options?: WalletProofCheckOptions,
+  ): Promise<WalletProofCheckResult>;
   /** Report background wallet recovery progress, when the wallet supports it. */
   getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }
