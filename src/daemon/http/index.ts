@@ -2555,7 +2555,12 @@ export function confidentialErrorStatus(error: unknown): { status: number; code:
 }
 
 /** A request the confidential path cannot take. */
-const CONFIDENTIAL_CALLER_CODES = new Set(["unsupported_endpoint", "offer_no_images", "not_configured"]);
+const CONFIDENTIAL_CALLER_CODES = new Set([
+  "unsupported_endpoint",
+  "offer_no_images",
+  "not_configured",
+  "pinned_parameter",
+]);
 /** The node's offer, session, proofs or receipt failed (the SDK's other codes). */
 const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   "offer_unavailable",
