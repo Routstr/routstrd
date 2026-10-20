@@ -12,6 +12,7 @@ import {
   resolveDeepSeekModelPathSelectors,
   type MintDiscovery,
   type Model,
+  type ModelProviderPrice,
   type NodeModelPaths,
   type SdkStore,
 } from "@routstr/sdk";
@@ -308,20 +309,26 @@ export function createModelService(
       ].filter((url) => !manuallyEnabled.has(normalizeBaseUrl(url))),
     );
 
-    // Use the SDK ranking (sorted by prompt+completion per million tokens)
-    // so the display order matches real routing. includeDisabled keeps
-    // disabled providers visible so we can annotate them.
-    const ranking = providerManager.getProviderPriceRankingForModel(modelId, {
-      includeDisabled: true,
-    });
+    // Use the SDK ranking (sorted by what one request basket costs) so the
+    // display order matches real routing. includeDisabled keeps disabled
+    // providers visible so we can annotate them.
+    const ranking: ModelProviderPrice[] =
+      providerManager.getProviderPriceRankingForModel(modelId, {
+        includeDisabled: true,
+      });
 
-    const providers: ModelProviderInfo[] = ranking.map((entry: any) => ({
+    const providers: ModelProviderInfo[] = ranking.map((entry) => ({
       baseUrl: entry.baseUrl,
       disabled: disabledSet.has(entry.baseUrl),
       pricing: {
-        prompt: entry.promptPerMillion / 1_000_000,
-        completion: entry.completionPerMillion / 1_000_000,
-        request: entry.model.sats_pricing?.request ?? 0,
+        // Per-token rates: the SDK resolved them from the sats_pricing the
+        // node publishes, including the prompt-rate fallback it applies to a
+        // cache rate that was not announced. Reading them off the entry (not
+        // off a per-million field, which no longer exists) is what keeps this
+        // mapping from silently rendering NaN.
+        prompt: entry.rates.prompt,
+        completion: entry.rates.completion,
+        request: entry.rates.request,
         max_cost: entry.model.sats_pricing?.max_cost ?? 0,
       },
     }));
