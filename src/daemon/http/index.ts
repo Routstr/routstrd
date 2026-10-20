@@ -425,7 +425,10 @@ export function createDaemonRequestHandler(deps: {
   getModelPaths: (modelId: string, refresh?: boolean) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
-  /** Default max_tokens/max_output_tokens to inject when the client omits one. */
+  /**
+   * Default max_completion_tokens (chat/completions) / max_output_tokens
+   * (responses) to inject when the client omits one.
+   */
   maxTokens: number;
   /** Enable SDK automatic DeepSeek V4.1 Flash model-path selection. */
   autoModelPath?: boolean;
@@ -2267,10 +2270,12 @@ export function createDaemonRequestHandler(deps: {
     // Cap the completion budget when the client does not set an output token
     // limit. Without this, the SDK prices at the provider's worst-case
     // max_completion_cost, which varies widely across providers (2.3× for
-    // kimi-k3) and balloons during provider failover. Chat/completions use
-    // max_tokens; the OpenAI Responses API uses max_output_tokens. Endpoints
-    // that do not define those fields (e.g. /v1/systemone) are forwarded
-    // verbatim — injecting one makes a strict upstream answer 400.
+    // kimi-k3) and balloons during provider failover. Chat/completions get
+    // max_completion_tokens (the OpenAI-standard field; reasoning models
+    // reject the legacy max_tokens); the OpenAI Responses API uses
+    // max_output_tokens. Endpoints that do not define those fields (e.g.
+    // /v1/systemone) are forwarded verbatim — injecting one makes a strict
+    // upstream answer 400.
     applyDefaultOutputTokenLimit(url.pathname, bodyObj, deps.maxTokens);
 
     const forcedProvider: string | undefined =

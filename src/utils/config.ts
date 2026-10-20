@@ -73,11 +73,12 @@ export interface RoutstrdConfig {
   /** Scheduled refresh job settings (see AutoRefreshConfig). */
   autoRefresh?: AutoRefreshConfig;
   /**
-   * Default max_tokens (chat/completions) and max_output_tokens (responses)
-   * injected into proxied requests when the client does not supply one.
-   * Caps the completion budget the SDK prices against (completion × maxTokens)
-   * instead of the provider's worst-case max_completion_cost. Set to 0 to
-   * disable injection and always forward the client's value as-is.
+   * Default max_completion_tokens (chat/completions) and max_output_tokens
+   * (responses) injected into proxied requests when the client does not
+   * supply one. Caps the completion budget the SDK prices against
+   * (completion × maxTokens) instead of the provider's worst-case
+   * max_completion_cost. Set to 0 to disable injection and always forward the
+   * client's value as-is.
    */
   maxTokens?: number;
   /** Automatic update checks, startup prompts and notices. Defaults to true. */
