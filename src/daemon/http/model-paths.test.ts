@@ -42,11 +42,19 @@ async function call(
 
 describe("GET /models/:id/paths", () => {
   function makeDeps(modelPaths: unknown) {
-    const calls: Array<{ modelId: string; refresh?: boolean }> = [];
+    const calls: Array<{
+      modelId: string;
+      refresh?: boolean;
+      includeDisabled?: boolean;
+    }> = [];
     const handler = createDaemonRequestHandler({
       store: { getState: () => ({}) },
-      getModelPaths: async (modelId: string, refresh?: boolean) => {
-        calls.push({ modelId, refresh });
+      getModelPaths: async (
+        modelId: string,
+        refresh?: boolean,
+        includeDisabled?: boolean,
+      ) => {
+        calls.push({ modelId, refresh, includeDisabled });
         return modelPaths;
       },
     } as any);
@@ -65,7 +73,9 @@ describe("GET /models/:id/paths", () => {
 
     expect(res.status).toBe(200);
     expect(res.json().output).toEqual(inventory);
-    expect(calls).toEqual([{ modelId: "deepseek-v4.1-flash", refresh: false }]);
+    expect(calls).toEqual([
+      { modelId: "deepseek-v4.1-flash", refresh: false, includeDisabled: false },
+    ]);
   });
 
   it("forwards refresh=true so the SDK's cached path payloads are dropped", async () => {
@@ -74,7 +84,44 @@ describe("GET /models/:id/paths", () => {
     const res = await call(handler, "GET", "/models/m/paths?refresh=true");
 
     expect(res.status).toBe(200);
-    expect(calls).toEqual([{ modelId: "m", refresh: true }]);
+    expect(calls).toEqual([
+      { modelId: "m", refresh: true, includeDisabled: false },
+    ]);
+  });
+
+  it("forwards includeDisabled=true so the disabled nodes are listed too", async () => {
+    const { handler, calls } = makeDeps({ id: "m", nodes: [], skipped: [] });
+
+    const res = await call(handler, "GET", "/models/m/paths?includeDisabled=true");
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([
+      { modelId: "m", refresh: false, includeDisabled: true },
+    ]);
+  });
+
+  it("composes includeDisabled with refresh", async () => {
+    const { handler, calls } = makeDeps({ id: "m", nodes: [], skipped: [] });
+
+    const res = await call(
+      handler,
+      "GET",
+      "/models/m/paths?refresh=true&includeDisabled=true",
+    );
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([
+      { modelId: "m", refresh: true, includeDisabled: true },
+    ]);
+  });
+
+  it("keeps includeDisabled off for anything but a literal true", async () => {
+    const { handler, calls } = makeDeps({ id: "m", nodes: [], skipped: [] });
+
+    await call(handler, "GET", "/models/m/paths?includeDisabled=1");
+    await call(handler, "GET", "/models/m/paths?includeDisabled=false");
+
+    expect(calls.map((entry) => entry.includeDisabled)).toEqual([false, false]);
   });
 
   it("decodes the model id and 404s for an unknown model", async () => {
@@ -84,6 +131,8 @@ describe("GET /models/:id/paths", () => {
 
     expect(res.status).toBe(404);
     expect(res.json().error).toBe("Model 'glm-5.3/flash' not found");
-    expect(calls).toEqual([{ modelId: "glm-5.3/flash", refresh: false }]);
+    expect(calls).toEqual([
+      { modelId: "glm-5.3/flash", refresh: false, includeDisabled: false },
+    ]);
   });
 });

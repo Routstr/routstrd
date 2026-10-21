@@ -72,9 +72,16 @@ type DaemonDeps = {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
-  getModelProviders: (modelId: string) => Promise<any>;
+  getModelProviders: (
+    modelId: string,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
   /** Advertised model paths for one model, ranked like the router. */
-  getModelPaths: (modelId: string, refresh?: boolean) => Promise<any>;
+  getModelPaths: (
+    modelId: string,
+    refresh?: boolean,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
@@ -420,9 +427,16 @@ export function createDaemonRequestHandler(deps: {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
-  getModelProviders: (modelId: string) => Promise<any>;
+  getModelProviders: (
+    modelId: string,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
   /** Advertised model paths for one model, ranked like the router. */
-  getModelPaths: (modelId: string, refresh?: boolean) => Promise<any>;
+  getModelPaths: (
+    modelId: string,
+    refresh?: boolean,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
   /**
@@ -1015,7 +1029,15 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && modelProvidersMatch && modelProvidersMatch[1]) {
       try {
         const modelId = decodeURIComponent(modelProvidersMatch[1]);
-        const modelWithProviders = await deps.getModelProviders(modelId);
+        // `includeDisabled=true` reports the nodes routing currently excludes
+        // too (marked `disabled`). They are hidden by default: a disabled
+        // node's price is not one a request can get.
+        const includeDisabled =
+          url.searchParams.get("includeDisabled")?.toLowerCase() === "true";
+        const modelWithProviders = await deps.getModelProviders(
+          modelId,
+          includeDisabled,
+        );
         if (!modelWithProviders) {
           sendJson(res, 404, { error: `Model '${modelId}' not found` });
           return;
@@ -1036,7 +1058,15 @@ export function createDaemonRequestHandler(deps: {
         // is live; routing refetches on its next request as a result.
         const refresh =
           url.searchParams.get("refresh")?.toLowerCase() === "true";
-        const modelPaths = await deps.getModelPaths(modelId, refresh);
+        // `includeDisabled=true` lists the nodes routing currently excludes,
+        // flagged `disabled`; hidden by default like the provider table.
+        const includeDisabled =
+          url.searchParams.get("includeDisabled")?.toLowerCase() === "true";
+        const modelPaths = await deps.getModelPaths(
+          modelId,
+          refresh,
+          includeDisabled,
+        );
         if (!modelPaths) {
           sendJson(res, 404, { error: `Model '${modelId}' not found` });
           return;

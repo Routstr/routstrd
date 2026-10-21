@@ -33,6 +33,7 @@ function model(partial: Partial<ModelWithProviders> = {}): ModelWithProviders {
     description: partial.description,
     context_length: partial.context_length,
     providers: partial.providers ?? [provider()],
+    hiddenProviders: partial.hiddenProviders ?? 0,
   };
 }
 
@@ -76,7 +77,7 @@ describe("formatModelProviders", () => {
     );
     expect(out).toContain("  deepseek via ccm");
     expect(out).toContain("  Context: 1,048,576 tokens");
-    expect(out).toContain("2 providers, 1 enabled, cheapest warm request first");
+    expect(out).toContain("2 providers, cheapest warm request first");
     expect(out).toContain("Rates in sats per million tokens");
     // Per-token rates render per million tokens.
     expect(out).toContain("200.00");
@@ -184,6 +185,55 @@ describe("formatModelProviders", () => {
     expect(formatModelProviders(model({ providers: [] }))).toContain(
       "No node serves this model.",
     );
+  });
+
+  it("reads an empty provider list with a hidden count as 'only disabled nodes'", () => {
+    // The CLI turns a null payload into "Model not found"; a model served
+    // only by disabled nodes arrives with an empty list instead, and must not
+    // be reported as unserved.
+    const out = formatModelProviders(
+      model({ providers: [], hiddenProviders: 3 }),
+    );
+
+    expect(out).toContain(
+      "No enabled node serves this model (3 disabled; pass --all to show them).",
+    );
+    expect(out).not.toContain("Provider  Prompt");
+  });
+
+  it("says how many nodes the default view hides", () => {
+    const out = formatModelProviders(
+      model({
+        providers: [provider({ baseUrl: "https://on.example/" })],
+        hiddenProviders: 9,
+      }),
+    );
+
+    expect(out).toContain("1 provider, cheapest warm request first");
+    expect(out).toContain(
+      "9 disabled nodes hidden — pass --all to show them",
+    );
+    // The hidden nodes are not rows: only the enabled one is priced.
+    expect(out).not.toContain("https://off.example/");
+    expect(out.split("\n").filter((line) => line.includes("https://")).length).toBe(1);
+  });
+
+  it("counts hidden nodes in the singular", () => {
+    const out = formatModelProviders(
+      model({ providers: [provider()], hiddenProviders: 1 }),
+    );
+
+    expect(out).toContain("1 disabled node hidden — pass --all to show it");
+  });
+
+  it("does not mention disabled nodes when none were hidden", () => {
+    const out = formatModelProviders(model());
+
+    expect(out).not.toContain("pass --all");
+    // Nothing disabled is on show, so the legend does not advertise a state
+    // it never renders.
+    expect(out).toContain("  ✓ enabled\n");
+    expect(out).not.toContain("✗ disabled");
   });
 
   it("tolerates a daemon that predates cache pricing", () => {

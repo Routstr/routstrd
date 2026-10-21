@@ -36,6 +36,8 @@ export type { ModelProviderInfo } from "../utils/model-providers";
 
 export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
+  /** Disabled nodes kept out of `providers`; the CLI's `--all` shows them. */
+  hiddenProviders: number;
 };
 
 /** Per-model path lookup, injectable so tests never touch the network. */
@@ -293,8 +295,18 @@ export function createModelService(
     return modelPopulationPromise;
   };
 
+  /**
+   * The nodes serving one model, cheapest warm request first.
+   *
+   * Disabled nodes are hidden unless `includeDisabled` (the CLI's `--all`)
+   * asks for them: routing excludes them, so their price is not one a request
+   * can get. The SDK ranking is still computed with `includeDisabled: true`,
+   * because the disabled flag, the count of hidden nodes, and the model
+   * metadata all come from entries a filtered ranking would not contain.
+   */
   const getModelProviders = async (
     modelId: string,
+    includeDisabled = false,
   ): Promise<ModelWithProviders | null> => {
     await ensureProvidersBootstrapped();
 
@@ -313,15 +325,16 @@ export function createModelService(
     // same basket routing prices (`WARM_COST_BASKET` in the SDK's
     // resolveRequestContext); the SDK's default basket is the cold
     // prompt+completion sum, which ranks differently once cache rates differ
-    // between nodes. includeDisabled keeps disabled providers visible so we
-    // can annotate them.
+    // between nodes. includeDisabled keeps disabled providers in the ranking
+    // so they can be counted (and shown on request); whether they reach the
+    // table is decided below.
     const ranking: ModelProviderPrice[] =
       providerManager.getProviderPriceRankingForModel(modelId, {
         includeDisabled: true,
         basket: WARM_COST_BASKET,
       });
 
-    const providers: ModelProviderInfo[] = ranking.map((entry) => ({
+    const ranked: ModelProviderInfo[] = ranking.map((entry) => ({
       baseUrl: entry.baseUrl,
       disabled: disabledSet.has(entry.baseUrl),
       pricing: {
@@ -346,18 +359,31 @@ export function createModelService(
       },
     }));
 
-    if (providers.length === 0) {
+    // Nothing serves the model at all: that is the only case that is really
+    // "not found". A ranking holding nothing but disabled nodes resolves to a
+    // model with an empty provider list, so the CLI can say the model exists
+    // but only disabled nodes serve it.
+    if (ranked.length === 0) {
       return null;
     }
+
+    const hiddenProviders = includeDisabled
+      ? 0
+      : ranked.filter((provider) => provider.disabled).length;
+    const providers = includeDisabled
+      ? ranked
+      : ranked.filter((provider) => !provider.disabled);
 
     // Get model metadata. Prefer a provider that serves the requested
     // canonical id natively (nicest name/description); fall back to the
     // cheapest provider matched through the SDK's model mappings, since it
-    // may only know the model under a mapped variant id or alias.
-    const cheapest = providers[0]!;
+    // may only know the model under a mapped variant id or alias. Metadata
+    // resolves off the full ranking: a model served only by disabled nodes
+    // must still describe itself.
+    const cheapest = ranked[0]!;
     const allModels = modelManager.getAllCachedModels();
     let modelInfo: Model | undefined;
-    for (const p of providers) {
+    for (const p of ranked) {
       const exact = (allModels[p.baseUrl] as Model[] | undefined)?.find(
         (m) => m.id === modelId,
       );
@@ -383,6 +409,7 @@ export function createModelService(
       description: modelInfo.description,
       context_length: modelInfo.context_length,
       providers,
+      hiddenProviders,
     };
   };
 
@@ -499,6 +526,12 @@ export function createModelService(
    * budget are reported in `skipped` instead of being silently dropped.
    * Returns null only when no node serves the model at all.
    *
+   * Disabled nodes are skipped before any I/O unless `includeDisabled` (the
+   * CLI's `--all`) asks for them: routing excludes them, so probing them
+   * would spend a request on data no request would use. When included they
+   * carry `disabled: true` so the renderer can flag them, and they are
+   * ranked and priced like every other node — the same inventory, one flag.
+   *
    * `refresh` drops the SDK's cached model-path payloads first, so
    * `models -m <id> --paths --refresh` shows live data; routing refetches on
    * its next request as a result.
@@ -506,6 +539,7 @@ export function createModelService(
   const getModelPaths = async (
     modelId: string,
     refresh = false,
+    includeDisabled = false,
   ): Promise<ModelPathsOutput | null> => {
     await ensureProvidersBootstrapped();
     if (refresh) clearModelPathsCache();
@@ -543,7 +577,8 @@ export function createModelService(
 
     await Promise.all(
       baseUrls.map(async (baseUrl) => {
-        if (disabledSet.has(normalizeBaseUrl(baseUrl))) return;
+        const disabled = disabledSet.has(normalizeBaseUrl(baseUrl));
+        if (disabled && !includeDisabled) return;
         const models = (allModels[baseUrl] ?? []) as Model[];
         const model = findModelForId(models, modelId, mappings);
         if (!model) return;
@@ -582,7 +617,15 @@ export function createModelService(
           return;
         }
 
-        nodes.push({ baseUrl, routes, rankCost: null, rankedOnPin: false });
+        nodes.push({
+          baseUrl,
+          routes,
+          rankCost: null,
+          rankedOnPin: false,
+          // Only set when the node is here because of `includeDisabled`;
+          // an enabled node's payload stays as it was.
+          ...(disabled ? { disabled: true } : {}),
+        });
       }),
     );
 

@@ -102,6 +102,7 @@ List available routstr21 models (discovered via Nostr).
 | `-r, --refresh` | Force refresh models from Nostr (with `--paths`, also drop the SDK's cached model-path payloads) |
 | `-m, --model <id>` | Show the providers serving a specific model |
 | `-p, --paths` | With `--model`: also list the model-path inventory (see below). Requires `--model` |
+| `-a, --all` | With `--model`: include disabled providers and nodes, marked. They are hidden by default |
 
 `--model` prints one table of the nodes serving that model, in the order the
 router ranks them — cheapest sats for one warm request first, the basket
@@ -113,7 +114,15 @@ at the prompt rate. A very long node URL is elided in the middle rather than
 widening the table. The per-request fee and max cost are not shown: they size
 the deposit, they are not billed.
 
-`--paths` shows every upstream route the enabled nodes advertise for that
+Disabled nodes are hidden by default, in both tables: routing excludes them, so
+their price is not one a request can get. When nodes were hidden the table says
+so (`9 disabled nodes hidden — pass --all to show them`), and `--all` lists them
+instead, `✗` in the provider table and tagged `[disabled]` in the inventory. A
+model served only by disabled nodes still resolves: it prints
+`No enabled node serves this model (N disabled; pass --all to show them)` rather
+than failing as unknown.
+
+`--paths` shows every upstream route the nodes advertise for that
 model, one block per node, ranked like the router. Every route is priced with
 the SDK's `estimateCost` against `WARM_COST_BASKET` (100k prompt tokens at a
 90% cache hit, 2k completion) — the same function and basket
@@ -130,11 +139,15 @@ reach (`openrouter.ai/api/v1 [deepseek]`), tagged `[cooldown]` when routing is
 currently skipping them, `[model price]` when the node advertises no per-route
 pricing, and `[id <spelling>]` when the route is only reachable by requesting
 the model under that spelling. Nodes left out (on cooldown, no paths
-advertised, lookup failed or timed out) are listed under `Not shown`.
+advertised, lookup failed or timed out) are listed under `Not shown`; a node
+included only because of `--all` is tagged `[disabled]` on its header.
 
 ```sh
+routstrd models -m deepseek-v4.1-flash                       # enabled nodes only
+routstrd models -m deepseek-v4.1-flash --all                 # + disabled nodes, marked
 routstrd models -m deepseek-v4.1-flash -p
-routstrd models -m deepseek-v4.1-flash -p --refresh   # live, ignores the 10 min path cache
+routstrd models -m deepseek-v4.1-flash -p --all              # disabled nodes in both tables
+routstrd models -m deepseek-v4.1-flash -p --refresh          # live, ignores the 10 min path cache
 ```
 
 ### `routstrd usage`
@@ -578,14 +591,30 @@ remain every 5 minutes).
 
 List available models (OpenAI-compatible).
 
+### `GET /models/:id/providers`
+
+The nodes serving one model, as rendered by `routstrd models -m <id>`: one
+entry per node with its per-token pricing (prompt, completion, request,
+`max_cost`, and the cache read/write rates plus whether the node advertised
+them), ordered cheapest sats for one warm request first.
+
+`?includeDisabled=true` (the CLI's `--all`) also reports the nodes routing
+currently excludes, with `disabled: true`; without it they are omitted and
+counted in `hiddenProviders`. A model whose only nodes are disabled returns
+200 with `providers: []` and the count populated — it exists, it is just not
+routable — so `404` means no node serves the model at all.
+
 ### `GET /models/:id/paths`
 
 The model-path inventory of one model, as rendered by
 `routstrd models -m <id> --paths`: per node, the advertised upstream routes
 (model-path selectors) with their per-route pricing, ordered the way the
 router ranks them. `?refresh=true` drops the SDK's cached path payloads first,
-so the inventory is live. Returns 404 when no node serves the model; nodes the
-inventory could not cover are reported in `skipped`.
+so the inventory is live. `?includeDisabled=true` (the CLI's `--all`) also
+lists the nodes routing currently excludes, flagged `disabled: true` and
+ranked like any other node; by default they are skipped without being probed.
+Returns 404 when no node serves the model; nodes the inventory could not cover
+are reported in `skipped`.
 
 ### `POST /v1/chat/completions`
 

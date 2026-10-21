@@ -99,6 +99,13 @@ export interface ModelPathNode {
   /** Advertised routes, cheapest warm-request cost first. */
   routes: ModelPathRoute[];
   /**
+   * Routing currently excludes this node (a disabled provider). Only set when
+   * the inventory was asked for every node (`includeDisabled` / `--all`);
+   * otherwise such a node is not listed at all. The node is priced and ranked
+   * like the others, and the renderer flags it.
+   */
+  disabled?: boolean;
+  /**
    * Ranking metric: sats one warm request would cost on the route routing
    * would use first, or null when the node has no priced route off cooldown.
    */
@@ -326,6 +333,9 @@ function renderNode(node: ModelPathNode, rank: number, requestedId: string): str
       : `rank ${node.rankCost.toFixed(2)} sats/request ${
           node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
         }`;
+  // A disabled node is priced and ranked like any other, so the tag is what
+  // keeps its rows from reading as routes a request could take.
+  const flags = node.disabled ? "  [disabled]" : "";
   const routes = node.routes.map((route) => toRow(route, requestedId));
 
   const width = (select: (row: RouteRow) => string, header: string) =>
@@ -341,7 +351,7 @@ function renderNode(node: ModelPathNode, rank: number, requestedId: string): str
   const lines = [
     `  ${String(rank).padStart(2)}. ${node.baseUrl}  ${node.routes.length} route${
       node.routes.length === 1 ? "" : "s"
-    }  ${metric}`,
+    }  ${metric}${flags}`,
     "",
     `        ${"cost".padEnd(costWidth)}  ${"prompt".padEnd(promptWidth)}  ${"completion".padEnd(completionWidth)}  ${"cache read".padEnd(cacheReadWidth)}  ${"cache write".padEnd(cacheWriteWidth)}  ${"ctx".padEnd(ctxWidth)}  upstream`,
   ];
@@ -395,6 +405,12 @@ export function formatModelPaths(output: ModelPathsOutput): string {
       lines.push(
         "  [pin] marks the first route the router pins on that node (the SDK's model-path",
         "  whitelist order, which governs its auto-pinned model).",
+      );
+    }
+    if (output.nodes.some((node) => node.disabled)) {
+      lines.push(
+        "  [disabled] marks a node routing currently excludes: it carries its price and",
+        "  rank position like any other node, but no request is routed to it.",
       );
     }
     lines.push("");

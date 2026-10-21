@@ -1158,7 +1158,17 @@ program
     "With --model: also show the model-path inventory (upstream routes per node, ranked like the router)",
     false,
   )
-  .action(async (options: { refresh: boolean; model?: string; paths: boolean }) => {
+  .option(
+    "-a, --all",
+    "Include disabled providers and nodes (hidden by default)",
+    false,
+  )
+  .action(async (options: {
+    refresh: boolean;
+    model?: string;
+    paths: boolean;
+    all: boolean;
+  }) => {
     if (options.paths && !options.model) {
       console.log("--paths requires --model <id>");
       process.exit(1);
@@ -1167,9 +1177,12 @@ program
     await ensureDaemonRunning();
 
     if (options.model) {
-      // Show providers for specific model
+      // Show providers for specific model. Disabled nodes are hidden unless
+      // --all asks for them: routing excludes them, so their price is not one
+      // a request can get. The same flag drives the path inventory below.
+      const includeDisabled = options.all ? "?includeDisabled=true" : "";
       const result = await callDaemon(
-        `/models/${encodeURIComponent(options.model)}/providers`,
+        `/models/${encodeURIComponent(options.model)}/providers${includeDisabled}`,
       );
       if (result.error) {
         console.log(result.error);
@@ -1197,10 +1210,16 @@ program
       if (options.paths) {
         // The advertised upstream routes per node, ordered the way the router
         // ranks them (see utils/model-paths). `--refresh` drops the SDK's
-        // cached path payloads so the inventory is live.
-        const pathsQuery = options.refresh ? "?refresh=true" : "";
+        // cached path payloads so the inventory is live; `--all` adds the
+        // nodes routing excludes, flagged [disabled]. Built through
+        // URLSearchParams so the two compose instead of fighting over the
+        // leading "?".
+        const pathsParams = new URLSearchParams();
+        if (options.refresh) pathsParams.set("refresh", "true");
+        if (options.all) pathsParams.set("includeDisabled", "true");
+        const query = pathsParams.toString();
         const pathsResult = await callDaemon(
-          `/models/${encodeURIComponent(options.model)}/paths${pathsQuery}`,
+          `/models/${encodeURIComponent(options.model)}/paths${query ? `?${query}` : ""}`,
         );
         if (pathsResult.error) {
           console.log(pathsResult.error);

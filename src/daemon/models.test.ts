@@ -719,6 +719,62 @@ describe("createModelService.getModelPaths", () => {
     expect(output.nodes).toEqual([]);
   });
 
+  it("includes a disabled node, marked, when includeDisabled asks for it", async () => {
+    const probed: string[] = [];
+    const service = makeService({
+      cached: {
+        "https://off.example/": [catalogModel()],
+        "https://on.example/": [catalogModel()],
+      },
+      disabled: ["https://off.example/"],
+      fetchNodeModelPaths: (baseUrl) => {
+        probed.push(baseUrl);
+        return nodePaths([{ path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) }]);
+      },
+    });
+
+    const hidden = (await service.getModelPaths(MODEL_ID))!;
+    expect(probed).toEqual(["https://on.example/"]);
+    expect(hidden.nodes.map((node) => node.baseUrl)).toEqual([
+      "https://on.example/",
+    ]);
+    // An enabled node's payload does not grow a flag for a view it is not in.
+    expect(hidden.nodes[0]!.disabled).toBeUndefined();
+
+    probed.length = 0;
+    const shown = (await service.getModelPaths(MODEL_ID, false, true))!;
+    expect(probed.sort()).toEqual([
+      "https://off.example/",
+      "https://on.example/",
+    ]);
+    // The disabled node is priced and ranked like any other one; the flag is
+    // the only thing that distinguishes it.
+    expect(shown.nodes.map((node) => [node.baseUrl, node.disabled === true])).toEqual([
+      ["https://off.example/", true],
+      ["https://on.example/", false],
+    ]);
+    expect(shown.nodes[0]!.routes).toHaveLength(1);
+    // 100k prompt (no cache rate advertised, so the whole prompt bills at the
+    // prompt rate) + 2k completion: 20 + 3 = 23 sats for one warm request.
+    expect(shown.nodes[0]!.rankCost).toBeCloseTo(23, 6);
+    expect(shown.skipped).toEqual([]);
+  });
+
+  it("still reports a disabled node's real failures under skipped", async () => {
+    const service = makeService({
+      cached: { "https://off.example/": [catalogModel()] },
+      disabled: ["https://off.example/"],
+      fetchNodeModelPaths: () => null,
+    });
+
+    const output = (await service.getModelPaths(MODEL_ID, false, true))!;
+
+    expect(output.nodes).toEqual([]);
+    expect(output.skipped).toEqual([
+      { baseUrl: "https://off.example/", reason: "model-path lookup failed" },
+    ]);
+  });
+
   it("lists a node whose routes are all on path-scoped cooldown, without a rank", async () => {
     const service = makeService({
       cached: { "https://a.example/": [catalogModel()] },
@@ -790,7 +846,16 @@ describe("createModelService.getModelProviders", () => {
     basket: {},
   });
 
-  function makeService(ranking: unknown[], disabled: string[] = []) {
+  function makeService(
+    ranking: unknown[],
+    disabled: string[] = [],
+    // The SDK caches a provider's models whether or not routing includes it,
+    // which is what lets metadata resolve for a model only disabled nodes
+    // serve.
+    cached: Record<string, unknown[]> = {
+      "https://a.example/": [catalogModel()],
+    },
+  ) {
     const state: Record<string, unknown> = {
       baseUrlsList: ranking.map((e) => (e as { baseUrl: string }).baseUrl),
       setBaseUrlsList: () => {},
@@ -803,8 +868,8 @@ describe("createModelService.getModelProviders", () => {
       {
         bootstrapProviders: async () => state.baseUrlsList,
         syncReviewedProvidersFromNostr: async () => null,
-        getAllCachedModels: () => ({ "https://a.example/": [catalogModel()] }),
-        getBaseUrls: () => ["https://a.example/"],
+        getAllCachedModels: () => cached,
+        getBaseUrls: () => Object.keys(cached),
         getModelIdMappings: () => ({}),
       } as never,
       { getProviderPriceRankingForModel: () => ranking } as never,
@@ -826,10 +891,13 @@ describe("createModelService.getModelProviders", () => {
       ["https://b.example/"],
     );
 
-    const output = await service.getModelProviders(MODEL_ID);
+    // `includeDisabled`: the CLI's --all, which is what shows a disabled
+    // node's row.
+    const output = await service.getModelProviders(MODEL_ID, true);
 
     expect(output?.id).toBe(MODEL_ID);
     expect(output?.name).toBe("DeepSeek V4.1 Flash 1017");
+    expect(output?.hiddenProviders).toBe(0);
     expect(output?.providers).toEqual([
       {
         baseUrl: "https://a.example/",
@@ -866,6 +934,53 @@ describe("createModelService.getModelProviders", () => {
         },
       },
     ]);
+  });
+
+  it("hides disabled nodes by default and counts them", async () => {
+    const service = makeService(
+      [
+        entry("https://a.example/", {}),
+        entry("https://off.example/", {}),
+        entry("https://b.example/", {}),
+      ],
+      ["https://off.example/"],
+    );
+
+    const output = await service.getModelProviders(MODEL_ID);
+
+    // Routing skips `off.example/`, so its price is not one a request can
+    // get: the default table lists only the nodes a request can use, in the
+    // SDK's ranking order.
+    expect(output?.providers.map((provider) => provider.baseUrl)).toEqual([
+      "https://a.example/",
+      "https://b.example/",
+    ]);
+    expect(output?.hiddenProviders).toBe(1);
+  });
+
+  it("returns the model with no providers when only disabled nodes serve it", async () => {
+    // Not null: the CLI turns null into "Model not found" + exit 1, which
+    // would be a lie about a model that exists and is merely unroutable.
+    const service = makeService(
+      [
+        entry("https://off-a.example/", {}),
+        entry("https://off-b.example/", {}),
+      ],
+      ["https://off-a.example/", "https://off-b.example/"],
+      {
+        "https://off-a.example/": [catalogModel()],
+        "https://off-b.example/": [catalogModel()],
+      },
+    );
+
+    const output = await service.getModelProviders(MODEL_ID);
+
+    expect(output).not.toBeNull();
+    expect(output?.id).toBe(MODEL_ID);
+    // Metadata still resolves, so the CLI can name the model it is refusing.
+    expect(output?.name).toBe("DeepSeek V4.1 Flash 1017");
+    expect(output?.providers).toEqual([]);
+    expect(output?.hiddenProviders).toBe(2);
   });
 
   it("returns null when no node serves the model", async () => {

@@ -391,4 +391,60 @@ describe("formatModelPaths", () => {
       "Model paths for gpt-5.6\n\n  No node advertises model paths for this model.",
     );
   });
+
+  it("tags a node included only because of --all", () => {
+    const withDisabled = rankModelPathNodes([
+      {
+        baseUrl: "https://on.example/",
+        routes: [
+          route({
+            path: "url=on",
+            pricing: { prompt: 0.0002, completion: 0.0008, request: 0, max_cost: 0 },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+      {
+        baseUrl: "https://off.example/",
+        routes: [
+          route({
+            path: "url=off",
+            pinned: true,
+            onCooldown: true,
+            pricing: { prompt: 0.0001, completion: 0.0004, request: 0, max_cost: 0 },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+        disabled: true,
+      },
+    ]);
+
+    const text = formatModelPaths({
+      id: "deepseek-v4.1-flash",
+      nodes: withDisabled,
+      skipped: [],
+    });
+    const lines = text.split("\n");
+    const offHeader = lines.find((line) =>
+      line.includes("https://off.example/"),
+    )!;
+    const onHeader = lines.find((line) =>
+      line.includes("https://on.example/"),
+    )!;
+
+    // The tag rides on the node header, after the rank metric, so a disabled
+    // node's rank and price never read as something a request could get.
+    expect(offHeader).toContain("[disabled]");
+    expect(offHeader.trimEnd().endsWith("[disabled]")).toBe(true);
+    expect(onHeader).not.toContain("[disabled]");
+    expect(text).toContain("[disabled] marks a node routing currently excludes");
+    // Route-level tags keep working alongside the node-level one.
+    expect(text).toContain("[pin, cooldown]");
+  });
+
+  it("says nothing about disabled nodes when none are shown", () => {
+    expect(formatModelPaths(output)).not.toContain("[disabled]");
+  });
 });

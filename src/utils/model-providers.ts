@@ -5,8 +5,10 @@
  * The daemon (`GET /models/:id/providers`) ranks nodes with the SDK's
  * `getProviderPriceRankingForModel` on `WARM_COST_BASKET` — what one warm
  * request would cost, the basket routing picks providers on — so the table
- * keeps that order: cheapest warm request first, disabled nodes interleaved
- * where they rank.
+ * keeps that order: cheapest warm request first. Disabled nodes are dropped
+ * unless the caller asked for them (`includeDisabled`, the CLI's `--all`),
+ * because a node routing excludes is not a price a request can get; when they
+ * are shown they keep their rank position and are marked `✗`.
  *
  * Rates travel as sats per token, the unit nodes advertise; the table renders
  * sats per million tokens, the unit routing prices are compared in. A cache
@@ -62,6 +64,14 @@ export interface ModelWithProviders {
   description?: string;
   context_length?: number;
   providers: ModelProviderInfo[];
+  /**
+   * Disabled nodes left out of {@link providers}. Absent from an older
+   * daemon's payload, which always reported every node; zero when the caller
+   * asked for them. Non-zero with an empty `providers` means only disabled
+   * nodes serve the model — the table says so instead of claiming the model
+   * does not exist.
+   */
+  hiddenProviders?: number;
 }
 
 /**
@@ -143,20 +153,35 @@ export function formatModelProviders(model: ModelWithProviders): string {
   }
 
   const rows = model.providers.map(toRow);
+  const hidden = model.hiddenProviders ?? 0;
 
   lines.push("");
   if (rows.length === 0) {
-    lines.push("  No node serves this model.");
+    // Two very different situations: no node serves the model at all, or the
+    // only nodes that do are disabled and therefore filtered out. Saying
+    // "not served" for the second would tell the user the model does not
+    // exist when `--all` would show it.
+    lines.push(
+      hidden > 0
+        ? `  No enabled node serves this model (${hidden} disabled; pass --all to show ${
+            hidden === 1 ? "it" : "them"
+          }).`
+        : "  No node serves this model.",
+    );
     return lines.join("\n");
   }
 
-  const enabled = model.providers.filter((provider) => !provider.disabled).length;
   lines.push(
-    `  ${rows.length} provider${rows.length === 1 ? "" : "s"}, ` +
-      `${enabled} enabled, cheapest warm request first`,
-    "  Rates in sats per million tokens",
-    "",
+    `  ${rows.length} provider${rows.length === 1 ? "" : "s"}, cheapest warm request first`,
   );
+  if (hidden > 0) {
+    lines.push(
+      `  ${hidden} disabled node${hidden === 1 ? "" : "s"} hidden — pass --all to show ${
+        hidden === 1 ? "it" : "them"
+      }`,
+    );
+  }
+  lines.push("  Rates in sats per million tokens", "");
 
   const widths = {} as Record<keyof ProviderRow, number>;
   for (const column of COLUMNS) {
@@ -183,7 +208,10 @@ export function formatModelProviders(model: ModelWithProviders): string {
 
   lines.push(
     "",
-    "  ✓ enabled   ✗ disabled",
+    // The On column only carries information once disabled nodes are shown.
+    model.providers.some((provider) => provider.disabled)
+      ? "  ✓ enabled   ✗ disabled"
+      : "  ✓ enabled",
     "  - the node advertises no cache rate, so cache tokens are billed at the prompt rate",
   );
 
