@@ -1877,7 +1877,14 @@ clientsCmd
 // Npubs - manage npubs (admin and user roles)
 const npubsCmd = program
   .command("npubs")
-  .description("Manage npubs on the daemon (admin or user roles)");
+  .description("Manage npubs on the daemon (admin or user roles)")
+  .hook("preAction", async () => {
+    const config = await loadConfig();
+    if (!config.daemonUrl && !config.authUrl) {
+      console.error("npubs needs a remote node. Run 'routstrd remote <url>' to set one up.");
+      process.exit(1);
+    }
+  });
 
 type NpubEntry = {
   npub: string;
