@@ -76,8 +76,8 @@ describe("formatModelProviders", () => {
     );
     expect(out).toContain("  deepseek via ccm");
     expect(out).toContain("  Context: 1,048,576 tokens");
-    expect(out).toContain("2 providers, 1 enabled");
-    expect(out).toContain("Prices in sats per million tokens");
+    expect(out).toContain("2 providers, 1 enabled, cheapest warm request first");
+    expect(out).toContain("Rates in sats per million tokens");
     // Per-token rates render per million tokens.
     expect(out).toContain("200.00");
     expect(out).toContain("800.00");

@@ -592,9 +592,11 @@ describe("createModelService.getModelPaths", () => {
         baseUrl === "https://b.example/"
           ? nodePaths([{ path: PIN_FIREWORKS, model: priced(0.0004, 0.0005) }])
           : nodePaths([
-              { path: PIN_DEEPSEEK, model: priced(0.0002, 0.0015) },
-              // Cheaper than any pinned route, so a "cheapest wins" ranking
-              // would put a.example/ first — routing would not.
+              // Expensive on the warm basket: 100k*0.0005 + 2k*0.002 = 54
+              // sats, where b.example/'s pinned route costs 41.
+              { path: PIN_DEEPSEEK, model: priced(0.0005, 0.002) },
+              // Cheaper than any pinned route (10.2 sats), so a "cheapest
+              // wins" ranking would put a.example/ first — routing would not.
               { path: CHEAP_DECART, model: priced(0.0001, 0.0001) },
             ]),
     });
@@ -605,7 +607,9 @@ describe("createModelService.getModelPaths", () => {
       "https://b.example/",
       "https://a.example/",
     ]);
-    expect(output.nodes[1]!.rankCompletion).toBe(0.0015);
+    // The node's rank is the warm-basket cost of the route routing would use
+    // first — its pinned route — not of its cheapest one.
+    expect(output.nodes[1]!.rankCost).toBeCloseTo(54, 6);
     expect(output.nodes[1]!.rankedOnPin).toBe(true);
     expect(output.nodes[1]!.routes.map((route) => route.path)).toEqual([
       CHEAP_DECART,
@@ -680,7 +684,8 @@ describe("createModelService.getModelPaths", () => {
 
     expect(node.routes[0]!.pinned).toBe(false);
     expect(node.rankedOnPin).toBe(false);
-    expect(node.rankCompletion).toBe(0.0018);
+    // 100k*0.0005 + 2k*0.0018 = 53.6 sats for one warm request.
+    expect(node.rankCost).toBeCloseTo(53.6, 6);
   });
 
   it("reports nodes it could not cover instead of dropping them silently", async () => {
@@ -726,7 +731,7 @@ describe("createModelService.getModelPaths", () => {
 
     expect(node.routes[0]!.onCooldown).toBe(true);
     expect(node.routes[0]!.pinned).toBe(false);
-    expect(node.rankCompletion).toBeNull();
+    expect(node.rankCost).toBeNull();
     expect(node.rankedOnPin).toBe(false);
   });
 

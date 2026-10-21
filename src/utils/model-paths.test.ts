@@ -81,7 +81,7 @@ describe("rankModelPathNodes", () => {
       pricing: { prompt: 0.0005, completion: 0.0015, request: 0, max_cost: 0 },
     });
     const nodes = rankModelPathNodes([
-      { baseUrl: "https://a.example/", routes: [pinned, cheapest], rankCompletion: null, rankedOnPin: false },
+      { baseUrl: "https://a.example/", routes: [pinned, cheapest], rankCost: null, rankedOnPin: false },
       {
         baseUrl: "https://b.example/",
         routes: [
@@ -91,7 +91,7 @@ describe("rankModelPathNodes", () => {
             pricing: { prompt: 0.0002, completion: 0.0005, request: 0, max_cost: 0 },
           }),
         ],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
     ]);
@@ -100,9 +100,12 @@ describe("rankModelPathNodes", () => {
       "https://b.example/",
       "https://a.example/",
     ]);
-    expect(nodes[1]!.rankCompletion).toBe(0.0015);
+    // 100k prompt at a 90% cache hit + 2k completion; no cache rate is
+    // advertised here, so prompt bills the whole prompt: 100k*0.0005 +
+    // 2k*0.0015 = 53 sats.
+    expect(nodes[1]!.rankCost).toBeCloseTo(53, 6);
     expect(nodes[1]!.rankedOnPin).toBe(true);
-    // Routes inside a node are cheapest completion first, pinned or not.
+    // Routes inside a node are cheapest warm-request cost first, pinned or not.
     expect(nodes[1]!.routes.map((entry) => entry.path)).toEqual([
       "url=decart&model-id=m",
       "url=deepseek&model-id=m",
@@ -117,13 +120,14 @@ describe("rankModelPathNodes", () => {
           route({ path: "url=b", pricing: { prompt: 0, completion: 0.002, request: 0, max_cost: 0 } }),
           route({ path: "url=a", pricing: { prompt: 0, completion: 0.001, request: 0, max_cost: 0 } }),
         ],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
     ]);
 
     expect(nodes[0]!.routes.map((entry) => entry.path)).toEqual(["url=a", "url=b"]);
-    expect(nodes[0]!.rankCompletion).toBe(0.001);
+    // 2k completion tokens at 0.001 sats each; the prompt rate is 0.
+    expect(nodes[0]!.rankCost).toBeCloseTo(2, 6);
     expect(nodes[0]!.rankedOnPin).toBe(false);
   });
 
@@ -143,13 +147,13 @@ describe("rankModelPathNodes", () => {
             pricing: { prompt: 0, completion: 0.0009, request: 0, max_cost: 0 },
           }),
         ],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
       {
         baseUrl: "https://unpriced.example/",
         routes: [route({ path: "url=none", pricing: null, pricingSource: "none" })],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
       {
@@ -157,7 +161,7 @@ describe("rankModelPathNodes", () => {
         routes: [
           route({ path: "url=cheap", pricing: { prompt: 0, completion: 0.0005, request: 0, max_cost: 0 } }),
         ],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
     ]);
@@ -167,16 +171,146 @@ describe("rankModelPathNodes", () => {
       "https://cooled.example/",
       "https://unpriced.example/",
     ]);
-    expect(nodes[1]!.rankCompletion).toBe(0.0009);
+    expect(nodes[1]!.rankCost).toBeCloseTo(1.8, 6);
     expect(nodes[1]!.rankedOnPin).toBe(false);
-    expect(nodes[2]!.rankCompletion).toBeNull();
+    expect(nodes[2]!.rankCost).toBeNull();
+  });
+
+  it("ranks on what one warm request costs, not on the completion rate", () => {
+    // Identical prompt rates; b has the cheaper completion rate, a the much
+    // cheaper cache read. Routing prices 90% of the prompt at the cache rate,
+    // so a is the node a warm session would actually be billed less on:
+    // a = 10k*0.0002 + 90k*0.000004 + 2k*0.0008 = 3.96 sats
+    // b = 10k*0.0002 + 90k*0.00005  + 2k*0.0006 = 7.70 sats
+    const nodes = rankModelPathNodes([
+      {
+        baseUrl: "https://b.example/",
+        routes: [
+          route({
+            path: "url=b",
+            pricing: {
+              prompt: 0.0002,
+              completion: 0.0006,
+              request: 0,
+              max_cost: 0,
+              input_cache_read: 0.00005,
+            },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+      {
+        baseUrl: "https://a.example/",
+        routes: [
+          route({
+            path: "url=a",
+            pricing: {
+              prompt: 0.0002,
+              completion: 0.0008,
+              request: 0,
+              max_cost: 0,
+              input_cache_read: 0.000004,
+            },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+    ]);
+
+    expect(nodes.map((node) => node.baseUrl)).toEqual([
+      "https://a.example/",
+      "https://b.example/",
+    ]);
+    expect(nodes[0]!.rankCost).toBeCloseTo(3.96, 6);
+    expect(nodes[1]!.rankCost).toBeCloseTo(7.7, 6);
+  });
+
+  it("orders routes inside a node by warm-request cost", () => {
+    // The cheaper completion rate loses to the cheaper cache read + prompt.
+    const nodes = rankModelPathNodes([
+      {
+        baseUrl: "https://a.example/",
+        routes: [
+          route({
+            path: "url=cheap-output",
+            pricing: {
+              prompt: 0.0004,
+              completion: 0.0009,
+              request: 0,
+              max_cost: 0,
+              input_cache_read: 0.00002,
+            },
+          }),
+          route({
+            path: "url=cheap-cache",
+            pricing: {
+              prompt: 0.0001,
+              completion: 0.0012,
+              request: 0,
+              max_cost: 0,
+              input_cache_read: 0.000001,
+            },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+    ]);
+
+    expect(nodes[0]!.routes.map((entry) => entry.path)).toEqual([
+      "url=cheap-cache",
+      "url=cheap-output",
+    ]);
+    expect(nodes[0]!.routes[0]!.cost).toBeCloseTo(3.49, 6);
+    expect(nodes[0]!.routes[1]!.cost).toBeCloseTo(7.6, 6);
+  });
+
+  it("never ranks a route whose rates are not prices", () => {
+    const nodes = rankModelPathNodes([
+      {
+        baseUrl: "https://broken.example/",
+        routes: [
+          route({
+            path: "url=negative",
+            pricing: {
+              prompt: -0.001,
+              completion: 0.001,
+              request: 0,
+              max_cost: 0,
+            },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+      {
+        baseUrl: "https://fine.example/",
+        routes: [
+          route({
+            path: "url=fine",
+            pricing: { prompt: 0.001, completion: 0.001, request: 0, max_cost: 0 },
+          }),
+        ],
+        rankCost: null,
+        rankedOnPin: false,
+      },
+    ]);
+
+    expect(nodes.map((node) => node.baseUrl)).toEqual([
+      "https://fine.example/",
+      "https://broken.example/",
+    ]);
+    expect(nodes[1]!.routes[0]!.cost).toBeNull();
+    expect(nodes[1]!.rankCost).toBeNull();
   });
 
   it("breaks price ties by URL so the order is deterministic", () => {
     const price = { prompt: 0, completion: 0.001, request: 0, max_cost: 0 };
     const nodes = rankModelPathNodes([
-      { baseUrl: "https://b.example/", routes: [route({ pricing: price })], rankCompletion: null, rankedOnPin: false },
-      { baseUrl: "https://a.example/", routes: [route({ pricing: price })], rankCompletion: null, rankedOnPin: false },
+      { baseUrl: "https://b.example/", routes: [route({ pricing: price })], rankCost: null, rankedOnPin: false },
+      { baseUrl: "https://a.example/", routes: [route({ pricing: price })], rankCost: null, rankedOnPin: false },
     ]);
 
     expect(nodes.map((node) => node.baseUrl)).toEqual([
@@ -215,7 +349,7 @@ describe("formatModelPaths", () => {
             pricing: { prompt: 0.00045235, completion: 0.0018094, request: 0, max_cost: 0 },
           }),
         ],
-        rankCompletion: null,
+        rankCost: null,
         rankedOnPin: false,
       },
     ]),
@@ -230,18 +364,21 @@ describe("formatModelPaths", () => {
     expect(text).toContain("1 node, 2 advertised routes");
     expect(text).toContain("[pin] marks the first route the router pins");
     expect(text).toContain(
-      "   1. https://ai.redsh1ft.com/  2 routes  rank 752.70 sats/M completion (pinned route)",
+      "   1. https://ai.redsh1ft.com/  2 routes  rank 5.19 sats/request (pinned route)",
     );
-    // Route prices are sats per million tokens; the pinned route sorts first.
+    expect(text).toContain("cost = sats for the SDK's WARM_COST_BASKET");
+    // The sort key is the warm-basket cost of the route (5.19 / 48.85 sats),
+    // not its completion rate: the venice route is the pricier of the two on
+    // both, and the cache-less route pays prompt rate for all 100k tokens.
     expect(text).toContain(
-      "        188.20  752.70      20.00       100.00       1,000,000  openrouter.ai/api/v1 [deepseek]  [pin]",
+      "        5.19   188.20  752.70      20.00       100.00       1,000,000  openrouter.ai/api/v1 [deepseek]  [pin]",
     );
     // A route that advertises no cache rate shows "-": 0 / absent is "not
     // announced", not "free".
     expect(text).toContain(
-      "        452.35  1809.40     -           -            1,000,000  api.venice.ai/api/v1  [id deepseek-v4-1-flash]",
+      "        48.85  452.35  1809.40     -           -            1,000,000  api.venice.ai/api/v1  [id deepseek-v4-1-flash]",
     );
-    expect(text).toContain("cache read  cache write");
+    expect(text).toContain("cost   prompt  completion  cache read  cache write");
     expect(text).toContain("api.venice.ai/api/v1");
     // A route reachable only under a variant spelling says so.
     expect(text).toContain("[id deepseek-v4-1-flash]");

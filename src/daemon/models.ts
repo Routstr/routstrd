@@ -13,6 +13,8 @@ import {
   type MintDiscovery,
   type Model,
   type ModelProviderPrice,
+  type ModelSatsPricing,
+  WARM_COST_BASKET,
   type NodeModelPaths,
   type SdkStore,
 } from "@routstr/sdk";
@@ -26,6 +28,7 @@ import {
   type ModelPathRoute,
   type ModelPathSkipped,
   type ModelPathsOutput,
+  warmCost,
 } from "../utils/model-paths";
 import type { ModelProviderInfo } from "../utils/model-providers";
 
@@ -107,10 +110,15 @@ export function createModelService(
    * Build the same cheapest-per-model view as ModelManager.fetchModels, but
    * exclusively from the persisted cache. Model-list reads must not wait for
    * unavailable providers; explicit and scheduled refreshes own network I/O.
+   *
+   * "Cheapest" is the warm basket (`warmCost`), the key routing ranks on, so
+   * the catalog entry that describes a model is the one whose node routes
+   * would pick — not the node with the lowest completion rate, which a warm
+   * session never pays in full.
    */
   const getCachedModels = (): ExposedModel[] => {
     type PricedModel = ExposedModel & {
-      sats_pricing?: { completion?: number };
+      sats_pricing?: ModelSatsPricing;
     };
 
     const cachedByProvider = modelManager.getAllCachedModels();
@@ -146,11 +154,11 @@ export function createModelService(
         // mapped variant id or alias fold into one aggregate entry.
         const canonicalId = canonicalIdForModel(model as Model);
         const existing = bestById.get(canonicalId);
-        if (
-          !existing ||
-          (model.sats_pricing.completion ?? 0) <
-            (existing.sats_pricing?.completion ?? 0)
-        ) {
+        const cost = warmCost(model.sats_pricing) ?? Number.POSITIVE_INFINITY;
+        const existingCost = existing
+          ? warmCost(existing.sats_pricing) ?? Number.POSITIVE_INFINITY
+          : Number.POSITIVE_INFINITY;
+        if (!existing || cost < existingCost) {
           bestById.set(canonicalId, model);
         }
       }
@@ -301,12 +309,16 @@ export function createModelService(
       ].filter((url) => !manuallyEnabled.has(normalizeBaseUrl(url))),
     );
 
-    // Use the SDK ranking (sorted by what one request basket costs) so the
-    // display order matches real routing. includeDisabled keeps disabled
-    // providers visible so we can annotate them.
+    // Use the SDK ranking so the display order matches real routing, with the
+    // same basket routing prices (`WARM_COST_BASKET` in the SDK's
+    // resolveRequestContext); the SDK's default basket is the cold
+    // prompt+completion sum, which ranks differently once cache rates differ
+    // between nodes. includeDisabled keeps disabled providers visible so we
+    // can annotate them.
     const ranking: ModelProviderPrice[] =
       providerManager.getProviderPriceRankingForModel(modelId, {
         includeDisabled: true,
+        basket: WARM_COST_BASKET,
       });
 
     const providers: ModelProviderInfo[] = ranking.map((entry) => ({
@@ -570,7 +582,7 @@ export function createModelService(
           return;
         }
 
-        nodes.push({ baseUrl, routes, rankCompletion: null, rankedOnPin: false });
+        nodes.push({ baseUrl, routes, rankCost: null, rankedOnPin: false });
       }),
     );
 

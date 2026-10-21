@@ -2,9 +2,11 @@
  * Per-provider pricing of one model, and its table rendering for
  * `routstrd models -m <id>`.
  *
- * The daemon (`GET /models/:id/providers`) ranks nodes by what one routing
- * request costs (the SDK's warm basket), so the table keeps that order:
- * cheapest routing cost first, disabled nodes interleaved where they rank.
+ * The daemon (`GET /models/:id/providers`) ranks nodes with the SDK's
+ * `getProviderPriceRankingForModel` on `WARM_COST_BASKET` — what one warm
+ * request would cost, the basket routing picks providers on — so the table
+ * keeps that order: cheapest warm request first, disabled nodes interleaved
+ * where they rank.
  *
  * Rates travel as sats per token, the unit nodes advertise; the table renders
  * sats per million tokens, the unit routing prices are compared in. A cache
@@ -53,7 +55,7 @@ export interface ModelProviderInfo {
   pricing: ModelProviderPricing;
 }
 
-/** A model with the nodes that serve it, cheapest routing cost first. */
+/** A model with the nodes that serve it, cheapest warm request first. */
 export interface ModelWithProviders {
   id: string;
   name?: string;
@@ -151,8 +153,8 @@ export function formatModelProviders(model: ModelWithProviders): string {
   const enabled = model.providers.filter((provider) => !provider.disabled).length;
   lines.push(
     `  ${rows.length} provider${rows.length === 1 ? "" : "s"}, ` +
-      `${enabled} enabled, cheapest routing cost first`,
-    "  Prices in sats per million tokens",
+      `${enabled} enabled, cheapest warm request first`,
+    "  Rates in sats per million tokens",
     "",
   );
 

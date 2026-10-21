@@ -11,19 +11,31 @@
  * direct upstreams — and each route prices and fails independently. The
  * inventory is therefore per node *and* per route.
  *
- * Ranking mirrors the router (the SDK's `ProviderManager`):
+ * Ranking mirrors the router (the SDK's `ProviderManager`), which does not
+ * compare a single token class but what one request would be *billed*:
  *
- *  - a node's rank is the completion price of the route routing would use
- *    first: the node's preferred *whitelisted* route when the model's routes
- *    are whitelisted (the SDK's model-path whitelist), otherwise its cheapest
+ *  - every route is priced with the SDK's `estimateCost` against
+ *    `WARM_COST_BASKET` — the basket routing ranks on (100k prompt tokens at a
+ *    90% cache hit, 2k completion) — so a route's cache rate carries the 90% of
+ *    the prompt it mostly serves;
+ *  - inside a node, routes are listed cheapest cost first;
+ *  - a node's rank is that cost on the route routing would use first: the
+ *    node's preferred *whitelisted* route when the model's routes are
+ *    whitelisted (the SDK's model-path whitelist), otherwise its cheapest
  *    advertised route;
- *  - nodes are ordered by that price, cheapest first, nodes with no priced
- *    route last;
- *  - inside a node, routes are listed cheapest completion first.
+ *  - nodes are ordered by that cost, cheapest first, nodes with no priced
+ *    route last (ties broken by URL, like `getProviderPriceRankingForModel`).
  *
  * A route on cooldown is still listed (it is advertised, just skipped for now)
  * but never decides the node's rank.
  */
+
+import {
+  estimateCost,
+  hasUsableTokenRates,
+  WARM_COST_BASKET,
+  type ModelSatsPricing,
+} from "@routstr/sdk";
 
 /** Per-route pricing as advertised on `GET /v1/models/paths` (sats per token). */
 export interface ModelPathPricing {
@@ -72,16 +84,26 @@ export interface ModelPathRoute {
   onCooldown: boolean;
   /** The route the router would pin first on this node. */
   pinned: boolean;
+  /**
+   * Sats one warm request would cost on this route (the SDK's
+   * `WARM_COST_BASKET`, the basket routing ranks on), or null when the route
+   * publishes no price it could be billed at. Set by
+   * {@link rankModelPathNodes}; absent on routes built but not yet ranked.
+   */
+  cost?: number | null;
 }
 
 /** One node's advertised routes for a model. */
 export interface ModelPathNode {
   baseUrl: string;
-  /** Advertised routes, cheapest completion first. */
+  /** Advertised routes, cheapest warm-request cost first. */
   routes: ModelPathRoute[];
-  /** Ranking metric: completion sats/token of the route routing would use. */
-  rankCompletion: number | null;
-  /** True when {@link rankCompletion} comes from the pinned route. */
+  /**
+   * Ranking metric: sats one warm request would cost on the route routing
+   * would use first, or null when the node has no priced route off cooldown.
+   */
+  rankCost: number | null;
+  /** True when {@link rankCost} comes from the pinned route. */
   rankedOnPin: boolean;
 }
 
@@ -154,17 +176,43 @@ function priceOrInfinity(value: number | undefined): number {
     : Number.POSITIVE_INFINITY;
 }
 
-/** Completion price of a route, or null when the route is unpriced. */
-function completionOf(route: ModelPathRoute): number | null {
-  const value = route.pricing?.completion;
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+/**
+ * What one warm request would cost on a route, in sats — the SDK's
+ * `estimateCost` against `WARM_COST_BASKET`, the same function and basket
+ * `getProviderPriceRankingForModel` sorts routing on. Every price comparison
+ * in routstrd goes through this, so the model list, the provider table and the
+ * route inventory all rank on one key.
+ *
+ * Null when the route publishes rates that are not prices (NaN, ±inf,
+ * negative) or no pricing at all: such a route cannot be billed, so it must
+ * never win a comparison. The per-request fee is excluded from the total the
+ * SDK returns, which is right — a node bills token classes, not the request.
+ */
+export function warmCost(
+  pricing: Partial<ModelSatsPricing> | null | undefined,
+): number | null {
+  if (!hasUsableTokenRates(pricing)) return null;
+  const total = estimateCost(pricing, WARM_COST_BASKET).total;
+  return Number.isFinite(total) ? total : null;
 }
 
-/** Cheapest completion first; ties break deterministically (never by input order). */
+/** Cost of a route, or +Infinity when it has none (sorts last). */
+function costOrInfinity(route: ModelPathRoute): number {
+  const { cost } = route;
+  return typeof cost === "number" && Number.isFinite(cost)
+    ? cost
+    : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Cheapest warm-request cost first, then cheap prompt, then upstream/endpoint/
+ * path. The tiebreaks only order routes the basket prices identically, so they
+ * never contradict the ranking; they keep the output independent of input and
+ * cache order.
+ */
 function compareRoutes(a: ModelPathRoute, b: ModelPathRoute): number {
   return (
-    priceOrInfinity(a.pricing?.completion) -
-      priceOrInfinity(b.pricing?.completion) ||
+    costOrInfinity(a) - costOrInfinity(b) ||
     priceOrInfinity(a.pricing?.prompt) - priceOrInfinity(b.pricing?.prompt) ||
     a.upstream.localeCompare(b.upstream) ||
     (a.endpoint ?? "").localeCompare(b.endpoint ?? "") ||
@@ -173,35 +221,38 @@ function compareRoutes(a: ModelPathRoute, b: ModelPathRoute): number {
 }
 
 /**
- * Order the inventory the way the router does: routes cheapest-completion
- * first within each node, then nodes by their ranking metric, cheapest first,
- * and every node without a priced route last (ordered by URL).
+ * Order the inventory the way the router does: every route priced against the
+ * warm basket, routes cheapest cost first inside a node, then nodes by the
+ * cost of the route routing would use first, cheapest first, and every node
+ * without a priced route last (ordered by URL).
  *
  * Callers must resolve pricing (including the model-level fallback) and
  * per-route cooldowns before calling: a route on cooldown is shown but never
- * becomes the price its node is ranked on.
+ * becomes the cost its node is ranked on.
  */
 export function rankModelPathNodes(nodes: ModelPathNode[]): ModelPathNode[] {
   return nodes
     .map((node) => {
-      const routes = [...node.routes].sort(compareRoutes);
+      const routes = node.routes
+        .map((route) => ({ ...route, cost: warmCost(route.pricing) }))
+        .sort(compareRoutes);
+      const priced = (route: ModelPathRoute) =>
+        costOrInfinity(route) !== Number.POSITIVE_INFINITY;
       const pinned = routes.find(
-        (route) => route.pinned && !route.onCooldown && completionOf(route) !== null,
+        (route) => route.pinned && !route.onCooldown && priced(route),
       );
-      const cheapest = routes.find(
-        (route) => !route.onCooldown && completionOf(route) !== null,
-      );
+      const cheapest = routes.find((route) => !route.onCooldown && priced(route));
       const ranked = pinned ?? cheapest;
       return {
         ...node,
         routes,
-        rankCompletion: ranked ? completionOf(ranked) : null,
+        rankCost: ranked ? ranked.cost ?? null : null,
         rankedOnPin: ranked !== undefined && ranked === pinned,
       };
     })
     .sort((a, b) => {
-      const left = a.rankCompletion ?? Number.POSITIVE_INFINITY;
-      const right = b.rankCompletion ?? Number.POSITIVE_INFINITY;
+      const left = a.rankCost ?? Number.POSITIVE_INFINITY;
+      const right = b.rankCost ?? Number.POSITIVE_INFINITY;
       return left - right || a.baseUrl.localeCompare(b.baseUrl);
     });
 }
@@ -224,6 +275,7 @@ function upstreamLabel(route: ModelPathRoute): string {
 }
 
 interface RouteRow {
+  cost: string;
   prompt: string;
   completion: string;
   cacheRead: string;
@@ -248,6 +300,12 @@ function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
     tags.push(`id ${route.modelId}`);
   }
   return {
+    // The sort key, in sats for one warm request: the rate columns below are
+    // per million tokens, so the ordering is not readable off them alone.
+    cost:
+      typeof route.cost === "number" && Number.isFinite(route.cost)
+        ? route.cost.toFixed(2)
+        : "-",
     prompt: route.pricing ? satsPerMillion(route.pricing.prompt) : "-",
     completion: route.pricing ? satsPerMillion(route.pricing.completion) : "-",
     cacheRead: cacheRate(route.pricing?.input_cache_read),
@@ -261,17 +319,18 @@ function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
 /** One node block: a rank header plus its route table. */
 function renderNode(node: ModelPathNode, rank: number, requestedId: string): string[] {
   const metric =
-    node.rankCompletion === null
+    node.rankCost === null
       ? node.routes.some((route) => route.onCooldown)
         ? "rank unavailable (no priced route off cooldown)"
         : "rank unavailable (no priced route)"
-      : `rank ${satsPerMillion(node.rankCompletion)} sats/M completion ${
+      : `rank ${node.rankCost.toFixed(2)} sats/request ${
           node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
         }`;
   const routes = node.routes.map((route) => toRow(route, requestedId));
 
   const width = (select: (row: RouteRow) => string, header: string) =>
     Math.max(header.length, ...routes.map((row) => select(row).length));
+  const costWidth = width((row) => row.cost, "cost");
   const promptWidth = width((row) => row.prompt, "prompt");
   const completionWidth = width((row) => row.completion, "completion");
   const cacheReadWidth = width((row) => row.cacheRead, "cache read");
@@ -284,10 +343,11 @@ function renderNode(node: ModelPathNode, rank: number, requestedId: string): str
       node.routes.length === 1 ? "" : "s"
     }  ${metric}`,
     "",
-    `        ${"prompt".padEnd(promptWidth)}  ${"completion".padEnd(completionWidth)}  ${"cache read".padEnd(cacheReadWidth)}  ${"cache write".padEnd(cacheWriteWidth)}  ${"ctx".padEnd(ctxWidth)}  upstream`,
+    `        ${"cost".padEnd(costWidth)}  ${"prompt".padEnd(promptWidth)}  ${"completion".padEnd(completionWidth)}  ${"cache read".padEnd(cacheReadWidth)}  ${"cache write".padEnd(cacheWriteWidth)}  ${"ctx".padEnd(ctxWidth)}  upstream`,
   ];
   for (const row of routes) {
     const cells = [
+      row.cost.padEnd(costWidth),
       row.prompt.padEnd(promptWidth),
       row.completion.padEnd(completionWidth),
       row.cacheRead.padEnd(cacheReadWidth),
@@ -320,13 +380,16 @@ export function formatModelPaths(output: ModelPathsOutput): string {
       `  ${output.nodes.length} node${output.nodes.length === 1 ? "" : "s"}, ${routeCount} advertised route${
         routeCount === 1 ? "" : "s"
       }, ranked like the router:`,
-      "  nodes by the completion price (sats/M tokens) of the route routing would use first",
+      "  nodes by what one warm request would cost on the route routing would use first",
       hasPin
         ? "  (the [pin] route when the node advertises one, else its cheapest route); nodes with"
         : "  (the node's cheapest advertised route); nodes with",
-      "  no priced route come last, and routes are cheapest completion first inside a node.",
-      "  Prices are sats per million tokens; a \"-\" cache cell means the node advertises no",
-      "  cache rate there, so those tokens bill at the prompt rate.",
+      "  no priced route come last, and routes are cheapest cost first inside a node.",
+      "  cost = sats for the SDK's WARM_COST_BASKET (100k prompt tokens at a 90% cache hit,",
+      "  2k completion) — the basket getProviderPriceRankingForModel ranks routing on. The",
+      "  prompt/completion/cache columns are sats per million tokens.",
+      "  A \"-\" cache cell means the node advertises no cache rate there, so those tokens",
+      "  bill at the prompt rate.",
     );
     if (hasPin) {
       lines.push(
