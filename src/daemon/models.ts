@@ -27,17 +27,9 @@ import {
   type ModelPathSkipped,
   type ModelPathsOutput,
 } from "../utils/model-paths";
+import type { ModelProviderInfo } from "../utils/model-providers";
 
-export type ModelProviderInfo = {
-  baseUrl: string;
-  disabled: boolean;
-  pricing: {
-    prompt: number;
-    completion: number;
-    request: number;
-    max_cost: number;
-  };
-};
+export type { ModelProviderInfo } from "../utils/model-providers";
 
 export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
@@ -330,6 +322,15 @@ export function createModelService(
         completion: entry.rates.completion,
         request: entry.rates.request,
         max_cost: entry.model.sats_pricing?.max_cost ?? 0,
+        // The cache rates carry the SDK's provenance: a rate it filled in
+        // from the prompt rate is not a price the node offered, and callers
+        // must not present it as one.
+        cache: {
+          read: entry.rates.cacheRead,
+          write: entry.rates.cacheWrite,
+          readAdvertised: entry.rates.cacheReadSource === "advertised",
+          writeAdvertised: entry.rates.cacheWriteSource === "advertised",
+        },
       },
     }));
 
@@ -441,6 +442,11 @@ export function createModelService(
                 completion: pricing.completion ?? 0,
                 request: pricing.request ?? 0,
                 max_cost: pricing.max_cost ?? 0,
+                // Cache rates as advertised per route: 0 when the node
+                // announces none, which the table renders as "-" (such
+                // tokens bill at the prompt rate, they are not free).
+                input_cache_read: pricing.input_cache_read ?? 0,
+                input_cache_write: pricing.input_cache_write ?? 0,
               }
             : null,
           pricingSource,

@@ -31,6 +31,15 @@ export interface ModelPathPricing {
   completion: number;
   request: number;
   max_cost: number;
+  /**
+   * Sats per prompt token served from the upstream cache. `0` (or absent)
+   * means the node announced no cache rate, which is not "free": an unusable
+   * cache rate bills at the prompt rate, so the table renders `-` rather than
+   * claiming a discount the node never offered.
+   */
+  input_cache_read?: number;
+  /** Sats per prompt token written into the upstream cache; `0` = not announced. */
+  input_cache_write?: number;
 }
 
 /**
@@ -217,9 +226,16 @@ function upstreamLabel(route: ModelPathRoute): string {
 interface RouteRow {
   prompt: string;
   completion: string;
+  cacheRead: string;
+  cacheWrite: string;
   ctx: string;
   upstream: string;
   tags: string[];
+}
+
+/** A cache rate, or `-` when the node announced none (`0` means unpriced, not free). */
+function cacheRate(perToken: number | undefined): string {
+  return perToken ? satsPerMillion(perToken) : "-";
 }
 
 function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
@@ -234,6 +250,8 @@ function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
   return {
     prompt: route.pricing ? satsPerMillion(route.pricing.prompt) : "-",
     completion: route.pricing ? satsPerMillion(route.pricing.completion) : "-",
+    cacheRead: cacheRate(route.pricing?.input_cache_read),
+    cacheWrite: cacheRate(route.pricing?.input_cache_write),
     ctx: route.contextLength === null ? "-" : route.contextLength.toLocaleString(),
     upstream: upstreamLabel(route),
     tags,
@@ -256,6 +274,8 @@ function renderNode(node: ModelPathNode, rank: number, requestedId: string): str
     Math.max(header.length, ...routes.map((row) => select(row).length));
   const promptWidth = width((row) => row.prompt, "prompt");
   const completionWidth = width((row) => row.completion, "completion");
+  const cacheReadWidth = width((row) => row.cacheRead, "cache read");
+  const cacheWriteWidth = width((row) => row.cacheWrite, "cache write");
   const ctxWidth = width((row) => row.ctx, "ctx");
   const upstreamWidth = width((row) => row.upstream, "upstream");
 
@@ -264,12 +284,14 @@ function renderNode(node: ModelPathNode, rank: number, requestedId: string): str
       node.routes.length === 1 ? "" : "s"
     }  ${metric}`,
     "",
-    `        ${"prompt".padEnd(promptWidth)}  ${"completion".padEnd(completionWidth)}  ${"ctx".padEnd(ctxWidth)}  upstream`,
+    `        ${"prompt".padEnd(promptWidth)}  ${"completion".padEnd(completionWidth)}  ${"cache read".padEnd(cacheReadWidth)}  ${"cache write".padEnd(cacheWriteWidth)}  ${"ctx".padEnd(ctxWidth)}  upstream`,
   ];
   for (const row of routes) {
     const cells = [
       row.prompt.padEnd(promptWidth),
       row.completion.padEnd(completionWidth),
+      row.cacheRead.padEnd(cacheReadWidth),
+      row.cacheWrite.padEnd(cacheWriteWidth),
       row.ctx.padEnd(ctxWidth),
       row.upstream.padEnd(upstreamWidth),
     ];
@@ -303,6 +325,8 @@ export function formatModelPaths(output: ModelPathsOutput): string {
         ? "  (the [pin] route when the node advertises one, else its cheapest route); nodes with"
         : "  (the node's cheapest advertised route); nodes with",
       "  no priced route come last, and routes are cheapest completion first inside a node.",
+      "  Prices are sats per million tokens; a \"-\" cache cell means the node advertises no",
+      "  cache rate there, so those tokens bill at the prompt rate.",
     );
     if (hasPin) {
       lines.push(

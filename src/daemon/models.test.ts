@@ -520,7 +520,14 @@ describe("createModelService.getModelPaths", () => {
     name: "DeepSeek V4.1 Flash",
     description: "flashy",
     context_length: 1_000_000,
-    sats_pricing: { prompt: 0.0002, completion: 0.0008, request: 0, max_cost: 0 },
+    sats_pricing: {
+      prompt: 0.0002,
+      completion: 0.0008,
+      request: 0,
+      max_cost: 0,
+      input_cache_read: 0.00002,
+      input_cache_write: 0,
+    },
     ...overrides,
   });
 
@@ -625,6 +632,10 @@ describe("createModelService.getModelPaths", () => {
       completion: 0.0008,
       request: 0,
       max_cost: 0,
+      // The fallback carries the node's advertised cache rates too; a rate it
+      // did not announce stays 0 (rendered as "-"), never a fake discount.
+      input_cache_read: 0.00002,
+      input_cache_write: 0,
     });
     expect(route.contextLength).toBe(1_000_000);
     expect(route.pinned).toBe(true);
@@ -726,5 +737,133 @@ describe("createModelService.getModelPaths", () => {
     });
 
     expect(await service.getModelPaths(MODEL_ID)).toBeNull();
+  });
+});
+
+/**
+ * `GET /models/:id/providers` is the CLI's pricing table, so it must carry the
+ * rates the router ranks on *and* say where each cache rate came from: the SDK
+ * fills a cache rate the node never announced with the prompt rate, and a
+ * display that presents that fill as a cache price claims a discount the node
+ * does not offer.
+ */
+describe("createModelService.getModelProviders", () => {
+  const MODEL_ID = "deepseek-v4.1-flash-1017";
+
+  const catalogModel = () => ({
+    id: MODEL_ID,
+    name: "DeepSeek V4.1 Flash 1017",
+    description: "deepseek via ccm",
+    context_length: 1_048_576,
+    sats_pricing: { prompt: 0.0002, completion: 0.0008, max_cost: 446 },
+  });
+
+  const entry = (
+    baseUrl: string,
+    rates: {
+      prompt?: number;
+      completion?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+      cacheReadSource?: "advertised" | "prompt";
+      cacheWriteSource?: "advertised" | "prompt";
+    },
+  ) => ({
+    baseUrl,
+    model: catalogModel(),
+    cost: 1,
+    rates: {
+      prompt: rates.prompt ?? 0.0002,
+      completion: rates.completion ?? 0.0008,
+      request: 0.001,
+      cacheRead: rates.cacheRead ?? 0.0002,
+      cacheWrite: rates.cacheWrite ?? 0.0002,
+      cacheReadSource: rates.cacheReadSource ?? "prompt",
+      cacheWriteSource: rates.cacheWriteSource ?? "prompt",
+    },
+    breakdown: {},
+    basket: {},
+  });
+
+  function makeService(ranking: unknown[], disabled: string[] = []) {
+    const state: Record<string, unknown> = {
+      baseUrlsList: ranking.map((e) => (e as { baseUrl: string }).baseUrl),
+      setBaseUrlsList: () => {},
+      disabledProviders: disabled,
+      setDisabledProviders: () => {},
+      manuallyDisabledProviders: [],
+      manuallyEnabledProviders: [],
+    };
+    return createModelService(
+      {
+        bootstrapProviders: async () => state.baseUrlsList,
+        syncReviewedProvidersFromNostr: async () => null,
+        getAllCachedModels: () => ({ "https://a.example/": [catalogModel()] }),
+        getBaseUrls: () => ["https://a.example/"],
+        getModelIdMappings: () => ({}),
+      } as never,
+      { getProviderPriceRankingForModel: () => ranking } as never,
+      { getState: () => state } as never,
+    );
+  }
+
+  it("exposes the SDK rates with cache provenance and the store's disabled flag", async () => {
+    const service = makeService(
+      [
+        entry("https://a.example/", {
+          prompt: 0.0003,
+          completion: 0.0009,
+          cacheRead: 0.00005,
+          cacheReadSource: "advertised",
+        }),
+        entry("https://b.example/", { cacheRead: 0.0002 }),
+      ],
+      ["https://b.example/"],
+    );
+
+    const output = await service.getModelProviders(MODEL_ID);
+
+    expect(output?.id).toBe(MODEL_ID);
+    expect(output?.name).toBe("DeepSeek V4.1 Flash 1017");
+    expect(output?.providers).toEqual([
+      {
+        baseUrl: "https://a.example/",
+        disabled: false,
+        pricing: {
+          prompt: 0.0003,
+          completion: 0.0009,
+          request: 0.001,
+          max_cost: 446,
+          cache: {
+            read: 0.00005,
+            write: 0.0002,
+            readAdvertised: true,
+            writeAdvertised: false,
+          },
+        },
+      },
+      {
+        baseUrl: "https://b.example/",
+        disabled: true,
+        pricing: {
+          prompt: 0.0002,
+          completion: 0.0008,
+          request: 0.001,
+          max_cost: 446,
+          cache: {
+            // The SDK filled this from the prompt rate; it must not read as
+            // an advertised cache price.
+            read: 0.0002,
+            write: 0.0002,
+            readAdvertised: false,
+            writeAdvertised: false,
+          },
+        },
+      },
+    ]);
+  });
+
+  it("returns null when no node serves the model", async () => {
+    expect(await makeService([]).getModelProviders(MODEL_ID)).toBeNull();
   });
 });

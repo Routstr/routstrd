@@ -23,6 +23,10 @@ import {
   formatModelPaths,
   type ModelPathsOutput,
 } from "./utils/model-paths";
+import {
+  formatModelProviders,
+  type ModelWithProviders,
+} from "./utils/model-providers";
 import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
@@ -1174,24 +1178,7 @@ program
         if (!options.paths) process.exit(1);
       }
 
-      const modelData = result.output as
-        | {
-            id: string;
-            name?: string;
-            description?: string;
-            context_length?: number;
-            providers: Array<{
-              baseUrl: string;
-              disabled?: boolean;
-              pricing: {
-                prompt: number;
-                completion: number;
-                request: number;
-                max_cost: number;
-              };
-            }>;
-          }
-        | undefined;
+      const modelData = result.output as ModelWithProviders | undefined;
 
       if (!modelData) {
         if (!result.error) console.log("Model not found");
@@ -1199,33 +1186,11 @@ program
       }
 
       if (modelData) {
-        console.log(`\n${modelData.name || modelData.id}`);
-        if (modelData.description) {
-          console.log(`  ${modelData.description}`);
-        }
-        if (modelData.context_length) {
-          console.log(
-            `  Context: ${modelData.context_length.toLocaleString()} tokens`,
-          );
-        }
-        console.log(`\n  Providers (${modelData.providers.length}):`);
-        for (const provider of modelData.providers) {
-          console.log(
-            `\n    ${provider.baseUrl}${provider.disabled ? "  [Disabled]" : ""}`,
-          );
-          console.log(
-            `      Prompt:     ${(provider.pricing.prompt * 1000000).toFixed(2)} sats/M tokens`,
-          );
-          console.log(
-            `      Completion: ${(provider.pricing.completion * 1000000).toFixed(2)} sats/M tokens`,
-          );
-          console.log(
-            `      Request:    ${provider.pricing.request.toFixed(2)} sats`,
-          );
-          console.log(
-            `      Max cost:   ${provider.pricing.max_cost.toFixed(2)} sats`,
-          );
-        }
+        // One table, ordered the way the router ranks the nodes (see
+        // utils/model-providers); the model-path inventory follows under
+        // --paths.
+        console.log("");
+        console.log(formatModelProviders(modelData));
         console.log("");
       }
 

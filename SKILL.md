@@ -103,13 +103,25 @@ List available routstr21 models (discovered via Nostr).
 | `-m, --model <id>` | Show the providers serving a specific model |
 | `-p, --paths` | With `--model`: also list the model-path inventory (see below). Requires `--model` |
 
+`--model` prints one table of the nodes serving that model, in the order the
+router ranks them (cheapest routing cost first), one row per node: its base
+URL, the prompt price, the completion price, the cache read and cache write
+prices, and `✓`/`✗` for enabled/disabled. Prices are sats per million tokens;
+a `-` cache cell means the node advertises no cache rate, so cache tokens bill
+at the prompt rate. A very long node URL is elided in the middle rather than
+widening the table. The per-request fee and max cost are not shown: they size
+the deposit, they are not billed.
+
 `--paths` shows every upstream route the enabled nodes advertise for that
 model, one block per node, ranked like the router: nodes by the completion
 price of the route the router would use first — the pinned route (`[pin]`, the
 SDK's model-path whitelist order, which governs its auto-pinned
 `deepseek-v4.1-flash`) when the node advertises one, otherwise its cheapest
 route — and routes cheapest completion first inside each node.
-Prices are sats per million tokens. Routes are shown with the upstream they
+Prices are sats per million tokens. Each route row shows its prompt,
+completion, cache read and cache write prices (a `-` cache cell means the node
+advertises no cache rate there, so those tokens bill at the prompt rate) and
+the route's context length. Routes are shown with the upstream they
 reach (`openrouter.ai/api/v1 [deepseek]`), tagged `[cooldown]` when routing is
 currently skipping them, `[model price]` when the node advertises no per-route
 pricing, and `[id <spelling>]` when the route is only reachable by requesting

@@ -199,7 +199,14 @@ describe("formatModelPaths", () => {
             upstream: "https://openrouter.ai/api/v1",
             endpoint: "deepseek",
             pinned: true,
-            pricing: { prompt: 0.0001882, completion: 0.0007527, request: 0, max_cost: 0 },
+            pricing: {
+              prompt: 0.0001882,
+              completion: 0.0007527,
+              request: 0,
+              max_cost: 0,
+              input_cache_read: 0.00002,
+              input_cache_write: 0.0001,
+            },
           }),
           route({
             path: "url=https%3A%2F%2Fapi.venice.ai%2Fapi%2Fv1&model-id=deepseek-v4-1-flash",
@@ -226,7 +233,15 @@ describe("formatModelPaths", () => {
       "   1. https://ai.redsh1ft.com/  2 routes  rank 752.70 sats/M completion (pinned route)",
     );
     // Route prices are sats per million tokens; the pinned route sorts first.
-    expect(text).toContain("        188.20  752.70      1,000,000  openrouter.ai/api/v1 [deepseek]  [pin]");
+    expect(text).toContain(
+      "        188.20  752.70      20.00       100.00       1,000,000  openrouter.ai/api/v1 [deepseek]  [pin]",
+    );
+    // A route that advertises no cache rate shows "-": 0 / absent is "not
+    // announced", not "free".
+    expect(text).toContain(
+      "        452.35  1809.40     -           -            1,000,000  api.venice.ai/api/v1  [id deepseek-v4-1-flash]",
+    );
+    expect(text).toContain("cache read  cache write");
     expect(text).toContain("api.venice.ai/api/v1");
     // A route reachable only under a variant spelling says so.
     expect(text).toContain("[id deepseek-v4-1-flash]");
