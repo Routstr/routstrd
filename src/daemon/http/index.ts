@@ -166,14 +166,29 @@ function normalizeProviderBaseUrl(url: string): string {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-/** The keys of the provider announcements (kind 38421) for `baseUrl`, from
- *  the SDK's provider index (same evidence and trust gates as discovery). */
-async function announcedNodePubkeys(
-  deps: { modelManager: { getProviderReviewIndex(): Promise<{ providerNodes: Map<string, Set<string>> }> } },
+/** The keys of the provider announcements (kind 38421) for `baseUrl` that
+ *  carry a positive review, from the SDK's provider index (same evidence and
+ *  trust gates as discovery). Anyone can announce any URL, so an announcement
+ *  alone does not make its key a pin: only a key whose latest review label
+ *  is one the daemon enables. */
+export async function announcedNodePubkeys(
+  deps: {
+    modelManager: {
+      getProviderReviewIndex(): Promise<{
+        providerNodes: Map<string, Set<string>>;
+        latestLabelByNode: Map<string, string>;
+      }>;
+      getEnabledReviewLabels(): string[];
+    };
+  },
   baseUrl: string,
 ): Promise<string[]> {
-  const { providerNodes } = await deps.modelManager.getProviderReviewIndex();
-  return [...(providerNodes.get(normalizeProviderBaseUrl(baseUrl)) ?? [])];
+  const { providerNodes, latestLabelByNode } = await deps.modelManager.getProviderReviewIndex();
+  const enabled = new Set(deps.modelManager.getEnabledReviewLabels());
+  return [...(providerNodes.get(normalizeProviderBaseUrl(baseUrl)) ?? [])].filter((pubkey) => {
+    const label = latestLabelByNode.get(pubkey);
+    return label !== undefined && enabled.has(label);
+  });
 }
 
 /** Read a tag value by name from a Nostr event's tag array. */
