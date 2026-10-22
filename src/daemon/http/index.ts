@@ -22,6 +22,7 @@ import {
 } from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
 import { getClientsFromStore } from "../../utils/clients";
+import { encodeRecoveryEvent } from "../../utils/recovery-stream";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
@@ -221,6 +222,61 @@ async function respond(
     sendJson(res, 200, await getPayload());
   } catch (error) {
     respondWithError(res, error);
+  }
+}
+
+/**
+ * Stream a NUT-09 mint restore as NDJSON.
+ *
+ * Progress is written as it happens so a long restore does not sit behind an
+ * unflushed response, and the stream always ends with an explicit result event
+ * so clients can tell a finished run from a truncated one. Failures after the
+ * status line is sent are reported in-band as that result event.
+ */
+export async function streamMintRecovery(
+  res: ServerResponse,
+  walletClient: WalletClient,
+  mintUrl: string,
+): Promise<void> {
+  const recoverMint = walletClient.recoverMint?.bind(walletClient);
+  if (!recoverMint) {
+    respondWithError(
+      res,
+      new WalletHttpError(
+        501,
+        "Mint proof recovery is not supported by this wallet client.",
+      ),
+    );
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  // A client that walks away (Ctrl-C, dropped connection) must not turn a
+  // heartbeat write into an unhandled stream error, and the restore itself
+  // keeps running so recovery is never interrupted by a disconnect.
+  res.once("error", () => {});
+  const writeEvent = (event: string): void => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(event);
+  };
+  try {
+    const message = await recoverMint(mintUrl, (line) => {
+      writeEvent(encodeRecoveryEvent({ type: "progress", message: line }));
+    });
+    writeEvent(encodeRecoveryEvent({ type: "result", ok: true, message }));
+  } catch (error) {
+    writeEvent(
+      encodeRecoveryEvent({
+        type: "result",
+        ok: false,
+        error: toErrorMessage(error),
+      }),
+    );
+  } finally {
+    if (!res.writableEnded) res.end();
   }
 }
 
@@ -595,6 +651,20 @@ export function createDaemonRequestHandler(deps: {
         });
         return { output: result };
       });
+      return;
+    }
+
+    // Re-derive a mint's proofs from its NUT-09 restore endpoint. Progress and
+    // the terminal result are streamed as NDJSON so clients can show live
+    // status and detect a truncated run.
+    if (req.method === "POST" && url.pathname === "/wallet/recover/mint") {
+      try {
+        const body = await readJsonBody(req);
+        const mintUrl = getRequiredStringField(body, "url");
+        await streamMintRecovery(res, deps.walletClient, mintUrl);
+      } catch (error) {
+        respondWithError(res, error);
+      }
       return;
     }
 

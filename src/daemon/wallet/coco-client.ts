@@ -7,9 +7,9 @@ import {
   normalizeMintUrl,
 } from "@cashu/coco-core";
 import type {
+  CoreProof,
   HistoryEntry,
   ReceiveOperation,
-  CoreProof,
   Logger as CocoLogger,
   Plugin as CocoPlugin,
 } from "@cashu/coco-core";
@@ -85,6 +85,7 @@ import {
   walletPidPath as defaultWalletPidPath,
 } from "./paths";
 import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
+import { MintRestoreGate } from "./mint-restore-gate";
 
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
@@ -1853,6 +1854,330 @@ export async function runWalletRecovery(
   }
 }
 
+/**
+ * coco-core's `WalletRestoreService.restoreKeyset()` writes the restored
+ * proofs without first removing the proofs already stored for that keyset.
+ * The sqlite repository rejects duplicate secrets, so `wallet.restore()`
+ * fails with "Proof with secret already exists" for any mint that already has
+ * local proofs — which is always the case for the mint we are recovering.
+ * See: coco-core 1.0.1 `restoreKeyset()` -> `proofService.saveProofs()`.
+ *
+ * We therefore drive the per-keyset restore ourselves so that:
+ *   - the keyset's proofs are wiped before the restored batch is written, and
+ *   - the pre-restore proofs are put back if the mint hands back fewer proofs
+ *     than were already stored, so a partial NUT-09 response cannot destroy
+ *     local state. NUT-09 returns the full counter range for a keyset, so a
+ *     smaller response means the restore is incomplete, not that proofs were
+ *     legitimately spent (spent proofs still come back from the mint).
+ *
+ * These services are private on coco's `Manager` type; routstrd already
+ * bridges coco privates this way for send recovery and startup cleanup. The
+ * availability check below fails closed if a coco bump renames them.
+ */
+type MintRestoreInternals = {
+  proofService: {
+    /** Ready proofs only — the repository filters out spent/inflight rows. */
+    getProofsByKeysetId(
+      mintUrl: string,
+      keysetId: string,
+    ): Promise<CoreProof[]>;
+    wipeProofsByKeysetId(mintUrl: string, keysetId: string): Promise<void>;
+    saveProofs(mintUrl: string, proofs: CoreProof[]): Promise<void>;
+  };
+  /** `ProofService` has no inflight accessor; the repository behind it does. */
+  proofRepository: {
+    getInflightProofs(mintUrls?: string[]): Promise<CoreProof[]>;
+  };
+  walletService: {
+    getWalletWithActiveKeysetId(mintUrl: string): Promise<{ wallet: unknown }>;
+  };
+  walletRestoreService: {
+    restoreKeyset(
+      mintUrl: string,
+      wallet: unknown,
+      keysetId: string,
+    ): Promise<void>;
+  };
+};
+
+function mintRestoreInternals(coco: Manager): MintRestoreInternals {
+  const internals = coco as unknown as Partial<MintRestoreInternals>;
+  const missing = [
+    typeof internals.proofService?.getProofsByKeysetId === "function"
+      ? null
+      : "proofService.getProofsByKeysetId",
+    typeof internals.proofService?.wipeProofsByKeysetId === "function"
+      ? null
+      : "proofService.wipeProofsByKeysetId",
+    typeof internals.proofService?.saveProofs === "function"
+      ? null
+      : "proofService.saveProofs",
+    typeof internals.proofRepository?.getInflightProofs === "function"
+      ? null
+      : "proofRepository.getInflightProofs",
+    typeof internals.walletService?.getWalletWithActiveKeysetId === "function"
+      ? null
+      : "walletService.getWalletWithActiveKeysetId",
+    typeof internals.walletRestoreService?.restoreKeyset === "function"
+      ? null
+      : "walletRestoreService.restoreKeyset",
+  ].filter((name): name is string => name !== null);
+  if (missing.length > 0) {
+    throw new Error(
+      `coco mint-restore internals are unavailable (${missing.join(", ")}); refusing to run proof recovery`,
+    );
+  }
+  return internals as MintRestoreInternals;
+}
+
+type KeysetRestoreOutcome = {
+  /** Unspent proofs stored for the keyset after the restore. */
+  stored: number;
+  /** Spendable value of those proofs, in sat. */
+  storedAmount: number;
+  /** Proofs stored for the keyset before the restore. */
+  before: number;
+};
+
+/** Flatten an error's cause chain, including nested AggregateErrors. */
+export function describeRestoreError(error: unknown): string {
+  const seen = new Set<unknown>();
+  const collect = (current: unknown, out: string[]): void => {
+    if (current === undefined || current === null) return;
+    if (seen.has(current)) return;
+    seen.add(current);
+    if (current instanceof AggregateError) {
+      for (const inner of current.errors) collect(inner, out);
+      return;
+    }
+    const message = current instanceof Error ? current.message : String(current);
+    if (message && !out.includes(message)) out.push(message);
+    if (current instanceof Error) collect(current.cause, out);
+  };
+  const parts: string[] = [];
+  collect(error, parts);
+  return parts.join(" — ") || "unknown error";
+}
+
+/**
+ * Proofs worth keeping if the restore does not complete: everything the wallet
+ * could still spend. Spent rows are dropped by the wipe and not restored —
+ * they hold no value, and a completed restore re-derives them from the mint.
+ *
+ * `getProofsByKeysetId()` only returns ready proofs, so inflight proofs (which
+ * also hold value and whose secrets would collide on save) are collected
+ * separately.
+ */
+async function snapshotKeysetProofs(
+  internals: MintRestoreInternals,
+  mintUrl: string,
+  keysetId: string,
+): Promise<CoreProof[]> {
+  const ready = await internals.proofService.getProofsByKeysetId(
+    mintUrl,
+    keysetId,
+  );
+  const inflight = (
+    await internals.proofRepository.getInflightProofs([mintUrl])
+  ).filter((proof) => proof.id === keysetId);
+  return [...ready, ...inflight];
+}
+
+/** How often a long keyset restore reports that it is still alive. */
+const RESTORE_HEARTBEAT_MS = 30_000;
+
+async function restoreKeysetWithWipe(
+  internals: MintRestoreInternals,
+  mintUrl: string,
+  wallet: unknown,
+  keysetId: string,
+  snapshot: CoreProof[],
+  onProgress?: (message: string) => void,
+): Promise<KeysetRestoreOutcome> {
+  // The wipe must be unconditional. Saving a restored proof whose secret is
+  // already stored throws ("Proof with secret already exists"), and the
+  // duplicate check spans every state — so leaving spent or inflight rows
+  // behind fails the keyset exactly like leaving ready rows would.
+  await internals.proofService.wipeProofsByKeysetId(mintUrl, keysetId);
+
+  // coco restores a keyset in one opaque call: mints rate-limit the NUT-09
+  // batches, so a keyset with thousands of proofs can take many minutes
+  // without producing a single event. Emit a heartbeat so the operator (and
+  // the client's stall detector) can tell that from a wedge.
+  const startedAt = Date.now();
+  const heartbeat = onProgress
+    ? setInterval(() => {
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        onProgress(`Keyset ${keysetId}: still restoring (${elapsed}s)…`);
+      }, RESTORE_HEARTBEAT_MS)
+    : undefined;
+
+  try {
+    await internals.walletRestoreService.restoreKeyset(
+      mintUrl,
+      wallet,
+      keysetId,
+    );
+  } catch (error) {
+    // A restore that failed partway is the only case where local data can be
+    // lost: coco persists just the unspent proofs, so whatever the wipe
+    // removed is gone unless we put the snapshot back. A *successful* restore
+    // is never second-guessed — the mint is authoritative about its own
+    // proofs, and it legitimately persists zero when everything is spent.
+    await internals.proofService.wipeProofsByKeysetId(mintUrl, keysetId);
+    if (snapshot.length > 0) {
+      await internals.proofService.saveProofs(mintUrl, snapshot);
+    }
+    throw error;
+  } finally {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+  }
+
+  const after = await internals.proofService.getProofsByKeysetId(
+    mintUrl,
+    keysetId,
+  );
+  return {
+    stored: after.length,
+    storedAmount: after.reduce((sum, proof) => sum + proof.amount, 0),
+    before: snapshot.length,
+  };
+}
+
+/**
+ * Re-derive a mint's proofs from its NUT-09 restore endpoint.
+ *
+ * Restored proofs are checked against the mint (NUT-07) by coco and only
+ * unspent proofs are persisted, so this repairs a wallet that lost proof
+ * metadata (wrong seed, restored backup, wiped database) without resurrecting
+ * proofs the mint already sees as spent.
+ */
+export async function recoverMintProofs(
+  coco: Manager,
+  mintUrl: string,
+  onProgress?: (message: string) => void,
+): Promise<string> {
+  const normalized = normalizeMintUrl(mintUrl);
+  const internals = mintRestoreInternals(coco);
+
+  onProgress?.(`Fetching mint info for ${normalized}…`);
+  const { keysets } = await coco.mint.addMint(normalized, { trusted: true });
+  if (keysets.length === 0) {
+    throw new Error(`Mint ${normalized} advertises no keysets to restore`);
+  }
+  onProgress?.(
+    `Recovery started for ${keysets.length} keyset(s) from ${normalized}; this may take several minutes…`,
+  );
+
+  // Wiping a keyset deletes every proof row for it, including proofs reserved
+  // by an operation that is still running, so refuse to break a live
+  // send/melt. A proof with no owning operation is an orphan left by an
+  // interrupted run: nothing will drive it, and reconciling it against the
+  // mint is exactly what recovery is for, so those do not block.
+  const inflight = await internals.proofRepository.getInflightProofs([
+    normalized,
+  ]);
+  const ownedInflight = inflight.filter((proof) => proof.usedByOperationId);
+  if (ownedInflight.length > 0) {
+    const operations = [
+      ...new Set(ownedInflight.map((proof) => proof.usedByOperationId)),
+    ];
+    throw new Error(
+      `${normalized} has ${ownedInflight.length} proof(s) reserved by operations that are still open (${operations.join(", ")}); settle them with 'routstrd wallet cleanup' before recovering`,
+    );
+  }
+  if (inflight.length > 0) {
+    onProgress?.(
+      `Reconciling ${inflight.length} proof(s) left inflight by an earlier run…`,
+    );
+  }
+
+  const { wallet } = await internals.walletService.getWalletWithActiveKeysetId(
+    normalized,
+  );
+
+  // Background services mutate proofs and counters independently of public
+  // client calls, so stop them while restore rewrites counters.
+  let subscriptionsPaused = false;
+  let mintWatcherStopped = false;
+  let proofWatcherStopped = false;
+  let mintProcessorStopped = false;
+  let recoveredSats = 0;
+  const failures: string[] = [];
+  try {
+    await coco.pauseSubscriptions();
+    subscriptionsPaused = true;
+    await coco.disableMintOperationWatcher();
+    mintWatcherStopped = true;
+    await coco.disableProofStateWatcher();
+    proofWatcherStopped = true;
+    await coco.disableMintOperationProcessor();
+    mintProcessorStopped = true;
+
+    for (const keyset of keysets) {
+      const snapshot = await snapshotKeysetProofs(
+        internals,
+        normalized,
+        keyset.id,
+      );
+      onProgress?.(
+        `Keyset ${keyset.id}: restoring ${keyset.id} (mints rate-limit restore batches, so this can take minutes)…`,
+      );
+      try {
+        const outcome = await restoreKeysetWithWipe(
+          internals,
+          normalized,
+          wallet,
+          keyset.id,
+          snapshot,
+          onProgress,
+        );
+        recoveredSats += outcome.storedAmount;
+        onProgress?.(
+          `Keyset ${keyset.id}: ${outcome.stored} unspent proof(s), ${outcome.storedAmount} sat` +
+            (outcome.before > 0
+              ? ` (replacing ${outcome.before} stored)`
+              : ""),
+        );
+      } catch (error) {
+        const message = describeRestoreError(error);
+        // A mint that no longer serves a retired keyset answers 4xx, and an
+        // empty keyset loses nothing by that: report it without failing the
+        // whole run, or every old keyset would mask a successful recovery.
+        if (snapshot.length === 0) {
+          onProgress?.(
+            `Keyset ${keyset.id}: skipped (no local proofs; mint said: ${message})`,
+          );
+          continue;
+        }
+        // One bad keyset must not discard the successful ones.
+        failures.push(`${keyset.id}: ${message}`);
+        onProgress?.(`Keyset ${keyset.id}: failed — ${message}`);
+      }
+    }
+  } finally {
+    const restarts: Promise<unknown>[] = [];
+    if (mintWatcherStopped) restarts.push(coco.enableMintOperationWatcher());
+    if (proofWatcherStopped) restarts.push(coco.enableProofStateWatcher());
+    if (mintProcessorStopped) restarts.push(coco.enableMintOperationProcessor());
+    if (subscriptionsPaused) restarts.push(coco.resumeSubscriptions());
+    const results = await Promise.allSettled(restarts);
+    const failedRestart = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failedRestart) throw failedRestart.reason;
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Failed to restore ${failures.length} of ${keysets.length} keyset(s): ${failures.join("; ")}`,
+    );
+  }
+
+  onProgress?.(`Recovery complete for ${normalized}`);
+  return `Mint ${normalized} recovered: ${recoveredSats} sat in unspent proofs`;
+}
+
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<WalletClient> {
@@ -1909,6 +2234,8 @@ export async function createCocoClient(
     recoveryResolve = resolve;
   });
   const recoveryGate = createRecoveryGate();
+  // Serializes an explicit mint restore against public wallet mutations.
+  const mintRestoreGate = new MintRestoreGate();
   let disposed = false;
   const enqueueRecovery = createRunQueue();
   const recoveryOutstanding: RecoveryWork = new Map();
@@ -2231,32 +2558,109 @@ export async function createCocoClient(
     },
 
     async receiveCashu(token: string): Promise<string> {
-      const reservation = reserveReceiveToken(database, token);
-      if (!reservation.acquired) {
-        if (reservation.existing?.state === "succeeded") {
-          return "Token already received successfully";
+      return mintRestoreGate.runMutation(async () => {
+        const reservation = reserveReceiveToken(database, token);
+        if (!reservation.acquired) {
+          if (reservation.existing?.state === "succeeded") {
+            return "Token already received successfully";
+          }
+          if (
+            reservation.existing?.state === "processing" &&
+            reservation.existing.operationId
+          ) {
+            // A prior request may have stopped after the mint call became
+            // uncertain. Re-drive that one Coco operation instead of creating a
+            // duplicate. Refresh is idempotent and uses its stored output data.
+            try {
+              const operation = await withTimeout(
+                coco.ops.receive.refresh(reservation.existing.operationId),
+                15_000,
+              );
+              if (operation.state === "finalized") {
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "succeeded",
+                  operationId: operation.id,
+                });
+                return "Token received successfully";
+              }
+              if (operation.state === "rolled_back") {
+                const finalizedSibling = await findFinalizedReceiveSibling(operation);
+                if (finalizedSibling) {
+                  updateReceiveToken(database, reservation.tokenHash, {
+                    state: "succeeded",
+                    operationId: finalizedSibling,
+                  });
+                  return "Token already received successfully";
+                }
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "failed",
+                  operationId: operation.id,
+                  error: operation.error || "Token receive was rolled back",
+                });
+                throw new Error(operation.error || "Token receive was rolled back");
+              }
+            } catch (error) {
+              const latest = await coco.ops.receive.get(reservation.existing.operationId);
+              if (latest?.state === "finalized") {
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "succeeded",
+                  operationId: latest.id,
+                });
+                return "Token received successfully";
+              }
+              throw error;
+            }
+            throw new Error("Token receive is still unresolved");
+          }
+          if (reservation.existing?.state === "processing") {
+            throw new Error("Token receive is already in progress");
+          }
+          throw new Error(reservation.existing?.error || "Token receive previously failed");
         }
-        if (
-          reservation.existing?.state === "processing" &&
-          reservation.existing.operationId
-        ) {
-          // A prior request may have stopped after the mint call became
-          // uncertain. Re-drive that one Coco operation instead of creating a
-          // duplicate. Refresh is idempotent and uses its stored output data.
-          try {
-            const operation = await withTimeout(
-              coco.ops.receive.refresh(reservation.existing.operationId),
-              15_000,
-            );
-            if (operation.state === "finalized") {
+
+        let preparedOperationId: string | undefined;
+        try {
+          await waitForRecovery();
+          const prepared = await coco.ops.receive.prepare({ token });
+          preparedOperationId = prepared.id;
+          updateReceiveToken(database, reservation.tokenHash, {
+            state: "processing",
+            operationId: prepared.id,
+          });
+          await coco.ops.receive.execute(prepared.id);
+          updateReceiveToken(database, reservation.tokenHash, {
+            state: "succeeded",
+            operationId: prepared.id,
+          });
+          return "Token received successfully";
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (preparedOperationId) {
+            let latest: Awaited<ReturnType<typeof coco.ops.receive.get>> = null;
+            try {
+              latest = await coco.ops.receive.get(preparedOperationId);
+            } catch (lookupError) {
+              logger.warn("Could not inspect failed receive operation", {
+                operationId: preparedOperationId,
+                error:
+                  lookupError instanceof Error ? lookupError.message : String(lookupError),
+              });
+            }
+            if (latest?.state === "finalized") {
               updateReceiveToken(database, reservation.tokenHash, {
                 state: "succeeded",
-                operationId: operation.id,
+                operationId: preparedOperationId,
               });
               return "Token received successfully";
             }
-            if (operation.state === "rolled_back") {
-              const finalizedSibling = await findFinalizedReceiveSibling(operation);
+            if (latest?.state === "executing") {
+              updateReceiveToken(database, reservation.tokenHash, {
+                state: "processing",
+                operationId: preparedOperationId,
+                error: message,
+              });
+            } else if (latest?.state === "rolled_back") {
+              const finalizedSibling = await findFinalizedReceiveSibling(latest);
               if (finalizedSibling) {
                 updateReceiveToken(database, reservation.tokenHash, {
                   state: "succeeded",
@@ -2266,115 +2670,42 @@ export async function createCocoClient(
               }
               updateReceiveToken(database, reservation.tokenHash, {
                 state: "failed",
-                operationId: operation.id,
-                error: operation.error || "Token receive was rolled back",
+                operationId: preparedOperationId,
+                error: latest.error || message,
               });
-              throw new Error(operation.error || "Token receive was rolled back");
+            } else {
+              // A prepared or missing operation had no known mint side effect.
+              deleteReceiveTokenReservation(database, reservation.tokenHash);
             }
-          } catch (error) {
-            const latest = await coco.ops.receive.get(reservation.existing.operationId);
-            if (latest?.state === "finalized") {
-              updateReceiveToken(database, reservation.tokenHash, {
-                state: "succeeded",
-                operationId: latest.id,
-              });
-              return "Token received successfully";
-            }
-            throw error;
-          }
-          throw new Error("Token receive is still unresolved");
-        }
-        if (reservation.existing?.state === "processing") {
-          throw new Error("Token receive is already in progress");
-        }
-        throw new Error(reservation.existing?.error || "Token receive previously failed");
-      }
-
-      let preparedOperationId: string | undefined;
-      try {
-        await waitForRecovery();
-        const prepared = await coco.ops.receive.prepare({ token });
-        preparedOperationId = prepared.id;
-        updateReceiveToken(database, reservation.tokenHash, {
-          state: "processing",
-          operationId: prepared.id,
-        });
-        await coco.ops.receive.execute(prepared.id);
-        updateReceiveToken(database, reservation.tokenHash, {
-          state: "succeeded",
-          operationId: prepared.id,
-        });
-        return "Token received successfully";
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (preparedOperationId) {
-          let latest: Awaited<ReturnType<typeof coco.ops.receive.get>> = null;
-          try {
-            latest = await coco.ops.receive.get(preparedOperationId);
-          } catch (lookupError) {
-            logger.warn("Could not inspect failed receive operation", {
-              operationId: preparedOperationId,
-              error:
-                lookupError instanceof Error ? lookupError.message : String(lookupError),
-            });
-          }
-          if (latest?.state === "finalized") {
-            updateReceiveToken(database, reservation.tokenHash, {
-              state: "succeeded",
-              operationId: preparedOperationId,
-            });
-            return "Token received successfully";
-          }
-          if (latest?.state === "executing") {
-            updateReceiveToken(database, reservation.tokenHash, {
-              state: "processing",
-              operationId: preparedOperationId,
-              error: message,
-            });
-          } else if (latest?.state === "rolled_back") {
-            const finalizedSibling = await findFinalizedReceiveSibling(latest);
-            if (finalizedSibling) {
-              updateReceiveToken(database, reservation.tokenHash, {
-                state: "succeeded",
-                operationId: finalizedSibling,
-              });
-              return "Token already received successfully";
-            }
-            updateReceiveToken(database, reservation.tokenHash, {
-              state: "failed",
-              operationId: preparedOperationId,
-              error: latest.error || message,
-            });
           } else {
-            // A prepared or missing operation had no known mint side effect.
-            deleteReceiveTokenReservation(database, reservation.tokenHash);
+            // Decode/validation failed before coco created an operation. Do not
+            // permanently reserve malformed input or transient mint-fetch errors.
+            releaseReceiveToken(database, reservation.tokenHash);
           }
-        } else {
-          // Decode/validation failed before coco created an operation. Do not
-          // permanently reserve malformed input or transient mint-fetch errors.
-          releaseReceiveToken(database, reservation.tokenHash);
+          throw error;
         }
-        throw error;
-      }
+      });
     },
 
     async receiveBolt11(amount: number, mintUrl?: string) {
-      const targetMint = mintUrl
-        ? normalizeMintUrl(mintUrl)
-        : walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for Lightning invoice");
-      }
-      await waitForRecovery(targetMint);
-      const op = await coco.ops.mint.prepare({
-        mintUrl: targetMint,
-        amount,
-        method: "bolt11",
+      return mintRestoreGate.runMutation(async () => {
+        const targetMint = mintUrl
+          ? normalizeMintUrl(mintUrl)
+          : walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for Lightning invoice");
+        }
+        await waitForRecovery(targetMint);
+        const op = await coco.ops.mint.prepare({
+          mintUrl: targetMint,
+          amount,
+          method: "bolt11",
+        });
+        if (!("request" in op)) {
+          throw new Error("mint prepare did not return a payment request");
+        }
+        return { invoice: op.request as string, operationId: op.id };
       });
-      if (!("request" in op)) {
-        throw new Error("mint prepare did not return a payment request");
-      }
-      return { invoice: op.request as string, operationId: op.id };
     },
 
     async getMintQuote(operationId: string) {
@@ -2391,36 +2722,40 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl
-        ? normalizeMintUrl(mintUrl)
-        : walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for sending");
-      }
-      await waitForRecovery(targetMint);
-      const prepared = await coco.ops.send.prepare({
-        mintUrl: targetMint,
-        amount,
+      return mintRestoreGate.runMutation(async () => {
+        const targetMint = mintUrl
+          ? normalizeMintUrl(mintUrl)
+          : walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for sending");
+        }
+        await waitForRecovery(targetMint);
+        const prepared = await coco.ops.send.prepare({
+          mintUrl: targetMint,
+          amount,
+        });
+        const { token } = await coco.ops.send.execute(prepared.id);
+        return getEncodedToken(token);
       });
-      const { token } = await coco.ops.send.execute(prepared.id);
-      return getEncodedToken(token);
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl
-        ? normalizeMintUrl(mintUrl)
-        : walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for Lightning payment");
-      }
-      await waitForRecovery(targetMint);
-      const prepared = await coco.ops.melt.prepare({
-        mintUrl: targetMint,
-        method: "bolt11",
-        methodData: { invoice },
+      return mintRestoreGate.runMutation(async () => {
+        const targetMint = mintUrl
+          ? normalizeMintUrl(mintUrl)
+          : walletConfig.defaultMintUrl;
+        if (!targetMint) {
+          throw new Error("No trusted mint available for Lightning payment");
+        }
+        await waitForRecovery(targetMint);
+        const prepared = await coco.ops.melt.prepare({
+          mintUrl: targetMint,
+          method: "bolt11",
+          methodData: { invoice },
+        });
+        await coco.ops.melt.execute(prepared.id);
+        return "Payment sent successfully";
       });
-      await coco.ops.melt.execute(prepared.id);
-      return "Payment sent successfully";
     },
 
     async listMints(): Promise<string[]> {
@@ -2456,6 +2791,16 @@ export async function createCocoClient(
       return `Default mint set to ${mintUrl}`;
     },
 
+    async recoverMint(
+      mintUrl: string,
+      onProgress?: (message: string) => void,
+    ): Promise<string> {
+      await waitForRecovery();
+      return mintRestoreGate.runRestore(() =>
+        recoverMintProofs(coco, mintUrl, onProgress),
+      );
+    },
+
     async dispose(): Promise<void> {
       await disposeRecovery().catch(error => {
         logger.warn("Wallet shutdown incomplete; database and ownership retained until recovery settles");
@@ -2489,21 +2834,25 @@ export async function createCocoClient(
       username: string,
       confirm?: boolean,
     ): Promise<NpcUsernameResult> {
-      await waitForRecovery();
-      const result = await npcApi().setUsername(username, confirm === true);
-      if (result.success) {
-        return { success: true };
-      }
-      return {
-        success: false,
-        paymentRequest:
-          result.pr as NpcUsernameResult["paymentRequest"],
-      };
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        const result = await npcApi().setUsername(username, confirm === true);
+        if (result.success) {
+          return { success: true };
+        }
+        return {
+          success: false,
+          paymentRequest:
+            result.pr as NpcUsernameResult["paymentRequest"],
+        };
+      });
     },
 
     async syncNpc(): Promise<void> {
-      await waitForRecovery();
-      await npcApi().sync();
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        await npcApi().sync();
+      });
     },
 
     async cleanupStuckOperations(

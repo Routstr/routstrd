@@ -114,6 +114,12 @@ export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
  */
 export const DAEMON_LONG_REQUEST_TIMEOUT_MS = 600_000;
 
+/**
+ * Inactivity bound for a streamed response. A stream that keeps sending
+ * progress is never cut off; one that goes quiet is treated as wedged.
+ */
+export const DAEMON_STREAM_STALL_TIMEOUT_MS = 120_000;
+
 /** Routes that may legitimately outlive the default request timeout. */
 const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/"];
 
@@ -138,12 +144,24 @@ export function getAuthBaseUrl(config: RoutstrdConfig): string {
   return getDaemonBaseUrl(config);
 }
 
-export async function callDaemonUrl(
+/**
+ * Send an authenticated daemon request and hand back the unread `Response`.
+ *
+ * Shared by the buffered `callDaemonUrl` and the streaming `callDaemonRaw` so
+ * both get the same NIP-98 auth, timeouts and connection-error classification.
+ * The timeout signal stays armed while the body is read, so a daemon that
+ * sends headers and then stalls the body cannot hang the CLI either.
+ */
+async function fetchDaemonUrl(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
   config: RoutstrdConfig,
-): Promise<CommandResponse> {
+  // No default on purpose: an omitted argument would silently re-arm the
+  // route deadline for callers that must not have one. `null` means "no total
+  // deadline" and every caller states its intent.
+  timeoutMs: number | null,
+): Promise<{ response: Response; signal: AbortSignal | undefined }> {
   const { method = "GET", body } = options;
   const url = `${baseUrl}${path}`;
 
@@ -167,30 +185,45 @@ export async function callDaemonUrl(
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString) headers.set("Content-Type", "application/json");
 
-  const timeoutMs = requestTimeoutMs(path);
-  const timeoutError = () =>
-    new Error(
-      `Daemon request timed out after ${timeoutMs / 1000}s; ` +
-        "any payment outcome is unknown — check before retrying",
-    );
-  // The signal stays armed while the body is read, so a daemon that sends
-  // headers and then stalls the body cannot hang the CLI either. Aborting
-  // here never cancels the daemon's operation — see timeoutError's warning.
-  const signal = AbortSignal.timeout(timeoutMs);
+  const signal =
+    timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
 
-  let response: Response;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method,
       headers,
       body: bodyString,
       signal,
     });
+    return { response, signal };
   } catch (error) {
-    if (signal.aborted) throw timeoutError();
+    if (signal?.aborted) throw timeoutError(path);
     // Only connection failures qualify for alternate-host retries.
     throw new DaemonConnectionError(error);
   }
+}
+
+function timeoutError(path: string): Error {
+  const timeoutMs = requestTimeoutMs(path);
+  return new Error(
+    `Daemon request timed out after ${timeoutMs / 1000}s; ` +
+      "any payment outcome is unknown — check before retrying",
+  );
+}
+
+export async function callDaemonUrl(
+  baseUrl: string,
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
+): Promise<CommandResponse> {
+  const { response, signal } = await fetchDaemonUrl(
+    baseUrl,
+    path,
+    options,
+    config,
+    requestTimeoutMs(path),
+  );
 
   try {
     if (!response.ok) {
@@ -199,7 +232,7 @@ export async function callDaemonUrl(
     }
     return (await response.json()) as CommandResponse;
   } catch (error) {
-    if (signal.aborted) throw timeoutError();
+    if (signal?.aborted) throw timeoutError(path);
     throw error;
   }
 }
@@ -268,6 +301,86 @@ export async function callDaemon(
     return callRemoteDaemon(getDaemonBaseUrl(config), path, options, config);
   }
   return callLocalDaemon(path, options, config);
+}
+
+/**
+ * Bound silence on a streamed body, leaving total duration unbounded.
+ *
+ * A long-running stream makes progress; a wedged one goes quiet. Charging the
+ * whole stream against one deadline would cut off a restore that is still
+ * working (mints rate-limit NUT-09 batches, so a large wallet takes minutes),
+ * while an idle bound still fails a hung daemon.
+ */
+export function withStallTimeout(
+  body: ReadableStream<Uint8Array> | null,
+  timeoutMs: number,
+): ReadableStream<Uint8Array> | null {
+  if (!body) return body;
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Daemon sent no response for ${timeoutMs / 1000}s; ` +
+                      "the operation may still be running — check its status before retrying",
+                  ),
+                ),
+              timeoutMs,
+            );
+          }),
+        ]);
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        controller.error(error);
+        await reader.cancel(error).catch(() => {});
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+/**
+ * Perform an authenticated daemon request and return the raw fetch `Response`
+ * so callers can stream the body (e.g. for live progress output).
+ *
+ * The response body is bounded by inactivity rather than by total duration, so
+ * a long stream that keeps making progress is not cut off.
+ *
+ * Unlike `callDaemon`, this never retries against another host candidate: the
+ * caller streams a single response, and replaying a write to a second address
+ * could duplicate the operation the caller is watching.
+ */
+export async function callDaemonRaw(
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+  stallTimeoutMs = DAEMON_STREAM_STALL_TIMEOUT_MS,
+): Promise<Response> {
+  const config = await loadConfig();
+  const baseUrl = getDaemonBaseUrl(config);
+  const { response } = await fetchDaemonUrl(
+    baseUrl,
+    path,
+    options,
+    config,
+    null,
+  );
+  return new Response(withStallTimeout(response.body, stallTimeoutMs), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 /** Like callDaemon but sends requests to the auth proxy URL instead.
