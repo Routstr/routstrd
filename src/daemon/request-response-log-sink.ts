@@ -1,4 +1,4 @@
-import { createWriteStream, mkdirSync, type WriteStream } from "fs";
+import { chmodSync, createWriteStream, mkdirSync, type WriteStream } from "fs";
 import { writeFile } from "fs/promises";
 import { join } from "path";
 import type { SdkLogger } from "@routstr/sdk";
@@ -59,6 +59,18 @@ const SENSITIVE_BODY_FIELD_NAMES = new Set([
 
 const REDACTED = "[REDACTED]";
 
+// The logs hold prompts and responses verbatim, and the directory can be set
+// to any path, so it is not covered by ~/.routstrd being 0700: keep both log
+// directories and every file in them readable by the daemon's user only.
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+const makePrivateDir = (dir: string): void => {
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
+  // mkdir leaves an existing directory's mode alone.
+  chmodSync(dir, PRIVATE_DIR_MODE);
+};
+
 const sanitizeForFilename = (value: string): string =>
   value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 
@@ -115,8 +127,8 @@ export class FileRequestResponseLogSink implements RequestResponseLogSink {
   constructor(private options: FileRequestResponseLogSinkOptions) {
     this.requestsDir = join(options.dir, "requests");
     this.responsesDir = join(options.dir, "responses");
-    mkdirSync(this.requestsDir, { recursive: true });
-    mkdirSync(this.responsesDir, { recursive: true });
+    makePrivateDir(this.requestsDir);
+    makePrivateDir(this.responsesDir);
   }
 
   async logRequest(input: RequestResponseLogRequestInput): Promise<string | undefined> {
@@ -140,6 +152,7 @@ export class FileRequestResponseLogSink implements RequestResponseLogSink {
           null,
           2,
         ),
+        { mode: PRIVATE_FILE_MODE },
       );
       return id;
     } catch (error) {
@@ -226,7 +239,7 @@ export class FileRequestResponseLogSink implements RequestResponseLogSink {
     if (existing) return existing;
 
     const filePath = join(this.responsesDir, `${sanitizeForFilename(id)}.jsonl`);
-    const stream = createWriteStream(filePath, { flags: "a" });
+    const stream = createWriteStream(filePath, { flags: "a", mode: PRIVATE_FILE_MODE });
     const active: ActiveResponseLog = {
       stream,
       pending: Promise.resolve(),

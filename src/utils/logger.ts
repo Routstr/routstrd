@@ -22,7 +22,7 @@ function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
 
 function ensureDir(dir: string) {
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 }
 
@@ -92,7 +92,7 @@ function writeLog(logsDir: string, level: string, ...args: unknown[]) {
   const line = `[${timestamp}] [${level}] ${message}\n`;
   const logFile = getLogFileForDate(logsDir, new Date(timestamp));
   try {
-    appendFileSync(logFile, line);
+    appendFileSync(logFile, line, { mode: 0o600 });
   } catch (error) {
     console.error("Failed to write log:", error);
   }
