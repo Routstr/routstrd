@@ -40,6 +40,8 @@ import {
 // bodies and Transfer-Encoding: chunked for streams itself.
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
+  "content-encoding",
+  "content-length",
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
