@@ -2212,7 +2212,15 @@ program
       const id = String(entry.id ?? "");
       const time = new Date(Number(entry.createdAt)).toISOString().replace("T", " ").slice(0, 19);
       const type = String(entry.type ?? "").toUpperCase();
-      const status = historyStatus(String(entry.type ?? ""), String(entry.state ?? ""));
+      const operationState =
+        typeof entry.operationState === "string"
+          ? entry.operationState
+          : undefined;
+      const status = historyStatus(
+        String(entry.type ?? ""),
+        String(entry.state ?? ""),
+        operationState,
+      );
       const mint = String(entry.mintUrl ?? "");
       const unit = String(entry.unit ?? "sat");
       const amount = `${entry.amount} ${unit}`;

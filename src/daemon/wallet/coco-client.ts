@@ -1,5 +1,8 @@
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
+import { installMeltQuoteExpiryHandler } from "./melt-quote-expiry";
+import { startMeltSweep } from "./melt-sweep";
+import { attachMeltOperationStates } from "./history-state";
 import {
   Manager,
   OperationInProgressError,
@@ -733,6 +736,12 @@ async function enableCocoManager(coco: Manager): Promise<void> {
   await coco.enableMintOperationWatcher();
   await coco.enableProofStateWatcher();
   await coco.enableMintOperationProcessor();
+  // coco 1.0.1 maps melt quote expiry (NUT-05 20007) to UNPAID only while
+  // recovering an *executing* operation. A pending melt whose quote the mint
+  // purged throws instead, so refresh()/reclaim() can never roll it back and
+  // its proofs stay reserved forever. Patch the handler once, here, after the
+  // manager (and its handlers) exist. Non-fatal if coco's shape changes.
+  installMeltQuoteExpiryHandler(coco);
 }
 
 /**
@@ -1905,6 +1914,7 @@ export async function createCocoClient(
   };
   let recoveryResolve: (() => void) | undefined;
   let stopPendingMintSweep: (() => Promise<void>) | undefined;
+  let stopMeltSweep: (() => Promise<void>) | undefined;
   const recoveryPromise = new Promise<void>((resolve) => {
     recoveryResolve = resolve;
   });
@@ -2126,6 +2136,12 @@ export async function createCocoClient(
             coco as unknown as { mintOperationService: MintOperationServiceCleanup }
           ).mintOperationService,
         }, recoveryOutstanding);
+        // Coco only recovers melt operations at startup or when a melt request
+        // observes its own failure in flight. A melt accepted and then left
+        // pending is never re-checked, so a UNPAID flip at the mint goes
+        // unnoticed and its proofs stay reserved. Sweep in-flight melts on a
+        // timer so refresh() can finalize or roll them back without a restart.
+        stopMeltSweep = startMeltSweep({ ops: coco!.ops }, recoveryOutstanding);
       })
       .catch((error) => {
         recoveryDone = true;
@@ -2170,6 +2186,7 @@ export async function createCocoClient(
     async () => {
       await recoveryPromise;
       await stopPendingMintSweep?.();
+      await stopMeltSweep?.();
       await enqueueRecovery.drain();
       await drainRecoveryWork(recoveryOutstanding);
     },
@@ -2464,11 +2481,15 @@ export async function createCocoClient(
     },
 
     async getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]> {
-      return coco.history.getPaginatedHistory(offset, limit);
+      const entries = await coco.history.getPaginatedHistory(offset, limit);
+      return attachMeltOperationStates({ ops: coco!.ops }, entries);
     },
 
     async getHistoryEntryById(id: string): Promise<HistoryEntry | null> {
-      return coco.history.getHistoryEntryById(id);
+      const entry = await coco.history.getHistoryEntryById(id);
+      if (!entry) return null;
+      const [annotated] = await attachMeltOperationStates({ ops: coco!.ops }, [entry]);
+      return annotated ?? null;
     },
 
     async getNpcAddress(): Promise<NpcAddress> {
