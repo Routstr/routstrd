@@ -49,6 +49,60 @@ export interface RoutstrdConfig {
   mode?: "xcashu" | "apikeys";
   /** Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash. Disabled by default; requires daemon restart after changing. */
   autoModelPath?: boolean;
+  /**
+   * Confidential upstream: requests sent with `x-routstr-verify: confidential`
+   * run with the daemon as the TLS client of the node's provider, so the node
+   * never sees the prompt or the response. Off unless `enabled`.
+   */
+  confidentialUpstream?: {
+    enabled?: boolean;
+    /** Upstream TLS hostnames trusted for the other end (exact, `*.x`, `**.x`). */
+    trusted_hosts?: string[];
+    /**
+     * Node signing keys (hex or npub) whose offers are accepted. When unset,
+     * the keys that announced the node's URL on Nostr (kind 38421) are used,
+     * for https and onion nodes only.
+     */
+    node_pubkeys?: string[];
+    /** Set false to require `node_pubkeys` (no pin from the Nostr announcement). */
+    pin_from_announcement?: boolean;
+    /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
+    prover_path?: string;
+    /**
+     * Development only: allow plain-http nodes that are neither loopback nor
+     * onion services. The node credential then travels unencrypted.
+     */
+    allow_insecure_transport?: boolean;
+    /**
+     * Traffic-driven pre-warming of protocol v2 sessions (the 2PC
+     * preprocessing runs before a request arrives). Only keys with recent
+     * traffic keep armed sessions; an idle daemon keeps none.
+     */
+    prewarm?: {
+      /** Default true. */
+      enabled?: boolean;
+      /** A key idle this long keeps no armed sessions (default 10). */
+      activityWindowMinutes?: number;
+      /** Armed sessions per (node, model, max_tokens) (default 6). */
+      maxPerKey?: number;
+      /** Armed sessions in total (default 6). */
+      maxTotal?: number;
+      /** Retire an armed session this old (default 480; the node ends it at 600). */
+      maxAgeSeconds?: number;
+      /**
+       * Arm only for nodes whose abandon fee (what a session that is never
+       * used costs, `abandon_fee_msat` in the signed offer) is at most this
+       * many msats (default 5000; 0 never pre-warms a node that charges one).
+       * For such a node at most `maxArmedWithFee` sessions are armed.
+       */
+      maxSessionFeeMsat?: number;
+      /**
+       * Armed sessions in total for nodes that charge an abandon fee
+       * (default 6, for parallel agents): each one that ends unused costs the fee.
+       */
+      maxArmedWithFee?: number;
+    };
+  };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {
     /** Enable raw request/response file logging. */

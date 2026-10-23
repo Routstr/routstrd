@@ -7,6 +7,7 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RoutstrdConfig } from "../../utils/config";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
@@ -25,6 +26,7 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
+import { CONFIDENTIAL_OPT_IN_HEADER, isConfidentialPath, parseConfidentialOptIn } from "./confidential-opt-in";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -162,6 +164,31 @@ function normalizeProviderBaseUrl(url: string): string {
     url = `https://${url}`;
   }
   return url.endsWith("/") ? url : `${url}/`;
+}
+
+/** The keys of the provider announcements (kind 38421) for `baseUrl` that
+ *  carry a positive review, from the SDK's provider index (same evidence and
+ *  trust gates as discovery). Anyone can announce any URL, so an announcement
+ *  alone does not make its key a pin: only a key whose latest review label
+ *  is one the daemon enables. */
+export async function announcedNodePubkeys(
+  deps: {
+    modelManager: {
+      getProviderReviewIndex(): Promise<{
+        providerNodes: Map<string, Set<string>>;
+        latestLabelByNode: Map<string, string>;
+      }>;
+      getEnabledReviewLabels(): string[];
+    };
+  },
+  baseUrl: string,
+): Promise<string[]> {
+  const { providerNodes, latestLabelByNode } = await deps.modelManager.getProviderReviewIndex();
+  const enabled = new Set(deps.modelManager.getEnabledReviewLabels());
+  return [...(providerNodes.get(normalizeProviderBaseUrl(baseUrl)) ?? [])].filter((pubkey) => {
+    const label = latestLabelByNode.get(pubkey);
+    return label !== undefined && enabled.has(label);
+  });
 }
 
 /** Read a tag value by name from a Nostr event's tag array. */
@@ -446,6 +473,8 @@ export function createDaemonRequestHandler(deps: {
   maxTokens: number;
   /** Enable SDK automatic DeepSeek V4.1 Flash model-path selection. */
   autoModelPath?: boolean;
+  /** Confidential-upstream settings (see RoutstrdConfig.confidentialUpstream). */
+  confidentialUpstream?: RoutstrdConfig["confidentialUpstream"];
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
@@ -2278,6 +2307,33 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Confidential upstream is opt-in per request; the node never sees the
+    // prompt or response. Fail closed: a request that asks for it is refused
+    // here, never sent on the plain path, when it cannot run confidentially,
+    // and so is one whose opt-in header carries any other value.
+    const optIn = parseConfidentialOptIn(req.headers[CONFIDENTIAL_OPT_IN_HEADER]);
+    if (optIn.kind === "invalid") {
+      sendJson(res, 400, { error: optIn.error });
+      return;
+    }
+    const wantsConfidential = optIn.kind === "confidential";
+    if (wantsConfidential) {
+      if (deps.confidentialUpstream?.enabled !== true) {
+        sendJson(res, 400, {
+          error:
+            "x-routstr-verify: confidential requested, but confidentialUpstream is not enabled in the routstrd config.",
+        });
+        return;
+      }
+      if (!isConfidentialPath(url.pathname)) {
+        sendJson(res, 400, {
+          error:
+            "Confidential requests support only POST /v1/chat/completions and /v1/images/generations.",
+        });
+        return;
+      }
+    }
+
     let requestBody: unknown = {};
     try {
       requestBody = await readJsonBody(req);
@@ -2314,6 +2370,30 @@ export function createDaemonRequestHandler(deps: {
       deps.provider ||
       undefined;
 
+    const confidentialConfig = deps.confidentialUpstream;
+    const confidential =
+      wantsConfidential && confidentialConfig
+        ? {
+            trustedHosts: confidentialConfig.trusted_hosts ?? [],
+            nodePubkeys: confidentialConfig.node_pubkeys,
+            // Without configured pins, the keys that announced the node's URL
+            // on Nostr: the offer must then be signed by the key that
+            // announced the URL it is served from.
+            // Only an absent or literal `true` setting pins from the
+            // announcement; anything else (`false`, `"false"`, …) requires
+            // the configured `node_pubkeys`.
+            ...(confidentialConfig.pin_from_announcement !== undefined &&
+            confidentialConfig.pin_from_announcement !== true
+              ? {}
+              : { nodePubkeysFor: (baseUrl: string) => announcedNodePubkeys(deps, baseUrl) }),
+            proverPath: confidentialConfig.prover_path,
+            ...(confidentialConfig.allow_insecure_transport === true
+              ? { allowInsecureTransport: true }
+              : {}),
+            prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
+          }
+        : undefined;
+
     // Convert req.headers to Record<string, string>
     const incomingHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
@@ -2347,6 +2427,7 @@ export function createDaemonRequestHandler(deps: {
         path: forwardedPath,
         forcedProvider,
         autoModelPath: deps.autoModelPath === true,
+        ...(confidential ? { confidential } : {}),
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
@@ -2409,7 +2490,14 @@ export function createDaemonRequestHandler(deps: {
         res.once("finish", finish);
         res.once("close", finish);
         res.once("error", fail);
-        nodeReadable.once("error", fail);
+        // `pipe` does not end the destination on a source error. A stream
+        // the SDK aborts after the body (a confidential settlement check
+        // that failed: proof, receipt, usage or cost) must end the client's
+        // connection with an error instead of leaving it open.
+        nodeReadable.once("error", (err) => {
+          res.destroy(err instanceof Error ? err : new Error(String(err)));
+          fail(err);
+        });
         nodeReadable.pipe(res);
       });
 
@@ -2424,6 +2512,13 @@ export function createDaemonRequestHandler(deps: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error(`[daemon] Error: ${message}`);
+
+      // The response head is already on the wire (a stream that failed after
+      // it started): nothing more can be written, make sure it is closed.
+      if (res.headersSent) {
+        if (!res.destroyed) res.destroy();
+        return;
+      }
 
       if (error instanceof InsufficientBalanceError) {
         const balanceError = error as {
@@ -2446,8 +2541,91 @@ export function createDaemonRequestHandler(deps: {
         return;
       }
 
+      const confidential = confidentialErrorStatus(error);
+      if (confidential) {
+        res.writeHead(confidential.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: message, error_type: confidential.code }));
+        return;
+      }
+
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: message }));
     }
+  };
+}
+
+/**
+ * The SDK's typed confidential errors as HTTP statuses: a request the
+ * confidential path cannot take is the caller's (400); a failed proof,
+ * receipt or session is the node's or provider's (502). Matched by shape,
+ * since the error may cross bundle boundaries.
+ */
+export function confidentialErrorStatus(error: unknown): { status: number; code: string } | undefined {
+  // Every SDK subclass sets its own `name`, so match the stable `code`.
+  const e = error as { code?: unknown } | null;
+  if (!e || !(error instanceof Error) || typeof e.code !== "string") return undefined;
+  if (CONFIDENTIAL_CALLER_CODES.has(e.code)) return { status: 400, code: e.code };
+  if (CONFIDENTIAL_UPSTREAM_CODES.has(e.code)) return { status: 502, code: e.code };
+  return undefined;
+}
+
+/** A request the confidential path cannot take. */
+const CONFIDENTIAL_CALLER_CODES = new Set([
+  "unsupported_endpoint",
+  "offer_no_images",
+  "not_configured",
+  "pinned_parameter",
+]);
+/** The node's offer, session, proofs or receipt failed (the SDK's other codes). */
+const CONFIDENTIAL_UPSTREAM_CODES = new Set([
+  "offer_unavailable",
+  "offer_malformed",
+  "offer_bad_signature",
+  "offer_unpinned",
+  "offer_pin_mismatch",
+  "offer_unsupported_version",
+  "trusted_host_rejected",
+  "session_protocol",
+  "session_rejected",
+  "prover_failed",
+  "prover_missing",
+  "receipt_verification",
+  "response_verification",
+  "timeout",
+]);
+
+/**
+ * routstrd's `confidentialUpstream.prewarm` block → the SDK's pre-warm
+ * options (undefined = pre-warming off). On by default.
+ */
+export function confidentialPrewarmOptions(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["prewarm"]
+):
+  | {
+      enabled: boolean;
+      activityWindowMs?: number;
+      maxPerKey?: number;
+      maxTotal?: number;
+      maxAgeMs?: number;
+      maxSessionFeeMsat?: number;
+      maxArmedWithFee?: number;
+      log: (message: string) => void;
+    }
+  | undefined {
+  if (cfg?.enabled === false) return undefined;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const minutes = num(cfg?.activityWindowMinutes);
+  const seconds = num(cfg?.maxAgeSeconds);
+  return {
+    enabled: true,
+    activityWindowMs: minutes !== undefined ? minutes * 60_000 : undefined,
+    maxPerKey: num(cfg?.maxPerKey),
+    maxTotal: num(cfg?.maxTotal),
+    // The node and the sidecar end a session 600 s after setup; below 60 s
+    // sessions would be armed and retired (traffic, abandon fees) every tick.
+    maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
+    maxSessionFeeMsat: num(cfg?.maxSessionFeeMsat),
+    maxArmedWithFee: num(cfg?.maxArmedWithFee),
+    log: (message: string) => logger.log(message),
   };
 }
