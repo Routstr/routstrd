@@ -2,6 +2,7 @@ import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
 import { installMeltQuoteExpiryHandler } from "./melt-quote-expiry";
 import { startMeltSweep } from "./melt-sweep";
+import { attachMeltOperationStates } from "./history-state";
 import {
   Manager,
   OperationInProgressError,
@@ -2480,11 +2481,15 @@ export async function createCocoClient(
     },
 
     async getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]> {
-      return coco.history.getPaginatedHistory(offset, limit);
+      const entries = await coco.history.getPaginatedHistory(offset, limit);
+      return attachMeltOperationStates({ ops: coco!.ops }, entries);
     },
 
     async getHistoryEntryById(id: string): Promise<HistoryEntry | null> {
-      return coco.history.getHistoryEntryById(id);
+      const entry = await coco.history.getHistoryEntryById(id);
+      if (!entry) return null;
+      const [annotated] = await attachMeltOperationStates({ ops: coco!.ops }, [entry]);
+      return annotated ?? null;
     },
 
     async getNpcAddress(): Promise<NpcAddress> {
