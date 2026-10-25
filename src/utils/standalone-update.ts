@@ -1,9 +1,12 @@
 import { createHash, randomBytes } from "crypto";
 import {
   chmodSync,
+  closeSync,
   constants,
   copyFileSync,
   mkdtempSync,
+  openSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -17,6 +20,20 @@ const FETCH_TIMEOUT_MS = 30_000;
 const PROCESS_TIMEOUT_MS = 30_000;
 const MAX_ARCHIVE_BYTES = 250 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 1024 * 1024;
+
+/**
+ * Mach-O magic numbers, as they appear in the first four bytes of a file.
+ * A standalone `bun build --compile` artifact is always one of these; a shell
+ * script or other non-binary payload is not.
+ */
+const MACHO_MAGICS = new Set([
+  "feedface", // 32-bit, big endian
+  "feedfacf", // 64-bit, big endian
+  "cefaedfe", // 32-bit, little endian
+  "cffaedfe", // 64-bit, little endian
+  "cafebabe", // universal (fat) binary
+  "bebafeca", // universal (fat) binary, reversed
+]);
 
 type ReleaseAsset = {
   name: string;
@@ -128,6 +145,71 @@ export function sha256(bytes: ArrayBuffer | Uint8Array): string {
   return createHash("sha256").update(new Uint8Array(bytes)).digest("hex");
 }
 
+export function isMachO(path: string): boolean {
+  let fd: number | undefined;
+  try {
+    // Read only the magic bytes: a standalone binary is tens of megabytes and
+    // there is no reason to pull all of it into memory for a 4-byte check.
+    fd = openSync(path, "r");
+    const header = Buffer.alloc(4);
+    if (readSync(fd, header, 0, 4, 0) !== 4) return false;
+    return MACHO_MAGICS.has(header.toString("hex"));
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * Run codesign, returning its exit code, or `null` when codesign is not
+ * available at all (non-macOS, or a stripped-down environment). `null` is
+ * distinct from a non-zero exit code, which means codesign ran and reported a
+ * problem with the file.
+ */
+function runCodesign(args: string[]): number | null {
+  try {
+    const proc = Bun.spawnSync(["codesign", ...args], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    return proc.exitCode ?? 1;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Repair a stale ad-hoc code signature on a downloaded Mach-O binary.
+ *
+ * `bun build --compile` appends its standalone payload after the linker's
+ * ad-hoc signature, so the embedded CodeDirectory no longer describes the
+ * bytes on disk. macOS 15+ validates code pages lazily and SIGKILLs the
+ * process on the first mismatching page (`Killed: 9` / exit 137), which is
+ * what the version check below would otherwise hit.
+ *
+ * Re-signing ad-hoc restores a valid signature without touching the payload.
+ * A binary that already verifies — for example a release properly signed with
+ * a Developer ID and notarized — is left untouched, so this never weakens a
+ * real signature.
+ */
+export function ensureValidSignature(path: string): void {
+  if (process.platform !== "darwin") return;
+  if (!isMachO(path)) return;
+
+  const verified = runCodesign(["--verify", path]);
+  if (verified === null || verified === 0) return;
+
+  runCodesign(["--force", "--sign", "-", "--timestamp=none", path]);
+  const rechecked = runCodesign(["--verify", path]);
+  if (rechecked !== null && rechecked !== 0) {
+    throw new Error(
+      `Could not repair the code signature on ${basename(path)}. ` +
+        "macOS would kill it on launch (SIGKILL / exit 137).",
+    );
+  }
+}
+
 async function verifyCandidate(path: string, version: string): Promise<void> {
   const proc = Bun.spawn([path, "--version"], {
     stdout: "pipe",
@@ -199,6 +281,9 @@ export async function installStandaloneRelease(
     const mode = statSync(executablePath).mode & 0o777;
     copyFileSync(extractedPath, stagedPath, constants.COPYFILE_EXCL);
     chmodSync(stagedPath, mode || 0o755);
+    // Must run before verifyCandidate: a stale signature makes macOS kill the
+    // binary on first page-in, so the version check would fail spuriously.
+    ensureValidSignature(stagedPath);
     await verifyCandidate(stagedPath, release.version);
     renameSync(stagedPath, executablePath);
   } catch (error) {

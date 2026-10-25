@@ -68,6 +68,21 @@ jobs:
           --no-compile-autoload-bunfig
           src/index.ts
           --outfile=build/routstrd
+      - name: Repair code signature (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # bun build --compile appends the standalone payload after the
+          # linker's ad-hoc signature, leaving the CodeDirectory stale. macOS
+          # validates code pages lazily and SIGKILLs the process on the first
+          # mismatching page, so re-sign before the smoke test runs the binary.
+          # A no-op when the artifact is already validly signed.
+          if codesign --verify build/routstrd >/dev/null 2>&1; then
+            echo "Existing signature verifies; leaving it untouched."
+          else
+            echo "Repairing stale ad-hoc signature on build/routstrd."
+            codesign --force --sign - --timestamp=none build/routstrd
+            codesign --verify --strict build/routstrd
+          fi
       - name: Smoke test executable
         run: |
           package_version="$(bun -p "require('./package.json').version")"
