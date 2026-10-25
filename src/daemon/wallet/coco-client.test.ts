@@ -88,6 +88,9 @@ describe("default mint functionality", () => {
       walletDir,
       legacySocketPath: join(walletDir, "legacy-cocod.sock"),
       legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+      // Keep wallet unit tests offline; NPC behavior is covered by
+      // coco-client.npc.test.ts.
+      enableNpc: false,
     });
     try {
       expect(readFileSync(join(walletDir, "wallet.pid"), "utf8")).toBe(
@@ -133,6 +136,9 @@ describe("default mint functionality", () => {
       walletDir,
       legacySocketPath: join(walletDir, "legacy-cocod.sock"),
       legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+      // Keep wallet unit tests offline; NPC behavior is covered by
+      // coco-client.npc.test.ts.
+      enableNpc: false,
     });
     try {
       // Should respect the configured default mint
@@ -164,6 +170,9 @@ describe("default mint functionality", () => {
       walletDir,
       legacySocketPath: join(walletDir, "legacy-cocod.sock"),
       legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+      // Keep wallet unit tests offline; NPC behavior is covered by
+      // coco-client.npc.test.ts.
+      enableNpc: false,
     });
     try {
       // The initial default should be the auto-added Minibits mint

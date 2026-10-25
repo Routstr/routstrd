@@ -12,6 +12,10 @@ const npcState = {
     | { success: false; pr: { amount: number; mints: string[] } },
   setUsernameCalls: [] as Array<{ username: string; attemptPayment?: boolean }>,
   syncCalls: 0,
+  pluginOptions: [] as Array<{
+    useWebsocket?: boolean;
+    syncIntervalMs?: number;
+  }>,
 };
 
 class MockNPCPlugin {
@@ -27,6 +31,17 @@ class MockNPCPlugin {
       npcState.syncCalls += 1;
     },
   };
+
+  constructor(
+    _baseUrl: string,
+    _signer: unknown,
+    options?: { useWebsocket?: boolean; syncIntervalMs?: number },
+  ) {
+    npcState.pluginOptions.push({
+      useWebsocket: options?.useWebsocket,
+      syncIntervalMs: options?.syncIntervalMs,
+    });
+  }
 
   onInit(ctx: { registerExtension: (key: string, api: unknown) => void }) {
     ctx.registerExtension("npc", this.api);
@@ -70,6 +85,21 @@ function resetNpcState(): void {
   npcState.usernameResult = { success: true };
   npcState.setUsernameCalls = [];
   npcState.syncCalls = 0;
+  npcState.pluginOptions = [];
+}
+
+// The daemon fires a catch-up sync in the background once wallet recovery
+// completes, so tests that assert on sync() calls must first wait for it.
+async function waitForNpcSyncs(count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (npcState.syncCalls < count) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `timed out waiting for ${count} NPC sync calls (saw ${npcState.syncCalls})`,
+      );
+    }
+    await Bun.sleep(5);
+  }
 }
 
 afterEach(() => {
@@ -141,11 +171,36 @@ describe("in-process coco client NPC integration", () => {
     }
   });
 
+  it("registers the plugin with an interval sync fallback", async () => {
+    const client = await createCocoClient(testClientOptions());
+    try {
+      expect(npcState.pluginOptions).toEqual([
+        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
+      ]);
+    } finally {
+      await client.dispose?.();
+    }
+  });
+
+  it("syncs paid quotes once automatically after wallet recovery", async () => {
+    const client = await createCocoClient(testClientOptions());
+    try {
+      await waitForNpcSyncs(1);
+      expect(npcState.syncCalls).toBe(1);
+    } finally {
+      await client.dispose?.();
+    }
+  });
+
   it("triggers a manual quote sync", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
+      // Wait out the automatic post-recovery catch-up so this test only
+      // measures the explicit syncNpc() call.
+      await waitForNpcSyncs(1);
+      const baseline = npcState.syncCalls;
       await client.syncNpc();
-      expect(npcState.syncCalls).toBe(1);
+      expect(npcState.syncCalls).toBe(baseline + 1);
     } finally {
       await client.dispose?.();
     }
@@ -163,6 +218,9 @@ describe("in-process coco client NPC integration", () => {
       await expect(client.syncNpc()).rejects.toThrow(
         "NPC plugin is not enabled",
       );
+      // No plugin means no interval fallback and no automatic catch-up sync.
+      expect(npcState.pluginOptions).toEqual([]);
+      expect(npcState.syncCalls).toBe(0);
     } finally {
       await client.dispose?.();
     }
