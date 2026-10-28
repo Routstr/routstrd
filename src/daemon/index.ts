@@ -357,6 +357,15 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       (async () => {
         logger.log("Running scheduled refund...");
         try {
+          const parked = await refundClient
+            .getCashuSpender()
+            .recoverCachedReceiveTokens();
+          if (parked.length > 0) {
+            logger.log(
+              `Retried ${parked.length} parked tokens: ${parked.filter((r: { success: boolean }) => r.success).length} received.`,
+            );
+          }
+
           const state = store.getState() as any;
           const pendingDistribution = (state.cachedTokens || []).map(
             (t: { baseUrl: string; balance?: number }) => ({
