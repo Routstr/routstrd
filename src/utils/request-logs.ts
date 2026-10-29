@@ -43,6 +43,12 @@ export interface LifecycleTrace {
 function text(value: unknown): string {
   return String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
 }
+/** Provider-controlled identifiers (node request ids) are not trusted: only a
+ * short opaque token is displayable, since anything else may echo credentials or
+ * a free-form upstream envelope. Same rule the SDK applies to structured codes. */
+function identifier(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-zA-Z0-9_.:-]{1,120}$/.test(value) ? value : undefined;
+}
 function provider(value: string): string {
   try {
     const url = new URL(value);
@@ -72,7 +78,9 @@ export function safeCorrelatedLog(line: string, requestId: string): { timestamp:
   const timestamp = Date.parse(match[1]!);
   if (!Number.isFinite(timestamp)) return;
   const tags = match[3]!.match(/^(?:\[[^\]]+\]\s*)+/)?.[0] ?? "";
-  const message = match[3]!.slice(tags.length);
+  // The SDK emits routing decisions through RoutstrClient's
+  // `_handleErrorResponse: ` prefix; strip it so the whitelist still matches.
+  const message = match[3]!.slice(tags.length).replace(/^_handleErrorResponse:\s*/i, "");
   // Whitelist operational prefixes, not arbitrary request-scoped messages.
   if (!/^(Routing request with path|Provider selected|Selected provider|Retrying|Failover|Failing over|Top-?up (?:started|succeeded|completed)|Stream (?:completed|cancelled)|Request (?:started|completed|aborted))\b/i.test(message)) return;
   // Keep only the diagnostic label. Variable suffixes can contain raw upstream
@@ -84,20 +92,27 @@ export function safeCorrelatedLog(line: string, requestId: string): { timestamp:
 export function formatRequestVerbose(trace: LifecycleTrace, logLines: string[] = []): string {
   const timeline: { timestamp: number; order: number; message: string }[] = [];
   for (const attempt of trace.attempts) {
+    const kind = identifier(attempt.kind);
+    const failurePhase = identifier(attempt.failurePhase);
+    const errorType = identifier(attempt.errorType);
+    const errorCode = identifier(attempt.errorCode);
+    const nodeRequestId = identifier(attempt.nodeRequestId);
     const details = [
       `attempt=${attempt.ordinal}`, `provider=${provider(attempt.baseUrl)}`,
-      attempt.kind && `kind=${text(attempt.kind)}`,
+      kind && `kind=${kind}`,
       `status=${attempt.httpStatus ?? (attempt.outcome === "in_progress" ? "IN_PROGRESS" : attempt.outcome === "aborted" ? "ABORTED" : "NET")}`,
       `outcome=${text(attempt.outcome)}`,
-      attempt.failurePhase && `phase=${text(attempt.failurePhase)}`,
-      (attempt.errorType || attempt.errorCode) && `error=${text([attempt.errorType, attempt.errorCode].filter(Boolean).join("/"))}`,
-      attempt.nodeRequestId && `node_request_id=${text(attempt.nodeRequestId)}`,
+      failurePhase && `phase=${failurePhase}`,
+      (errorType || errorCode) && `error=${[errorType, errorCode].filter(Boolean).join("/")}`,
+      // Never print a provider-supplied header value verbatim: it is not ours.
+      nodeRequestId && `node_request_id=${nodeRequestId}`,
     ].filter(Boolean).join(" ");
     timeline.push({ timestamp: attempt.headersReceivedAt ?? attempt.endedAt ?? attempt.startedAt, order: attempt.ordinal, message: details });
   }
   for (const event of trace.events) {
+    const eventAttemptId = identifier(event.attemptId);
     const details = [text(event.type), event.baseUrl && `provider=${provider(event.baseUrl)}`,
-      event.attemptId && `attempt_id=${text(event.attemptId)}`];
+      eventAttemptId && `attempt_id=${eventAttemptId}`];
     // Never dump event objects. Only routing decision fields are displayed.
     for (const key of ["from", "to"] as const) {
       if (typeof event.data?.[key] === "string") details.push(`${key}=${provider(event.data[key])}`);

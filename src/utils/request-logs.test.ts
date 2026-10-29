@@ -52,6 +52,35 @@ describe("lifecycle logs rendering", () => {
     expect(rendered).not.toContain("TOP SECRET");
     expect(rendered).not.toContain("req:other");
   });
+  test("verbose refuses provider-controlled node ids that are not opaque tokens", () => {
+    const t = trace();
+    // x-routstr-request-id is a provider header, so its value is untrusted.
+    t.attempts[0]!.nodeRequestId = "Bearer sk-live-secret free-form provider text";
+    t.attempts[1]!.nodeRequestId = "node-2";
+    t.attempts[2]!.nodeRequestId = "x".repeat(121);
+    t.events = [{ sequence: 1, timestamp: 1000, type: "provider_selected", attemptId: "Bearer sk-attempt-secret" }];
+    const rendered = formatRequestVerbose(t);
+    expect(rendered).not.toContain("sk-live-secret");
+    expect(rendered).not.toContain("sk-attempt-secret");
+    expect(rendered).not.toContain("free-form provider text");
+    expect(rendered).not.toContain("x".repeat(121));
+    expect(rendered).toContain("node_request_id=node-2");
+    expect(rendered).not.toContain("attempt_id=");
+  });
+  test("verbose picks up the SDK's _handleErrorResponse retry and failover lines", () => {
+    const t = trace();
+    const lines = [
+      `[1970-01-01T00:00:01.100Z] [INFO] [req:${id}] [RoutstrClient] _handleErrorResponse: Retrying 402 (attempt 1/2)`,
+      `[1970-01-01T00:00:01.200Z] [INFO] [req:${id}] [RoutstrClient] _handleErrorResponse: Failing over to next provider: https://b.test, model: m`,
+    ];
+    const rendered = formatRequestVerbose(t, lines);
+    expect(rendered).toContain("log [INFO] Retrying");
+    expect(rendered).toContain("log [INFO] Failing over");
+    // Variable suffixes still never reach the terminal.
+    expect(rendered).not.toContain("attempt 1/2");
+    expect(rendered).not.toContain("next provider");
+    expect(safeCorrelatedLog(lines[0]!, id)).toEqual({ timestamp: 1_100, message: "log [INFO] Retrying" });
+  });
   test("verbose excludes raw payloads, credentials, unknown messages and continuations", () => {
     const t = trace(); t.attempts[0]!.baseUrl = "https://user:password@node.test/v1?api_key=SECRET";
     const payloads = [
