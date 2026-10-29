@@ -10,7 +10,8 @@ import {
 // storage (eventStoreDbPath) gets its SQLite-backed factory. The default
 // "@routstr/sdk" export is browser-safe and throws without that factory
 // (SDK 0.3.7+ browser-safe entrypoint split).
-import { ModelManager } from "@routstr/sdk/bun";
+import { ModelManager, createBunSqliteRequestLifecycleDriver } from "@routstr/sdk/bun";
+import { initializeDaemonLifecycle } from "./request-lifecycle";
 import type { SdkLogger } from "@routstr/sdk";
 import {
   CONFIG_DIR,
@@ -122,6 +123,8 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     legacyStorageDriver: sqliteDriver,
   });
 
+  const requestLifecycleDriver = await createBunSqliteRequestLifecycleDriver({ dbPath: DB_PATH });
+
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
   startupProgress("Routstr databases ready.");
@@ -202,6 +205,9 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     { logger: daemonSdkLogger },
   );
 
+  // Wallet startup has acquired the process PID lock. Only its owner may
+  // interrupt the previous daemon instance's unfinished rows.
+  const lifecycleOwnerInstanceId = await initializeDaemonLifecycle(requestLifecycleDriver, DB_PATH);
   const server = createServer();
   server.on(
     "request",
@@ -226,6 +232,8 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       routstrPubkey: config.routstrPubkey,
       routstrModelsPubkey: config.routstrModelsPubkey,
       usageTrackingDriver,
+      requestLifecycleDriver,
+      lifecycleOwnerInstanceId,
       providerManager,
       refundClient,
       requestResponseLogSink,
