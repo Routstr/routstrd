@@ -1,3 +1,4 @@
+import { loadRequestTraces, RequestLogFollower, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
@@ -35,7 +36,7 @@ import {
   refreshModelsAndClientsAction,
   setAutomaticRefreshAction,
 } from "./utils/clients";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
 import { execSync } from "child_process";
 import { dirname, join } from "path";
 import {
@@ -3422,19 +3423,27 @@ function parseLinesOption(value: string): number {
 
 program
   .command("logs")
-  .description("View daemon logs")
-  .option("-f, --follow", "Follow log output", false)
+  .description("View request lifecycle summaries (use --raw for legacy daemon logs)")
+  .option("-f, --follow", "Follow requests; emit updated summaries as attempts complete", false)
+  .option("-v, --verbose", "Show chronological lifecycle diagnostics and correlated safe log lines", false)
+  .option("--raw", "Show legacy flat daemon logs (may contain sensitive diagnostics)", false)
+  .option("--before <timestamp>", "Requests started before epoch milliseconds")
+  .option("--after <timestamp>", "Requests started after epoch milliseconds")
+  .option("--outcome <outcome>", "Filter by lifecycle outcome")
+  .option("--model-id <id>", "Filter by requested canonical model")
+  .option("--base-url <url>", "Filter by provider URL")
+  .option("--client-id <id>", "Filter by client ID")
   .option("-c, --coco", "Show Cashu wallet-engine (coco) logs instead of daemon logs", false)
-  .option("-n, --lines <number>", "Number of lines to show", "50")
-  .option("-r, --recent", "List recent request ids with their model", false)
-  .option("-i, --request-id <id>", "Only show log lines for a specific request id")
+  .option("-n, --lines <number>", "Number of requests (or lines with --raw) to show", "50")
+  .option("-r, --recent", "List recent requests (legacy request index with --raw)", false)
+  .option("-i, --request-id <id>", "Only show this lifecycle UUID (log lines with --raw)")
   .action(
-    async (options: {
+    async (options: RequestLogFilters & {
       follow: boolean;
-      lines: string;
       coco: boolean;
       recent: boolean;
-      requestId?: string;
+      verbose: boolean;
+      raw: boolean;
     }) => {
       await requireLocalDaemon();
 
@@ -3450,6 +3459,29 @@ program
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
       const yesterdayFile = getLogFileForDate(logsDir, yesterday);
+
+      if (!options.raw && !options.coco) {
+        // The daemon reads its persistent lifecycle DB, including failures that
+        // never created usage rows. Flat logs cannot supply the status chain.
+        const follower = new RequestLogFollower();
+        let first = true;
+        do {
+          const traces = await loadRequestTraces(options, callDaemon);
+          // Search retained daily diagnostics, not the opt-in raw payload sink.
+          // This also permits inspecting an older request by its full UUID.
+          const logLines = options.verbose && existsSync(LOGS_DIR)
+            ? readdirSync(LOGS_DIR).filter((file) => /^\d{4}-\d{2}-\d{2}\.log$/.test(file))
+                .sort().flatMap((file) => readAllLines(join(LOGS_DIR, file)))
+            : [];
+          const output = follower.changed(traces, options.verbose, logLines);
+          for (const rendered of output) console.log(rendered);
+          if (first && traces.length === 0) console.log("No requests found.");
+          first = false;
+          if (!options.follow) break;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } while (true);
+        return;
+      }
 
       if (!existsSync(todayFile) && !existsSync(yesterdayFile)) {
         console.log("No log files found. Daemon may not have started yet.");

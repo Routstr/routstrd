@@ -4,6 +4,9 @@ import { join } from "path";
 import type { SdkLogger } from "@routstr/sdk";
 
 export interface RequestResponseLogRequestInput {
+  requestId?: string;
+  attemptId?: string;
+  ordinal?: number;
   method: string;
   url: string;
   path: string;
@@ -128,6 +131,9 @@ export class FileRequestResponseLogSink implements RequestResponseLogSink {
         JSON.stringify(
           {
             id,
+            requestId: input.requestId,
+            attemptId: input.attemptId,
+            ordinal: input.ordinal,
             timestamp: new Date().toISOString(),
             method: input.method,
             url: input.url,

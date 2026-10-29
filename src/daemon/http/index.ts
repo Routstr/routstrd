@@ -3,10 +3,12 @@ import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
 import {
   routeRequests,
+  beginRequestLifecycle,
+  shouldTrackRequestLifecycle,
   InsufficientBalanceError,
   ProviderManager,
 } from "@routstr/sdk";
-import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RequestLifecycleDriver, UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
@@ -102,16 +104,8 @@ function getClientIdFromRequest(
   store: { getState(): any },
 ): string | undefined {
   const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return undefined;
-  }
-
-  const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
-
-  if (!apiKey.startsWith("sk-")) {
-    return undefined;
-  }
+  const apiKey = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1] ?? req.headers["x-api-key"];
+  if (typeof apiKey !== "string") return undefined;
 
   const clients = getClientsFromStore(store);
   const matchingClient = clients.find((c) => c.apiKey === apiKey);
@@ -126,11 +120,21 @@ function generateApiKey(): string {
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (chunk) => {
-      data += chunk.toString();
-    });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
+    const cleanup = () => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("aborted", onAborted);
+    };
+    const onData = (chunk: Buffer | string) => { data += chunk.toString(); };
+    const onEnd = () => { cleanup(); resolve(data); };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onAborted = () => onError(new Error("Request aborted."));
+    if (req.aborted) { onAborted(); return; }
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
   });
 }
 
@@ -451,6 +455,8 @@ export function createDaemonRequestHandler(deps: {
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
   routstrModelsPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
+  requestLifecycleDriver?: RequestLifecycleDriver;
+  lifecycleOwnerInstanceId?: string;
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
@@ -2236,7 +2242,7 @@ export function createDaemonRequestHandler(deps: {
         const allMatching = await usageDriver.list();
         const requestIdPrefix = `gen-${timestamp}-`;
         const filtered = allMatching.filter((entry) =>
-          entry.requestId.startsWith(requestIdPrefix),
+          (entry.upstreamResponseId ?? entry.requestId).startsWith(requestIdPrefix),
         );
         const entries = filtered.slice(0, limit);
         const totalEntries = filtered.length;
@@ -2268,6 +2274,36 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "GET" && (url.pathname === "/requests" || url.pathname.startsWith("/requests/"))) {
+      try {
+        const driver = deps.requestLifecycleDriver;
+        if (!driver) { sendJson(res, 503, { error: "Lifecycle storage unavailable." }); return; }
+        if (url.pathname === "/requests") {
+          const time = (key: string) => {
+            const raw = url.searchParams.get(key);
+            if (raw === null) return undefined;
+            const value = Number(raw);
+            if (!Number.isFinite(value)) throw new Error(`Invalid ${key} timestamp.`);
+            return value;
+          };
+          const outcome = url.searchParams.get("outcome") || undefined;
+          if (outcome && !["in_progress", "succeeded", "failed", "aborted", "interrupted"].includes(outcome)) {
+            sendJson(res, 400, { error: "Invalid outcome." }); return;
+          }
+          const entries = await driver.list({
+            limit: parseLimit(url.searchParams.get("limit")), before: time("before"), after: time("after"),
+            outcome: outcome as any, modelId: url.searchParams.get("modelId") || undefined,
+            baseUrl: url.searchParams.get("baseUrl") || undefined, clientId: url.searchParams.get("clientId") || undefined,
+          });
+          sendJson(res, 200, { output: entries });
+        } else {
+          const trace = await driver.getTrace(decodeURIComponent(url.pathname.slice("/requests/".length)));
+          sendJson(res, trace ? 200 : 404, trace ? { request: trace.request, attempts: trace.attempts, events: trace.events } : { error: "Request not found." });
+        }
+      } catch (error) { sendJson(res, 400, { error: toErrorMessage(error) }); }
+      return;
+    }
+
     if (
       req.method !== "POST" &&
       !url.pathname.startsWith("/clients") &&
@@ -2278,10 +2314,46 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (!shouldTrackRequestLifecycle(req.method || "GET", url.pathname) || /^\/(?:v1\/)?(?:status|version|clients|cooldowns|settings|nwc|stop)(?:\/|$)/.test(url.pathname)) {
+      sendJson(res, 404, { error: "Unknown endpoint." });
+      return;
+    }
+
+    // Only the final provider-proxy POST branch is eligible. Metadata/admin
+    // routes above never allocate a lifecycle (including their validation errors).
+    const abortController = new AbortController();
+    const onAbort = () => abortController.abort();
+    const onClose = () => { if (!res.writableFinished) onAbort(); };
+    req.once("aborted", onAbort);
+    res.once("close", onClose);
+    const cleanup = () => {
+      req.removeListener("aborted", onAbort);
+      res.removeListener("close", onClose);
+    };
+    res.once("finish", cleanup);
+    res.once("close", cleanup);
+    const lifecycle = await beginRequestLifecycle({
+      driver: deps.requestLifecycleDriver,
+      ownerInstanceId: deps.lifecycleOwnerInstanceId,
+      method: req.method || "POST", path: url.pathname,
+      clientId: getClientIdFromRequest(req, deps.store) || "unknown",
+      callerRequestId: typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : undefined,
+      mode: deps.mode, logger: makeSdkLogger("lifecycle"),
+    });
+    res.setHeader("x-routstr-sdk-request-id", lifecycle.requestId);
+    const reqLogger = makeSdkLogger(`req:${lifecycle.requestId}`);
+    let handedToSdk = false;
+    const finishLocal = async (httpStatus: number, errorMessage: string) => {
+      const aborted = abortController.signal.aborted;
+      await lifecycle.finish({ outcome: aborted ? "aborted" : "failed", httpStatus: aborted ? undefined : httpStatus, errorMessage: aborted ? "Request aborted." : errorMessage });
+    };
+
     let requestBody: unknown = {};
     try {
       requestBody = await readJsonBody(req);
     } catch (error) {
+      await finishLocal(400, "Invalid JSON body.");
+      if (res.destroyed) return;
       sendJson(res, 400, {
         error: "Invalid JSON body.",
         details: toErrorMessage(error),
@@ -2289,13 +2361,17 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    const bodyObj = requestBody as Record<string, unknown>;
+    const bodyObj = requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)
+      ? requestBody as Record<string, unknown> : {};
     const modelId = typeof bodyObj.model === "string" ? bodyObj.model : "";
 
     if (!modelId) {
+      await finishLocal(400, "Missing required model field.");
       sendJson(res, 400, { error: "Missing required 'model' field." });
       return;
     }
+
+    await lifecycle.updateRequest({ modelId, stream: bodyObj.stream === true });
 
     // Cap the completion budget when the client does not set an output token
     // limit. Without this, the SDK prices at the provider's worst-case
@@ -2325,9 +2401,18 @@ export function createDaemonRequestHandler(deps: {
     }
 
     try {
-      await deps.ensureProvidersBootstrapped();
-      const reqId = randomBytes(4).toString("hex");
-      const reqLogger = makeSdkLogger(`req:${reqId}`, `model:${modelId}`);
+      // Discovery is shared: cancel this waiter, not the shared bootstrap.
+      await new Promise<void>((resolve, reject) => {
+        const signal = abortController.signal;
+        const aborted = () => { signal.removeEventListener("abort", aborted); reject(new Error("Request aborted.")); };
+        if (signal.aborted) { aborted(); return; }
+        signal.addEventListener("abort", aborted, { once: true });
+        deps.ensureProvidersBootstrapped().then(
+          () => { signal.removeEventListener("abort", aborted); resolve(); },
+          (error) => { signal.removeEventListener("abort", aborted); reject(error); },
+        );
+      });
+
       // Provider nodes accept an endpoint with or without a leading `/v1`, but
       // they forward the caller's spelling to their own upstream, and some
       // upstreams serve only the versioned route. Normalize at the last hop
@@ -2341,7 +2426,9 @@ export function createDaemonRequestHandler(deps: {
           : `Routing request with path: ${url.pathname} (forwarding as ${forwardedPath})`,
       );
 
+      handedToSdk = true;
       const response = await routeRequests({
+        lifecycle, requestLifecycleDriver: deps.requestLifecycleDriver, signal: abortController.signal,
         modelId,
         requestBody,
         path: forwardedPath,
@@ -2367,6 +2454,13 @@ export function createDaemonRequestHandler(deps: {
           : {}),
       });
 
+      if (abortController.signal.aborted || res.destroyed) {
+        await response.body?.cancel().catch(() => {});
+        const finalize = (response as any).finalize;
+        if (finalize) await finalize();
+        return;
+      }
+
       // Bridge the Web `Response` to the Node `ServerResponse`: status +
       // headers + pipe(body → res). Hop-by-hop headers are dropped (see
       // HOP_BY_HOP_HEADERS) so Node computes correct framing for THIS
@@ -2387,13 +2481,15 @@ export function createDaemonRequestHandler(deps: {
           try {
             await finalize();
           } catch (err) {
-            logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+            reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
           }
         }
         return;
       }
 
       const nodeReadable = Readable.fromWeb(response.body as any);
+      const cancelBody = () => nodeReadable.destroy();
+      abortController.signal.addEventListener("abort", cancelBody, { once: true });
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const finish = () => {
@@ -2407,23 +2503,28 @@ export function createDaemonRequestHandler(deps: {
           reject(err);
         };
         res.once("finish", finish);
-        res.once("close", finish);
+        res.once("close", () => { nodeReadable.destroy(); finish(); });
         res.once("error", fail);
         nodeReadable.once("error", fail);
         nodeReadable.pipe(res);
       });
 
+      abortController.signal.removeEventListener("abort", cancelBody);
       if (finalize) {
         try {
           await finalize();
         } catch (err) {
-          logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+          reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
         }
       }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[daemon] Error: ${message}`);
+      const nodeRequestId = (error as { nodeRequestId?: unknown })?.nodeRequestId;
+      if (!res.headersSent && typeof nodeRequestId === "string") res.setHeader("x-routstr-request-id", nodeRequestId);
+      reqLogger.error(`Error: ${message}`);
+      if (!handedToSdk) await finishLocal(error instanceof InsufficientBalanceError ? 402 : 500, "Local inference preparation failed.");
+      if (res.headersSent || res.destroyed) { res.destroy(); return; }
 
       if (error instanceof InsufficientBalanceError) {
         const balanceError = error as {
