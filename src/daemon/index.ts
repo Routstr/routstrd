@@ -358,20 +358,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
         logger.log("Running scheduled refund...");
         try {
           const state = store.getState() as any;
-          const pendingDistribution = (state.cachedTokens || []).map(
-            (t: { baseUrl: string; balance?: number }) => ({
-              baseUrl: t.baseUrl,
-              amount: t.balance || 0,
-            }),
-          );
-          const apiKeysStored = (state.apiKeys || []).map(
-            (k: { baseUrl: string; balance?: number }) => ({
-              baseUrl: k.baseUrl,
-              amount: k.balance || 0,
-            }),
-          );
-
-          if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+          if ((state.apiKeys || []).length === 0) {
             logger.log("No pending tokens to refund.");
             return;
           }
