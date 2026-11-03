@@ -262,6 +262,14 @@ export interface WalletClient {
   checkProofs?(
     options?: WalletProofCheckOptions,
   ): Promise<WalletProofCheckResult>;
+  /**
+   * Re-derive a mint's proofs from its NUT-09 restore endpoint. Progress is
+   * reported per keyset; the promise resolves with a human-readable summary.
+   */
+  recoverMint?(
+    mintUrl: string,
+    onProgress?: (message: string) => void,
+  ): Promise<string>;
   /** Report background wallet recovery progress, when the wallet supports it. */
   getRecoveryProgress?(): Promise<WalletRecoveryProgress>;
 }
