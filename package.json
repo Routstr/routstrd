@@ -18,6 +18,7 @@
   "files": [
     "dist/index.js",
     "dist/daemon/index.js",
+    "patches",
     "src",
     "!src/**/*.test.ts",
     "!src/daemon/wallet/fixtures",
@@ -60,5 +61,9 @@
     "rxjs": "^7.8.1",
     "yaml": "^2.9.0",
     "zustand": "^5.0.5"
+  },
+  "patchedDependencies": {
+    "npubcash-sdk@0.3.2": "patches/npubcash-sdk@0.3.2.patch",
+    "coco-cashu-plugin-npc@2.4.1": "patches/coco-cashu-plugin-npc@2.4.1.patch"
   }
 }
