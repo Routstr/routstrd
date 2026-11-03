@@ -605,6 +605,33 @@ program
     }
   });
 
+/**
+ * Tokens the daemon had parked after a failed receive and retried as part of
+ * this refund. Reported separately because they never appear in the store's
+ * pending token/API key counts — without this line a refund that recovered
+ * them looks identical to one that had nothing to do.
+ */
+interface RefundRecovery {
+  attempted: number;
+  succeeded: number;
+  error?: string;
+}
+
+function printRecoveredTokens(recovered?: RefundRecovery): void {
+  if (!recovered || (recovered.attempted === 0 && !recovered.error)) return;
+  if (recovered.error) {
+    console.log(`\nParked tokens: recovery failed: ${recovered.error}`);
+    return;
+  }
+  const stillParked = recovered.attempted - recovered.succeeded;
+  console.log(
+    `\nParked tokens: ${recovered.succeeded}/${recovered.attempted} received` +
+      (stillParked > 0
+        ? `, ${stillParked} still parked (the daemon retries them every 42 minutes)`
+        : ""),
+  );
+}
+
 program
   .command("refund")
   .description("Refund pending tokens and API keys to a specified mint")
@@ -656,12 +683,14 @@ program
         const output = result.output as
           | {
               message: string;
+              recovered?: RefundRecovery;
               results: Array<{ baseUrl: string; token: string; success: boolean; error?: string }>;
             }
           | undefined;
 
         if (output) {
           console.log(output.message);
+          printRecoveredTokens(output.recovered);
           console.log("\nResults:");
           for (const r of output.results) {
             const status = r.success ? "success" : `failed: ${r.error || "unknown"}`;
@@ -686,6 +715,7 @@ program
             message: string;
             pendingTokens: number;
             apiKeys: number;
+            recovered?: RefundRecovery;
             results: Array<{ baseUrl: string; success: boolean }>;
           }
         | undefined;
@@ -694,6 +724,7 @@ program
         console.log(output.message);
         console.log(`\nPending tokens: ${output.pendingTokens}`);
         console.log(`API keys: ${output.apiKeys}`);
+        printRecoveredTokens(output.recovered);
         console.log("\nResults:");
         for (const r of output.results) {
           console.log(`  - ${r.baseUrl}: ${r.success ? "success" : "failed"}`);
