@@ -2664,6 +2664,64 @@ walletCmd
   });
 
 walletCmd
+  .command("sweep-offline")
+  .description("Check and reclaim aged pending offline Cashu sends (invalidates unclaimed tokens)")
+  .option("--mint-url <url>", "Only sweep tokens from this mint")
+  .option("--min-age <hours>", "Minimum token age in hours (default: 168, seven days)", "168")
+  .option("--dry-run", "List candidates locally without mint requests or changes", false)
+  .option("-y, --yes", "Confirm invalidating outstanding unclaimed tokens", false)
+  .action(async (options: { mintUrl?: string; minAge: string; dryRun: boolean; yes: boolean }) => {
+    const hours = Number(options.minAge);
+    const minAgeMs = Math.round(hours * 60 * 60 * 1000);
+    if (!options.minAge.trim() || !Number.isFinite(hours) || hours < 0 || !Number.isSafeInteger(minAgeMs)) {
+      console.error(`Invalid --min-age value: ${options.minAge}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (!options.dryRun && !options.yes) {
+      if (!process.stdin.isTTY) {
+        console.error("Offline sweeping requires confirmation. Preview with --dry-run or explicitly use --yes.");
+        process.exitCode = 1;
+        return;
+      }
+      const rl = require("readline").createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((resolve) => {
+        rl.question("WARNING: Reclaiming invalidates outstanding unclaimed tokens, even if recipients still hold them. Mint fees may apply. Continue? [y/N] ", (value: string) => {
+          rl.close();
+          resolve(value.trim().toLowerCase());
+        });
+      });
+      if (answer !== "y" && answer !== "yes") {
+        console.log("Aborted.");
+        return;
+      }
+    }
+    try {
+      await ensureDaemonRunning();
+      const result = await callDaemon("/wallet/sweep-offline", {
+        method: "POST",
+        body: { mintUrl: options.mintUrl, minAgeMs, dryRun: options.dryRun, confirmed: !options.dryRun },
+      });
+      if (result.error) {
+        console.error(result.error);
+        process.exitCode = 1;
+        return;
+      }
+      const output = result.output as import("./daemon/wallet/offline-sweep").OfflineSweepResult;
+      console.log(options.dryRun ? "Offline sweep candidates (not checked with mint):" : "Offline sweep results:");
+      console.log(`  Candidates: ${output.candidates}; skipped: ${output.skipped}`);
+      console.log(`  Claimed: ${output.claimed}; reclaimed: ${output.reclaimed}; unresolved: ${output.unresolved}; failed: ${output.failed}`);
+      for (const op of output.operations) {
+        console.log(`  ${op.operationId} ${op.mintUrl} ${op.amount} sat ${op.outcome}${op.error ? `: ${op.error}` : ""}`);
+      }
+      if (output.failed || output.unresolved) process.exitCode = 1;
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
+  });
+
+walletCmd
   .command("cleanup")
   .description("Clear stuck pending/in-flight wallet operations")
   .option("--mint-url <url>", "Only clean up operations for this mint URL")

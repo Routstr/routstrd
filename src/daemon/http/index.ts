@@ -569,6 +569,34 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/sweep-offline") {
+      await respond(res, async () => {
+        if (!deps.walletClient.sweepOfflineSends) {
+          throw new WalletHttpError(501, "Offline sweeps are not supported by this wallet client.");
+        }
+        const body = await readJsonBody(req);
+        if (body.minAgeMs !== undefined &&
+            (typeof body.minAgeMs !== "number" || !Number.isSafeInteger(body.minAgeMs) || body.minAgeMs < 0)) {
+          throw new WalletHttpError(400, "'minAgeMs' must be a non-negative safe integer.");
+        }
+        for (const field of ["dryRun", "confirmed"]) {
+          if (body[field] !== undefined && typeof body[field] !== "boolean") {
+            throw new WalletHttpError(400, `'${field}' must be a boolean.`);
+          }
+        }
+        if (body.dryRun !== true && body.confirmed !== true) {
+          throw new WalletHttpError(400, "Confirm the offline sweep: unclaimed tokens will be invalidated.");
+        }
+        return { output: await deps.walletClient.sweepOfflineSends({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          minAgeMs: body.minAgeMs as number | undefined,
+          dryRun: body.dryRun === true,
+          confirmed: body.confirmed === true,
+        }) };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/cleanup") {
       await respond(res, async () => {
         if (!deps.walletClient.cleanupStuckOperations) {

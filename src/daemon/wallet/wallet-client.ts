@@ -1,3 +1,4 @@
+import type { OfflineSweepOptions, OfflineSweepResult } from "./offline-sweep";
 import type { HistoryEntry } from "@cashu/coco-core";
 
 /**
@@ -246,6 +247,8 @@ export interface WalletClient {
   ): Promise<OfflineCashuSendResult>;
   /** Locally assert that an offline token was claimed, without contacting its mint. */
   markSendSpent(operationId: string): Promise<MarkSendSpentResult>;
+  /** Explicit mint-backed sweep of aged pending offline tokens. */
+  sweepOfflineSends?(options: OfflineSweepOptions): Promise<OfflineSweepResult>;
   sendBolt11(invoice: string, mintUrl?: string): Promise<string>;
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;

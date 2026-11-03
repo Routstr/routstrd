@@ -217,6 +217,55 @@ token held by the recipient; age alone does not mean the token was abandoned.
 Normal sends without `--offline` retain Coco's swap and automatic
 proof-state behavior.
 
+### Sweeping old offline sends (explicit operator action)
+
+Offline tokens **do not expire after seven days**. A recipient may hold one
+for months. Routstrd never automatically reclaims them during startup.
+To inspect pending offline sends aged at least seven days:
+
+```sh
+routstrd wallet sweep-offline --dry-run
+# Limit to a mint or override the age in hours:
+routstrd wallet sweep-offline --mint-url https://mint.example --min-age 336 --dry-run
+```
+
+The preview is local only: it lists operation IDs, mints and token face values;
+it does not establish whether a recipient claimed a token. Age is measured
+from the send operation's creation time, not its last refresh. Only pending
+`offline` operations qualify; online sends and executing operations are excluded.
+
+```sh
+routstrd wallet sweep-offline
+# Non-interactive use requires explicit consent:
+routstrd wallet sweep-offline --yes
+```
+
+**Reclaiming invalidates the outstanding token, even if the recipient still
+holds it.** The command warns and asks `[y/N]`; without a terminal, use `--yes`
+or it refuses to apply. Mint connectivity is required and reclaim fees may
+reduce the returned value. Amounts in the report are token face values, not net
+reclaim proceeds.
+
+For each candidate, the sweep asks the mint about its proofs:
+
+- **Claimed:** every proof is SPENT; persist mint-verified settlement and finalize
+  the send. No value is reclaimed.
+- **Reclaimed:** every proof is UNSPENT; use Coco's normal mint-backed reclaim to
+  swap into fresh local proofs. Shared proofs are never merely restored to ready.
+- **Unresolved:** mixed, PENDING or unknown states; leave the token untouched.
+- **Failed:** unreachable mint, malformed response, fee-exhausted token, or failed
+  reclaim/finalization. Continue to other operations and report the operation ID.
+  A recipient can redeem between check and reclaim; that race is reported as a
+  failure, never a successful reclaim. An interrupted reclaim may leave a Coco
+  `rolling_back` operation for normal wallet recovery; inspect before retrying.
+
+The CLI exits nonzero for failures or unresolved tokens. Dry runs report only
+candidates, not claimed/reclaimed counts. This is separate from manual
+`mark-spent`, which asserts settlement without mint verification.
+The daemon API is `POST /wallet/sweep-offline` with optional `mintUrl`,
+`minAgeMs` (default 604800000), and `dryRun`; applying requires
+`confirmed: true` even for API clients.
+
 ### NPC (Lightning Address)
 
 The in-process wallet registers the NPC (npubx.cash) plugin, which gives the

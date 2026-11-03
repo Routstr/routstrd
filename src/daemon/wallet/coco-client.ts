@@ -1,3 +1,4 @@
+import { sweepOfflineSends } from "./offline-sweep";
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
 import { installMeltQuoteExpiryHandler } from "./melt-quote-expiry";
@@ -2493,6 +2494,14 @@ export async function createCocoClient(
         overpayment: actualAmount - amount,
         state: "pending",
       };
+    },
+
+    async sweepOfflineSends(options) {
+      await waitForRecovery();
+      return sweepOfflineSends(coco, {
+        ...options,
+        mintUrl: options.mintUrl ? normalizeMintUrl(options.mintUrl) : undefined,
+      });
     },
 
     async markSendSpent(operationId: string): Promise<MarkSendSpentResult> {
