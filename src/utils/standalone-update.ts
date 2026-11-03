@@ -224,19 +224,27 @@ export function isMachO(path: string): boolean {
   }
 }
 
+type CodesignRun = {
+  exitCode: number;
+  /** codesign explains itself on stderr; keep it for failure messages. */
+  stderr: string;
+};
+
 /**
- * Run codesign, returning its exit code, or `null` when codesign is not
- * available at all (non-macOS, or a stripped-down environment). `null` is
+ * Run codesign, returning its exit code and stderr, or `null` when codesign is
+ * not available at all (non-macOS, or a stripped-down environment). `null` is
  * distinct from a non-zero exit code, which means codesign ran and reported a
  * problem with the file.
  */
-function runCodesign(args: string[]): number | null {
+function runCodesign(args: string[]): CodesignRun | null {
   try {
     const proc = Bun.spawnSync(["codesign", ...args], {
       stdout: "ignore",
-      stderr: "ignore",
+      stderr: "pipe",
+      timeout: PROCESS_TIMEOUT_MS,
     });
-    return proc.exitCode ?? 1;
+    const stderr = proc.stderr ? proc.stderr.toString().trim() : "";
+    return { exitCode: proc.exitCode ?? 1, stderr };
   } catch {
     return null;
   }
@@ -252,23 +260,37 @@ function runCodesign(args: string[]): number | null {
  * what the version check below would otherwise hit.
  *
  * Re-signing ad-hoc restores a valid signature without touching the payload.
- * A binary that already verifies — for example a release properly signed with
- * a Developer ID and notarized — is left untouched, so this never weakens a
- * real signature.
+ * A signature that already verifies — for example a release properly signed
+ * with a Developer ID and notarized — is left untouched, so a working
+ * signature is never weakened. Only a signature macOS is already rejecting is
+ * replaced; the payload it covers has already been verified against the
+ * release SHA256SUMS.
  */
 export function ensureValidSignature(path: string): void {
-  if (process.platform !== "darwin") return;
+  // Check the file type first: it is a cheap local read, and it keeps the
+  // "non-Mach-O payloads are untouched" contract testable off macOS.
   if (!isMachO(path)) return;
+  if (process.platform !== "darwin") return;
 
   const verified = runCodesign(["--verify", path]);
-  if (verified === null || verified === 0) return;
+  if (verified === null || verified.exitCode === 0) return;
 
-  runCodesign(["--force", "--sign", "-", "--timestamp=none", path]);
+  const repaired = runCodesign([
+    "--force",
+    "--sign",
+    "-",
+    "--timestamp=none",
+    path,
+  ]);
   const rechecked = runCodesign(["--verify", path]);
-  if (rechecked !== null && rechecked !== 0) {
+  if (rechecked !== null && rechecked.exitCode !== 0) {
+    const detail = [repaired?.stderr, rechecked.stderr]
+      .filter((line): line is string => Boolean(line))
+      .join("; ");
     throw new Error(
       `Could not repair the code signature on ${basename(path)}. ` +
-        "macOS would kill it on launch (SIGKILL / exit 137).",
+        "macOS would kill it on launch (SIGKILL / exit 137)." +
+        (detail ? ` codesign: ${detail}` : ""),
     );
   }
 }

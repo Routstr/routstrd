@@ -60,6 +60,12 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
+      # The code-signature repair only runs on Darwin, so its test (a real
+      # `bun build --compile` artifact, re-signed and executed) is skipped on
+      # the ubuntu validate job. Run it here on macOS, where it is not.
+      - name: Test code-signature repair (macOS)
+        if: runner.os == 'macOS'
+        run: bun test tests/utils/standalone-update.test.ts
       - name: Build standalone executable
         run: >-
           bun build --compile
@@ -76,7 +82,9 @@ jobs:
           # validates code pages lazily and SIGKILLs the process on the first
           # mismatching page, so re-sign before the smoke test runs the binary.
           # A no-op when the artifact is already validly signed.
-          if codesign --verify build/routstrd >/dev/null 2>&1; then
+          # --strict is used to decide as well as to confirm: a signature that
+          # only passes the loose check would skip the repair and still ship.
+          if codesign --verify --strict build/routstrd >/dev/null 2>&1; then
             echo "Existing signature verifies; leaving it untouched."
           else
             echo "Repairing stale ad-hoc signature on build/routstrd."

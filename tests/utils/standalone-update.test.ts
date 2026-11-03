@@ -346,8 +346,23 @@ describe("ensureValidSignature", () => {
     const target = join(dir, "script.sh");
     writeFileSync(target, "#!/bin/sh\necho hi\n");
 
+    expect(isMachO(target)).toBe(false);
     expect(() => ensureValidSignature(target)).not.toThrow();
   });
+
+  // The file-type gate runs before the platform gate, so this holds on every
+  // host: off macOS nothing is re-signed, even a Mach-O binary.
+  test.skipIf(process.platform === "darwin")(
+    "never invokes codesign for a Mach-O binary off macOS",
+    () => {
+      const dir = tempDir("codesign-non-darwin-");
+      const target = join(dir, "binary");
+      writeFakeMachO(target);
+
+      expect(isMachO(target)).toBe(true);
+      expect(() => ensureValidSignature(target)).not.toThrow();
+    },
+  );
 
   // `bun build --compile` appends its standalone payload after the linker's
   // ad-hoc signature, leaving the CodeDirectory stale. This is the regression
@@ -364,7 +379,7 @@ describe("ensureValidSignature", () => {
       const binary = join(dir, "standalone");
 
       const build = Bun.spawnSync(
-        ["bun", "build", "--compile", "--outfile", binary, entry],
+        [process.execPath, "build", "--compile", "--outfile", binary, entry],
         { stdout: "ignore", stderr: "ignore" },
       );
       expect(build.exitCode).toBe(0);
