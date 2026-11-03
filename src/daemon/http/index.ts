@@ -23,6 +23,7 @@ import {
   type WalletRecoveryProgress,
 } from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
+import { recoverParkedTokens } from "../wallet/parked-tokens";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
@@ -1118,6 +1119,11 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const mintUrl = getRequiredStringField(body, "mintUrl");
 
+        // Parked refund tokens are not in the store's pending buckets, so
+        // retry them before deciding there is nothing to refund — otherwise a
+        // forced refund reports "nothing pending" while funds stay unredeemed.
+        const recovered = await recoverParkedTokens(deps.refundClient);
+
         const state = deps.store.getState();
         const pendingDistribution = (state.cachedTokens || []).map(
           (t: { baseUrl: string; balance?: number }) => ({
@@ -1134,7 +1140,11 @@ export function createDaemonRequestHandler(deps: {
 
         if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
           sendJson(res, 200, {
-            output: { message: "No pending tokens to refund", results: [] },
+            output: {
+              message: "No pending tokens to refund",
+              results: [],
+              recovered,
+            },
           });
           return;
         }
@@ -1151,6 +1161,7 @@ export function createDaemonRequestHandler(deps: {
             message: `Refunded to ${mintUrl}`,
             pendingTokens: pendingDistribution.length,
             apiKeys: apiKeysStored.length,
+            recovered,
             results: results.map(
               (r: { baseUrl: string; success: boolean }) => ({
                 baseUrl: r.baseUrl,
@@ -1171,12 +1182,17 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const mintUrl = getRequiredStringField(body, "mintUrl");
 
+        // Same reasoning as POST /refund: parked refund tokens are not xcashu
+        // tokens, so this route must recover them too.
+        const recovered = await recoverParkedTokens(deps.refundClient);
+
         const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundXcashuTokens(mintUrl);
 
         sendJson(res, 200, {
           output: {
             message: `Refunded xcashu tokens to ${mintUrl}`,
+            recovered,
             results: results.map(
               (r: { baseUrl: string; token: string; success: boolean; error?: string }) => ({
                 baseUrl: r.baseUrl,

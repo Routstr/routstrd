@@ -52,6 +52,7 @@ import {
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
+import { recoverParkedTokens } from "./wallet/parked-tokens";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
@@ -365,6 +366,10 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       (async () => {
         logger.log("Running scheduled refund...");
         try {
+          // Runs before the "nothing to refund" early return: a parked token
+          // can exist with no API key left to refund.
+          await recoverParkedTokens(refundClient);
+
           const state = store.getState() as any;
           const pendingDistribution = (state.cachedTokens || []).map(
             (t: { baseUrl: string; balance?: number }) => ({
