@@ -44,6 +44,8 @@ import type {
   WalletProofCheckOptions,
   WalletProofCheckResult,
   WalletRecoveryProgress,
+  OfflineCashuSendResult,
+  MarkSendSpentResult,
 } from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
@@ -88,6 +90,11 @@ import {
   walletPidPath as defaultWalletPidPath,
 } from "./paths";
 import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
+import {
+  markOfflineSendSpent,
+  registerOfflineSendHandler,
+  watchOnlineInflightProofs,
+} from "./offline-send";
 
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
@@ -732,14 +739,23 @@ function constructCocoManager(
   repo: SqliteRepositories,
   seed: Uint8Array,
 ): Manager {
-  return new Manager(repo, async () => seed, createCocoLogger());
+  const coco = new Manager(repo, async () => seed, createCocoLogger());
+  // Persisted offline operations must have a handler before any recovery pass.
+  registerOfflineSendHandler(coco);
+  return coco;
 }
 
-async function enableCocoManager(coco: Manager): Promise<void> {
+async function enableCocoManager(
+  coco: Manager,
+  repo: SqliteRepositories,
+): Promise<void> {
   await coco.initPlugins();
   await coco.reconcileLegacyMintQuotes();
   await coco.enableMintOperationWatcher();
-  await coco.enableProofStateWatcher();
+  // Coco's bootstrap checks and subscribes every inflight proof. Start without
+  // it, then restore subscriptions only for operations that are not offline.
+  await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
+  await watchOnlineInflightProofs(coco, repo);
   await coco.enableMintOperationProcessor();
   // coco 1.0.1 maps melt quote expiry (NUT-05 20007) to UNPAID only while
   // recovering an *executing* operation. A pending melt whose quote the mint
@@ -1902,6 +1918,7 @@ export async function createCocoClient(
   }
 
   let database: Database | undefined;
+  let historyRepository: SqliteRepositories["historyRepository"] | undefined;
   let coco: Manager | undefined;
   let findFinalizedReceiveSibling: (
     operation: ReceiveOperation | null,
@@ -1937,6 +1954,7 @@ export async function createCocoClient(
     const seed = mnemonicToSeedSync(mnemonic);
     database = new Database(dbPath);
     const repo = new SqliteRepositories({ database });
+    historyRepository = repo.historyRepository;
     await repo.init();
     initReceiveDedupSchema(database);
     const interruptedReservations = clearInterruptedReceiveReservations(database);
@@ -1995,7 +2013,7 @@ export async function createCocoClient(
       );
     }
 
-    await enableCocoManager(coco);
+    await enableCocoManager(coco, repo);
     const openDatabase = database;
 
     findFinalizedReceiveSibling = async (
@@ -2444,6 +2462,60 @@ export async function createCocoClient(
       });
       const { token } = await coco.ops.send.execute(prepared.id);
       return getEncodedToken(token);
+    },
+
+    async sendCashuOffline(
+      amount: number,
+      mintUrl?: string,
+    ): Promise<OfflineCashuSendResult> {
+      const targetMint = mintUrl
+        ? normalizeMintUrl(mintUrl)
+        : walletConfig.defaultMintUrl;
+      if (!targetMint) {
+        throw new Error("No trusted mint available for offline sending");
+      }
+      await waitForRecovery(targetMint);
+      const prepared = await coco.ops.send.prepare({
+        mintUrl: targetMint,
+        amount,
+        target: { type: "offline" },
+      });
+      const { operation, token } = await coco.ops.send.execute(prepared.id);
+      const actualAmount = operation.inputAmount;
+
+      // Coco creates history from operation.amount (the requested floor).
+      // For an offline overpayment, retain the value that actually left the
+      // wallet so history agrees with the encoded token and balance change.
+      try {
+        const entry = await historyRepository?.getSendHistoryEntry(
+          operation.mintUrl,
+          operation.id,
+        );
+        if (entry) {
+          entry.amount = actualAmount;
+          await historyRepository?.updateHistoryEntry(entry);
+        }
+      } catch (error) {
+        logger.warn("Could not record offline send's actual amount in history", {
+          operationId: operation.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      return {
+        token: getEncodedToken(token),
+        operationId: operation.id,
+        mintUrl: operation.mintUrl,
+        requestedAmount: amount,
+        actualAmount,
+        overpayment: actualAmount - amount,
+        state: "pending",
+      };
+    },
+
+    async markSendSpent(operationId: string): Promise<MarkSendSpentResult> {
+      await waitForRecovery();
+      return markOfflineSendSpent(coco, operationId);
     },
 
     async sendBolt11(invoice: string, mintUrl?: string): Promise<string> {

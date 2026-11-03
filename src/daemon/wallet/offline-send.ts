@@ -1,0 +1,335 @@
+import type {
+  BasePrepareContext,
+  CoreProof,
+  ExecuteContext,
+  ExecutionResult,
+  Manager,
+  PendingSendOperation,
+  PreparedSendOperation,
+  RecoverExecutingContext,
+  RollbackContext,
+  SendMethod,
+  SendMethodHandler,
+} from "@cashu/coco-core";
+import type { MarkSendSpentResult } from "./wallet-client";
+
+declare module "@cashu/coco-core" {
+  interface SendMethodDefinitions {
+    /** Create a token from existing proofs without a swap or change outputs. */
+    offline: {
+      /** Retained for diagnostics; prepared.inputAmount is the token value. */
+      requestedAmount?: number;
+    };
+  }
+}
+
+/**
+ * Pick the smallest available value that covers amount without a swap.
+ *
+ * This is a sparse subset-sum DP rather than largest-first selection: greedy
+ * selection can miss an exact or closer subset. Ties use fewer proofs, then
+ * secret order, so repository row order cannot change the resulting token.
+ */
+export function selectClosestProofs(
+  proofs: readonly CoreProof[],
+  amount: number,
+): CoreProof[] | null {
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw new Error("Offline send amount must be a positive integer");
+  }
+
+  const ordered = [...proofs].sort((a, b) => a.secret.localeCompare(b.secret));
+  const secrets = new Set<string>();
+  for (const proof of ordered) {
+    if (!Number.isSafeInteger(proof.amount) || proof.amount <= 0) {
+      throw new Error("Offline send encountered a proof with an invalid amount");
+    }
+    if (!proof.secret || secrets.has(proof.secret)) {
+      throw new Error("Offline send encountered a missing or duplicate proof secret");
+    }
+    secrets.add(proof.secret);
+  }
+
+  const selectionKey = (selection: readonly CoreProof[]) =>
+    selection.map((proof) => proof.secret).sort().join("\u0000");
+  const isBetter = (
+    candidate: readonly CoreProof[],
+    current: readonly CoreProof[] | undefined,
+  ) => {
+    if (!current || candidate.length !== current.length) {
+      return !current || candidate.length < current.length;
+    }
+    return selectionKey(candidate) < selectionKey(current);
+  };
+
+  // Sums below the target remain reachable. Larger sums are tracked only as
+  // the best answer because adding more proofs can never reduce them again.
+  const reachable = new Map<number, CoreProof[]>([[0, []]]);
+  let best: CoreProof[] | undefined;
+  let bestAmount = Infinity;
+
+  for (const proof of ordered) {
+    const additions = Array.from(reachable, ([sum, selection]) => ({
+      sum: sum + proof.amount,
+      selection: [...selection, proof],
+    }));
+
+    for (const candidate of additions) {
+      if (candidate.sum >= amount) {
+        if (
+          candidate.sum < bestAmount ||
+          (candidate.sum === bestAmount && isBetter(candidate.selection, best))
+        ) {
+          best = candidate.selection;
+          bestAmount = candidate.sum;
+        }
+        continue;
+      }
+
+      const current = reachable.get(candidate.sum);
+      if (isBetter(candidate.selection, current)) {
+        reachable.set(candidate.sum, candidate.selection);
+      }
+    }
+
+    // One proof is the smallest possible token and no closer sum is possible.
+    if (bestAmount === amount && best?.length === 1) break;
+  }
+
+  return best ?? null;
+}
+
+interface SendHandlerRegistry {
+  get<M extends SendMethod>(method: M): SendMethodHandler<M>;
+  register<M extends SendMethod>(method: M, handler: SendMethodHandler<M>): void;
+}
+
+interface OfflineSendManagerInternals {
+  sendOperationService: {
+    handlerProvider: SendHandlerRegistry;
+  };
+  proofStateWatcher?: {
+    watchProof(mintUrl: string, secrets: string[]): Promise<void>;
+  };
+}
+
+interface InflightProofSource {
+  proofRepository: {
+    getInflightProofs(): Promise<CoreProof[]>;
+  };
+}
+
+/**
+ * Restore subscriptions for online sends after starting Coco's watcher without
+ * its bootstrap scan. The stock bootstrap checks and watches every inflight
+ * proof, including offline operations that must remain manually settled.
+ */
+export async function watchOnlineInflightProofs(
+  coco: Manager,
+  repo: InflightProofSource,
+): Promise<void> {
+  const watcher = (coco as unknown as OfflineSendManagerInternals).proofStateWatcher;
+  if (!watcher || typeof watcher.watchProof !== "function") {
+    throw new Error("Coco's proof-state watcher is unavailable");
+  }
+
+  const operationCache = new Map<string, Awaited<ReturnType<typeof coco.ops.send.get>>>();
+  const onlineByMint = new Map<string, string[]>();
+  for (const proof of await repo.proofRepository.getInflightProofs()) {
+    const operationId = proof.usedByOperationId ?? proof.createdByOperationId;
+    let operation = operationId ? operationCache.get(operationId) : undefined;
+    if (operationId && !operationCache.has(operationId)) {
+      operation = await coco.ops.send.get(operationId);
+      operationCache.set(operationId, operation);
+    }
+    if (operation?.method === "offline") continue;
+
+    const secrets = onlineByMint.get(proof.mintUrl) ?? [];
+    secrets.push(proof.secret);
+    onlineByMint.set(proof.mintUrl, secrets);
+  }
+
+  for (const [mintUrl, secrets] of onlineByMint) {
+    await watcher.watchProof(mintUrl, secrets);
+  }
+}
+
+export function createOfflineSendHandler(
+  defaultHandler: SendMethodHandler<"default">,
+): SendMethodHandler<"offline"> {
+  return {
+    async prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation> {
+      const { operation, proofRepository, proofService, logger } = ctx;
+      const { mintUrl, amount } = operation;
+      const available = await proofRepository.getAvailableProofs(mintUrl);
+      const selected = selectClosestProofs(available, amount);
+      if (!selected) {
+        const availableAmount = available.reduce(
+          (sum, proof) => sum + proof.amount,
+          0,
+        );
+        throw new Error(
+          `Offline send cannot cover ${amount} sats without a swap ` +
+            `(${availableAmount} sats available in ${available.length} proofs)`,
+        );
+      }
+
+      const inputProofSecrets = selected.map((proof) => proof.secret);
+      const inputAmount = selected.reduce((sum, proof) => sum + proof.amount, 0);
+      await proofService.reserveProofs(mintUrl, inputProofSecrets, operation.id);
+
+      logger?.info("Offline send prepared without a swap", {
+        operationId: operation.id,
+        requestedAmount: amount,
+        actualAmount: inputAmount,
+        overpayment: inputAmount - amount,
+        proofCount: selected.length,
+      });
+
+      return {
+        ...operation,
+        state: "prepared",
+        updatedAt: Date.now(),
+        needsSwap: false,
+        fee: 0,
+        inputAmount,
+        inputProofSecrets,
+        outputData: undefined,
+        methodData: { requestedAmount: amount },
+      };
+    },
+
+    async execute(ctx: ExecuteContext): Promise<ExecutionResult> {
+      const { operation, wallet, reservedProofs, proofRepository } = ctx;
+      const { mintUrl, inputProofSecrets } = operation;
+      const bySecret = new Map(reservedProofs.map((proof) => [proof.secret, proof]));
+      const inputProofs = inputProofSecrets.map((secret) => bySecret.get(secret));
+      if (inputProofs.some((proof) => !proof)) {
+        throw new Error("Could not find all reserved proofs for offline send");
+      }
+
+      // Use the repository deliberately. ProofService.setProofState emits the
+      // event that starts Coco's mint proof-state subscription. Offline sends
+      // are settled explicitly by markSendSpent instead.
+      await proofRepository.setProofState(mintUrl, inputProofSecrets, "inflight");
+
+      const token = {
+        mint: mintUrl,
+        proofs: inputProofs as CoreProof[],
+        unit: wallet.unit,
+      };
+      const pending: PendingSendOperation = {
+        ...operation,
+        state: "pending",
+        updatedAt: Date.now(),
+        token,
+      };
+      return { status: "PENDING", pending, token };
+    },
+
+    async finalize(ctx) {
+      await ctx.proofService.releaseProofs(
+        ctx.operation.mintUrl,
+        ctx.operation.inputProofSecrets,
+      );
+    },
+
+    async rollback(ctx: RollbackContext): Promise<void> {
+      if (ctx.operation.state === "prepared") {
+        await ctx.proofService.releaseProofs(
+          ctx.operation.mintUrl,
+          ctx.operation.inputProofSecrets,
+        );
+        return;
+      }
+      if (!defaultHandler.rollback) {
+        throw new Error("Coco's default send rollback handler is unavailable");
+      }
+      // Reclaiming an already shared token is an explicitly online operation:
+      // the mint must swap it for fresh local proofs before they can be reused.
+      await defaultHandler.rollback(ctx);
+    },
+
+    async checkPending() {
+      // Startup recovery and ops.send.refresh() must not contact the mint for
+      // an operation whose settlement is deliberately controlled by the user.
+      return "stay_pending" as const;
+    },
+
+    async recoverExecuting(ctx: RecoverExecutingContext): Promise<ExecutionResult> {
+      const { operation, proofService } = ctx;
+      // No token was returned while the operation was still executing. Unlike
+      // releaseProofs(), this also changes inflight proofs back to ready.
+      await proofService.restoreProofsToReady(
+        operation.mintUrl,
+        operation.inputProofSecrets,
+      );
+      return {
+        status: "FAILED",
+        failed: {
+          ...operation,
+          state: "rolled_back",
+          updatedAt: Date.now(),
+          error: "Recovered offline send before its token was returned",
+        },
+      };
+    },
+  };
+}
+
+/** Mark a claimed offline token spent locally; never asks the mint for state. */
+export async function markOfflineSendSpent(
+  coco: Manager,
+  operationId: string,
+): Promise<MarkSendSpentResult> {
+  const operation = await coco.ops.send.get(operationId);
+  if (!operation) throw new Error(`Send operation ${operationId} not found`);
+  if (operation.method !== "offline") {
+    throw new Error("Only offline send operations can be marked spent manually");
+  }
+  if (operation.state === "finalized") {
+    return {
+      operationId,
+      state: "finalized",
+      markedSpent: 0,
+      actualAmount: operation.inputAmount,
+    };
+  }
+  if (operation.state !== "pending") {
+    throw new Error(
+      `Cannot mark offline send in state '${operation.state}' as spent`,
+    );
+  }
+
+  const internals = coco as unknown as {
+    proofService: {
+      setProofState(
+        mintUrl: string,
+        secrets: string[],
+        state: "spent",
+      ): Promise<void>;
+    };
+  };
+  await internals.proofService.setProofState(
+    operation.mintUrl,
+    operation.inputProofSecrets,
+    "spent",
+  );
+  await coco.ops.send.finalize(operationId);
+  return {
+    operationId,
+    state: "finalized",
+    markedSpent: operation.inputProofSecrets.length,
+    actualAmount: operation.inputAmount,
+  };
+}
+
+/** Register before watchers or recovery can encounter a persisted offline op. */
+export function registerOfflineSendHandler(coco: Manager): void {
+  const internals = coco as unknown as OfflineSendManagerInternals;
+  const provider = internals.sendOperationService?.handlerProvider;
+  if (!provider || typeof provider.get !== "function" || typeof provider.register !== "function") {
+    throw new Error("Coco's send handler registry is unavailable");
+  }
+  provider.register("offline", createOfflineSendHandler(provider.get("default")));
+}

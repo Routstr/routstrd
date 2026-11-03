@@ -184,6 +184,30 @@ Clear all active cooldowns and failure strikes so every provider is retried now:
 routstrd cooldowns --reset
 ```
 
+### Offline Cashu sends
+
+Use `--offline` to create a token directly from existing proofs, without a
+swap or change outputs. Routstrd picks the closest available proof set whose
+total covers the request, so the token can be worth slightly more than asked:
+
+```sh
+routstrd send 1020 --offline
+# or: routstrd wallet send cashu 1020 --offline
+```
+
+The response includes the token, its `operationId`, and the requested/actual
+amounts. Selected proofs are marked `inflight`; offline operations do not
+subscribe to the mint for settlement. After the recipient claims the token,
+mark it spent and finalize the operation locally:
+
+```sh
+routstrd wallet send mark-spent <operation-id>
+```
+
+`mark-spent` is a local assertion and does not verify claim status with the
+mint. Normal sends without `--offline` retain Coco's swap and automatic
+proof-state behavior.
+
 ### NPC (Lightning Address)
 
 The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
