@@ -26,9 +26,11 @@ declare module "@cashu/coco-core" {
 /**
  * Pick the smallest available value that covers amount without a swap.
  *
- * This is a sparse subset-sum DP rather than largest-first selection: greedy
- * selection can miss an exact or closer subset. Ties use fewer proofs, then
- * secret order, so repository row order cannot change the resulting token.
+ * Binary denominations use two bounded greedy passes: maximize the excluded
+ * value without exceeding total - amount, then minimize the proof count for
+ * the resulting token value. For powers of two, largest-first is optimal for
+ * both passes. Other denominations use a strictly budgeted subset-sum fallback.
+ * Ties use fewer proofs, then secret order, independently of repository order.
  */
 export function selectClosestProofs(
   proofs: readonly CoreProof[],
@@ -38,7 +40,7 @@ export function selectClosestProofs(
     throw new Error("Offline send amount must be a positive integer");
   }
 
-  const ordered = [...proofs].sort((a, b) => a.secret.localeCompare(b.secret));
+  const ordered = [...proofs].sort((a, b) => a.secret < b.secret ? -1 : a.secret > b.secret ? 1 : 0);
   const secrets = new Set<string>();
   for (const proof of ordered) {
     if (!Number.isSafeInteger(proof.amount) || proof.amount <= 0) {
@@ -50,8 +52,50 @@ export function selectClosestProofs(
     secrets.add(proof.secret);
   }
 
-  const selectionKey = (selection: readonly CoreProof[]) =>
-    selection.map((proof) => proof.secret).sort().join("\u0000");
+  const total = ordered.reduce((sum, proof) => sum + proof.amount, 0);
+  if (!Number.isSafeInteger(total)) {
+    throw new Error("Offline send proof total exceeds the safe integer range");
+  }
+  if (total < amount) return null;
+
+  // Avoid bitwise tests: Cashu amounts can exceed the 32-bit integer range.
+  if (ordered.every((proof) => 2 ** Math.floor(Math.log2(proof.amount)) === proof.amount)) {
+    const descending = [...ordered].sort((a, b) => b.amount - a.amount);
+    let exclusionBudget = total - amount;
+    for (const proof of descending) {
+      if (proof.amount <= exclusionBudget) exclusionBudget -= proof.amount;
+    }
+    // The unused exclusion budget is the smallest unavoidable overpayment.
+    let remaining = amount + exclusionBudget;
+    const selected: CoreProof[] = [];
+    // Stable sorting preserves secret order among equal denominations.
+    for (const proof of descending) {
+      if (proof.amount <= remaining) {
+        selected.push(proof);
+        remaining -= proof.amount;
+      }
+    }
+    return selected.sort((a, b) => a.secret < b.secret ? -1 : a.secret > b.secret ? 1 : 0);
+  }
+
+  // Non-binary denominations are supported, but must never turn a send into
+  // unbounded synchronous work on the daemon's event loop. Charge for copied
+  // proof references as well as candidates; cap tie-key work separately below.
+  let workRemaining = 1_000_000;
+  const charge = (work: number) => {
+    workRemaining -= work;
+    if (workRemaining < 0) {
+      throw new Error(
+        "Offline proof selection exceeded its work limit; consolidate proofs with an online send or request a smaller amount",
+      );
+    }
+  };
+
+  const selectionKey = (selection: readonly CoreProof[]) => {
+    // Selections already follow ordered secret order.
+    charge(selection.reduce((size, proof) => size + proof.secret.length, 0));
+    return selection.map((proof) => proof.secret).join("\u0000");
+  };
   const isBetter = (
     candidate: readonly CoreProof[],
     current: readonly CoreProof[] | undefined,
@@ -59,6 +103,7 @@ export function selectClosestProofs(
     if (!current || candidate.length !== current.length) {
       return !current || candidate.length < current.length;
     }
+    charge(candidate.length + current.length);
     return selectionKey(candidate) < selectionKey(current);
   };
 
@@ -69,10 +114,10 @@ export function selectClosestProofs(
   let bestAmount = Infinity;
 
   for (const proof of ordered) {
-    const additions = Array.from(reachable, ([sum, selection]) => ({
-      sum: sum + proof.amount,
-      selection: [...selection, proof],
-    }));
+    const additions = Array.from(reachable, ([sum, selection]) => {
+      charge(selection.length + 1);
+      return { sum: sum + proof.amount, selection: [...selection, proof] };
+    });
 
     for (const candidate of additions) {
       if (candidate.sum >= amount) {

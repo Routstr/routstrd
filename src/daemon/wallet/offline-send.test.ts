@@ -57,6 +57,56 @@ describe("selectClosestProofs", () => {
     expect(second?.map((entry) => entry.secret)).toEqual(["a", "b"]);
   });
 
+  it("selects from 500 binary proofs without a target-sized search", () => {
+    const candidates = Array.from({ length: 500 }, (_, i) =>
+      proof(2 ** ((i * 5) % 14), `proof-${String(i).padStart(3, "0")}`),
+    );
+    const start = performance.now();
+    const selected = selectClosestProofs(candidates, 100_000)!;
+    expect(selected.reduce((sum, entry) => sum + entry.amount, 0)).toBe(100_000);
+    expect(new Set(selected.map((entry) => entry.secret)).size).toBe(selected.length);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  it("handles binary denominations above the 32-bit range", () => {
+    expect(amounts(selectClosestProofs([proof(2 ** 40), proof(2 ** 41)], 2 ** 40 + 1)))
+      .toEqual([2 ** 41]);
+  });
+
+  it("matches exhaustive selection for bounded binary wallets", () => {
+    let seed = 170;
+    const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+    for (let trial = 0; trial < 100; trial++) {
+      const candidates = Array.from({ length: 10 }, (_, i) =>
+        proof(2 ** (random() % 6), `p${i}`),
+      );
+      const target = 1 + random() % 150;
+      let best: CoreProof[] | null = null;
+      let bestSum = Infinity;
+      for (let mask = 0; mask < 1 << candidates.length; mask++) {
+        const subset = candidates.filter((_, i) => mask & (1 << i));
+        const sum = subset.reduce((total, entry) => total + entry.amount, 0);
+        if (sum < target) continue;
+        if (sum < bestSum || (sum === bestSum && (
+          !best || subset.length < best.length ||
+          (subset.length === best.length &&
+            subset.map((entry) => entry.secret).join("\0") < best.map((entry) => entry.secret).join("\0"))
+        ))) {
+          best = subset;
+          bestSum = sum;
+        }
+      }
+      expect(selectClosestProofs(candidates, target)).toEqual(best);
+    }
+  });
+
+  it("fails clearly when non-binary selection exceeds its work budget", () => {
+    const candidates = Array.from({ length: 500 }, (_, i) =>
+      proof(3 * 2 ** ((i * 5) % 14), `proof-${i}`),
+    );
+    expect(() => selectClosestProofs(candidates, 100_000)).toThrow("work limit");
+  });
+
   it("rejects invalid amounts and duplicate secrets", () => {
     expect(() => selectClosestProofs([proof(1)], 1.5)).toThrow(
       "positive integer",
