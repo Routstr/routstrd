@@ -41,4 +41,4 @@ Premature client disconnect propagates cancellation to the SDK, rather than trea
 
 ## SDK prerequisite
 
-This feature requires the request-lifecycle SDK API (the parallel `feat/request-lifecycle-tracking` PR), not the currently released SDK 0.4.13. The package manifest intentionally retains its normal registry dependency; no local path or feature-branch dependency is shipped. Until that SDK API is released and the dependency updated, this is a dependent draft and clean-install build/typecheck are expected to fail on missing lifecycle exports. Local integration validation may use the SDK worktree build without changing the committed manifest or lockfile.
+This feature requires `@routstr/sdk` 0.5.0 or newer, which ships the request-lifecycle API (`RequestLifecycleDriver`, `createBunSqliteRequestLifecycleDriver`). The dependency is the normal registry version; no local path or feature-branch dependency is shipped.
