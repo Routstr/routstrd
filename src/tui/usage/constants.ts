@@ -19,9 +19,6 @@ export function getVisibleTabs(hasNpubs: boolean): Tab[] {
   return tabs.map((t, i) => ({ ...t, key: String(i + 1) }));
 }
 
-/** Default tab list (no npub data yet). */
-export const TABS: Tab[] = getVisibleTabs(false);
-
 // ─── Time windows ─────────────────────────────────────────────────────────────
 
 /** Cycle order for the `[W]` key: all → today → 7d → 30d → all. */
