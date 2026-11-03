@@ -1,13 +1,14 @@
 /**
- * Map an expired or purged melt quote to UNPAID on the pending path.
+ * Recover pending melts with expired/purged quotes only after NUT-07 checks.
  *
  * coco 1.0.1's melt handler already maps error 20007 ("quote expired") to
  * UNPAID in `recoverExecuting`, but its `checkPending` asks the mint without
  * that catch. A pending melt whose quote the mint has purged therefore throws,
  * which leaves the operation stuck forever: `refresh()` fails and `reclaim()`
- * re-runs the same check and throws at the same place. Applying the same
- * mapping to `checkPending` makes both paths work, so the operation can roll
- * back and its input proofs return to the spendable balance.
+ * re-runs the same check and throws at the same place. Quote expiry alone is
+ * not evidence of payment failure: proofs can still be PENDING or SPENT. Only
+ * a complete, matching set of UNSPENT states permits rollback. Unknown states,
+ * missing/malformed results, and lookup failures preserve the reservations.
  *
  * This is a version-sensitive bridge in the same spirit as
  * `sendRecoveryServiceOf` and `cleanupLocalRecoveryState`: if coco's handler
@@ -15,7 +16,8 @@
  * Errors are matched by numeric code as well as by class because the throw
  * crosses the coco package boundary.
  */
-import { MintOperationError, type Manager } from "@cashu/coco-core";
+import { hashToCurve } from "@cashu/cashu-ts";
+import { MintOperationError, type Manager, type MeltOperation } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 
 /** NUT-05 melt error code for an expired quote. */
@@ -32,8 +34,49 @@ export function isMeltQuoteExpiredError(error: unknown): boolean {
   );
 }
 
+type PendingMeltOperation = Extract<MeltOperation, { state: "pending" }>;
+
 interface MeltHandlerLike {
   checkPending?: (ctx: unknown) => Promise<unknown>;
+  /** Coco 1.0.1 helper: selects swap-send secrets rather than spent swap inputs. */
+  getMeltInputSecrets?: (operation: PendingMeltOperation) => string[];
+}
+
+interface PendingContextLike {
+  operation: PendingMeltOperation;
+  mintAdapter: {
+    checkProofStates: (mintUrl: string, Ys: string[]) => Promise<unknown>;
+  };
+}
+
+async function expiredInputsAreUnspent(handler: MeltHandlerLike, context: unknown): Promise<boolean> {
+  try {
+    const ctx = context as PendingContextLike;
+    if (typeof ctx.operation.needsSwap !== "boolean") return false;
+    const secrets = handler.getMeltInputSecrets?.(ctx.operation);
+    if (!Array.isArray(secrets) || secrets.length === 0 ||
+        secrets.some((secret) => typeof secret !== "string" || secret.length === 0) ||
+        new Set(secrets).size !== secrets.length) return false;
+
+    const encoder = new TextEncoder();
+    const Ys = secrets.map((secret) => hashToCurve(encoder.encode(secret)).toHex(true));
+    const expected = new Set(Ys);
+    if (expected.size !== Ys.length) return false;
+    // Use the adapter's raw NUT-07 results: wallet.checkProofsStates() reorders
+    // responses into a map and can hide duplicate Y entries from the mint.
+    const states = await ctx.mintAdapter.checkProofStates(ctx.operation.mintUrl, Ys);
+    if (!Array.isArray(states) || states.length !== Ys.length) return false;
+    for (const entry of states) {
+      if (!entry || typeof entry.Y !== "string" || entry.state !== "UNSPENT" ||
+          !expected.delete(entry.Y)) return false;
+    }
+    return expected.size === 0;
+  } catch (error) {
+    logger.warn("Could not verify expired melt input states; preserving reservations", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }
 
 interface MeltHandlerProviderLike {
@@ -42,7 +85,8 @@ interface MeltHandlerProviderLike {
 
 /**
  * Wrap every registered melt handler's `checkPending` so an expired quote
- * becomes a rollback decision instead of a thrown error.
+ * permits rollback only when all actual melt inputs are confirmed UNSPENT.
+ * If Coco's input-secret helper changes, fail closed and keep the melt pending.
  *
  * Returns true when at least one handler was wrapped. A false result is not
  * fatal: the daemon keeps running and only the expired-quote edge case stays
@@ -75,17 +119,20 @@ export function installMeltQuoteExpiryHandler(coco: Manager): boolean {
   for (const [method, handler] of Object.entries(registry)) {
     const candidate = handler as MeltHandlerLike;
     if (typeof candidate.checkPending !== "function") continue;
+    if (typeof candidate.getMeltInputSecrets !== "function") {
+      logger.warn("Coco melt input-secret helper unavailable; expired melts will remain pending", { method });
+    }
     const original = candidate.checkPending.bind(candidate);
     candidate.checkPending = async (ctx: unknown) => {
       try {
         return await original(ctx);
       } catch (error) {
         if (isMeltQuoteExpiredError(error)) {
-          logger.info(
-            "Melt quote expired at the mint; treating as UNPAID for rollback",
-            { method },
-          );
-          return "rollback";
+          if (await expiredInputsAreUnspent(candidate, ctx)) {
+            logger.info("Expired melt inputs confirmed UNSPENT; allowing rollback", { method });
+            return "rollback";
+          }
+          return "stay_pending";
         }
         throw error;
       }
@@ -101,7 +148,7 @@ export function installMeltQuoteExpiryHandler(coco: Manager): boolean {
   }
 
   logger.log(
-    `Melt quote expiry handler installed for ${installed} melt method(s) (20007 -> rollback)`,
+    `Melt quote expiry handler installed for ${installed} melt method(s) (20007 -> verify inputs)`,
   );
   return true;
 }
