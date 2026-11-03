@@ -25,3 +25,31 @@ describe("history status", () => {
     expect(historyStatus("melt", "PAID")).toBe("");
   });
 });
+
+describe("history status with operation state", () => {
+  it("shows a rolled-back melt as cancelled, not waiting", () => {
+    expect(historyStatus("melt", "UNPAID", "rolled_back")).toBe("cancelled");
+  });
+
+  it("keeps an interrupted rollback visibly unfinished", () => {
+    expect(historyStatus("melt", "UNPAID", "rolling_back")).toBe("rolling back");
+    expect(historyStatus("melt", "PENDING", "rolling_back")).toBe("rolling back");
+    expect(historyStatus("melt", "PAID", "rolling_back")).toBe("rolling back");
+  });
+
+  it("keeps a melt that is genuinely in flight as waiting", () => {
+    expect(historyStatus("melt", "UNPAID", "prepared")).toBe("waiting");
+    expect(historyStatus("melt", "PENDING", "pending")).toBe("waiting");
+    expect(historyStatus("melt", "UNPAID", "executing")).toBe("waiting");
+  });
+
+  it("treats a finalized melt as finished regardless of the quote label", () => {
+    expect(historyStatus("melt", "UNPAID", "finalized")).toBe("");
+    expect(historyStatus("melt", "PAID", "finalized")).toBe("");
+  });
+
+  it("falls back to the stored state when no operation state is available", () => {
+    expect(historyStatus("melt", "UNPAID")).toBe("waiting");
+    expect(historyStatus("melt", "PAID")).toBe("");
+  });
+});
