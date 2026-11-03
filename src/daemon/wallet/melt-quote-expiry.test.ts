@@ -6,7 +6,15 @@ import {
   OutputData,
   pointFromHex,
 } from "@cashu/cashu-ts";
-import { Manager, MemoryRepositories, MintOperationError, NetworkError, type CoreProof, type MeltOperation } from "@cashu/coco-core";
+import {
+  HttpResponseError,
+  Manager,
+  MemoryRepositories,
+  MintOperationError,
+  NetworkError,
+  type CoreProof,
+  type MeltOperation,
+} from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import {
   installMeltQuoteExpiryHandler,
@@ -338,12 +346,16 @@ interface ChangeEntry {
   signature: { amount: number; id: string; C_: string };
 }
 
-/** Deterministic blank outputs plus real mint signatures, as NUT-09 would return. */
+/**
+ * Deterministic blank outputs plus real mint signatures, as NUT-09 would
+ * return. Like coco (NUT-08), the blank output amount is 0; only the mint's
+ * signature carries the real denomination.
+ */
 function makeChangeEntries(amounts: number[]): ChangeEntry[] {
   const seed = new Uint8Array(32).fill(3);
   return amounts.map((amount, counter) => {
     const output = OutputData.createSingleDeterministicData(
-      amount,
+      0,
       seed,
       counter,
       mintKeys.id,
@@ -356,7 +368,7 @@ function makeChangeEntries(amounts: number[]): ChangeEntry[] {
     );
     return {
       serialized: {
-        blindedMessage: { amount, id: mintKeys.id, B_ },
+        blindedMessage: { amount: 0, id: mintKeys.id, B_ },
         blindingFactor: output.blindingFactor.toString(16),
         secret: Buffer.from(output.secret).toString("hex"),
       },
@@ -377,6 +389,8 @@ interface MeltFixtureOptions {
   restore?: (outputs: Array<{ amount: number; id: string; B_: string }>) => Promise<unknown>;
   /** Error `checkMeltQuote` throws inside the handler's finalize. Defaults to 20007. */
   quoteError?: Error;
+  /** NUT-07 states for restored change outputs. Defaults to all UNSPENT. */
+  changeStates?: (Ys: string[]) => unknown;
 }
 
 async function pendingMeltFixture(
@@ -442,8 +456,18 @@ async function pendingMeltFixture(
     throw options.quoteError ?? new MintOperationError(20007, "quote expired");
   };
   const queries: string[][] = [];
+  const changeY = new Set(
+    change.map((entry) =>
+      yFor(Buffer.from(entry.serialized.secret, "hex").toString()),
+    ),
+  );
   internal.mintAdapter.checkProofStates = async (url, Ys) => {
     expect(url).toBe(mintUrl);
+    if (Ys.length > 0 && Ys.every((Y) => changeY.has(Y))) {
+      return options.changeStates
+        ? options.changeStates(Ys)
+        : Ys.map((Y) => ({ Y, state: "UNSPENT" }));
+    }
     queries.push(Ys);
     return remoteStates(Ys, queries.length);
   };
@@ -684,7 +708,7 @@ describe("expired quote finalization with Coco 1.0.1", () => {
       const bySecret = new Map(ready.map((proof) => [proof.secret, proof]));
       for (const entry of change) {
         const secret = Buffer.from(entry.serialized.secret, "hex").toString();
-        expect(bySecret.get(secret)?.amount).toBe(entry.serialized.blindedMessage.amount);
+        expect(bySecret.get(secret)?.amount).toBe(entry.signature.amount);
       }
     } finally {
       await coco.dispose();
@@ -716,7 +740,7 @@ describe("expired quote finalization with Coco 1.0.1", () => {
     }
   });
 
-  it("does not save change proofs twice when an earlier attempt already did", async () => {
+  it("does not save change already persisted by another operation", async () => {
     const change = makeChangeEntries([1, 2]);
     const { coco, repo } = await pendingMeltFixture(false, allSpent, {
       amount: 1,
@@ -724,8 +748,8 @@ describe("expired quote finalization with Coco 1.0.1", () => {
       change,
     });
     try {
-      // Simulate a previous finalize that saved change before failing to
-      // persist the operation.
+      // Simulate a seed restore (or another operation) that already claimed
+      // this change proof.
       const existingSecret = Buffer.from(change[0]!.serialized.secret, "hex").toString();
       await repo.proofRepository.saveProofs(mintUrl, [
         {
@@ -735,7 +759,7 @@ describe("expired quote finalization with Coco 1.0.1", () => {
           id: change[0]!.serialized.blindedMessage.id,
           C: yFor(existingSecret),
           amount: 1,
-          createdByOperationId: "op",
+          createdByOperationId: "other-op",
         } satisfies CoreProof,
       ]);
 
@@ -744,6 +768,111 @@ describe("expired quote finalization with Coco 1.0.1", () => {
       const ready = await repo.proofRepository.getReadyProofs(mintUrl);
       expect(ready).toHaveLength(2);
       expect(ready.filter((proof) => proof.secret === existingSecret)).toHaveLength(1);
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("finalizes without change when the mint does not support NUT-09 restore", async () => {
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    const notFound = new HttpResponseError("not found", 404);
+    const { coco } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change: makeChangeEntries([1]),
+      restore: async () => {
+        throw notFound;
+      },
+    });
+    try {
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(0);
+      expect(operation.effectiveFee).toBe(1);
+      expect(
+        warn.mock.calls.some((call) => String(call[0]).includes("NUT-09")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await coco.dispose();
+    }
+  });
+
+  it("keeps retrying when NUT-09 restore fails with a server error", async () => {
+    const failure = new HttpResponseError("bad gateway", 503);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change: makeChangeEntries([1]),
+      restore: async () => {
+        throw failure;
+      },
+    });
+    try {
+      await expect(coco.ops.melt.refresh("op")).rejects.toBe(failure);
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+      for (const secret of inputSecrets) {
+        expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe(
+          "inflight",
+        );
+      }
+      expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("does not save restored change the mint reports SPENT", async () => {
+    const change = makeChangeEntries([1]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change,
+      changeStates: (Ys) => Ys.map((Y) => ({ Y, state: "SPENT" })),
+    });
+    try {
+      // Settlement still accounts for the change the melt returned, but the
+      // already-spent proof is not resurrected as spendable.
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(1);
+      expect(operation.effectiveFee).toBe(0);
+      expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("retries finalization after saving change fails once", async () => {
+    const change = makeChangeEntries([1]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change,
+    });
+    const internal = coco as unknown as {
+      proofService: { unblindAndSaveChangeProofs: (...args: unknown[]) => Promise<unknown> };
+    };
+    const original = internal.proofService.unblindAndSaveChangeProofs.bind(
+      internal.proofService,
+    );
+    let failures = 1;
+    internal.proofService.unblindAndSaveChangeProofs = async (...args: unknown[]) => {
+      if (failures > 0) {
+        failures--;
+        throw new Error("disk full");
+      }
+      return original(...args);
+    };
+    try {
+      await expect(coco.ops.melt.refresh("op")).rejects.toThrow("disk full");
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(1);
+      const ready = await repo.proofRepository.getReadyProofs(mintUrl);
+      expect(ready).toHaveLength(1);
+      expect(ready[0]!.secret).toBe(
+        Buffer.from(change[0]!.serialized.secret, "hex").toString(),
+      );
     } finally {
       await coco.dispose();
     }

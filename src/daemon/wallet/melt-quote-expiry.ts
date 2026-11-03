@@ -31,7 +31,13 @@
  * crosses the coco package boundary.
  */
 import { hashToCurve } from "@cashu/cashu-ts";
-import { MintOperationError, type Manager, type MeltOperation } from "@cashu/coco-core";
+import {
+  HttpResponseError,
+  MintOperationError,
+  NetworkError,
+  type Manager,
+  type MeltOperation,
+} from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 
 /** NUT-05 melt error code for an expired quote. */
@@ -89,10 +95,10 @@ interface MeltContextLike {
   };
   proofService?: { unblindAndSaveChangeProofs?: unknown };
   proofRepository?: {
-    getProofsByOperationId?: (
+    getProofBySecret?: (
       mintUrl: string,
-      operationId: string,
-    ) => Promise<Array<{ secret?: unknown }>>;
+      secret: string,
+    ) => Promise<{ secret?: unknown } | null>;
   };
 }
 
@@ -112,7 +118,15 @@ interface RestoreResultLike {
 interface ChangeRecovery {
   /** Every change output the mint signed, for settlement accounting. */
   all: SerializedChangeOutput[];
-  /** Change outputs not saved yet, aligned with `signatures` for unblinding. */
+  /**
+   * Amounts taken from the mint's signatures, aligned with `all`.
+   *
+   * Coco prepares every blank change output with amount 0 (NUT-08); the mint
+   * picks the denomination when it signs. The output amounts are therefore
+   * useless for accounting and must not be summed.
+   */
+  allAmounts: number[];
+  /** Change outputs that should be unblinded/saved, aligned with `signatures`. */
   outputs: SerializedChangeOutput[];
   signatures: unknown[];
 }
@@ -127,6 +141,47 @@ function decodeSerializedSecret(hex: string): string | undefined {
     bytes[index / 2] = byte;
   }
   return new TextDecoder().decode(bytes);
+}
+
+/** Read the amount the mint assigned to a restored signature. */
+function signatureAmount(signature: unknown): number {
+  const raw = (signature as { amount?: unknown } | null)?.amount;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string") {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  const toNumber = (raw as { toNumber?: unknown } | null)?.toNumber;
+  if (typeof toNumber === "function") {
+    try {
+      const parsed = (toNumber as () => unknown).call(raw);
+      return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : 0;
+    } catch {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+/**
+ * True for a mint response that means "this mint has no usable NUT-09 restore"
+ * rather than "try again later". Client errors other than timeout/rate-limit
+ * are permanent; transport and 5xx failures must propagate so the sweep backs
+ * off and retries the operation.
+ */
+function isRestoreUnsupportedError(error: unknown, depth = 0): boolean {
+  if (!(error instanceof Error) || depth > 5) return false;
+  if (error instanceof NetworkError || error.name === "NetworkError") return false;
+  // MintRequestProvider maps HTTP 400 + a NUT error body (and some direct
+  // calls) to MintOperationError: semantic rejection, not worth retrying.
+  if (error instanceof MintOperationError) return true;
+  if (error instanceof HttpResponseError || error.name === "HttpResponseError") {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number") {
+      return status !== 408 && status !== 429 && status < 500;
+    }
+  }
+  return isRestoreUnsupportedError((error as { cause?: unknown }).cause, depth + 1);
 }
 
 const INPUT_STATE_MEANING: Record<ExpiredInputStates, string> = {
@@ -257,12 +312,11 @@ async function recoverExpiredMeltChange(
   context: unknown,
   method: string,
 ): Promise<ChangeRecovery> {
+  const empty: ChangeRecovery = { all: [], allAmounts: [], outputs: [], signatures: [] };
   const ctx = context as MeltContextLike;
   const operation = ctx.operation!;
   const keep = operation.changeOutputData?.keep;
-  if (!Array.isArray(keep) || keep.length === 0) {
-    return { all: [], outputs: [], signatures: [] };
-  }
+  if (!Array.isArray(keep) || keep.length === 0) return empty;
 
   const walletService = ctx.walletService;
   if (typeof walletService?.getWalletWithActiveKeysetId !== "function") {
@@ -275,11 +329,27 @@ async function recoverExpiredMeltChange(
     throw new Error("Wallet has no NUT-09 restore; cannot recover expired-melt change");
   }
 
-  // Transport errors propagate: the operation stays pending and the sweep
-  // retries with mint backoff. No proof state has been mutated yet.
-  const result = (await restore.call(walletLike!.mint, {
-    outputs: keep.map((output) => output.blindedMessage),
-  })) as RestoreResultLike;
+  let result: RestoreResultLike;
+  try {
+    result = (await restore.call(walletLike!.mint, {
+      outputs: keep.map((output) => output.blindedMessage),
+    })) as RestoreResultLike;
+  } catch (error) {
+    if (!isRestoreUnsupportedError(error)) {
+      // Transport/5xx: the operation stays pending and the sweep backs off.
+      throw error;
+    }
+    logger.warn(
+      "Mint has no usable NUT-09 restore; finalizing expired melt without change",
+      {
+        method,
+        operationId: operation.id,
+        mintUrl: operation.mintUrl,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
+    return empty;
+  }
 
   const restoredOutputs = Array.isArray(result?.outputs) ? result.outputs : [];
   const restoredSignatures = Array.isArray(result?.signatures) ? result.signatures : [];
@@ -289,8 +359,9 @@ async function recoverExpiredMeltChange(
       .map((output) => [output.blindedMessage.B_, output] as const),
   );
 
-  const outputs: SerializedChangeOutput[] = [];
-  const signatures: unknown[] = [];
+  const all: SerializedChangeOutput[] = [];
+  const allSignatures: unknown[] = [];
+  const allAmounts: number[] = [];
   for (let index = 0; index < restoredOutputs.length; index++) {
     const restored = restoredOutputs[index];
     const signature = restoredSignatures[index];
@@ -299,67 +370,128 @@ async function recoverExpiredMeltChange(
     const output = unmatched.get(B_);
     if (!output) continue;
     unmatched.delete(B_);
-    outputs.push(output);
-    signatures.push(signature);
+    all.push(output);
+    allSignatures.push(signature);
+    // Blank outputs carry amount 0; the signature carries the real amount.
+    allAmounts.push(signatureAmount(signature));
   }
 
-  if (signatures.length === 0) {
+  if (all.length === 0) {
     logger.warn(
       "Mint restored no change signatures for expired melt; finalizing without change",
       { method, operationId: operation.id, mintUrl: operation.mintUrl, changeOutputs: keep.length },
     );
-  } else if (signatures.length < keep.length) {
+    return empty;
+  }
+  if (all.length < keep.length) {
     logger.info("Mint restored only part of the expired melt change", {
       method,
       operationId: operation.id,
-      restored: signatures.length,
+      restored: all.length,
       changeOutputs: keep.length,
     });
   }
 
-  // A previous finalize may have saved some change before failing to persist
-  // the operation. Never save those proofs twice; still count them as change.
-  const savableOutputs: SerializedChangeOutput[] = [];
-  const savableSignatures: unknown[] = [];
-  const savedSecrets = await savedChangeSecrets(ctx, operation);
-  for (let index = 0; index < outputs.length; index++) {
-    const secret = decodeSerializedSecret(outputs[index]!.secret);
-    if (secret && savedSecrets.has(secret)) continue;
-    savableOutputs.push(outputs[index]!);
-    savableSignatures.push(signatures[index]);
+  // Never re-save a secret the wallet already holds (from an earlier attempt or
+  // a seed restore under another operation), and only save change the mint
+  // reports UNSPENT so spent change is not resurrected as spendable.
+  const candidates: number[] = [];
+  let alreadyKnown = 0;
+  for (let index = 0; index < all.length; index++) {
+    const secret = decodeSerializedSecret(all[index]!.secret);
+    if (!secret) continue;
+    if (await walletHoldsSecret(ctx, operation.mintUrl, secret)) {
+      alreadyKnown++;
+      continue;
+    }
+    candidates.push(index);
   }
-  if (savableOutputs.length < outputs.length) {
-    logger.info("Expired melt change was already saved; skipping duplicate proofs", {
+
+  const unspent = await unspentChangeIndexes(ctx, operation.mintUrl, all, candidates, method);
+  const outputs: SerializedChangeOutput[] = [];
+  const signatures: unknown[] = [];
+  for (const index of unspent) {
+    outputs.push(all[index]!);
+    signatures.push(allSignatures[index]);
+  }
+
+  const skipped = all.length - outputs.length;
+  if (skipped > 0) {
+    logger.info("Skipped some restored melt change", {
       method,
       operationId: operation.id,
-      alreadySaved: outputs.length - savableOutputs.length,
+      alreadyKnown,
+      notUnspent: candidates.length - unspent.length,
+      restored: all.length,
+      saved: outputs.length,
     });
   }
 
-  return { all: outputs, outputs: savableOutputs, signatures: savableSignatures };
+  return { all, allAmounts, outputs, signatures };
 }
 
-/** Proof secrets already saved for this operation (change from an earlier try). */
-async function savedChangeSecrets(
+/** Whether any proof with this secret is already persisted for this mint. */
+async function walletHoldsSecret(
   ctx: MeltContextLike,
-  operation: PendingMeltOperation,
-): Promise<Set<string>> {
+  mintUrl: string,
+  secret: string,
+): Promise<boolean> {
   const repository = ctx.proofRepository;
-  if (typeof repository?.getProofsByOperationId !== "function") return new Set();
+  if (typeof repository?.getProofBySecret !== "function") return false;
   try {
-    const proofs = await repository.getProofsByOperationId(
-      operation.mintUrl,
-      operation.id,
-    );
-    return new Set(
-      proofs
-        .map((proof) => proof.secret)
-        .filter((secret): secret is string => typeof secret === "string"),
-    );
+    return (await repository.getProofBySecret(mintUrl, secret)) !== null;
   } catch {
-    // Best effort: a repository read failure must not block settlement.
-    return new Set();
+    // A read failure must not risk a duplicate save: treat as already present.
+    return true;
   }
+}
+
+/** NUT-07 filter: only save restored change the mint reports UNSPENT. */
+async function unspentChangeIndexes(
+  ctx: MeltContextLike,
+  mintUrl: string,
+  outputs: SerializedChangeOutput[],
+  candidates: number[],
+  method: string,
+): Promise<number[]> {
+  if (candidates.length === 0) return [];
+  const checkProofStates = ctx.mintAdapter?.checkProofStates;
+  if (typeof checkProofStates !== "function") {
+    logger.warn("Cannot verify restored change states; not saving change", {
+      method,
+      mintUrl,
+      candidates: candidates.length,
+    });
+    return [];
+  }
+
+  const encoder = new TextEncoder();
+  const Ys: string[] = [];
+  const YByIndex = new Map<number, string>();
+  for (const index of candidates) {
+    const secret = decodeSerializedSecret(outputs[index]!.secret);
+    if (!secret) continue;
+    const Y = hashToCurve(encoder.encode(secret)).toHex(true);
+    YByIndex.set(index, Y);
+    Ys.push(Y);
+  }
+  if (Ys.length === 0) return [];
+
+  // Request failures propagate before any local mutation; mixed or unknown
+  // answers fail closed (skip saving) because the change stays recoverable
+  // from the seed if the mint reports it later.
+  const states = await checkProofStates(mintUrl, Ys);
+  if (!Array.isArray(states)) return [];
+  const unspent = new Set<string>();
+  for (const entry of states) {
+    if (entry && typeof entry.Y === "string" && entry.state === "UNSPENT") {
+      unspent.add(entry.Y);
+    }
+  }
+  return candidates.filter((index) => {
+    const Y = YByIndex.get(index);
+    return Y !== undefined && unspent.has(Y);
+  });
 }
 
 /**
@@ -408,9 +540,8 @@ async function finalizeExpiredMelt(
   } as PendingMeltOperation;
   await finalizeOperation.call(handler, { ...ctx, operation: alignedOperation }, change.signatures);
 
-  const changeProofs = change.all.map((output) => ({
-    amount: output.blindedMessage.amount,
-  }));
+  // Amounts come from the mint's signatures; blank outputs are always 0.
+  const changeProofs = change.allAmounts.map((amount) => ({ amount }));
   const { changeAmount, effectiveFee } = calculateSettlement.call(
     handler,
     meltInputAmount,

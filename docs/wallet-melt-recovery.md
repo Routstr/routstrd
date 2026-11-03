@@ -41,11 +41,15 @@ itself:
   on the operation (`changeOutputData.keep`). Restore may return a subset in any
   order, so signatures are matched back to their outputs by `B_`;
 - the melt inputs are marked spent and the recovered change is unblinded and
-  saved as ready proofs. Change that an earlier attempt already saved is not
-  saved twice;
+  saved as ready proofs. Change is only saved when the wallet has no proof with
+  that secret (from an earlier attempt or a seed restore under another
+  operation) and the mint reports the restored proof UNSPENT, so spent change is
+  not resurrected and duplicate saves cannot wedge the operation;
 - `changeAmount`/`effectiveFee` are derived from the actual melt input amount
-  and the recovered change. No preimage is available, so `finalizedData` is
-  empty and history shows a finalized operation.
+  and the amounts in the mint's change signatures. Blank change outputs are
+  always amount 0 (NUT-08), so their amounts are never summed. No preimage is
+  available, so `finalizedData` is empty and history shows a finalized
+  operation.
 
 Limits:
 
@@ -53,8 +57,14 @@ Limits:
   finalized (the inputs are spent, so the sats left) with `changeAmount = 0` and
   a warning. Change outputs are deterministic from the seed, so a later seed
   restore can still find them.
-- A restore transport failure leaves the operation pending and nothing spent;
-  the sweep retries with mint backoff.
+- A restore transport failure (network error, timeout, rate limit, 5xx) leaves
+  the operation pending and nothing spent; the sweep retries with mint backoff.
+- A mint that does not implement NUT-09 (404 or another permanent 4xx,
+  including a NUT error on the restore call) is not retried forever: the
+  operation is finalized without change and a warning is logged, matching the
+  "no signatures" path.
+- A save failure after inputs were marked spent is retried safely: already
+  saved change is skipped by secret, so the next sweep completes the operation.
 - If Coco changes these handler helpers, installation warns and the melt stays
   pending instead of settling with guessed amounts.
 
