@@ -1,6 +1,13 @@
-import { describe, expect, it } from "bun:test";
-import { hashToCurve } from "@cashu/cashu-ts";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import {
+  createBlindSignature,
+  createNewMintKeys,
+  hashToCurve,
+  OutputData,
+  pointFromHex,
+} from "@cashu/cashu-ts";
 import { Manager, MemoryRepositories, MintOperationError, NetworkError, type CoreProof, type MeltOperation } from "@cashu/coco-core";
+import { logger } from "../../utils/logger";
 import {
   installMeltQuoteExpiryHandler,
   isMeltQuoteExpiredError,
@@ -22,10 +29,16 @@ const inputSecrets = ["input-a", "input-b"];
 const yFor = (secret: string) => hashToCurve(new TextEncoder().encode(secret)).toHex(true);
 const unspent = (secrets = inputSecrets) => secrets.map((secret) => ({ Y: yFor(secret), state: "UNSPENT" }));
 
-function expiryContext(checkProofStates: () => Promise<unknown> = async () => unspent()) {
+function expiryContext(
+  remoteStates: (Ys: string[], call: number) => Promise<unknown> = async () => unspent(),
+) {
+  let calls = 0;
   return {
     operation: { id: "op", mintUrl, needsSwap: false, inputProofSecrets: inputSecrets },
-    mintAdapter: { checkProofStates },
+    mintAdapter: {
+      checkProofStates: async (_url: string, Ys: string[]) =>
+        remoteStates(Ys, ++calls),
+    },
   };
 }
 
@@ -79,6 +92,102 @@ describe("installMeltQuoteExpiryHandler", () => {
     ).checkPending(expiryContext());
     expect(decision).toBe("rollback");
     expect(calls).toHaveLength(1);
+  });
+
+  const allSpent = (Ys: string[]) => Ys.map((Y) => ({ Y, state: "SPENT" }));
+
+  function finalizableHandler() {
+    const handler = {
+      getMeltInputSecrets: (operation: { inputProofSecrets: string[] }) =>
+        operation.inputProofSecrets,
+      getMeltInputAmount: (operation: { inputAmount?: number }) =>
+        operation.inputAmount ?? 2,
+      calculateSettlementAmounts: (
+        meltInputAmount: number,
+        meltAmount: number,
+        change?: Array<{ amount: number }>,
+      ) => {
+        const changeAmount = change?.reduce((sum, proof) => sum + proof.amount, 0) ?? 0;
+        return { changeAmount, effectiveFee: meltInputAmount - meltAmount - changeAmount };
+      },
+      finalizeOperation: async (_ctx: unknown, _change?: unknown[]) => {},
+      checkPending: async (_ctx: unknown): Promise<unknown> => {
+        throw new MintOperationError(20007, "quote expired");
+      },
+      finalize: async (_ctx: unknown): Promise<unknown> => {
+        throw new MintOperationError(20007, "quote expired");
+      },
+    };
+    return handler;
+  }
+
+  it("maps a 20007 from checkPending to a finalize decision when all inputs are SPENT", async () => {
+    const handler = finalizableHandler();
+    installMeltQuoteExpiryHandler(fakeManager({ bolt11: handler }));
+    const ctx = expiryContext(async (Ys) => allSpent(Ys));
+    (ctx.operation as { inputAmount?: number }).inputAmount = 2;
+    expect(await handler.checkPending(ctx)).toBe("finalize");
+  });
+
+  it("finalizes through the wrapper when the underlying finalize also sees 20007", async () => {
+    const handler = finalizableHandler();
+    let finalized = 0;
+    handler.finalizeOperation = async () => { finalized++; };
+    installMeltQuoteExpiryHandler(fakeManager({ bolt11: handler }));
+    const ctx = expiryContext(async (Ys) => allSpent(Ys));
+    Object.assign(ctx.operation, { amount: 2, inputAmount: 2 });
+    Object.assign(ctx, {
+      proofService: { unblindAndSaveChangeProofs: async () => {} },
+    });
+    const result = await handler.finalize(ctx);
+    expect(finalized).toBe(1);
+    expect(result).toEqual({ changeAmount: 0, effectiveFee: 0, finalizedData: undefined });
+  });
+
+  it("refuses to finalize when inputs flip to PENDING under the lock", async () => {
+    const handler = finalizableHandler();
+    installMeltQuoteExpiryHandler(fakeManager({ bolt11: handler }));
+    const ctx = expiryContext(async (Ys, call) =>
+      Ys.map((Y) => ({ Y, state: call === 1 ? "SPENT" : "PENDING" })));
+    Object.assign(ctx.operation, { amount: 2, inputAmount: 2 });
+    expect(await handler.checkPending(ctx)).toBe("finalize");
+    await expect(handler.finalize(ctx)).rejects.toThrow("expected all SPENT");
+  });
+
+  it("does not wrap finalize when coco's helpers are missing", async () => {
+    const registry: Record<string, unknown> = {
+      bolt11: {
+        getMeltInputSecrets: (operation: { inputProofSecrets: string[] }) =>
+          operation.inputProofSecrets,
+        checkPending: async (_ctx: unknown): Promise<unknown> => {
+          throw new MintOperationError(20007, "quote expired");
+        },
+        finalize: async (_ctx: unknown): Promise<unknown> => {
+          throw new MintOperationError(20007, "quote expired");
+        },
+      },
+    };
+    installMeltQuoteExpiryHandler(fakeManager(registry));
+    const handler = registry.bolt11 as {
+      checkPending: (ctx: unknown) => Promise<unknown>;
+      finalize: (ctx: unknown) => Promise<unknown>;
+    };
+    // Without finalize helpers, SPENT inputs must stay pending rather than
+    // letting coco persist a finalized operation with no settlement data.
+    expect(await handler.checkPending(expiryContext(async (Ys) => allSpent(Ys)))).toBe(
+      "stay_pending",
+    );
+    await expect(handler.finalize(expiryContext())).rejects.toBeInstanceOf(MintOperationError);
+  });
+
+  it("passes non-20007 finalize errors through unchanged", async () => {
+    const handler = finalizableHandler();
+    const boom = new Error("mint exploded");
+    handler.finalize = async () => { throw boom; };
+    installMeltQuoteExpiryHandler(fakeManager({ bolt11: handler }));
+    const ctx = expiryContext(async (Ys) => allSpent(Ys));
+    Object.assign(ctx.operation, { amount: 2, inputAmount: 2 });
+    await expect(handler.finalize(ctx)).rejects.toBe(boom);
   });
 
   for (const state of ["PENDING", "SPENT"]) {
@@ -198,16 +307,94 @@ describe("installMeltQuoteExpiryHandler", () => {
 /** Exercise Coco's real checkPending -> rollback -> proof restoration path.
  * Only wallet acquisition and mint responses are stubbed; no network is used.
  */
-async function pendingMeltFixture(needsSwap: boolean, remoteStates: (Ys: string[], call: number) => unknown) {
+/** Real mint keyset so restored change signatures can be unblinded. */
+const mintKeys = (() => {
+  const pair = createNewMintKeys(20, new Uint8Array(32).fill(9));
+  const hex = (value: string | Uint8Array) =>
+    typeof value === "string" ? value : Buffer.from(value).toString("hex");
+  return {
+    id: pair.keysetId,
+    pubKeys: Object.fromEntries(
+      Object.entries(pair.pubKeys).map(([amount, key]) => [
+        amount,
+        hex(key as string | Uint8Array),
+      ]),
+    ) as Record<string, string>,
+    privKeys: Object.fromEntries(
+      Object.entries(pair.privKeys).map(([amount, key]) => [
+        amount,
+        key as Uint8Array,
+      ]),
+    ) as Record<string, Uint8Array>,
+  };
+})();
+
+interface ChangeEntry {
+  serialized: {
+    blindedMessage: { amount: number; id: string; B_: string };
+    blindingFactor: string;
+    secret: string;
+  };
+  signature: { amount: number; id: string; C_: string };
+}
+
+/** Deterministic blank outputs plus real mint signatures, as NUT-09 would return. */
+function makeChangeEntries(amounts: number[]): ChangeEntry[] {
+  const seed = new Uint8Array(32).fill(3);
+  return amounts.map((amount, counter) => {
+    const output = OutputData.createSingleDeterministicData(
+      amount,
+      seed,
+      counter,
+      mintKeys.id,
+    );
+    const B_ = output.blindedMessage.B_;
+    const signature = createBlindSignature(
+      pointFromHex(B_),
+      mintKeys.privKeys[String(amount)]!,
+      mintKeys.id,
+    );
+    return {
+      serialized: {
+        blindedMessage: { amount, id: mintKeys.id, B_ },
+        blindingFactor: output.blindingFactor.toString(16),
+        secret: Buffer.from(output.secret).toString("hex"),
+      },
+      signature: {
+        amount,
+        id: mintKeys.id,
+        C_: Buffer.from(signature.C_.toBytes(false)).toString("hex"),
+      },
+    };
+  });
+}
+
+interface MeltFixtureOptions {
+  amount?: number;
+  inputAmount?: number;
+  change?: ChangeEntry[];
+  /** Override NUT-09 restore. Defaults to returning every change signature. */
+  restore?: (outputs: Array<{ amount: number; id: string; B_: string }>) => Promise<unknown>;
+  /** Error `checkMeltQuote` throws inside the handler's finalize. Defaults to 20007. */
+  quoteError?: Error;
+}
+
+async function pendingMeltFixture(
+  needsSwap: boolean,
+  remoteStates: (Ys: string[], call: number) => unknown,
+  options: MeltFixtureOptions = {},
+) {
   const repo = new MemoryRepositories();
   const coco = new Manager(repo, async () => new Uint8Array(64));
   const swapSecrets = ["swap-a", "swap-b"];
+  const change = options.change ?? [];
   const operation = {
     id: "op", mintUrl, method: "bolt11", methodData: { invoice: "invoice" },
     state: "pending", createdAt: 0, updatedAt: 0, quoteId: "expired-quote", unit: "sat",
-    needsSwap, amount: 2, fee_reserve: 0, swap_fee: 0, inputAmount: 2,
+    needsSwap, amount: options.amount ?? 2, fee_reserve: 0, swap_fee: 0,
+    inputAmount: options.inputAmount ?? 2,
     inputProofSecrets: inputSecrets,
-    changeOutputData: { keep: [], send: [] },
+    changeOutputData: { keep: change.map((entry) => entry.serialized), send: [] },
     swapOutputData: needsSwap ? {
       keep: [],
       send: swapSecrets.map((secret) => ({
@@ -225,14 +412,35 @@ async function pendingMeltFixture(needsSwap: boolean, remoteStates: (Ys: string[
     ...(needsSwap ? swapSecrets.map((secret) => proof(secret, "inflight")) : []),
   ]);
   const internal = coco as unknown as {
-    walletService: { getWalletWithActiveKeysetId: () => Promise<unknown> };
+    walletService: {
+      getWalletWithActiveKeysetId: (url: string) => Promise<unknown>;
+    };
+    mintService: { ensureUpdatedMint: (url: string) => Promise<unknown> };
     mintAdapter: {
+      checkMeltQuote: () => Promise<unknown>;
       checkMeltQuoteState: () => Promise<unknown>;
       checkProofStates: (mintUrl: string, Ys: string[]) => Promise<unknown>;
     };
   };
-  internal.walletService.getWalletWithActiveKeysetId = async () => ({ wallet: {} });
+  const restoreCalls: Array<{ outputs: Array<{ amount: number; id: string; B_: string }> }> = [];
+  internal.walletService.getWalletWithActiveKeysetId = async () => ({
+    wallet: {
+      mint: {
+        restore: async (payload: { outputs: Array<{ amount: number; id: string; B_: string }> }) => {
+          restoreCalls.push(payload);
+          if (options.restore) return options.restore(payload.outputs);
+          return { outputs: payload.outputs, signatures: change.map((entry) => entry.signature) };
+        },
+      },
+    },
+  });
+  internal.mintService.ensureUpdatedMint = async () => ({
+    keysets: [{ id: mintKeys.id, unit: "sat", keypairs: mintKeys.pubKeys }],
+  });
   internal.mintAdapter.checkMeltQuoteState = async () => { throw new MintOperationError(20007, "quote expired"); };
+  internal.mintAdapter.checkMeltQuote = async () => {
+    throw options.quoteError ?? new MintOperationError(20007, "quote expired");
+  };
   const queries: string[][] = [];
   internal.mintAdapter.checkProofStates = async (url, Ys) => {
     expect(url).toBe(mintUrl);
@@ -240,7 +448,14 @@ async function pendingMeltFixture(needsSwap: boolean, remoteStates: (Ys: string[
     return remoteStates(Ys, queries.length);
   };
   installMeltQuoteExpiryHandler(coco);
-  return { coco, repo, queries, actualSecrets: needsSwap ? swapSecrets : inputSecrets };
+  return {
+    coco,
+    repo,
+    queries,
+    restoreCalls,
+    change,
+    actualSecrets: needsSwap ? swapSecrets : inputSecrets,
+  };
 }
 
 describe("expired quote recovery with Coco 1.0.1", () => {
@@ -265,7 +480,8 @@ describe("expired quote recovery with Coco 1.0.1", () => {
     });
   }
 
-  for (const remoteState of ["PENDING", "SPENT", "MISSING", "FAILED", "DUPLICATE"]) {
+  // SPENT is no longer a preserve case: it now finalizes (see the finalize suite).
+  for (const remoteState of ["PENDING", "MISSING", "FAILED", "DUPLICATE"]) {
     it(`does not release reservations for ${remoteState} input states`, async () => {
       const { coco, repo, actualSecrets } = await pendingMeltFixture(true, (Ys) => {
         if (remoteState === "FAILED") throw new Error("mint offline");
@@ -371,5 +587,278 @@ describe("expired quote recovery with Coco 1.0.1", () => {
         expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe("inflight");
       }
     } finally { await coco.dispose(); }
+  });
+});
+
+describe("expired quote finalization with Coco 1.0.1", () => {
+  const allSpent = (Ys: string[]) => Ys.map((Y) => ({ Y, state: "SPENT" }));
+
+  const finalizedState = (operation: MeltOperation) => {
+    if (operation.state !== "finalized") {
+      throw new Error(`expected finalized, got ${operation.state}`);
+    }
+    return operation;
+  };
+
+  for (const needsSwap of [false, true]) {
+    it(`finalizes when every actual melt input is SPENT (needsSwap=${needsSwap})`, async () => {
+      const { coco, repo, queries, actualSecrets, restoreCalls } = await pendingMeltFixture(
+        needsSwap,
+        allSpent,
+      );
+      try {
+        const operation = finalizedState(await coco.ops.melt.refresh("op"));
+        // Both NUT-07 checks run: checkPending, then re-verification under the
+        // finalize lock, using the actual melt inputs (swap-send when swapped).
+        expect(queries).toEqual([actualSecrets.map(yFor), actualSecrets.map(yFor)]);
+        expect(operation.changeAmount).toBe(0);
+        expect(operation.effectiveFee).toBe(0);
+        // No change outputs were prepared, so NUT-09 restore is not called.
+        expect(restoreCalls).toHaveLength(0);
+        for (const secret of actualSecrets) {
+          expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe(
+            "spent",
+          );
+        }
+        if (needsSwap) {
+          for (const secret of inputSecrets) {
+            expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe(
+              "spent",
+            );
+          }
+        }
+        expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+      } finally {
+        await coco.dispose();
+      }
+    });
+  }
+
+  it("recovers change through NUT-09 and records the settlement amounts", async () => {
+    const change = makeChangeEntries([1]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change,
+    });
+    try {
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(1);
+      expect(operation.effectiveFee).toBe(0);
+
+      const ready = await repo.proofRepository.getReadyProofs(mintUrl);
+      expect(ready).toHaveLength(1);
+      expect(ready[0]!.secret).toBe(
+        Buffer.from(change[0]!.serialized.secret, "hex").toString(),
+      );
+      expect(ready[0]!.amount).toBe(1);
+      expect(ready[0]!.createdByOperationId).toBe("op");
+      for (const secret of inputSecrets) {
+        expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe(
+          "spent",
+        );
+      }
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("aligns reordered restore results to their own outputs", async () => {
+    const change = makeChangeEntries([1, 2]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 4,
+      change,
+      restore: async (outputs) => ({
+        outputs: [outputs[1], outputs[0]],
+        signatures: [change[1]!.signature, change[0]!.signature],
+      }),
+    });
+    try {
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(3);
+      expect(operation.effectiveFee).toBe(0);
+
+      const ready = await repo.proofRepository.getReadyProofs(mintUrl);
+      expect(ready).toHaveLength(2);
+      const bySecret = new Map(ready.map((proof) => [proof.secret, proof]));
+      for (const entry of change) {
+        const secret = Buffer.from(entry.serialized.secret, "hex").toString();
+        expect(bySecret.get(secret)?.amount).toBe(entry.serialized.blindedMessage.amount);
+      }
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("saves only the change outputs the mint returned", async () => {
+    const change = makeChangeEntries([1, 2]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 4,
+      change,
+      restore: async (outputs) => ({
+        outputs: [outputs[0]],
+        signatures: [change[0]!.signature],
+      }),
+    });
+    try {
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(1);
+      expect(operation.effectiveFee).toBe(2);
+      const ready = await repo.proofRepository.getReadyProofs(mintUrl);
+      expect(ready).toHaveLength(1);
+      expect(ready[0]!.secret).toBe(
+        Buffer.from(change[0]!.serialized.secret, "hex").toString(),
+      );
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("does not save change proofs twice when an earlier attempt already did", async () => {
+    const change = makeChangeEntries([1, 2]);
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 4,
+      change,
+    });
+    try {
+      // Simulate a previous finalize that saved change before failing to
+      // persist the operation.
+      const existingSecret = Buffer.from(change[0]!.serialized.secret, "hex").toString();
+      await repo.proofRepository.saveProofs(mintUrl, [
+        {
+          secret: existingSecret,
+          state: "ready",
+          mintUrl,
+          id: change[0]!.serialized.blindedMessage.id,
+          C: yFor(existingSecret),
+          amount: 1,
+          createdByOperationId: "op",
+        } satisfies CoreProof,
+      ]);
+
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(3);
+      const ready = await repo.proofRepository.getReadyProofs(mintUrl);
+      expect(ready).toHaveLength(2);
+      expect(ready.filter((proof) => proof.secret === existingSecret)).toHaveLength(1);
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("stays pending and propagates when NUT-09 restore fails in transport", async () => {
+    const failure = new NetworkError("restore offline");
+    const { coco, repo, restoreCalls } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change: makeChangeEntries([1]),
+      restore: async () => {
+        throw failure;
+      },
+    });
+    try {
+      await expect(coco.ops.melt.refresh("op")).rejects.toBe(failure);
+      expect(restoreCalls).toHaveLength(1);
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+      // Nothing was marked spent and no change was saved.
+      for (const secret of inputSecrets) {
+        const proof = await repo.proofRepository.getProofBySecret(mintUrl, secret);
+        expect(proof?.state).toBe("inflight");
+        expect(proof?.usedByOperationId).toBe("op");
+      }
+      expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("finalizes without change and warns when the mint restores nothing", async () => {
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    const { coco, repo } = await pendingMeltFixture(false, allSpent, {
+      amount: 1,
+      inputAmount: 2,
+      change: makeChangeEntries([1]),
+      restore: async () => ({ outputs: [], signatures: [] }),
+    });
+    try {
+      const operation = finalizedState(await coco.ops.melt.refresh("op"));
+      expect(operation.changeAmount).toBe(0);
+      expect(operation.effectiveFee).toBe(1);
+      expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+      expect(
+        warn.mock.calls.some((call) => String(call[0]).includes("no change signatures")),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await coco.dispose();
+    }
+  });
+
+  for (const [name, states] of Object.entries({
+    "mixed SPENT/UNSPENT": (Ys: string[]) =>
+      Ys.map((Y, index) => ({ Y, state: index === 0 ? "SPENT" : "UNSPENT" })),
+    "one PENDING": (Ys: string[]) =>
+      Ys.map((Y, index) => ({ Y, state: index === 0 ? "PENDING" : "SPENT" })),
+    incomplete: (Ys: string[]) => [{ Y: Ys[0], state: "SPENT" }],
+    duplicate: (Ys: string[]) => Ys.map(() => ({ Y: Ys[0], state: "SPENT" })),
+  })) {
+    it(`keeps the operation pending on ${name} states`, async () => {
+      const { coco, repo } = await pendingMeltFixture(true, states);
+      try {
+        expect((await coco.ops.melt.refresh("op")).state).toBe("pending");
+        expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+        const actualSecrets = ["swap-a", "swap-b"];
+        for (const secret of actualSecrets) {
+          const proof = await repo.proofRepository.getProofBySecret(mintUrl, secret);
+          expect(proof?.state).toBe("inflight");
+          expect(proof?.usedByOperationId).toBe("op");
+        }
+        expect(await repo.proofRepository.getReadyProofs(mintUrl)).toHaveLength(0);
+      } finally {
+        await coco.dispose();
+      }
+    });
+  }
+
+  it("refuses to finalize when inputs flip from SPENT to PENDING before the lock", async () => {
+    const { coco, repo, queries } = await pendingMeltFixture(false, (Ys, call) =>
+      Ys.map((Y) => ({ Y, state: call === 1 ? "SPENT" : "PENDING" })));
+    try {
+      await expect(coco.ops.melt.refresh("op")).rejects.toThrow("expected all SPENT");
+      expect(queries).toHaveLength(2);
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+      for (const secret of inputSecrets) {
+        const proof = await repo.proofRepository.getProofBySecret(mintUrl, secret);
+        expect(proof?.state).toBe("inflight");
+        expect(proof?.usedByOperationId).toBe("op");
+      }
+    } finally {
+      await coco.dispose();
+    }
+  });
+
+  it("propagates non-20007 errors from the original finalize unchanged", async () => {
+    const boom = new Error("mint exploded");
+    const { coco, repo, queries, restoreCalls } = await pendingMeltFixture(false, allSpent, {
+      quoteError: boom,
+    });
+    try {
+      await expect(coco.ops.melt.refresh("op")).rejects.toThrow("mint exploded");
+      // Only the checkPending verification ran; the finalize wrapper rethrew
+      // before re-checking or restoring anything.
+      expect(queries).toHaveLength(1);
+      expect(restoreCalls).toHaveLength(0);
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+      for (const secret of inputSecrets) {
+        expect((await repo.proofRepository.getProofBySecret(mintUrl, secret))?.state).toBe(
+          "inflight",
+        );
+      }
+    } finally {
+      await coco.dispose();
+    }
   });
 });

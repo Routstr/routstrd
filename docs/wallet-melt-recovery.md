@@ -17,12 +17,48 @@ mint nor melt sweep starts; the daemon logs that explicitly.
 ## Expired quotes do not prove payment failure
 
 Coco 1.0.1's pending-melt handler is wrapped to handle error 20007 (quote expired).
-Expiry alone never authorizes releasing proofs. Rollback requires NUT-07 to
-confirm every actual melt input is UNSPENT, including swap-send inputs when the
-operation required a swap. Pending, spent, incomplete or unverifiable inputs stay
-reserved. Proof-state request exceptions propagate without releasing proofs, so
-transport failures still trigger sweep backoff. This bridge depends on Coco
-internals and must be rechecked on upgrades.
+Expiry alone never authorizes releasing proofs. The sweep asks the mint (NUT-07)
+about the proofs the melt actually sent, including swap-send inputs when the
+operation required a swap, and applies a strict decision table:
+
+| Melt input states | Result |
+| --- | --- |
+| every input UNSPENT | rollback: the payment did not happen, restore the inputs |
+| every input SPENT | finalize: the mint burned the inputs, so the payment succeeded |
+| any input PENDING | stay pending: the HTLC is still live |
+| mixed, incomplete, duplicate, malformed, helper unavailable | stay pending + warning |
+| proof-state request throws | error propagates, sweep backs off the mint |
+
+### Finalizing an expired, paid melt
+
+Returning `finalize` is not enough: Coco's `MeltBolt11Handler.finalize` asks the
+mint for the quote again and throws 20007 at the same purged quote. The wrapper
+therefore also wraps `finalize`, re-verifies under the operation lock that every
+melt input is SPENT (states can move between checks), and settles the operation
+itself:
+
+- change is recovered with NUT-09 restore over the blank change outputs stored
+  on the operation (`changeOutputData.keep`). Restore may return a subset in any
+  order, so signatures are matched back to their outputs by `B_`;
+- the melt inputs are marked spent and the recovered change is unblinded and
+  saved as ready proofs. Change that an earlier attempt already saved is not
+  saved twice;
+- `changeAmount`/`effectiveFee` are derived from the actual melt input amount
+  and the recovered change. No preimage is available, so `finalizedData` is
+  empty and history shows a finalized operation.
+
+Limits:
+
+- If the quote is gone and restore returns no signatures, the operation is still
+  finalized (the inputs are spent, so the sats left) with `changeAmount = 0` and
+  a warning. Change outputs are deterministic from the seed, so a later seed
+  restore can still find them.
+- A restore transport failure leaves the operation pending and nothing spent;
+  the sweep retries with mint backoff.
+- If Coco changes these handler helpers, installation warns and the melt stays
+  pending instead of settling with guessed amounts.
+
+This bridge depends on Coco internals and must be rechecked on upgrades.
 
 ## History output changes
 
