@@ -203,6 +203,8 @@ export function createOfflineSendHandler(
   defaultHandler: SendMethodHandler<"default">,
 ): SendMethodHandler<"offline"> {
   return {
+    requiresWallet: false,
+
     async prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation> {
       const { operation, proofRepository, proofService, logger } = ctx;
       const { mintUrl, amount } = operation;
@@ -245,7 +247,7 @@ export function createOfflineSendHandler(
     },
 
     async execute(ctx: ExecuteContext): Promise<ExecutionResult> {
-      const { operation, wallet, reservedProofs, proofRepository } = ctx;
+      const { operation, reservedProofs, proofRepository } = ctx;
       const { mintUrl, inputProofSecrets } = operation;
       const bySecret = new Map(reservedProofs.map((proof) => [proof.secret, proof]));
       const inputProofs = inputProofSecrets.map((secret) => bySecret.get(secret));
@@ -261,7 +263,8 @@ export function createOfflineSendHandler(
       const token = {
         mint: mintUrl,
         proofs: inputProofs as CoreProof[],
-        unit: wallet.unit,
+        // Coco wallets use sat; exporting existing sat proofs needs no wallet.
+        unit: "sat",
       };
       const pending: PendingSendOperation = {
         ...operation,
