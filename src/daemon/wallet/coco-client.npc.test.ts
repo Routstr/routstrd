@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { MintApi, SendOpsApi } from "@cashu/coco-core";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -12,6 +13,10 @@ const npcState = {
     | { success: false; pr: { amount: number; mints: string[] } },
   setUsernameCalls: [] as Array<{ username: string; attemptPayment?: boolean }>,
   syncCalls: 0,
+  pluginOptions: [] as Array<{
+    useWebsocket?: boolean;
+    syncIntervalMs?: number;
+  }>,
 };
 
 class MockNPCPlugin {
@@ -27,6 +32,17 @@ class MockNPCPlugin {
       npcState.syncCalls += 1;
     },
   };
+
+  constructor(
+    _baseUrl: string,
+    _signer: unknown,
+    options?: { useWebsocket?: boolean; syncIntervalMs?: number },
+  ) {
+    npcState.pluginOptions.push({
+      useWebsocket: options?.useWebsocket,
+      syncIntervalMs: options?.syncIntervalMs,
+    });
+  }
 
   onInit(ctx: { registerExtension: (key: string, api: unknown) => void }) {
     ctx.registerExtension("npc", this.api);
@@ -70,9 +86,36 @@ function resetNpcState(): void {
   npcState.usernameResult = { success: true };
   npcState.setUsernameCalls = [];
   npcState.syncCalls = 0;
+  npcState.pluginOptions = [];
 }
 
+// The daemon fires a catch-up sync in the background once wallet recovery
+// completes, so tests that assert on sync() calls must first wait for it.
+async function waitForNpcSyncs(count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (npcState.syncCalls < count) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `timed out waiting for ${count} NPC sync calls (saw ${npcState.syncCalls})`,
+      );
+    }
+    await Bun.sleep(5);
+  }
+}
+
+// NPC integration does not exercise mint discovery. Stub only that API so
+// constructing an empty wallet never depends on public mint availability.
+let mintDiscovery: ReturnType<typeof spyOn<typeof MintApi.prototype, "addMint">>;
+beforeEach(() => {
+  mintDiscovery = spyOn(MintApi.prototype, "addMint").mockImplementation(async (mintUrl) => ({
+    mint: { mintUrl, name: "Test mint", trusted: true, createdAt: 0, updatedAt: 0,
+      mintInfo: {} as Awaited<ReturnType<MintApi["getMintInfo"]>> },
+    keysets: [],
+  }));
+});
+
 afterEach(() => {
+  mintDiscovery.mockRestore();
   resetNpcState();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -80,9 +123,12 @@ afterEach(() => {
 });
 
 describe("in-process coco client NPC integration", () => {
-  it("registers the plugin and exposes the wallet's NPC lightning address", async () => {
+  it("registers the plugin with the interval fallback and exposes the NPC address", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
+      expect(npcState.pluginOptions).toEqual([
+        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
+      ]);
       const info = await client.getNpcAddress();
       expect(info).toEqual({
         address: "alice@npubx.cash",
@@ -141,11 +187,44 @@ describe("in-process coco client NPC integration", () => {
     }
   });
 
+  it("does not fire the catch-up sync when disposal starts during recovery", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const original = SendOpsApi.prototype.listInFlight;
+    const recovery = spyOn(SendOpsApi.prototype, "listInFlight").mockImplementationOnce(async function (this: SendOpsApi) {
+      entered();
+      await held;
+      return original.call(this);
+    });
+    let client: Awaited<ReturnType<typeof createCocoClient>> | undefined;
+    try {
+      client = await createCocoClient(testClientOptions());
+      await started;
+      expect(npcState.syncCalls).toBe(0);
+      // dispose quiesces synchronously, but must wait for held recovery.
+      const disposal = client.dispose!();
+      release();
+      await disposal;
+      expect(npcState.syncCalls).toBe(0);
+    } finally {
+      release();
+      recovery.mockRestore();
+      await client?.dispose?.();
+    }
+  });
+
   it("triggers a manual quote sync", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
-      await client.syncNpc();
+      // Recovery fires exactly one automatic catch-up, so this test only
+      // measures the explicit syncNpc() call on top of it.
+      await waitForNpcSyncs(1);
       expect(npcState.syncCalls).toBe(1);
+      const baseline = npcState.syncCalls;
+      await client.syncNpc();
+      expect(npcState.syncCalls).toBe(baseline + 1);
     } finally {
       await client.dispose?.();
     }
@@ -163,6 +242,9 @@ describe("in-process coco client NPC integration", () => {
       await expect(client.syncNpc()).rejects.toThrow(
         "NPC plugin is not enabled",
       );
+      // No plugin means no interval fallback and no automatic catch-up sync.
+      expect(npcState.pluginOptions).toEqual([]);
+      expect(npcState.syncCalls).toBe(0);
     } finally {
       await client.dispose?.();
     }

@@ -92,6 +92,11 @@ import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
 const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
+// NPC's websocket push is best-effort: the connection can drop without the
+// plugin noticing, and there is no reconnect-triggered or startup catch-up. Poll
+// the quote list on an interval so paid quotes are never stranded until a manual
+// `wallet npc sync`.
+const NPC_QUOTE_SYNC_INTERVAL_MS = 5 * 60_000;
 
 const STALE_SOCKET_ERROR_CODES = new Set([
   "ECONNREFUSED",
@@ -2094,6 +2099,8 @@ export async function createCocoClient(
         finalizeEvent(template, npcSecretKey);
       const npcPlugin = new NPCPlugin(npcBaseUrl, npcSigner, {
         useWebsocket: true,
+        // Interval fallback for missed websocket updates (see constant above).
+        syncIntervalMs: NPC_QUOTE_SYNC_INTERVAL_MS,
         logger: createCocoLogger({ module: "npc" }),
       });
       // coco-cashu-plugin-npc implements the plugin contract from the
@@ -2142,6 +2149,21 @@ export async function createCocoClient(
         // unnoticed and its proofs stay reserved. Sweep in-flight melts on a
         // timer so refresh() can finalize or roll them back without a restart.
         stopMeltSweep = startMeltSweep({ ops: coco!.ops }, recoveryOutstanding);
+
+        // Catch up once after recovery: quotes paid while the daemon was down
+        // (or while the websocket was silently dead) would otherwise wait for
+        // the next push or a manual `wallet npc sync`. Skip it once disposal
+        // has quiesced the wallet: plugin shutdown waits for in-flight syncs,
+        // so a stalled NPC request here would delay lock release and close.
+        if (!disposed && options.enableNpc !== false) {
+          void npcApi()
+            .sync()
+            .catch((error) => {
+              logger.warn("Initial NPC quote sync failed", {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+        }
       })
       .catch((error) => {
         recoveryDone = true;
