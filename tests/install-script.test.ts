@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { releaseArchiveName } from "../src/utils/standalone-update";
@@ -30,12 +39,24 @@ function sha256Hex(bytes: Uint8Array): string {
 }
 
 /** Builds a tar.gz that mimics a real release archive: a single `routstrd` entry. */
-function buildArchive(dir: string, version: string): Uint8Array {
+function buildArchive(
+  dir: string,
+  version: string,
+  options: { machO?: boolean } = {},
+): Uint8Array {
   const stage = join(dir, "stage");
   const archivePath = join(dir, "archive.tar.gz");
   writeFileSync(
     join(dir, "routstrd"),
-    `#!/bin/sh\necho ${version}\n`,
+    // A Mach-O-looking payload starts with the magic bytes is_macho_binary
+    // inspects. It is never executed: the signature tests pin --platform/--arch,
+    // which skips install.sh's version check.
+    options.machO
+      ? Buffer.concat([
+          Buffer.from([0xcf, 0xfa, 0xed, 0xfe]),
+          Buffer.from(`\n${version}\n`),
+        ])
+      : `#!/bin/sh\necho ${version}\n`,
   );
   Bun.spawnSync([
     "sh",
@@ -113,6 +134,49 @@ async function runInstallerAsync(args: string[], env: Record<string, string> = {
     new Response(proc.stderr).text(),
   ]);
   return { exitCode, stdout, stderr };
+}
+
+/**
+ * Puts `uname` and `codesign` stubs first on PATH so install.sh's macOS
+ * signature repair can be exercised on any host. `report()` returns the
+ * codesign invocations the installer made, one per line.
+ */
+function stubCodesign(
+  dir: string,
+  options: { alreadyValid?: boolean; signFails?: boolean } = {},
+): { bin: string; report: () => string } {
+  const bin = join(dir, "stubs");
+  mkdirSync(bin, { recursive: true });
+  const log = join(dir, "codesign.log");
+  const signed = join(dir, "codesign.signed");
+  writeFileSync(log, "");
+
+  // Only `uname -s` matters: the tests pass --platform/--arch, so install.sh
+  // never consults `uname` for platform or architecture detection.
+  const uname = "#!/bin/sh\necho Darwin\n";
+  const codesign = [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> ${JSON.stringify(log)}`,
+    'case "$1" in',
+    "  --verify)",
+    `    [ -f ${JSON.stringify(signed)} ] && exit 0`,
+    options.alreadyValid ? "    exit 0" : "    exit 1",
+    "    ;;",
+    "  --force)",
+    options.signFails
+      ? '    echo "simulated failure: not signed at all" >&2 ; exit 1'
+      : `    : > ${JSON.stringify(signed)} ; exit 0`,
+    "    ;;",
+    "esac",
+    "exit 0",
+    "",
+  ].join("\n");
+
+  writeFileSync(join(bin, "uname"), uname);
+  writeFileSync(join(bin, "codesign"), codesign);
+  chmodSync(join(bin, "uname"), 0o755);
+  chmodSync(join(bin, "codesign"), 0o755);
+  return { bin, report: () => readFileSync(log, "utf8") };
 }
 
 describe("install.sh", () => {
@@ -457,4 +521,86 @@ describe("install.sh", () => {
     },
     15000,
   );
+
+  describe("code-signature repair", () => {
+    /**
+     * Installs a darwin-arm64 release with stubbed uname/codesign first on PATH.
+     * --platform/--arch are pinned, which skips install.sh's version check: the
+     * Mach-O payload cannot run on this host. The signature handling under test
+     * runs either way.
+     */
+    async function install(options: {
+      machO: boolean;
+      alreadyValid?: boolean;
+      signFails?: boolean;
+    }) {
+      const dir = tempDir("routstrd-install-signature-");
+      const installDir = join(dir, "bin");
+      const stubs = stubCodesign(dir, options);
+      const asset = releaseArchiveName(VERSION, "darwin", "arm64");
+      const archive = buildArchive(dir, VERSION, { machO: options.machO });
+      const origin = serveFakeRelease({
+        asset,
+        archive,
+        checksums: `${sha256Hex(archive)}  ${asset}\n`,
+      });
+
+      const result = await runInstallerAsync(
+        [
+          "--dir",
+          installDir,
+          "--platform",
+          "darwin",
+          "--arch",
+          "arm64",
+          "--api-base-url",
+          origin,
+          "--download-base-url",
+          `${origin}/dl`,
+        ],
+        { PATH: `${stubs.bin}:${process.env.PATH ?? ""}` },
+      );
+      return { ...result, installDir, report: stubs.report() };
+    }
+
+    test("repairs a stale signature after staging, before installing", async () => {
+      const { exitCode, stderr, installDir, report } = await install({ machO: true });
+
+      expect(exitCode).toBe(0);
+      expect(stderr).toContain("Repairing invalid code signature on routstrd");
+      expect(report).toContain("--force --sign - --timestamp=none");
+      expect(statSync(join(installDir, "routstrd")).mode & 0o111).not.toBe(0);
+    });
+
+    test("leaves an already valid signature untouched", async () => {
+      const { exitCode, report } = await install({
+        machO: true,
+        alreadyValid: true,
+      });
+
+      expect(exitCode).toBe(0);
+      expect(report).toContain("--verify");
+      expect(report).not.toContain("--force");
+    });
+
+    test("never calls codesign for a non-Mach-O payload", async () => {
+      const { exitCode, report } = await install({ machO: false });
+
+      expect(exitCode).toBe(0);
+      expect(report).toBe("");
+    });
+
+    test("fails instead of installing a binary it cannot repair", async () => {
+      const { exitCode, stderr, installDir } = await install({
+        machO: true,
+        signFails: true,
+      });
+
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("could not re-sign routstrd");
+      // codesign's own diagnostics must survive into the failure message.
+      expect(stderr).toContain("simulated failure: not signed at all");
+      expect(readdirSync(installDir)).toEqual([]);
+    });
+  });
 });

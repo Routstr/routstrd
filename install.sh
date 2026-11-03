@@ -204,6 +204,60 @@ hash_file() {
   fi
 }
 
+# Mach-O magic numbers, as they appear in the first four bytes of a file.
+# A standalone `bun build --compile` artifact is always one of these; a shell
+# script or other non-binary payload is not.
+is_macho_binary() {
+  magic="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" || magic=""
+  case "$magic" in
+    feedface|feedfacf|cefaedfe|cffaedfe|cafebabe|bebafeca) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Renders captured codesign output as a one-line suffix for an error message.
+# codesign explains itself on stderr, and without that text a failed repair is
+# impossible to diagnose from a bug report.
+codesign_note() {
+  [ -n "$1" ] || return 0
+  printf ' codesign: %s' "$(printf '%s' "$1" | tr '\n' ' ')"
+}
+
+# Repair a stale ad-hoc code signature on a downloaded Mach-O binary.
+#
+# `bun build --compile` appends its standalone payload after the linker's
+# ad-hoc signature, so the embedded CodeDirectory no longer describes the
+# bytes on disk. macOS validates code pages lazily and SIGKILLs the process on
+# the first mismatching page (`Killed: 9` / exit 137) -- which is exactly what
+# the version check below would otherwise hit.
+#
+# Re-signing ad-hoc restores a valid signature without touching the payload.
+# A signature that already verifies -- for example a release properly signed
+# with a Developer ID and notarized -- is left untouched, so a working
+# signature is never weakened. Only a signature macOS is already rejecting is
+# replaced, and the payload it covers has already been checked against
+# SHA256SUMS above.
+#
+# $2 is the name to report in messages, for callers working on a temporary
+# path: telling the user about `.routstrd.tmp.4711` helps nobody.
+ensure_valid_signature() {
+  sig_target="$1"
+  sig_label="${2:-$(basename "$sig_target")}"
+  [ "$(uname -s)" = Darwin ] || return 0
+  command -v codesign >/dev/null 2>&1 || return 0
+  is_macho_binary "$sig_target" || return 0
+  if codesign --verify "$sig_target" >/dev/null 2>&1; then
+    return 0
+  fi
+  say "Repairing invalid code signature on ${sig_label} (macOS)."
+  if ! codesign_output="$(codesign --force --sign - --timestamp=none "$sig_target" 2>&1)"; then
+    die "could not re-sign ${sig_label}; macOS would kill it on launch (SIGKILL / exit 137).$(codesign_note "$codesign_output")"
+  fi
+  if ! codesign_output="$(codesign --verify "$sig_target" 2>&1)"; then
+    die "code signature on ${sig_label} is still invalid after re-signing.$(codesign_note "$codesign_output")"
+  fi
+}
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/routstrd-install.XXXXXX")" \
   || die "could not create a temporary directory."
 STAGED=""
@@ -255,6 +309,10 @@ STAGED="${INSTALL_DIR}/.routstrd.tmp.$$"
 
 cp "${WORKDIR}/routstrd" "$STAGED" || die "could not write to ${INSTALL_DIR}."
 chmod 755 "$STAGED"
+
+# Must run before the version check below: a stale signature makes macOS kill
+# the binary on first page-in, so the check would fail spuriously.
+ensure_valid_signature "$STAGED" routstrd
 
 # Validate the staged binary before replacing the target, mirroring
 # installStandaloneRelease: refuse a release whose binary reports the wrong
