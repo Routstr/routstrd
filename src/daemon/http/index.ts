@@ -33,6 +33,7 @@ import {
   type StoredCooldownEntry,
   type StoredFailureStreak,
 } from "../../utils/cooldowns";
+import { assessProviderReachability } from "../../utils/provider-reachability";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's
@@ -2051,6 +2052,13 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
+        // Unreachable nodes are hidden unless the caller asks for the whole
+        // discovered set (`--all`): discovery keeps announcing dead nodes for
+        // months, and a node that cannot be reached cannot be routed to
+        // either.
+        const includeUnreachable = ["1", "true"].includes(
+          (url.searchParams.get("all") ?? "").toLowerCase(),
+        );
         // Read disable/override state from the discovery adapter (the same
         // source the router/ProviderManager uses), not the mirror in the
         // SdkStore, which can lag behind the scheduled kind-38425 review
@@ -2072,17 +2080,48 @@ export function createDaemonRequestHandler(deps: {
         const inSet = (set: Set<string>, baseUrl: string) =>
           set.has(baseUrl) || set.has(normalizeProviderBaseUrl(baseUrl));
 
-        const providers = baseUrlsList.map((baseUrl, index) => ({
-          index,
-          baseUrl,
-          disabled: inSet(disabledProviders, baseUrl),
-          manuallyDisabled: inSet(manuallyDisabled, baseUrl),
-          manuallyEnabled: inSet(manuallyEnabled, baseUrl),
-        }));
+        // ModelManager writes to the sharded discovery adapter, not the
+        // SdkStore mirror. Read the same live cache the refresh pass updates;
+        // see utils/provider-reachability. `index` stays the position in the
+        // *full* discovered list so `providers disable <index>` keeps meaning
+        // the same node whether or not unreachable ones are hidden.
+        const reachability = assessProviderReachability(baseUrlsList, {
+          lastModelsUpdate: Object.fromEntries(
+            baseUrlsList.map((baseUrl) => [
+              baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
+              deps.discoveryAdapter.getProviderLastUpdate(baseUrl) ?? 0,
+            ]),
+          ),
+          modelsFromAllProviders: deps.discoveryAdapter.getCachedModels(),
+        });
+        const allProviders = baseUrlsList.map((baseUrl, index) => {
+          const verdict = reachability[index];
+          return {
+            index,
+            baseUrl,
+            disabled: inSet(disabledProviders, baseUrl),
+            manuallyDisabled: inSet(manuallyDisabled, baseUrl),
+            manuallyEnabled: inSet(manuallyEnabled, baseUrl),
+            // One verdict per URL is guaranteed; defaulting to reachable keeps
+            // a future helper change from hiding a working node.
+            reachable: verdict?.reachable ?? true,
+            lastModelFetchAt: verdict?.lastModelFetchAt ?? null,
+            modelCount: verdict?.modelCount ?? 0,
+            ...(verdict?.reason ? { unreachableReason: verdict.reason } : {}),
+          };
+        });
 
         // Only count disabled providers that are actually in the current list
         // (filter out stale entries from previously disabled providers that are no longer present)
-        const activeDisabledCount = providers.filter((p) => p.disabled).length;
+        const activeDisabledCount = allProviders.filter((p) => p.disabled).length;
+        // A manually enabled node stays listed even while it is unreachable:
+        // the user asked for it explicitly, so hiding it would silently undo
+        // that decision instead of reporting that it is down.
+        const providers = includeUnreachable
+          ? allProviders
+          : allProviders.filter(
+              (provider) => provider.reachable || provider.manuallyEnabled,
+            );
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -2090,7 +2129,12 @@ export function createDaemonRequestHandler(deps: {
             output: {
               providers,
               disabledCount: activeDisabledCount,
-              totalCount: baseUrlsList.length,
+              totalCount: allProviders.length,
+              reachableCount: allProviders.filter((p) => p.reachable).length,
+              unreachableCount: allProviders.filter((p) => !p.reachable).length,
+              // Nodes the filter dropped; zero when `all=true`.
+              hiddenCount: allProviders.length - providers.length,
+              includeUnreachable,
             },
           }),
         );

@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { EventEmitter } from "events";
+import { createSdkStore } from "@routstr/sdk";
+import {
+  createMemoryDriver,
+  createShardedDiscoveryAdapter,
+} from "@routstr/sdk/storage";
 import { createDaemonRequestHandler } from "./index";
 
 const PROVIDER_A = "https://provider-a.example/";
 const PROVIDER_B = "https://provider-b.example/";
+const PROVIDER_C = "https://provider-c.example/";
 
 /** Labels the SDK enables out of the box; `sandbox` deliberately is not one. */
 const DEFAULT_LABELS = ["trusted", "verified", "lgtm", "lgtm2"];
@@ -41,7 +47,10 @@ function makeRes() {
   return res;
 }
 
-function makeStore(baseUrlsList: string[]) {
+function makeStore(
+  baseUrlsList: string[],
+  extraState: Record<string, unknown> = {},
+) {
   const state: any = {
     baseUrlsList,
     disabledProviders: [] as string[],
@@ -56,6 +65,10 @@ function makeStore(baseUrlsList: string[]) {
     setManuallyEnabledProviders: (urls: string[]) => {
       state.manuallyEnabledProviders = urls;
     },
+    // Reachability slices, written by the SDK's model-refresh pass.
+    lastModelsUpdate: {} as Record<string, number>,
+    modelsFromAllProviders: {} as Record<string, unknown[]>,
+    ...extraState,
   };
   return { getState: () => state, state };
 }
@@ -213,6 +226,11 @@ function makeDeps(overrides: {
   baseUrlsList?: string[];
   providers?: ReviewFixture[];
   reviews?: ReviewEntry[];
+  state?: Record<string, unknown>;
+  reachability?: {
+    lastModelsUpdate: Record<string, number>;
+    modelsFromAllProviders: Record<string, unknown[]>;
+  };
 }) {
   const baseUrlsList = overrides.baseUrlsList ?? [PROVIDER_A, PROVIDER_B];
   const providers = overrides.providers ?? [
@@ -224,8 +242,13 @@ function makeDeps(overrides: {
     { node: "nodeA", label: "lgtm", createdAt: 10 },
     { node: "nodeB", label: "lgtm", createdAt: 10 },
   ];
-  const store = makeStore(baseUrlsList);
-  const adapter = makeAdapter(baseUrlsList);
+  const store = makeStore(baseUrlsList, overrides.state);
+  const adapter = {
+    ...makeAdapter(baseUrlsList),
+    getProviderLastUpdate: (baseUrl: string) =>
+      overrides.reachability?.lastModelsUpdate[baseUrl] ?? null,
+    getCachedModels: () => overrides.reachability?.modelsFromAllProviders ?? {},
+  };
   const modelManager = makeModelManager(adapter, providers, reviews);
   const handler = createDaemonRequestHandler({
     store,
@@ -287,6 +310,156 @@ describe("GET /providers", () => {
       manuallyDisabled: false,
       manuallyEnabled: true,
     });
+  });
+});
+
+describe("GET /providers reachability", () => {
+  const FRESH = Date.now() - 60_000;
+  const STALE = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  /** Store slices the SDK's model-refresh pass leaves behind. */
+  const reachabilityState = (
+    updates: Record<string, number>,
+    models: Record<string, unknown[]> = {},
+  ) => ({ lastModelsUpdate: updates, modelsFromAllProviders: models });
+
+  it("reads live sharded adapter updates independently of the legacy store", async () => {
+    const driver = createMemoryDriver();
+    const { store, hydrate } = createSdkStore({ driver });
+    await hydrate;
+    store.getState().setBaseUrlsList([PROVIDER_A, PROVIDER_B, PROVIDER_C]);
+    const adapter = await createShardedDiscoveryAdapter({ driver });
+    const handler = createDaemonRequestHandler({
+      store,
+      discoveryAdapter: adapter,
+    } as any);
+
+    // Before a refresh, no evidence means fail open.
+    expect((await call(handler, "GET", "/providers")).json().output.providers)
+      .toHaveLength(3);
+
+    // These are the same writes ModelManager makes after successful fetches.
+    adapter.setCachedModels({ [PROVIDER_A]: [{ id: "m-1" } as any] });
+    adapter.setProviderLastUpdate(PROVIDER_A, FRESH);
+    adapter.setProviderLastUpdate(PROVIDER_C, STALE);
+    expect(store.getState().lastModelsUpdate).toEqual({});
+    expect(store.getState().modelsFromAllProviders).toEqual({});
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    expect(out.providers).toEqual([
+      expect.objectContaining({
+        index: 0,
+        baseUrl: PROVIDER_A,
+        reachable: true,
+        lastModelFetchAt: FRESH,
+        modelCount: 1,
+      }),
+    ]);
+    expect(out.hiddenCount).toBe(2);
+
+    const all = (await call(handler, "GET", "/providers?all=true")).json().output;
+    expect(all.providers[1].unreachableReason).toBe("never-fetched");
+    expect(all.providers[2].unreachableReason).toBe("stale");
+
+    // Recovery must be visible immediately without rehydrating SdkStore.
+    adapter.setProviderLastUpdate(PROVIDER_B, FRESH);
+    expect((await call(handler, "GET", "/providers")).json().output.providers
+      .map((p: any) => p.index)).toEqual([0, 1]);
+  });
+
+  it("hides nodes that never answered and keeps discovery indices stable", async () => {
+    const { handler } = makeDeps({
+      baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
+      reachability: reachabilityState(
+        { [PROVIDER_A]: FRESH, [PROVIDER_C]: STALE },
+        { [PROVIDER_A]: [{ id: "m-1" }, { id: "m-2" }] },
+      ),
+    });
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    // PROVIDER_B never answered, PROVIDER_C is ~a week stale.
+    expect(out.providers.map((p: any) => p.baseUrl)).toEqual([PROVIDER_A]);
+    expect(out.providers[0]).toMatchObject({
+      index: 0,
+      reachable: true,
+      lastModelFetchAt: FRESH,
+      modelCount: 2,
+    });
+    expect(out.providers[0].unreachableReason).toBeUndefined();
+    expect(out).toMatchObject({
+      totalCount: 3,
+      reachableCount: 1,
+      unreachableCount: 2,
+      hiddenCount: 2,
+      includeUnreachable: false,
+    });
+  });
+
+  it("reports every node with `all=true`, flagged with why it is unreachable", async () => {
+    const { handler } = makeDeps({
+      baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH, [PROVIDER_C]: STALE }),
+    });
+
+    const out = (await call(handler, "GET", "/providers?all=true")).json()
+      .output;
+    expect(out.providers.map((p: any) => p.baseUrl)).toEqual([
+      PROVIDER_A,
+      PROVIDER_B,
+      PROVIDER_C,
+    ]);
+    // Indices address the full discovered list, so `providers disable 2`
+    // keeps meaning PROVIDER_C whether or not unreachable nodes are listed.
+    expect(out.providers.map((p: any) => p.index)).toEqual([0, 1, 2]);
+    expect(out.providers.map((p: any) => p.reachable)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+    expect(out.providers[1]).toMatchObject({
+      lastModelFetchAt: null,
+      unreachableReason: "never-fetched",
+    });
+    expect(out.providers[2]).toMatchObject({
+      lastModelFetchAt: STALE,
+      unreachableReason: "stale",
+    });
+    expect(out).toMatchObject({ hiddenCount: 0, includeUnreachable: true });
+  });
+
+  it("keeps a manually enabled node listed while it is unreachable", async () => {
+    const { handler, adapter } = makeDeps({
+      baseUrlsList: [PROVIDER_A, PROVIDER_B],
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH }),
+    });
+    adapter.setManuallyEnabledProviders([PROVIDER_B]);
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    expect(out.providers.map((p: any) => p.baseUrl)).toEqual([
+      PROVIDER_A,
+      PROVIDER_B,
+    ]);
+    expect(out.providers[1]).toMatchObject({
+      reachable: false,
+      manuallyEnabled: true,
+      unreachableReason: "never-fetched",
+    });
+    expect(out.hiddenCount).toBe(0);
+  });
+
+  it("fails open when no node has answered yet (fresh install, pass running)", async () => {
+    const { handler } = makeDeps({
+      baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
+    });
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    // Hiding every node would be worse than showing a dead one.
+    expect(out.providers).toHaveLength(3);
+    expect(out.providers.every((p: any) => p.reachable === true)).toBe(true);
+    expect(out.providers.every((p: any) => p.lastModelFetchAt === null)).toBe(
+      true,
+    );
+    expect(out).toMatchObject({ hiddenCount: 0, unreachableCount: 0 });
   });
 });
 

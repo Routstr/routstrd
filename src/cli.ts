@@ -29,6 +29,10 @@ import {
   formatModelProviders,
   type ModelWithProviders,
 } from "./utils/model-providers";
+import {
+  formatProviderList,
+  type ProviderListOutput,
+} from "./utils/provider-reachability";
 import { waitForDaemonToExit } from "./utils/daemon-stop";
 import {
   listClientsAction,
@@ -1641,50 +1645,37 @@ const splitProviderTargets = (
 
 providersCmd
   .command("list")
-  .description("List all providers with their enabled/disabled status")
+  .description("List reachable providers with their enabled/disabled status")
   .option("--refresh", "Force re-fetch all Nostr events and refresh models from all enabled providers", false)
-  .action(async (options: { refresh: boolean }) => {
+  .option(
+    "--all",
+    "Also list unreachable providers (down, or never answered); hidden by default",
+    false,
+  )
+  .action(async (options: { refresh: boolean; all: boolean }) => {
     await ensureDaemonRunning();
 
-    const query = options.refresh ? "/providers?refresh=true" : "/providers";
+    const params = new URLSearchParams();
+    if (options.refresh) params.set("refresh", "true");
+    if (options.all) params.set("all", "true");
+    const query = params.size > 0 ? `/providers?${params}` : "/providers";
     const result = await callDaemon(query);
     if (result.error) {
       console.log(result.error);
       process.exit(1);
     }
 
-    const output = result.output as
-      | {
-          providers: Array<{
-            index: number;
-            baseUrl: string;
-            disabled: boolean;
-            manuallyDisabled?: boolean;
-            manuallyEnabled?: boolean;
-          }>;
-          disabledCount: number;
-          totalCount: number;
-        }
-      | undefined;
+    const output = result.output as ProviderListOutput | undefined;
 
     if (!output?.providers) {
       console.log("No providers found.");
       return;
     }
 
-    console.log(
-      `Providers (${output.totalCount} total, ${output.disabledCount} disabled):\n`,
-    );
-    for (const provider of output.providers) {
-      const status = provider.manuallyDisabled
-        ? "DISABLED (manual)         "
-        : provider.disabled
-          ? "DISABLED (nostr review)   "
-          : provider.manuallyEnabled
-            ? "enabled  (manual override)"
-            : "enabled                   ";
-      console.log(`  [${provider.index}] ${status}  ${provider.baseUrl}`);
-    }
+    // An older daemon reports every node and no reachability fields; the
+    // renderer degrades to the plain list rather than pretending everything is
+    // reachable. See utils/provider-reachability.
+    console.log(formatProviderList(output));
   });
 
 providersCmd
