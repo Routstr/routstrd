@@ -2678,6 +2678,7 @@ walletCmd
     "Fail expired mint quotes without confirming UNPAID with the mint (may strand paid quotes)",
     false,
   )
+  .option("--include-offline", "Also reclaim old offline sends, invalidating unclaimed tokens", false)
   .option("-y, --yes", "Skip confirmation prompt", false)
   .action(
     async (options: {
@@ -2685,6 +2686,7 @@ walletCmd
       minAge: string;
       dryRun: boolean;
       force: boolean;
+      includeOffline: boolean;
       yes: boolean;
     }) => {
       const minAgeHours = Number.parseFloat(options.minAge);
@@ -2698,6 +2700,9 @@ walletCmd
           input: process.stdin,
           output: process.stdout,
         });
+        if (options.includeOffline) {
+          console.warn("WARNING: offline tokens reclaimed by this cleanup can no longer be claimed by their recipients.");
+        }
         const answer = await new Promise<string>((resolve) => {
           rl.question(
             options.force
@@ -2725,6 +2730,7 @@ walletCmd
             minAgeMs: Math.round(minAgeHours * 60 * 60 * 1000),
             dryRun: options.dryRun === true,
             force: options.force === true,
+            includeOffline: options.includeOffline === true,
           },
         });
 
@@ -3123,7 +3129,32 @@ walletSendCmd
   .description(
     "Mark an offline token's proofs spent locally and finalize it (no mint check)",
   )
-  .action(async (operationId: string) => {
+  .option("-y, --yes", "Skip irreversible local settlement confirmation", false)
+  .action(async (operationId: string, options: { yes: boolean }) => {
+    if (!options.yes) {
+      if (!process.stdin.isTTY) {
+        console.error("mark-spent requires confirmation; use --yes for non-interactive use.");
+        process.exitCode = 1;
+        return;
+      }
+      const rl = require("readline").createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      const answer = await new Promise<string>((resolve) => {
+        rl.question(
+          `Mark offline send ${operationId} spent WITHOUT checking the mint? This cannot be undone locally, even if the recipient never claims it. Continue? [y/N] `,
+          (value: string) => {
+            rl.close();
+            resolve(value.trim().toLowerCase());
+          },
+        );
+      });
+      if (answer !== "y" && answer !== "yes") {
+        console.log("Aborted.");
+        return;
+      }
+    }
     await handleDaemonCommand(
       `/wallet/send/cashu/${encodeURIComponent(operationId)}/mark-spent`,
       { method: "POST" },

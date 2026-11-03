@@ -300,3 +300,14 @@ describe("initializeWallet", () => {
     expect(permissions(walletConfig)).toBe(0o600);
   });
 });
+
+describe("offline settlement confirmation", () => {
+  test("refuses non-interactive mark-spent without --yes before contacting the daemon", async () => {
+    const proc = Bun.spawn([
+      process.execPath, join(import.meta.dir, "index.ts"), "wallet", "send", "mark-spent", "test-operation",
+    ], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(1);
+    expect(stderr).toContain("use --yes for non-interactive use");
+  });
+});

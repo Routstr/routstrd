@@ -204,8 +204,17 @@ mark it spent and finalize the operation locally:
 routstrd wallet send mark-spent <operation-id>
 ```
 
-`mark-spent` is a local assertion and does not verify claim status with the
-mint. Normal sends without `--offline` retain Coco's swap and automatic
+`mark-spent` prompts for confirmation (`--yes` bypasses it for automation).
+It is an irreversible local assertion and does not verify claim status with the
+mint: those proofs will not be checked again even if the recipient never claims
+them. As a mint-verified alternative, `wallet check-proofs` checks inflight
+proofs and can automatically finalize offline sends whose proofs are spent.
+
+`wallet cleanup` excludes offline sends by default. Explicitly pass
+`--include-offline` to also reclaim offline sends older than `--min-age` (default:
+168 hours / seven days). Reclaim contacts the mint and invalidates any unclaimed
+token held by the recipient; age alone does not mean the token was abandoned.
+Normal sends without `--offline` retain Coco's swap and automatic
 proof-state behavior.
 
 ### NPC (Lightning Address)

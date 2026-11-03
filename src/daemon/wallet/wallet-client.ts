@@ -55,6 +55,8 @@ export interface NpcUsernameResult {
 
 /** Options for the wallet cleanup command. */
 export interface WalletCleanupOptions {
+  /** Reclaim old offline tokens too, invalidating unclaimed recipient tokens. */
+  includeOffline?: boolean;
   /** Only clean up operations for this mint URL. */
   mintUrl?: string;
   /** Minimum operation age in milliseconds (defaults to 7 days / 1 week). */

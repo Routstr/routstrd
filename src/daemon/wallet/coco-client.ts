@@ -2632,6 +2632,7 @@ export async function createCocoClient(
       const selection = selectCleanupOperations({
         mints: filteredMints,
         sends: filteredSends,
+        includeOffline: options.includeOffline === true,
         melts: filteredMelts,
         nowMs,
         minAgeMs,

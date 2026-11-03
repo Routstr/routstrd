@@ -23,6 +23,8 @@ export interface MintCleanupCandidate {
 }
 
 export interface NonMintCleanupCandidate {
+  /** Send method, when this is a send operation. */
+  method?: string;
   id: string;
   state: string;
   /** Last update time in epoch milliseconds. */
@@ -39,6 +41,8 @@ export interface CleanupSelectionOptions<
   melts: TMelt[];
   nowMs: number;
   minAgeMs: number;
+  /** Explicitly reclaim shared offline tokens as well as online sends. */
+  includeOffline?: boolean;
 }
 
 export interface CleanupSelection<
@@ -67,8 +71,8 @@ export interface CleanupSelection<
  *   failExpiredMintQuoteIfUnpaid in coco-client.ts). Explicit cleanup follows
  *   the same rule unless the operator opts into unsafe `--force` behaviour.
  * - Pending sends are reclaimed (rolled back) only when they are older than
- *   `minAgeMs`, so we never roll back a token that a receiver might still
- *   legitimately claim.
+ *   `minAgeMs`. Offline sends are excluded unless explicitly requested: age
+ *   alone does not mean their recipient has abandoned the token.
  * - Prepared melts are cancelled under the same age guard.
  */
 export function selectCleanupOperations<
@@ -93,7 +97,8 @@ export function selectCleanupOperations<
   );
 
   const sendsToReclaim = sends.filter(
-    (op) => op.state === "pending" && nowMs - op.updatedAt >= minAgeMs,
+    (op) => op.state === "pending" && nowMs - op.updatedAt >= minAgeMs &&
+      (op.method !== "offline" || options.includeOffline === true),
   );
 
   const meltsToCancel = melts.filter(

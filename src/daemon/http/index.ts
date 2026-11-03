@@ -587,6 +587,7 @@ export function createDaemonRequestHandler(deps: {
               : undefined,
           dryRun: body.dryRun === true,
           force: body.force === true,
+          includeOffline: body.includeOffline === true,
         });
         return { output: result };
       });

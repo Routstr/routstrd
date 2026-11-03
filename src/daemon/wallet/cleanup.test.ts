@@ -177,3 +177,27 @@ describe("mint cleanup reporting", () => {
       .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 1, leftForRecovery: 2 });
   });
 });
+
+describe("offline cleanup safety", () => {
+  it("keeps old offline sends pending unless explicitly included", () => {
+    const sends = [
+      { ...send({ id: "offline" }), method: "offline" },
+      { ...send({ id: "online" }), method: "default" },
+    ];
+    const options = { mints: [], sends, melts: [], nowMs: NOW_MS, minAgeMs: DAY_MS };
+    expect(selectCleanupOperations(options).sendsToReclaim.map((op) => op.id)).toEqual(["online"]);
+    expect(selectCleanupOperations({ ...options, includeOffline: true }).sendsToReclaim.map((op) => op.id))
+      .toEqual(["offline", "online"]);
+  });
+
+  it("still applies age and pending-state guards when offline sends are included", () => {
+    const result = selectCleanupOperations({
+      mints: [], melts: [], nowMs: NOW_MS, minAgeMs: DAY_MS, includeOffline: true,
+      sends: [
+        { ...send({ updatedAt: NOW_MS }), method: "offline" },
+        { ...send({ state: "executing" }), method: "offline" },
+      ],
+    });
+    expect(result.sendsToReclaim).toEqual([]);
+  });
+});
