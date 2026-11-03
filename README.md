@@ -503,3 +503,7 @@ routstrd/
 ## License
 
 MIT
+
+## Request lifecycle logs
+
+`routstrd logs` shows one persistent summary per inference request, including retries and failures. Use `logs -v` for safe chronological diagnostics, or `logs --raw` for legacy flat logs. See [lifecycle logs and APIs](docs/request-lifecycle-logs.md) for filters, compatibility and SDK prerequisites.
