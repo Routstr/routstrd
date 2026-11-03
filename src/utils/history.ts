@@ -37,7 +37,8 @@ export function historyStatus(
   // A PAID mint quote means paid but not minted yet, the case `wallet recover` handles.
   if (type === "mint" && state === "PAID") return "paid, not minted";
   if (type === "melt" && operationState) {
-    if (operationState === "rolled_back" || operationState === "rolling_back") {
+    if (operationState === "rolling_back") return "rolling back";
+    if (operationState === "rolled_back") {
       return "cancelled";
     }
     if (operationState === "finalized") return "";

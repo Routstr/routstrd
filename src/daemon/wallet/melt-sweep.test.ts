@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { MeltOperation } from "@cashu/coco-core";
+import { HttpResponseError, MintFetchError, MintOperationError, NetworkError, OperationInProgressError, type MeltOperation } from "@cashu/coco-core";
 import {
   createMeltSweepState,
   MELT_SWEEP_BACKOFF_BASE_MS,
@@ -49,12 +49,14 @@ function makeSource(options: {
         listInFlight: async () => inFlight as never,
         refresh: async (id: string) => {
           refreshCalls.push(id);
-          if (refreshDelayMs > 0) {
-            await new Promise((r) => setTimeout(r, refreshDelayMs));
-          }
-          if (refreshError) throw refreshError;
           const op = inFlight.find((candidate) => candidate.id === id);
           if (!op) throw new Error(`unknown op ${id}`);
+          const delayMs = op.refreshDelayMs ?? refreshDelayMs;
+          if (delayMs > 0) {
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+          const error = op.refreshError ?? refreshError;
+          if (error) throw error;
           const nextState = refreshState?.(id) ?? op.state;
           return { ...op, state: nextState } as never;
         },
@@ -67,7 +69,7 @@ function makeSource(options: {
 describe("settleMeltOperations", () => {
   it("returns empty result when nothing is in flight", async () => {
     const source = makeSource();
-    const result = await settleMeltOperations(source, Date.now());
+    const result = await settleMeltOperations(source);
     expect(result).toEqual({
       checked: 0,
       rolledBack: 0,
@@ -91,7 +93,7 @@ describe("settleMeltOperations", () => {
       refreshState: (id) =>
         id === "paid" ? "finalized" : id === "expired" ? "rolled_back" : "pending",
     });
-    const result = await settleMeltOperations(source, Date.now());
+    const result = await settleMeltOperations(source);
     expect(source.refreshCalls.sort()).toEqual(["alive", "expired", "paid"]);
     expect(result.finalized).toBe(1);
     expect(result.rolledBack).toBe(1);
@@ -106,7 +108,7 @@ describe("settleMeltOperations", () => {
       inFlight: [melt({ id: "a" }), melt({ id: "b" })],
     });
     let calls = 0;
-    const result = await settleMeltOperations(source, Date.now(), {
+    const result = await settleMeltOperations(source, {
       shouldStop: () => {
         calls++;
         return calls > 1;
@@ -121,7 +123,7 @@ describe("settleMeltOperations", () => {
       inFlight: [melt({ id: "slow" })],
       refreshDelayMs: 10_000,
     });
-    const result = await settleMeltOperations(source, Date.now(), { opTimeoutMs: 25 });
+    const result = await settleMeltOperations(source, { opTimeoutMs: 25 });
     expect(result.checked).toBe(1);
     expect(result.timedOut).toBe(1);
     expect(result.failed).toBe(0);
@@ -131,10 +133,10 @@ describe("settleMeltOperations", () => {
   it("counts thrown errors as failures and backs the mint off", async () => {
     const source = makeSource({
       inFlight: [melt({ id: "broken", mintUrl: "https://bad.example" })],
-      refreshError: new Error("mint unreachable"),
+      refreshError: new NetworkError("mint unreachable"),
     });
     const state = createMeltSweepState(new Map());
-    const first = await settleMeltOperations(source, Date.now(), { state });
+    const first = await settleMeltOperations(source, { state });
     expect(first.failed).toBe(1);
 
     const backoff = state.mintBackoff.get("https://bad.example");
@@ -142,7 +144,7 @@ describe("settleMeltOperations", () => {
     expect(backoff?.nextAttemptAt).toBeGreaterThan(Date.now());
 
     // Second pass within the window skips the operation entirely.
-    const second = await settleMeltOperations(source, Date.now(), { state });
+    const second = await settleMeltOperations(source, { state });
     expect(second.skippedMints.has("https://bad.example")).toBe(true);
     expect(second.checked).toBe(0);
   });
@@ -150,12 +152,12 @@ describe("settleMeltOperations", () => {
   it("escalates backoff and caps it", async () => {
     const source = makeSource({
       inFlight: [melt({ id: "broken", mintUrl: "https://bad.example" })],
-      refreshError: new Error("mint unreachable"),
+      refreshError: new NetworkError("mint unreachable"),
     });
     const state = createMeltSweepState(new Map());
     for (let i = 0; i < 20; i++) {
       state.mintBackoff.set("https://bad.example", { failures: i, nextAttemptAt: 0 });
-      await settleMeltOperations(source, Date.now(), { state });
+      await settleMeltOperations(source, { state });
     }
     const backoff = state.mintBackoff.get("https://bad.example");
     expect(backoff?.failures).toBeGreaterThan(1);
@@ -170,9 +172,106 @@ describe("settleMeltOperations", () => {
     const source = makeSource({ inFlight });
     const state = createMeltSweepState(new Map());
     state.mintBackoff.set("https://flaky.example", { failures: 3, nextAttemptAt: 0 });
-    const result = await settleMeltOperations(source, Date.now(), { state });
+    const result = await settleMeltOperations(source, { state });
     expect(result.checked).toBe(1);
     expect(state.mintBackoff.has("https://flaky.example")).toBe(false);
+  });
+
+  it("spends only one timeout on a slow mint and reaches a healthy mint", async () => {
+    const source = makeSource({
+      inFlight: [
+        ...Array.from({ length: 4 }, (_, i) => melt({
+          id: `slow-${i}`, mintUrl: "https://slow.example/", refreshDelayMs: 100,
+        })),
+        melt({ id: "healthy", mintUrl: "https://healthy.example" }),
+      ],
+    });
+    const state = createMeltSweepState(new Map());
+    const result = await settleMeltOperations(source, { state, opTimeoutMs: 10, deadlineMs: 1000 });
+    expect(source.refreshCalls).toEqual(["slow-0", "healthy"]);
+    expect(result.timedOut).toBe(1);
+    expect(result.stillInFlight).toBe(1);
+    expect(result.skippedMints.has("https://slow.example")).toBe(true);
+    expect(state.mintBackoff.get("https://slow.example")?.failures).toBe(1);
+    await Promise.allSettled(state.outstanding.values());
+  });
+
+  for (const error of [
+    new NetworkError("offline"),
+    Object.assign(new Error("cross-package network failure"), { name: "NetworkError" }),
+    new HttpResponseError("service unavailable", 503),
+    new HttpResponseError("rate limited", 429),
+    new MintFetchError("https://bad.example", "fetch failed", new NetworkError("offline")),
+  ]) {
+    it(`backs off transport failure ${error.name}: ${error.message} within the pass`, async () => {
+      const source = makeSource({ inFlight: [
+        melt({ id: "bad", refreshError: error }), melt({ id: "same-mint" }),
+        melt({ id: "healthy", mintUrl: "https://healthy.example" }),
+      ] });
+      const state = createMeltSweepState(new Map());
+      const result = await settleMeltOperations(source, { state });
+      expect(source.refreshCalls).toEqual(["bad", "healthy"]);
+      expect(result.failed).toBe(1);
+      expect(state.mintBackoff.size).toBe(1);
+    });
+  }
+
+  for (const error of [new OperationInProgressError("busy"),
+    Object.assign(new Error("cross-package lock"), { name: "OperationInProgressError" })]) {
+    it(`skips a lock race without backing off the mint (${error.message})`, async () => {
+      const source = makeSource({ inFlight: [
+        melt({ id: "busy", refreshError: error }), melt({ id: "other" }),
+      ] });
+      const state = createMeltSweepState(new Map());
+      const result = await settleMeltOperations(source, { state });
+      expect(source.refreshCalls).toEqual(["busy", "other"]);
+      expect(result.skippedLocked).toBe(1);
+      expect(result.failed).toBe(0);
+      expect(result.timedOut).toBe(0);
+      expect(state.mintBackoff.size).toBe(0);
+    });
+  }
+
+  for (const error of [new Error("local failure"), new MintOperationError(20007, "expired"),
+    new HttpResponseError("bad request", 400)]) {
+    it(`does not back off an operation-specific error (${error.message})`, async () => {
+      // A later success must not be necessary to prevent mint-wide backoff.
+      const source = makeSource({ inFlight: [melt({ id: "bad", refreshError: error })] });
+      const state = createMeltSweepState(new Map());
+      const first = await settleMeltOperations(source, { state });
+      expect(first.failed).toBe(1);
+      expect(state.mintBackoff.size).toBe(0);
+      source.inFlight.push(melt({ id: "other" }));
+      const second = await settleMeltOperations(source, { state });
+      expect(second.checked).toBe(2);
+      expect(second.stillInFlight).toBe(1);
+    });
+  }
+
+  it("uses the current clock when a backoff expires during the pass", async () => {
+    let clock = 1_000;
+    const source = makeSource({ inFlight: [
+      melt({ id: "first", mintUrl: "https://first.example" }),
+      melt({ id: "recovering", mintUrl: "https://recovering.example" }),
+    ], refreshState: (id) => { if (id === "first") clock += 100; return "pending"; } });
+    const state = createMeltSweepState(new Map());
+    state.mintBackoff.set("https://recovering.example", { failures: 1, nextAttemptAt: 1_050 });
+    await settleMeltOperations(source, { state, now: () => clock });
+    expect(source.refreshCalls).toEqual(["first", "recovering"]);
+    expect(state.mintBackoff.size).toBe(0);
+  });
+
+  it("starts backoff at failure time even after an earlier success at that mint", async () => {
+    let clock = 1_000;
+    const source = makeSource({ inFlight: [
+      melt({ id: "first" }), melt({ id: "failed", refreshError: new NetworkError("offline") }),
+      melt({ id: "skip" }),
+    ], refreshState: () => { clock += 100; return "pending"; } });
+    const state = createMeltSweepState(new Map());
+    await settleMeltOperations(source, { state, now: () => clock });
+    expect(source.refreshCalls).toEqual(["first", "failed"]);
+    expect(state.mintBackoff.get("https://mint.example")?.nextAttemptAt)
+      .toBe(1_100 + MELT_SWEEP_BACKOFF_BASE_MS);
   });
 
   it("skips operations already being refreshed by an earlier pass", async () => {
@@ -186,7 +285,7 @@ describe("settleMeltOperations", () => {
         release = r;
       }),
     );
-    const result = await settleMeltOperations(source, Date.now(), { state });
+    const result = await settleMeltOperations(source, { state });
     expect(result.skippedLocked).toBe(1);
     expect(result.checked).toBe(0);
     release();
@@ -203,17 +302,17 @@ describe("settleMeltOperations", () => {
         },
       },
     };
-    const result = await settleMeltOperations(lockedSource, Date.now());
+    const result = await settleMeltOperations(lockedSource);
     expect(result.skippedLocked).toBe(1);
     expect(source.refreshCalls).toEqual([]);
   });
 
   it("stops at the pass deadline instead of running every operation", async () => {
     const source = makeSource({
-      inFlight: Array.from({ length: 5 }, (_, i) => melt({ id: `op${i}` })),
+      inFlight: Array.from({ length: 5 }, (_, i) => melt({ id: `op${i}`, mintUrl: `https://mint-${i}.example` })),
       refreshDelayMs: 30,
     });
-    const result = await settleMeltOperations(source, Date.now(), {
+    const result = await settleMeltOperations(source, {
       deadlineMs: 10,
       opTimeoutMs: 5,
     });

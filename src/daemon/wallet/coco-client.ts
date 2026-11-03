@@ -738,8 +738,8 @@ async function enableCocoManager(coco: Manager): Promise<void> {
   await coco.enableMintOperationProcessor();
   // coco 1.0.1 maps melt quote expiry (NUT-05 20007) to UNPAID only while
   // recovering an *executing* operation. A pending melt whose quote the mint
-  // purged throws instead, so refresh()/reclaim() can never roll it back and
-  // its proofs stay reserved forever. Patch the handler once, here, after the
+  // purged throws instead. On expiry, require NUT-07 to confirm every melt
+  // input UNSPENT before allowing rollback. Patch the handler once, after the
   // manager (and its handlers) exist. Non-fatal if coco's shape changes.
   installMeltQuoteExpiryHandler(coco);
 }
@@ -2150,6 +2150,7 @@ export async function createCocoClient(
         recoveryGate.fail(recoveryError);
         recoveryResolve?.();
         startupProgress(`Wallet recovery failed: ${recoveryError}`);
+        logger.warn("Periodic mint and melt sweeps were not started because wallet recovery failed");
       });
   } catch (error) {
     database?.close();

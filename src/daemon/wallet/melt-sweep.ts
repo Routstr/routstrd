@@ -19,7 +19,8 @@
  * Invariants:
  * - A melt the mint still reports PENDING is never rolled back. PENDING means
  *   the Lightning HTLC is live; its proofs must stay reserved. Expiry does not
- *   make a PENDING melt recoverable — only the mint flipping it to UNPAID does.
+ *   make a PENDING melt recoverable. Expired/purged quotes require a separate
+ *   NUT-07 check confirming every actual melt input is UNSPENT.
  * - An unreachable or hung mint is left untouched and backed off per mint. A
  *   mint that answers `/v1/info` but stalls on its melt-quote endpoint costs one
  *   timeout per backoff window instead of one per operation per sweep.
@@ -28,6 +29,9 @@
  */
 import {
   normalizeMintUrl,
+  NetworkError,
+  HttpResponseError,
+  OperationInProgressError,
   type Manager,
   type MeltOperation,
 } from "@cashu/coco-core";
@@ -83,6 +87,8 @@ export interface MeltSweepOptions {
   opTimeoutMs?: number;
   state?: MeltSweepState;
   shouldStop?: () => boolean;
+  /** Shared clock for deadlines and backoff; injectable for deterministic tests. */
+  now?: () => number;
 }
 
 export interface MeltSweepResult {
@@ -113,14 +119,14 @@ export function createMeltSweepState(outstanding: RecoveryWork): MeltSweepState 
  *
  * Enumeration is a single local query. Each in-flight operation is refreshed
  * within a per-operation budget and the whole pass within a deadline. A mint
- * whose check times out is backed off so the next pass skips its operations
- * until the window expires.
+ * whose check times out or hits a transport failure is skipped for the rest of
+ * this pass and backed off until the window expires.
  */
 export async function settleMeltOperations(
   source: MeltSweepSource,
-  nowMs: number,
   options: MeltSweepOptions = {},
 ): Promise<MeltSweepResult> {
+  const now = options.now ?? Date.now;
   const deadlineMs = options.deadlineMs ?? MELT_SWEEP_DEADLINE_MS;
   const opTimeoutMs = options.opTimeoutMs ?? MELT_SWEEP_OP_TIMEOUT_MS;
   const state = options.state ?? createMeltSweepState(new Map());
@@ -138,13 +144,12 @@ export async function settleMeltOperations(
   const inFlight = await source.ops.melt.listInFlight();
   if (inFlight.length === 0) return result;
 
-  const startedAt = Date.now();
-  const failedMints = new Set<string>();
-  const succeededMints = new Set<string>();
+  const startedAt = now();
+  const unreachableMints = new Set<string>();
 
   for (const op of inFlight) {
     if (options.shouldStop?.()) break;
-    const remaining = deadlineMs - (Date.now() - startedAt);
+    const remaining = deadlineMs - (now() - startedAt);
     if (remaining <= 0) {
       result.timedOut++;
       break;
@@ -152,7 +157,7 @@ export async function settleMeltOperations(
 
     const mintUrl = safeNormalizeMintUrl(op.mintUrl);
     const backoff = state.mintBackoff.get(mintUrl);
-    if (backoff && nowMs < backoff.nextAttemptAt) {
+    if (unreachableMints.has(mintUrl) || (backoff && now() < backoff.nextAttemptAt)) {
       result.skippedMints.add(mintUrl);
       continue;
     }
@@ -169,44 +174,43 @@ export async function settleMeltOperations(
     }
 
     result.checked++;
-    const work = trackRecovery(state.outstanding, key, source.ops.melt.refresh(op.id));
     try {
+      const work = trackRecovery(state.outstanding, key, source.ops.melt.refresh(op.id));
       const updated = await waitForRecoveryWork(
         work,
         Math.min(opTimeoutMs, Math.max(1, remaining)),
       );
-      succeededMints.add(mintUrl);
+      state.mintBackoff.delete(mintUrl);
       classifyMeltOutcome(updated, result);
     } catch (error) {
+      // The pre-check can race with execute/recovery taking the lock.
+      if (error instanceof OperationInProgressError ||
+          (error instanceof Error && error.name === "OperationInProgressError")) {
+        result.skippedLocked++;
+        continue;
+      }
       if (error instanceof RecoveryWaitTimeout) {
         result.timedOut++;
       } else {
         result.failed++;
       }
-      failedMints.add(mintUrl);
+      // Operation-specific/protocol errors must not penalize the whole mint.
+      if (error instanceof RecoveryWaitTimeout || isTransportFailure(error)) {
+        unreachableMints.add(mintUrl);
+        const previous = state.mintBackoff.get(mintUrl);
+        const failures = (previous?.failures ?? 0) + 1;
+        const delay = Math.min(
+          MELT_SWEEP_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 10),
+          MELT_SWEEP_BACKOFF_MAX_MS,
+        );
+        state.mintBackoff.set(mintUrl, { failures, nextAttemptAt: now() + delay });
+      }
       logger.warn("Melt sweep could not check an operation", {
         operationId: op.id,
         mintUrl,
         error: error instanceof Error ? error.message : String(error),
       });
     }
-  }
-
-  // A mint that answered at least once is healthy again: clear its backoff.
-  for (const mintUrl of succeededMints) state.mintBackoff.delete(mintUrl);
-  // Mints whose every check failed get an exponentially growing backoff.
-  for (const mintUrl of failedMints) {
-    if (succeededMints.has(mintUrl)) continue;
-    const previous = state.mintBackoff.get(mintUrl);
-    const failures = (previous?.failures ?? 0) + 1;
-    const delay = Math.min(
-      MELT_SWEEP_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 10),
-      MELT_SWEEP_BACKOFF_MAX_MS,
-    );
-    state.mintBackoff.set(mintUrl, {
-      failures,
-      nextAttemptAt: Date.now() + delay,
-    });
   }
 
   return result;
@@ -241,35 +245,35 @@ export function startMeltSweep(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight: Promise<void> = Promise.resolve();
   const state = createMeltSweepState(outstanding);
-  let unreachableBefore = 0;
+  let unsuccessfulBefore = 0;
 
   const tick = async () => {
     if (stopped) return;
-    inFlight = settleMeltOperations(source, Date.now(), {
+    inFlight = settleMeltOperations(source, {
       state,
       shouldStop: () => stopped,
       opTimeoutMs: options.opTimeoutMs,
       deadlineMs: options.deadlineMs,
     }).then(
       (result) => {
-        const unreachable = result.timedOut + result.failed;
+        const unsuccessful = result.timedOut + result.failed;
         // Report actions and reachability transitions only, so a healthy
         // idle wallet stays quiet.
         if (result.rolledBack || result.finalized) {
           logger.log(
             `Melt sweep: checked ${result.checked}, rolled back ${result.rolledBack}, ` +
               `finalized ${result.finalized}, still in flight ${result.stillInFlight}, ` +
-              `unreachable ${unreachable}`,
+              `unsuccessful ${unsuccessful}`,
           );
         }
-        if (unreachable > 0 && unreachableBefore === 0) {
+        if (unsuccessful > 0 && unsuccessfulBefore === 0) {
           logger.warn(
-            `Could not check ${unreachable} in-flight melt(s); will keep retrying with backoff`,
+            `Could not check ${unsuccessful} in-flight melt(s); will keep retrying (transport failures use mint backoff)`,
           );
-        } else if (unreachable === 0 && unreachableBefore > 0) {
-          logger.log("In-flight melt checks are reaching the mint again");
+        } else if (unsuccessful === 0 && unsuccessfulBefore > 0 && state.mintBackoff.size === 0) {
+          logger.log("In-flight melt checks completed without errors");
         }
-        unreachableBefore = unreachable;
+        if (unsuccessful > 0 || state.mintBackoff.size === 0) unsuccessfulBefore = unsuccessful;
       },
       (error: unknown) => {
         logger.warn(
@@ -307,6 +311,17 @@ function classifyMeltOutcome(op: MeltOperation, result: MeltSweepResult): void {
       result.stillInFlight++;
       break;
   }
+}
+
+/** Mint adapter errors may wrap transport failures in `cause`. */
+function isTransportFailure(error: unknown, depth = 0): boolean {
+  if (!(error instanceof Error) || depth > 5) return false;
+  if (error instanceof NetworkError || error.name === "NetworkError") return true;
+  if (error instanceof HttpResponseError || error.name === "HttpResponseError") {
+    const status = (error as HttpResponseError).status;
+    if (status === 408 || status === 429 || status >= 500) return true;
+  }
+  return isTransportFailure(error.cause, depth + 1);
 }
 
 function safeNormalizeMintUrl(mintUrl: string): string {

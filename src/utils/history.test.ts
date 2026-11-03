@@ -29,7 +29,12 @@ describe("history status", () => {
 describe("history status with operation state", () => {
   it("shows a rolled-back melt as cancelled, not waiting", () => {
     expect(historyStatus("melt", "UNPAID", "rolled_back")).toBe("cancelled");
-    expect(historyStatus("melt", "UNPAID", "rolling_back")).toBe("cancelled");
+  });
+
+  it("keeps an interrupted rollback visibly unfinished", () => {
+    expect(historyStatus("melt", "UNPAID", "rolling_back")).toBe("rolling back");
+    expect(historyStatus("melt", "PENDING", "rolling_back")).toBe("rolling back");
+    expect(historyStatus("melt", "PAID", "rolling_back")).toBe("rolling back");
   });
 
   it("keeps a melt that is genuinely in flight as waiting", () => {
