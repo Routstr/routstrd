@@ -2483,24 +2483,6 @@ export async function createCocoClient(
       const { operation, token } = await coco.ops.send.execute(prepared.id);
       const actualAmount = operation.inputAmount;
 
-      // Coco creates history from operation.amount (the requested floor).
-      // For an offline overpayment, retain the value that actually left the
-      // wallet so history agrees with the encoded token and balance change.
-      try {
-        const entry = await historyRepository?.getSendHistoryEntry(
-          operation.mintUrl,
-          operation.id,
-        );
-        if (entry) {
-          entry.amount = actualAmount;
-          await historyRepository?.updateHistoryEntry(entry);
-        }
-      } catch (error) {
-        logger.warn("Could not record offline send's actual amount in history", {
-          operationId: operation.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
 
       return {
         token: getEncodedToken(token),

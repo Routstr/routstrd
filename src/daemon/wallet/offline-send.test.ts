@@ -163,7 +163,7 @@ describe("offline send handler", () => {
       "op-offline",
     );
     expect(prepared).toMatchObject({
-      amount: 1020,
+      amount: 1024,
       inputAmount: 1024,
       inputProofSecrets: ["c"],
       needsSwap: false,
@@ -368,6 +368,9 @@ describe("offline send with a real Coco Manager", () => {
         amount: 1020,
         target: { type: "offline" },
       });
+      expect(prepared.amount).toBe(1024);
+      expect(prepared.methodData).toEqual({ requestedAmount: 1020 });
+      expect((await repo.historyRepository.getSendHistoryEntry(mintUrl, prepared.id))?.amount).toBe(1024);
       const { operation, token } = await coco.ops.send.execute(prepared.id);
       expect(getDecodedToken(getEncodedToken(token))).toMatchObject({
         mint: mintUrl, unit: "sat", proofs: [{ amount: 1024, secret: "c" }],

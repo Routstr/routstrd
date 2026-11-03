@@ -236,6 +236,7 @@ export function createOfflineSendHandler(
       return {
         ...operation,
         state: "prepared",
+        amount: inputAmount,
         updatedAt: Date.now(),
         needsSwap: false,
         fee: 0,
