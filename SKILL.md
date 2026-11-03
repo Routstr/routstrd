@@ -150,6 +150,27 @@ routstrd models -m deepseek-v4.1-flash -p --all              # disabled nodes in
 routstrd models -m deepseek-v4.1-flash -p --refresh          # live, ignores the 10 min path cache
 ```
 
+### `routstrd models auto-model-path [on|off|toggle]`
+
+Show or change `autoModelPath` (SDK automatic model-path selection for
+`deepseek-v4.1-flash`). With no argument it prints the setting currently in
+effect. When no daemon is running it prints the value from `config.json` and says
+so instead of starting one.
+
+| Argument | Description |
+|----------|-------------|
+| _(none)_ / `status` | Print the current setting |
+| `on` / `enable` / `true` | Enable automatic model-path selection |
+| `off` / `disable` / `false` | Disable automatic model-path selection |
+| `toggle` | Flip the persisted setting |
+
+No restart is needed: the daemon applies the new value to the next routed
+request. A hand-edited `config.json` still needs `routstrd restart`, and the
+status output points that out when the file and the running daemon disagree.
+
+Works the same against a remote node: the daemon that owns the `config.json` is
+the one that persists the change, and it applies it without a restart.
+
 ### `routstrd usage`
 
 Show recent usage logs and total sats cost.
@@ -632,6 +653,19 @@ The incoming request path is forwarded to the provider, so the Anthropic
 Messages API (`POST /v1/messages`) and the OpenAI Responses API
 (`POST /v1/responses`) are proxied in their own formats as well.
 
+### `GET`/`POST /settings/auto-model-path`
+
+Persist the SDK automatic model-path setting (`autoModelPath`).
+
+```json
+{ "enabled": true }
+```
+
+`enabled` must be a boolean (`400` otherwise). The write is persisted and applied
+to routing immediately, so no restart is required. Both verbs return the live
+value (`autoModelPath`) and the value on disk (`configured`); a mismatch means
+`config.json` was edited by hand and needs a restart.
+
 #### Provider pinning
 
 A provider can be pinned with any of:
@@ -656,6 +690,7 @@ Config file: `~/.routstrd/config.json`
 | `host` | string | `"127.0.0.1"` | Bind address |
 | `provider` | string\|null | null | Pinned provider URL; all requests go only to this node (no cross-provider failover) |
 | `mode` | string | `"apikeys"` | Client mode (`apikeys` or `xcashu`) |
+| `autoModelPath` | boolean | false | SDK automatic model-path selection for `deepseek-v4.1-flash`; toggled with `routstrd models auto-model-path`, applied to the next routed request |
 | `maxTokens` | number | 64000 | Completion budget applied when a client sets no output-token limit |
 | `daemonUrl` | string | — | Remote daemon URL (set by `routstrd remote`) |
 | `authUrl` | string | — | Auth proxy URL for management commands |

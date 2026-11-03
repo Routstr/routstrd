@@ -4,8 +4,10 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   collectRecentRequestsFromLines,
+  formatAutoModelPathStatus,
   getLivePidFileOwner,
   initializeWallet,
+  parseAutoModelPathArg,
   parseStructuredLogLine,
 } from "./cli";
 
@@ -135,6 +137,72 @@ describe("parseStructuredLogLine", () => {
       modelId: undefined,
       isRouting: false,
     });
+  });
+});
+
+describe("parseAutoModelPathArg", () => {
+  test("reports the current setting when no state is given", () => {
+    expect(parseAutoModelPathArg(undefined)).toEqual({ kind: "status" });
+    expect(parseAutoModelPathArg("status")).toEqual({ kind: "status" });
+    expect(parseAutoModelPathArg(" ")).toEqual({ kind: "status" });
+  });
+
+  test("accepts case-insensitive on/off spellings", () => {
+    for (const raw of ["on", "ENABLE", " Enabled ", "true"]) {
+      expect(parseAutoModelPathArg(raw)).toEqual({ kind: "set", enabled: true });
+    }
+    for (const raw of ["off", "Disable", "disabled", "false"]) {
+      expect(parseAutoModelPathArg(raw)).toEqual({ kind: "set", enabled: false });
+    }
+  });
+
+  test("recognises toggle separately from an explicit value", () => {
+    expect(parseAutoModelPathArg("toggle")).toEqual({ kind: "toggle" });
+  });
+
+  test("rejects anything else instead of guessing", () => {
+    // "yes"/"no"/"1" must not silently map onto on/off.
+    expect(parseAutoModelPathArg("yes")).toEqual({
+      kind: "invalid",
+      value: "yes",
+    });
+    expect(parseAutoModelPathArg("1")).toEqual({ kind: "invalid", value: "1" });
+  });
+});
+
+describe("formatAutoModelPathStatus", () => {
+  test("reports the live value of a running daemon", () => {
+    expect(
+      formatAutoModelPathStatus({
+        autoModelPath: true,
+        configured: true,
+        running: true,
+      }),
+    ).toEqual(["Automatic model-path selection: enabled"]);
+  });
+
+  test("warns when a hand-edited config.json disagrees with the daemon", () => {
+    const lines = formatAutoModelPathStatus({
+      autoModelPath: false,
+      configured: true,
+      running: true,
+    });
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("Automatic model-path selection: disabled");
+    expect(lines[1]).toContain("config.json says enabled");
+    expect(lines[1]).toContain("routstrd restart");
+  });
+
+  test("does not present a stopped daemon's file value as the live value", () => {
+    expect(
+      formatAutoModelPathStatus({
+        autoModelPath: true,
+        configured: true,
+        running: false,
+      }),
+    ).toEqual([
+      "Automatic model-path selection: enabled (configured; the daemon is not running)",
+    ]);
   });
 });
 

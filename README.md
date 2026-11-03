@@ -159,6 +159,15 @@ routstrd clients --disable-automatic-refresh
 routstrd clients --enable-automatic-refresh
 ```
 
+Show or toggle automatic model-path selection (applied to the running daemon
+immediately — no restart):
+```sh
+routstrd models auto-model-path          # show the current setting
+routstrd models auto-model-path on
+routstrd models auto-model-path off
+routstrd models auto-model-path toggle
+```
+
 Stop the daemon:
 ```sh
 routstrd stop
@@ -248,6 +257,24 @@ Enables or disables the scheduled refresh job. Persisted to the daemon's
 `config.json` as `autoRefresh.enabled` and picked up on the next tick, so no
 daemon restart is required.
 
+#### Automatic Model-Path Settings
+```
+GET /settings/auto-model-path
+POST /settings/auto-model-path
+```
+
+Request body for `POST`:
+```json
+{ "enabled": true }
+```
+
+Reads or writes `autoModelPath` in the daemon's `config.json`, and applies it to
+routing immediately. `enabled` must be a boolean; anything else is a `400`
+rather than a silent disable. Both verbs return the live value (`autoModelPath`)
+and the value on disk (`configured`): they differ only when `config.json` was
+edited by hand, which still needs a restart to take effect. Manage it with
+`routstrd models auto-model-path`.
+
 #### Route Request
 ```
 POST /v1/chat/completions
@@ -331,7 +358,10 @@ overrides the 21-minute interval.
 `autoModelPath` defaults to `false`. Set it to `true` to let the SDK automatically
 choose and pin an advertised model path for `deepseek-v4.1-flash` requests.
 Explicit `x-routstr-model-path` request headers work independently of this
-setting and take precedence. Restart the daemon after changing `autoModelPath`.
+setting and take precedence. Change it with
+`routstrd models auto-model-path on|off|toggle`: the daemon applies the new value
+to the next routed request, so editing the file by hand is only useful together
+with a restart.
 
 `provider` pins every request to one node (same strict behavior as the
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
