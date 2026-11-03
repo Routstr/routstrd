@@ -1995,12 +1995,20 @@ export function createDaemonRequestHandler(deps: {
         const inSet = (set: Set<string>, baseUrl: string) =>
           set.has(baseUrl) || set.has(normalizeProviderBaseUrl(baseUrl));
 
-        // Reachability comes from the store's per-node "last successful
-        // /v1/models fetch" timestamps (written by the SDK's refresh pass);
+        // ModelManager writes to the sharded discovery adapter, not the
+        // SdkStore mirror. Read the same live cache the refresh pass updates;
         // see utils/provider-reachability. `index` stays the position in the
         // *full* discovered list so `providers disable <index>` keeps meaning
         // the same node whether or not unreachable ones are hidden.
-        const reachability = assessProviderReachability(baseUrlsList, state);
+        const reachability = assessProviderReachability(baseUrlsList, {
+          lastModelsUpdate: Object.fromEntries(
+            baseUrlsList.map((baseUrl) => [
+              baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
+              deps.discoveryAdapter.getProviderLastUpdate(baseUrl) ?? 0,
+            ]),
+          ),
+          modelsFromAllProviders: deps.discoveryAdapter.getCachedModels(),
+        });
         const allProviders = baseUrlsList.map((baseUrl, index) => {
           const verdict = reachability[index];
           return {

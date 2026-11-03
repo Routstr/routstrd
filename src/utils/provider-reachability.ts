@@ -7,10 +7,11 @@
  * has one piece of evidence the other way — the SDK fetches
  * `GET {node}/v1/models` for every discovered node on each refresh pass
  * (21-minute cadence, the SDK's own provider cache TTL) and persists the time
- * of the last *successful* fetch per node (`SdkStore.lastModelsUpdate`). That
- * timestamp, plus the catalog the fetch left behind
- * (`SdkStore.modelsFromAllProviders`), is what this module turns into a
- * per-node verdict.
+ * of the last *successful* fetch per node in the discovery adapter. That
+ * timestamp (`getProviderLastUpdate`), plus the catalog the fetch left behind
+ * (`getCachedModels`), is what this module turns into a per-node verdict.
+ * The daemon snapshots those live adapter values into the input shape below;
+ * the legacy SdkStore cache is separate and is not updated by model refreshes.
  *
  * This is a read-side classification only: `baseUrlsList` keeps every
  * discovered node, because discovery, routing and the review policy all
@@ -44,8 +45,8 @@ export interface ProviderReachability {
 }
 
 /**
- * The store slices the verdict is computed from. Both are optional so a
- * partially-hydrated store (or an older payload shape) reads as "no evidence"
+ * The cache snapshot the verdict is computed from. Both are optional so a
+ * partially-hydrated cache (or an older payload shape) reads as "no evidence"
  * instead of throwing.
  */
 export interface ProviderReachabilityState {
@@ -200,7 +201,7 @@ export function formatProviderList(
   now = Date.now(),
 ): string {
   const totalCount = output.totalCount ?? output.providers.length;
-  const reachableCount = output.reachableCount ?? totalCount;
+  const reachableCount = output.reachableCount;
   const unreachableCount = output.unreachableCount ?? 0;
   const hiddenCount = output.hiddenCount ?? 0;
 
@@ -229,7 +230,9 @@ export function formatProviderList(
   const statusWidth = Math.max(...rows.map((row) => row.status.length), 0);
 
   const lines = [
-    `Providers (${reachableCount} reachable of ${totalCount} discovered, ${output.disabledCount} disabled):`,
+    reachableCount === undefined
+      ? `Providers (${totalCount} total, ${output.disabledCount} disabled):`
+      : `Providers (${reachableCount} reachable of ${totalCount} discovered, ${output.disabledCount} disabled):`,
     "",
   ];
   for (const row of rows) {

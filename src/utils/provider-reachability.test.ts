@@ -260,7 +260,8 @@ describe("formatProviderList", () => {
       },
       NOW,
     );
-    expect(out).toContain("Providers (2 reachable of 2 discovered, 0 disabled):");
+    expect(out).toContain("Providers (2 total, 0 disabled):");
+    expect(out).not.toContain("reachable");
     expect(out).toContain("  [0] enabled  https://a.example/");
     expect(out).not.toContain("UNREACHABLE");
     expect(out).not.toContain("hidden");

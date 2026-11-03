@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { EventEmitter } from "events";
+import { createSdkStore } from "@routstr/sdk";
+import {
+  createMemoryDriver,
+  createShardedDiscoveryAdapter,
+} from "@routstr/sdk/storage";
 import { createDaemonRequestHandler } from "./index";
 
 const PROVIDER_A = "https://provider-a.example/";
@@ -222,6 +227,10 @@ function makeDeps(overrides: {
   providers?: ReviewFixture[];
   reviews?: ReviewEntry[];
   state?: Record<string, unknown>;
+  reachability?: {
+    lastModelsUpdate: Record<string, number>;
+    modelsFromAllProviders: Record<string, unknown[]>;
+  };
 }) {
   const baseUrlsList = overrides.baseUrlsList ?? [PROVIDER_A, PROVIDER_B];
   const providers = overrides.providers ?? [
@@ -234,7 +243,12 @@ function makeDeps(overrides: {
     { node: "nodeB", label: "lgtm", createdAt: 10 },
   ];
   const store = makeStore(baseUrlsList, overrides.state);
-  const adapter = makeAdapter(baseUrlsList);
+  const adapter = {
+    ...makeAdapter(baseUrlsList),
+    getProviderLastUpdate: (baseUrl: string) =>
+      overrides.reachability?.lastModelsUpdate[baseUrl] ?? null,
+    getCachedModels: () => overrides.reachability?.modelsFromAllProviders ?? {},
+  };
   const modelManager = makeModelManager(adapter, providers, reviews);
   const handler = createDaemonRequestHandler({
     store,
@@ -309,10 +323,54 @@ describe("GET /providers reachability", () => {
     models: Record<string, unknown[]> = {},
   ) => ({ lastModelsUpdate: updates, modelsFromAllProviders: models });
 
+  it("reads live sharded adapter updates independently of the legacy store", async () => {
+    const driver = createMemoryDriver();
+    const { store, hydrate } = createSdkStore({ driver });
+    await hydrate;
+    store.getState().setBaseUrlsList([PROVIDER_A, PROVIDER_B, PROVIDER_C]);
+    const adapter = await createShardedDiscoveryAdapter({ driver });
+    const handler = createDaemonRequestHandler({
+      store,
+      discoveryAdapter: adapter,
+    } as any);
+
+    // Before a refresh, no evidence means fail open.
+    expect((await call(handler, "GET", "/providers")).json().output.providers)
+      .toHaveLength(3);
+
+    // These are the same writes ModelManager makes after successful fetches.
+    adapter.setCachedModels({ [PROVIDER_A]: [{ id: "m-1" } as any] });
+    adapter.setProviderLastUpdate(PROVIDER_A, FRESH);
+    adapter.setProviderLastUpdate(PROVIDER_C, STALE);
+    expect(store.getState().lastModelsUpdate).toEqual({});
+    expect(store.getState().modelsFromAllProviders).toEqual({});
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    expect(out.providers).toEqual([
+      expect.objectContaining({
+        index: 0,
+        baseUrl: PROVIDER_A,
+        reachable: true,
+        lastModelFetchAt: FRESH,
+        modelCount: 1,
+      }),
+    ]);
+    expect(out.hiddenCount).toBe(2);
+
+    const all = (await call(handler, "GET", "/providers?all=true")).json().output;
+    expect(all.providers[1].unreachableReason).toBe("never-fetched");
+    expect(all.providers[2].unreachableReason).toBe("stale");
+
+    // Recovery must be visible immediately without rehydrating SdkStore.
+    adapter.setProviderLastUpdate(PROVIDER_B, FRESH);
+    expect((await call(handler, "GET", "/providers")).json().output.providers
+      .map((p: any) => p.index)).toEqual([0, 1]);
+  });
+
   it("hides nodes that never answered and keeps discovery indices stable", async () => {
     const { handler } = makeDeps({
       baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
-      state: reachabilityState(
+      reachability: reachabilityState(
         { [PROVIDER_A]: FRESH, [PROVIDER_C]: STALE },
         { [PROVIDER_A]: [{ id: "m-1" }, { id: "m-2" }] },
       ),
@@ -340,7 +398,7 @@ describe("GET /providers reachability", () => {
   it("reports every node with `all=true`, flagged with why it is unreachable", async () => {
     const { handler } = makeDeps({
       baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
-      state: reachabilityState({ [PROVIDER_A]: FRESH, [PROVIDER_C]: STALE }),
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH, [PROVIDER_C]: STALE }),
     });
 
     const out = (await call(handler, "GET", "/providers?all=true")).json()
@@ -372,7 +430,7 @@ describe("GET /providers reachability", () => {
   it("keeps a manually enabled node listed while it is unreachable", async () => {
     const { handler, adapter } = makeDeps({
       baseUrlsList: [PROVIDER_A, PROVIDER_B],
-      state: reachabilityState({ [PROVIDER_A]: FRESH }),
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH }),
     });
     adapter.setManuallyEnabledProviders([PROVIDER_B]);
 
