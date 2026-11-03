@@ -20,7 +20,8 @@
  * - A melt the mint still reports PENDING is never rolled back. PENDING means
  *   the Lightning HTLC is live; its proofs must stay reserved. Expiry does not
  *   make a PENDING melt recoverable. Expired/purged quotes require a separate
- *   NUT-07 check confirming every actual melt input is UNSPENT.
+ *   NUT-07 check of the actual melt inputs: all UNSPENT rolls back, all SPENT
+ *   finalizes (the payment succeeded), anything else stays pending.
  * - An unreachable or hung mint is left untouched and backed off per mint. A
  *   mint that answers `/v1/info` but stalls on its melt-quote endpoint costs one
  *   timeout per backoff window instead of one per operation per sweep.
