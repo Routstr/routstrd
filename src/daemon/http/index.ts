@@ -1187,21 +1187,9 @@ export function createDaemonRequestHandler(deps: {
         // forced refund reports "nothing pending" while funds stay unredeemed.
         const recovered = await recoverParkedTokens(deps.refundClient);
 
-        const state = deps.store.getState();
-        const pendingDistribution = (state.cachedTokens || []).map(
-          (t: { baseUrl: string; balance?: number }) => ({
-            baseUrl: t.baseUrl,
-            amount: t.balance || 0,
-          }),
-        );
-        const apiKeysStored = (state.apiKeys || []).map(
-          (k: { baseUrl: string; balance?: number }) => ({
-            baseUrl: k.baseUrl,
-            amount: k.balance || 0,
-          }),
-        );
+        const apiKeys = (deps.store.getState().apiKeys || []).length;
 
-        if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+        if (apiKeys === 0) {
           sendJson(res, 200, {
             output: {
               message: "No pending tokens to refund",
@@ -1212,18 +1200,14 @@ export function createDaemonRequestHandler(deps: {
           return;
         }
 
-        const refundBaseUrls = pendingDistribution
-          .map((p: { baseUrl: string }) => p.baseUrl)
-          .concat(apiKeysStored.map((p: { baseUrl: string }) => p.baseUrl));
-
         const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundProviders(mintUrl, true);
 
         sendJson(res, 200, {
           output: {
             message: `Refunded to ${mintUrl}`,
-            pendingTokens: pendingDistribution.length,
-            apiKeys: apiKeysStored.length,
+            pendingTokens: 0,
+            apiKeys,
             recovered,
             results: results.map(
               (r: { baseUrl: string; success: boolean }) => ({
@@ -1297,14 +1281,7 @@ export function createDaemonRequestHandler(deps: {
           0,
         );
 
-        const state = deps.store.getState();
-        const cachedTokens = state.cachedTokens || [];
-        const totalCached = cachedTokens.reduce(
-          (sum: number, t: { balance?: number }) => sum + (t.balance || 0),
-          0,
-        );
-
-        const apiKeys = state.apiKeys || [];
+        const apiKeys = deps.store.getState().apiKeys || [];
         const totalApiKeys = apiKeys.reduce(
           (sum: number, k: { balance?: number }) => sum + (k.balance || 0),
           0,
@@ -1312,11 +1289,6 @@ export function createDaemonRequestHandler(deps: {
 
         const keys: Array<{ id: string; name: string; balance: number }> = [
           { id: "wallet", name: "Wallet", balance: totalWallet },
-          ...cachedTokens.map((t: { baseUrl: string; balance?: number }) => ({
-            id: `cached:${t.baseUrl}`,
-            name: `Cached: ${t.baseUrl}`,
-            balance: t.balance || 0,
-          })),
           ...apiKeys.map((k: { baseUrl: string; balance?: number }) => ({
             id: `apikey:${k.baseUrl}`,
             name: `API Key: ${k.baseUrl}`,
@@ -1327,7 +1299,7 @@ export function createDaemonRequestHandler(deps: {
         sendJson(res, 200, {
           output: {
             keys,
-            total: totalWallet + totalCached + totalApiKeys,
+            total: totalWallet + totalApiKeys,
             unit: "sat",
             apikeysCalled: apiKeys.length,
           },

@@ -1,7 +1,3 @@
-export function clearScreen(): string {
-  return "\x1b[2J\x1b[H";
-}
-
 export function enterAlternateScreen(): string {
   return "\x1b[?1049h";
 }
