@@ -9,6 +9,8 @@
  * not evidence of payment failure: proofs can still be PENDING or SPENT. Only
  * a complete, matching set of UNSPENT states permits rollback. Unknown states,
  * missing/malformed results, and lookup failures preserve the reservations.
+ * Request failures propagate so recovery callers can classify and back off an
+ * unreachable mint instead of interpreting the lookup as a successful check.
  *
  * This is a version-sensitive bridge in the same spirit as
  * `sendRecoveryServiceOf` and `cleanupLocalRecoveryState`: if coco's handler
@@ -50,8 +52,10 @@ interface PendingContextLike {
 }
 
 async function expiredInputsAreUnspent(handler: MeltHandlerLike, context: unknown): Promise<boolean> {
+  const ctx = context as PendingContextLike;
+  let Ys: string[];
+  let expected: Set<string>;
   try {
-    const ctx = context as PendingContextLike;
     if (typeof ctx.operation.needsSwap !== "boolean") return false;
     const secrets = handler.getMeltInputSecrets?.(ctx.operation);
     if (!Array.isArray(secrets) || secrets.length === 0 ||
@@ -59,24 +63,25 @@ async function expiredInputsAreUnspent(handler: MeltHandlerLike, context: unknow
         new Set(secrets).size !== secrets.length) return false;
 
     const encoder = new TextEncoder();
-    const Ys = secrets.map((secret) => hashToCurve(encoder.encode(secret)).toHex(true));
-    const expected = new Set(Ys);
-    if (expected.size !== Ys.length) return false;
-    // Use the adapter's raw NUT-07 results: wallet.checkProofsStates() reorders
-    // responses into a map and can hide duplicate Y entries from the mint.
-    const states = await ctx.mintAdapter.checkProofStates(ctx.operation.mintUrl, Ys);
-    if (!Array.isArray(states) || states.length !== Ys.length) return false;
-    for (const entry of states) {
-      if (!entry || typeof entry.Y !== "string" || entry.state !== "UNSPENT" ||
-          !expected.delete(entry.Y)) return false;
-    }
-    return expected.size === 0;
+    Ys = secrets.map((secret) => hashToCurve(encoder.encode(secret)).toHex(true));
+    expected = new Set(Ys);
+    if (expected.size !== Ys.length || typeof ctx.mintAdapter?.checkProofStates !== "function") return false;
   } catch (error) {
     logger.warn("Could not verify expired melt input states; preserving reservations", {
       error: error instanceof Error ? error.message : String(error),
     });
     return false;
   }
+  // Use raw NUT-07 results: wallet.checkProofsStates() maps by Y and can hide
+  // duplicate responses. Do not swallow request errors: the sweep needs their
+  // transport classification to back off this mint, while proofs stay reserved.
+  const states = await ctx.mintAdapter.checkProofStates(ctx.operation.mintUrl, Ys);
+  if (!Array.isArray(states) || states.length !== Ys.length) return false;
+  for (const entry of states) {
+    if (!entry || typeof entry.Y !== "string" || entry.state !== "UNSPENT" ||
+        !expected.delete(entry.Y)) return false;
+  }
+  return expected.size === 0;
 }
 
 interface MeltHandlerProviderLike {

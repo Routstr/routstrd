@@ -20,7 +20,9 @@ Coco 1.0.1's pending-melt handler is wrapped to handle error 20007 (quote expire
 Expiry alone never authorizes releasing proofs. Rollback requires NUT-07 to
 confirm every actual melt input is UNSPENT, including swap-send inputs when the
 operation required a swap. Pending, spent, incomplete or unverifiable inputs stay
-reserved. This bridge depends on Coco internals and must be rechecked on upgrades.
+reserved. Proof-state request exceptions propagate without releasing proofs, so
+transport failures still trigger sweep backoff. This bridge depends on Coco
+internals and must be rechecked on upgrades.
 
 ## History output changes
 

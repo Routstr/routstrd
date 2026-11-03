@@ -1,10 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { hashToCurve } from "@cashu/cashu-ts";
-import { Manager, MemoryRepositories, MintOperationError, type CoreProof, type MeltOperation } from "@cashu/coco-core";
+import { Manager, MemoryRepositories, MintOperationError, NetworkError, type CoreProof, type MeltOperation } from "@cashu/coco-core";
 import {
   installMeltQuoteExpiryHandler,
   isMeltQuoteExpiredError,
 } from "./melt-quote-expiry";
+import { createMeltSweepState, settleMeltOperations } from "./melt-sweep";
 
 function fakeManager(registry: Record<string, unknown>): Manager {
   return {
@@ -103,10 +104,11 @@ describe("installMeltQuoteExpiryHandler", () => {
     });
   }
 
-  it("preserves pending state if proof lookup fails", async () => {
+  it("propagates proof lookup failures so the sweep can back off the mint", async () => {
     const handler = expiredHandler();
     installMeltQuoteExpiryHandler(fakeManager({ bolt11: handler }));
-    expect(await handler.checkPending(expiryContext(async () => { throw new Error("offline"); }))).toBe("stay_pending");
+    const error = new NetworkError("offline");
+    await expect(handler.checkPending(expiryContext(async () => { throw error; }))).rejects.toBe(error);
   });
 
   it("accepts complete matching results in any order", async () => {
@@ -272,9 +274,14 @@ describe("expired quote recovery with Coco 1.0.1", () => {
         return Ys.map((Y) => ({ Y, state: remoteState }));
       });
       try {
-        expect((await coco.ops.melt.refresh("op")).state).toBe("pending");
-        // reclaim repeats the check and must not bypass the safety gate.
-        await expect(coco.ops.melt.reclaim("op")).rejects.toThrow("not UNPAID");
+        if (remoteState === "FAILED") {
+          await expect(coco.ops.melt.refresh("op")).rejects.toThrow("mint offline");
+          await expect(coco.ops.melt.reclaim("op")).rejects.toThrow("mint offline");
+        } else {
+          expect((await coco.ops.melt.refresh("op")).state).toBe("pending");
+          // reclaim repeats the check and must not bypass the safety gate.
+          await expect(coco.ops.melt.reclaim("op")).rejects.toThrow("not UNPAID");
+        }
         expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
         for (const secret of actualSecrets) {
           const reserved = await repo.proofRepository.getProofBySecret(mintUrl, secret);
@@ -284,6 +291,46 @@ describe("expired quote recovery with Coco 1.0.1", () => {
       } finally { await coco.dispose(); }
     });
   }
+
+  it("backs off NUT-07 network failures and still checks a healthy mint", async () => {
+    const { coco, repo, queries, actualSecrets } = await pendingMeltFixture(false, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      throw new NetworkError("NUT-07 offline");
+    });
+    try {
+      const operation = await coco.ops.melt.get("op");
+      if (!operation || operation.state !== "pending") throw new Error("Missing fixture operation");
+      await repo.meltOperationRepository.create({ ...operation, id: "same-mint" });
+      await repo.meltOperationRepository.create({ ...operation, id: "healthy", mintUrl: "https://healthy.example" });
+      const refreshed: string[] = [];
+      const state = createMeltSweepState(new Map());
+      const source = { ops: { melt: {
+        listInFlight: () => coco.ops.melt.listInFlight(),
+        diagnostics: coco.ops.melt.diagnostics,
+        refresh: async (id: string) => {
+          refreshed.push(id);
+          if (id === "healthy") return { ...operation, id, mintUrl: "https://healthy.example" };
+          return coco.ops.melt.refresh(id);
+        },
+      } } };
+      const result = await settleMeltOperations(source, { state, opTimeoutMs: 500, deadlineMs: 2_000 });
+      expect(refreshed).toEqual(["op", "healthy"]);
+      expect(result.failed).toBe(1);
+      expect(result.stillInFlight).toBe(1);
+      expect(result.skippedMints.has(mintUrl)).toBe(true);
+      expect(state.mintBackoff.get(mintUrl)?.failures).toBe(1);
+      expect(queries).toHaveLength(1);
+      await settleMeltOperations(source, { state });
+      expect(queries).toHaveLength(1);
+      expect(refreshed).toEqual(["op", "healthy", "healthy"]);
+      expect((await coco.ops.melt.get("op"))?.state).toBe("pending");
+      for (const secret of actualSecrets) {
+        const proof = await repo.proofRepository.getProofBySecret(mintUrl, secret);
+        expect(proof?.state).toBe("inflight");
+        expect(proof?.usedByOperationId).toBe("op");
+      }
+    } finally { await coco.dispose(); }
+  });
 
   it("keeps swap inputs reserved if swap output data is missing", async () => {
     const { coco, repo, queries } = await pendingMeltFixture(true, (Ys) =>
