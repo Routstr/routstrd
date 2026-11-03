@@ -180,19 +180,36 @@ List and manage providers (subcommand required).
 
 #### `routstrd providers list`
 
-List all providers with their enabled/disabled status. Shows index, status, and
-base URL.
+List discovered providers with their enabled/disabled status. Shows the index
+into the full discovered list, the status, and the base URL.
+
+Nostr discovery (kind 38421) announces every node that exists, not every node
+that answers, so dead nodes would otherwise sit in this list for months. A node
+counts as reachable when its `GET /v1/models` fetch succeeded within the last
+two refresh passes (~42 min); unreachable nodes are hidden by default. Indices
+always address the full discovered list, so they stay stable for `providers
+disable <index>` whether or not unreachable nodes are listed.
 
 | Option | Description |
 |--------|-------------|
 | `--refresh` | Force re-fetch all Nostr events and refresh models from every enabled provider |
+| `--all` | Also list unreachable nodes (down, or never answered), marked with when they were last seen |
 
 ```
-Providers (12 total, 2 disabled):
+Providers (28 reachable of 60 discovered, 2 disabled):
 
-  [0] enabled   https://provider1.example.com
-  [1] enabled   https://provider2.example.com
-  [2] DISABLED  https://provider3.example.com
+  [ 0] enabled                     https://provider1.example.com
+  [ 1] enabled (manual override)   https://provider2.example.com
+  [ 2] DISABLED (nostr review)     https://provider3.example.com
+
+  32 unreachable nodes hidden — pass --all to list them.
+```
+
+With `--all` every discovered node is listed, and unreachable ones say why:
+
+```
+  [41] UNREACHABLE (never fetched)     https://provider42.example.com
+  [42] UNREACHABLE (last seen 8d ago)  https://provider43.example.com
 ```
 
 #### `routstrd providers disable <targets...>`
