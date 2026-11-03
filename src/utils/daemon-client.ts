@@ -99,6 +99,23 @@ class DaemonConnectionError extends Error {
 }
 
 /**
+ * A reached daemon answered with a non-2xx status.
+ *
+ * The HTTP status is carried separately so callers can branch on it (e.g. "this
+ * build has no such route yet") instead of matching the human-readable message,
+ * which mirrors the body's `error` field and is free to change.
+ */
+export class DaemonHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DaemonHttpError";
+  }
+}
+
+/**
  * Upper bound for a single daemon request, including response-body
  * consumption. The daemon bounds its own NWC operations, so this only guards
  * against a wedged server; without it a hung request would block the CLI
@@ -194,8 +211,15 @@ export async function callDaemonUrl(
 
   try {
     if (!response.ok) {
-      const errorData = (await response.json()) as { error?: string };
-      throw new Error(errorData.error || `HTTP ${response.status}`);
+      // A non-JSON error body (an HTML page from a proxy, an empty 405) must not
+      // surface as a JSON parse failure; fall back to the status text.
+      const errorData = (await response
+        .json()
+        .catch(() => ({}))) as { error?: string };
+      throw new DaemonHttpError(
+        response.status,
+        errorData.error || `HTTP ${response.status}`,
+      );
     }
     return (await response.json()) as CommandResponse;
   } catch (error) {
