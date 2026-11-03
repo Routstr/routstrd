@@ -47,7 +47,12 @@ export interface RoutstrdConfig {
   host: string;
   provider: string | null;
   mode?: "xcashu" | "apikeys";
-  /** Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash. Disabled by default; requires daemon restart after changing. */
+  /**
+   * Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash.
+   * Disabled by default. Change it through `routstrd models auto-model-path`
+   * (`POST /settings/auto-model-path`): the daemon applies it to the next
+   * routed request. A hand-edited file needs a daemon restart.
+   */
   autoModelPath?: boolean;
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {

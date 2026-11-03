@@ -451,8 +451,18 @@ export function createDaemonRequestHandler(deps: {
    * (responses) to inject when the client omits one.
    */
   maxTokens: number;
-  /** Enable SDK automatic DeepSeek V4.1 Flash model-path selection. */
+  /**
+   * SDK automatic DeepSeek V4.1 Flash model-path selection, as of daemon
+   * startup. The running value lives in the handler's `settings` holder, so
+   * `POST /settings/auto-model-path` applies without a restart.
+   */
   autoModelPath?: boolean;
+  /**
+   * Routing implementation. Injectable so tests can observe the arguments the
+   * handler passes (e.g. the live `autoModelPath` value) without mocking the
+   * SDK module.
+   */
+  routeRequests?: typeof routeRequests;
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
@@ -467,6 +477,12 @@ export function createDaemonRequestHandler(deps: {
   loadUpdateState?: () => UpdateState | null;
   updateChecksEnabled?: () => boolean;
 }) {
+  // Settings the daemon can change while it runs live in a mutable holder shared
+  // with the /settings routes. `autoModelPath` is read per routed request (see
+  // routeRequests below), so persisting a new value applies it to the next
+  // request — unlike `mode`, which stays startup-only in `deps`.
+  const settings = { autoModelPath: deps.autoModelPath === true };
+
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
@@ -1019,6 +1035,53 @@ export function createDaemonRequestHandler(deps: {
         };
       });
       return;
+    }
+
+    // SDK automatic model-path selection. Routing reads this per request, so a
+    // persisted change applies immediately; GET reports the live value next to
+    // the one on disk, which differ only when config.json was hand-edited (that
+    // still needs a restart).
+    if (url.pathname === "/settings/auto-model-path") {
+      if (req.method === "GET") {
+        await respond(res, async () => {
+          const config = await loadDaemonConfig();
+
+          return {
+            output: {
+              autoModelPath: settings.autoModelPath,
+              configured: config.autoModelPath === true,
+            },
+          };
+        });
+        return;
+      }
+
+      if (req.method === "POST") {
+        await respond(res, async () => {
+          const body = await readJsonBody(req);
+          const enabled = body.enabled;
+          // An explicit setting must not be guessable: a typo'd payload would
+          // otherwise silently disable routing behaviour and answer 200.
+          if (typeof enabled !== "boolean") {
+            throw new WalletHttpError(400, "'enabled' must be a boolean.");
+          }
+
+          const config = await loadDaemonConfig();
+          config.autoModelPath = enabled;
+          // Persist first: a write that throws must not change how we route.
+          saveDaemonConfig(config);
+          settings.autoModelPath = enabled;
+
+          return {
+            output: {
+              message: `Auto model path ${enabled ? "enabled" : "disabled"}.`,
+              autoModelPath: settings.autoModelPath,
+              configured: enabled,
+            },
+          };
+        });
+        return;
+      }
     }
 
     if (req.method === "GET" && url.pathname === "/models") {
@@ -2445,13 +2508,13 @@ export function createDaemonRequestHandler(deps: {
       );
 
       handedToSdk = true;
-      const response = await routeRequests({
+      const response = await (deps.routeRequests ?? routeRequests)({
         lifecycle, requestLifecycleDriver: deps.requestLifecycleDriver, signal: abortController.signal,
         modelId,
         requestBody,
         path: forwardedPath,
         forcedProvider,
-        autoModelPath: deps.autoModelPath === true,
+        autoModelPath: settings.autoModelPath,
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
