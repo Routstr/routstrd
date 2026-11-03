@@ -2152,7 +2152,9 @@ export async function createCocoClient(
 
         // Catch up once after recovery: quotes paid while the daemon was down
         // (or while the websocket was silently dead) would otherwise wait for
-        // the next push or a manual `wallet npc sync`.
+        // the next push or a manual `wallet npc sync`. Skip it once disposal
+        // has quiesced the wallet: plugin shutdown waits for in-flight syncs,
+        // so a stalled NPC request here would delay lock release and close.
         if (!disposed && options.enableNpc !== false) {
           void npcApi()
             .sync()

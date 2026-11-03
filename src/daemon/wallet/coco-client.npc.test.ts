@@ -110,9 +110,12 @@ afterEach(() => {
 });
 
 describe("in-process coco client NPC integration", () => {
-  it("registers the plugin and exposes the wallet's NPC lightning address", async () => {
+  it("registers the plugin with the interval fallback and exposes the NPC address", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
+      expect(npcState.pluginOptions).toEqual([
+        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
+      ]);
       const info = await client.getNpcAddress();
       expect(info).toEqual({
         address: "alice@npubx.cash",
@@ -171,33 +174,31 @@ describe("in-process coco client NPC integration", () => {
     }
   });
 
-  it("registers the plugin with an interval sync fallback", async () => {
+  it("does not fire the catch-up sync when disposal starts during recovery", async () => {
+    // createCocoClient returns while background recovery is still running, so
+    // this disposes on a wallet whose recovery has not settled yet.
     const client = await createCocoClient(testClientOptions());
     try {
-      expect(npcState.pluginOptions).toEqual([
-        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
-      ]);
+      // dispose() quiesces the wallet synchronously, so recovery settles on a
+      // wallet that is already shutting down. Its catch-up must never run:
+      // plugin shutdown waits for in-flight syncs and an NPC request has no
+      // timeout, so that work would delay closing the database and releasing
+      // the wallet lock.
+      await (client.dispose?.() ?? Promise.resolve());
+      await Bun.sleep(50);
+      expect(npcState.syncCalls).toBe(0);
     } finally {
-      await client.dispose?.();
-    }
-  });
-
-  it("syncs paid quotes once automatically after wallet recovery", async () => {
-    const client = await createCocoClient(testClientOptions());
-    try {
-      await waitForNpcSyncs(1);
-      expect(npcState.syncCalls).toBe(1);
-    } finally {
-      await client.dispose?.();
+      await client.dispose?.().catch(() => {});
     }
   });
 
   it("triggers a manual quote sync", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
-      // Wait out the automatic post-recovery catch-up so this test only
-      // measures the explicit syncNpc() call.
+      // Recovery fires exactly one automatic catch-up, so this test only
+      // measures the explicit syncNpc() call on top of it.
       await waitForNpcSyncs(1);
+      expect(npcState.syncCalls).toBe(1);
       const baseline = npcState.syncCalls;
       await client.syncNpc();
       expect(npcState.syncCalls).toBe(baseline + 1);
