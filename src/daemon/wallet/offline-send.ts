@@ -19,6 +19,11 @@ declare module "@cashu/coco-core" {
     offline: {
       /** Retained for diagnostics; prepared.inputAmount is the token value. */
       requestedAmount?: number;
+      /**
+       * Maximum token value as a multiple of the requested amount. When the
+       * closest no-swap token would exceed it, fall back to an online send.
+       */
+      overpayCap?: number;
     };
   }
 }
@@ -153,6 +158,50 @@ interface OfflineSendManagerInternals {
   sendOperationService: {
     handlerProvider: SendHandlerRegistry;
   };
+  proofRepository?: {
+    getAvailableProofs(mintUrl: string): Promise<CoreProof[]>;
+  };
+}
+
+/**
+ * The offline selection would leave more value on the table than the caller's
+ * overpay cap allows. Callers may fall back to a regular online send.
+ */
+export class OfflineOverpayCapExceededError extends Error {
+  constructor(
+    readonly requestedAmount: number,
+    readonly actualAmount: number,
+    readonly overpayCap: number,
+    readonly maxTokenAmount: number,
+  ) {
+    super(
+      `Offline send token ${actualAmount} sats exceeds the ${overpayCap}x ` +
+        `overpay cap (${maxTokenAmount} sats) for a ${requestedAmount} sat request`,
+    );
+    this.name = "OfflineOverpayCapExceededError";
+  }
+}
+
+/** Select the proofs an offline send would use, without creating an operation. */
+export async function previewOfflineSend(
+  coco: Manager,
+  mintUrl: string,
+  amount: number,
+): Promise<{ inputAmount: number; proofCount: number } | null> {
+  const repo = (coco as unknown as OfflineSendManagerInternals).proofRepository;
+  if (!repo || typeof repo.getAvailableProofs !== "function") {
+    // Let prepare surface the real error rather than guessing here.
+    return null;
+  }
+  const available = await repo.getAvailableProofs(mintUrl);
+  const selected = selectClosestProofs(available, amount);
+  if (!selected) {
+    return null;
+  }
+  return {
+    inputAmount: selected.reduce((sum, proof) => sum + proof.amount, 0),
+    proofCount: selected.length,
+  };
 }
 
 export function createOfflineSendHandler(
@@ -164,6 +213,17 @@ export function createOfflineSendHandler(
     async prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation> {
       const { operation, proofRepository, proofService, logger } = ctx;
       const { mintUrl, amount } = operation;
+      // BasePrepareContext types methodData as the union of all methods; this
+      // handler only runs for offline operations, which own `overpayCap`.
+      const overpayCap = (operation.methodData as { overpayCap?: number } | undefined)
+        ?.overpayCap;
+      if (
+        overpayCap !== undefined &&
+        (!Number.isFinite(overpayCap) || overpayCap < 1)
+      ) {
+        throw new Error("Offline overpay cap must be a finite number >= 1");
+      }
+
       const available = await proofRepository.getAvailableProofs(mintUrl);
       const selected = selectClosestProofs(available, amount);
       if (!selected) {
@@ -179,6 +239,30 @@ export function createOfflineSendHandler(
 
       const inputProofSecrets = selected.map((proof) => proof.secret);
       const inputAmount = selected.reduce((sum, proof) => sum + proof.amount, 0);
+
+      if (overpayCap !== undefined) {
+        const maxTokenAmount = Math.floor(amount * overpayCap);
+        if (!Number.isSafeInteger(maxTokenAmount)) {
+          throw new Error("Offline send amount is too large to apply an overpay cap");
+        }
+        if (inputAmount > maxTokenAmount) {
+          logger?.info("Offline send exceeded its overpay cap", {
+            operationId: operation.id,
+            requestedAmount: amount,
+            actualAmount: inputAmount,
+            overpayment: inputAmount - amount,
+            overpayCap,
+            maxTokenAmount,
+          });
+          throw new OfflineOverpayCapExceededError(
+            amount,
+            inputAmount,
+            overpayCap,
+            maxTokenAmount,
+          );
+        }
+      }
+
       await proofService.reserveProofs(mintUrl, inputProofSecrets, operation.id);
 
       logger?.info("Offline send prepared without a swap", {
@@ -187,6 +271,7 @@ export function createOfflineSendHandler(
         actualAmount: inputAmount,
         overpayment: inputAmount - amount,
         proofCount: selected.length,
+        ...(overpayCap !== undefined ? { overpayCap } : {}),
       });
 
       return {
@@ -199,7 +284,10 @@ export function createOfflineSendHandler(
         inputAmount,
         inputProofSecrets,
         outputData: undefined,
-        methodData: { requestedAmount: amount },
+        methodData: {
+          requestedAmount: amount,
+          ...(overpayCap !== undefined ? { overpayCap } : {}),
+        },
       };
     },
 

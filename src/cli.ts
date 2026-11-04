@@ -137,6 +137,19 @@ function isPositiveIntegerString(value: string): boolean {
   return /^[1-9]\d*$/.test(value.trim());
 }
 
+/** `--overpay-cap` with no value means the 3x default. */
+function parseOverpayCapOrExit(
+  value: string | boolean | undefined,
+): number | undefined {
+  if (value === undefined) return undefined;
+  const factor = value === true ? 3 : Number(value);
+  if (!Number.isFinite(factor) || factor < 1) {
+    console.error(`Invalid --overpay-cap: ${String(value)} (expected a number >= 1)`);
+    process.exit(1);
+  }
+  return factor;
+}
+
 async function printLightningInvoice(invoice: string): Promise<void> {
   const paymentUri = `lightning:${invoice}`;
   const qr = await QRCode.toString(paymentUri, {
@@ -2562,25 +2575,39 @@ program
     "Send the closest available proofs without a swap; finalize manually",
     false,
   )
+  .option(
+    "--overpay-cap [factor]",
+    "With --offline, allow a token worth up to FACTOR x the amount (default 3) before falling back to an online send",
+  )
   .action(
     async (
       target: string,
-      options: { mintUrl?: string; offline: boolean },
+      options: { mintUrl?: string; offline: boolean; overpayCap?: string | boolean },
     ) => {
       await warnIfWalletRecovering();
       if (isPositiveIntegerString(target)) {
+        const overpayCap = parseOverpayCapOrExit(options.overpayCap);
+        if (overpayCap !== undefined && !options.offline) {
+          console.error("--overpay-cap requires --offline");
+          process.exit(1);
+        }
         await handleDaemonCommand("/wallet/send/cashu", {
           method: "POST",
           body: {
             amount: parsePositiveIntOrExit(target, "amount"),
             mintUrl: options.mintUrl,
             offline: options.offline,
+            ...(overpayCap !== undefined ? { overpayCap } : {}),
           },
         });
         return;
       }
       if (options.offline) {
         console.error("--offline is only available when sending a Cashu amount");
+        process.exit(1);
+      }
+      if (options.overpayCap !== undefined) {
+        console.error("--overpay-cap requires --offline");
         process.exit(1);
       }
 
@@ -3185,18 +3212,28 @@ walletSendCmd
     "Send the closest available proofs without a swap; finalize manually",
     false,
   )
+  .option(
+    "--overpay-cap [factor]",
+    "With --offline, allow a token worth up to FACTOR x the amount (default 3) before falling back to an online send",
+  )
   .action(
     async (
       amount: string,
-      options: { mintUrl?: string; offline: boolean },
+      options: { mintUrl?: string; offline: boolean; overpayCap?: string | boolean },
     ) => {
       await warnIfWalletRecovering();
+      const overpayCap = parseOverpayCapOrExit(options.overpayCap);
+      if (overpayCap !== undefined && !options.offline) {
+        console.error("--overpay-cap requires --offline");
+        process.exit(1);
+      }
       await handleDaemonCommand("/wallet/send/cashu", {
         method: "POST",
         body: {
           amount: parsePositiveIntOrExit(amount, "amount"),
           mintUrl: options.mintUrl,
           offline: options.offline,
+          ...(overpayCap !== undefined ? { overpayCap } : {}),
         },
       });
     },

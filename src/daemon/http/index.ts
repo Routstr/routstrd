@@ -863,10 +863,29 @@ export function createDaemonRequestHandler(deps: {
         if (body.offline !== undefined && typeof body.offline !== "boolean") {
           throw new WalletHttpError(400, "'offline' must be a boolean.");
         }
+        const overpayCap = body.overpayCap;
+        if (
+          overpayCap !== undefined &&
+          (typeof overpayCap !== "number" ||
+            !Number.isFinite(overpayCap) ||
+            overpayCap < 1)
+        ) {
+          throw new WalletHttpError(
+            400,
+            "'overpayCap' must be a finite number >= 1.",
+          );
+        }
         if (body.offline === true) {
           return {
-            output: await deps.walletClient.sendCashuOffline(amount, mintUrl),
+            output: await deps.walletClient.sendCashuOffline(
+              amount,
+              mintUrl,
+              overpayCap === undefined ? undefined : { overpayCap },
+            ),
           };
+        }
+        if (overpayCap !== undefined) {
+          throw new WalletHttpError(400, "'overpayCap' requires 'offline: true'.");
         }
         const token = await deps.walletClient.sendCashu(amount, mintUrl);
         return { output: { token, amount, mintUrl } };

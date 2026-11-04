@@ -215,6 +215,26 @@ proofs and can automatically finalize offline sends whose proofs are spent.
 Normal sends without `--offline` retain Coco's swap and automatic
 proof-state behavior.
 
+#### Bounding the overpayment
+
+Because a no-swap send hands over whole proofs, a small request can pick a much
+larger proof. Use `--overpay-cap` to allow a token worth at most a multiple of
+the requested amount, falling back to an online send when the closest no-swap
+token would exceed it:
+
+```sh
+# token may be worth at most 3x the request (3000 sats for `send 1000`)
+routstrd send 1000 --offline --overpay-cap 3
+
+# the bare flag uses the 3x default
+routstrd send 1000 --offline --overpay-cap
+```
+
+If the cap is exceeded, routstrd performs a normal online send (swap) instead
+and reports `"mode": "online"` with `overpayment: 0`. Only `mode: "offline"`
+operations need `mark-spent`; online fallbacks finalize through Coco's normal
+proof-state watcher.
+
 ### Sweeping old offline sends (explicit operator action)
 
 Offline tokens **do not expire after seven days**. A recipient may hold one

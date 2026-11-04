@@ -50,7 +50,7 @@ describe("offline Cashu send HTTP API", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(sendCashuOffline).toHaveBeenCalledWith(1020, undefined);
+    expect(sendCashuOffline).toHaveBeenCalledWith(1020, undefined, undefined);
     expect(sendCashu).not.toHaveBeenCalled();
     expect(JSON.parse(res.body).output).toMatchObject({
       operationId: "op-1",
@@ -80,6 +80,65 @@ describe("offline Cashu send HTTP API", () => {
       token: "online-token",
       amount: 64,
     });
+  });
+
+  it("forwards a valid overpay cap to the offline send", async () => {
+    const sendCashuOffline = mock(async () => ({
+      token: "cashu-token",
+      operationId: "op-1",
+      mintUrl: "https://mint.example",
+      requestedAmount: 100,
+      actualAmount: 100,
+      overpayment: 0,
+      state: "pending",
+      mode: "online",
+      overpayCap: 3,
+    }));
+    const handler = createDaemonRequestHandler({
+      walletClient: { sendCashuOffline, sendCashu: mock(async () => "online-token") },
+    } as never);
+    const res = makeRes();
+
+    await handler(
+      makeReq("/wallet/send/cashu", { amount: 100, offline: true, overpayCap: 3 }),
+      res as never,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sendCashuOffline).toHaveBeenCalledWith(100, undefined, {
+      overpayCap: 3,
+    });
+    expect(JSON.parse(res.body).output.mode).toBe("online");
+  });
+
+  it("rejects invalid or non-offline overpay caps", async () => {
+    const sendCashu = mock(async () => "online-token");
+    const sendCashuOffline = mock(async () => { throw new Error("unused"); });
+    const handler = createDaemonRequestHandler({
+      walletClient: { sendCashuOffline, sendCashu },
+    } as never);
+
+    for (const overpayCap of [0, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const res = makeRes();
+      await handler(
+        makeReq("/wallet/send/cashu", {
+          amount: 100,
+          offline: true,
+          overpayCap,
+        }),
+        res as never,
+      );
+      expect(res.status).toBe(400);
+    }
+
+    const withoutOffline = makeRes();
+    await handler(
+      makeReq("/wallet/send/cashu", { amount: 100, overpayCap: 3 }),
+      withoutOffline as never,
+    );
+    expect(withoutOffline.status).toBe(400);
+    expect(sendCashu).not.toHaveBeenCalled();
+    expect(sendCashuOffline).not.toHaveBeenCalled();
   });
 
   it("rejects a non-boolean offline flag", async () => {

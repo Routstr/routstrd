@@ -94,6 +94,8 @@ import {
 import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
 import {
   markOfflineSendSpent,
+  OfflineOverpayCapExceededError,
+  previewOfflineSend,
   registerOfflineSendHandler,
 } from "./offline-send";
 
@@ -2269,6 +2271,19 @@ export async function createCocoClient(
     },
   );
 
+  async function prepareOnlineSend(amount: number, mintUrl?: string) {
+    const targetMint = mintUrl
+      ? normalizeMintUrl(mintUrl)
+      : walletConfig.defaultMintUrl;
+    if (!targetMint) {
+      throw new Error("No trusted mint available for sending");
+    }
+    await waitForRecovery(targetMint);
+    const prepared = await coco!.ops.send.prepare({ mintUrl: targetMint, amount });
+    const { operation, token } = await coco!.ops.send.execute(prepared.id);
+    return { token: getEncodedToken(token), operation };
+  }
+
   return {
     async ping(): Promise<boolean> {
       try {
@@ -2479,24 +2494,13 @@ export async function createCocoClient(
     },
 
     async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      const targetMint = mintUrl
-        ? normalizeMintUrl(mintUrl)
-        : walletConfig.defaultMintUrl;
-      if (!targetMint) {
-        throw new Error("No trusted mint available for sending");
-      }
-      await waitForRecovery(targetMint);
-      const prepared = await coco.ops.send.prepare({
-        mintUrl: targetMint,
-        amount,
-      });
-      const { token } = await coco.ops.send.execute(prepared.id);
-      return getEncodedToken(token);
+      return (await prepareOnlineSend(amount, mintUrl)).token;
     },
 
     async sendCashuOffline(
       amount: number,
       mintUrl?: string,
+      options?: { overpayCap?: number },
     ): Promise<OfflineCashuSendResult> {
       const targetMint = mintUrl
         ? normalizeMintUrl(mintUrl)
@@ -2504,12 +2508,85 @@ export async function createCocoClient(
       if (!targetMint) {
         throw new Error("No trusted mint available for offline sending");
       }
+      const overpayCap = options?.overpayCap;
+      if (
+        overpayCap !== undefined &&
+        (!Number.isFinite(overpayCap) || overpayCap < 1)
+      ) {
+        throw new Error("Offline overpay cap must be a finite number >= 1");
+      }
       await waitForRecovery(targetMint);
-      const prepared = await coco.ops.send.prepare({
-        mintUrl: targetMint,
-        amount,
-        target: { type: "offline" },
-      });
+
+      // An online fallback is a normal Coco send: it swaps and its proofs are
+      // settled by the proof-state watcher. It must not be reported as an
+      // offline operation that the caller later marks spent by hand.
+      const onlineFallback = async (): Promise<OfflineCashuSendResult> => {
+        // Keep this send on the mint selected before any asynchronous work,
+        // even if another request changes the wallet's default meanwhile.
+        const { token, operation } = await prepareOnlineSend(amount, targetMint);
+        return {
+          token,
+          operationId: operation.id,
+          mintUrl: operation.mintUrl,
+          requestedAmount: amount,
+          actualAmount: amount,
+          overpayment: 0,
+          state: "pending",
+          mode: "online",
+          ...(overpayCap !== undefined ? { overpayCap } : {}),
+        };
+      };
+
+      const maxTokenAmount =
+        overpayCap === undefined ? undefined : Math.floor(amount * overpayCap);
+      if (maxTokenAmount !== undefined && !Number.isSafeInteger(maxTokenAmount)) {
+        throw new Error("Offline send amount is too large to apply an overpay cap");
+      }
+
+      if (maxTokenAmount !== undefined) {
+        // Preview first so the common fallback case never creates and rolls
+        // back an offline operation. Concurrent sends can still change the
+        // proof set; prepare re-checks and throws the typed cap error below.
+        const preview = await previewOfflineSend(coco!, targetMint, amount);
+        if (preview && preview.inputAmount > maxTokenAmount) {
+          logger.info("Offline send exceeds overpay cap; using an online send", {
+            mintUrl: targetMint,
+            requestedAmount: amount,
+            actualAmount: preview.inputAmount,
+            overpayCap,
+            maxTokenAmount,
+          });
+          return onlineFallback();
+        }
+      }
+
+      let prepared: Awaited<ReturnType<typeof coco.ops.send.prepare>>;
+      try {
+        prepared = await coco.ops.send.prepare({
+          mintUrl: targetMint,
+          amount,
+          target: {
+            type: "offline",
+            ...(overpayCap !== undefined ? { overpayCap } : {}),
+          },
+        });
+      } catch (error) {
+        if (
+          overpayCap !== undefined &&
+          error instanceof OfflineOverpayCapExceededError
+        ) {
+          logger.info("Offline send exceeded overpay cap while preparing; using an online send", {
+            mintUrl: targetMint,
+            requestedAmount: amount,
+            actualAmount: error.actualAmount,
+            overpayCap,
+            maxTokenAmount: error.maxTokenAmount,
+          });
+          return onlineFallback();
+        }
+        throw error;
+      }
+
       const { operation, token } = await coco.ops.send.execute(prepared.id);
       const actualAmount = operation.inputAmount;
 
@@ -2522,6 +2599,8 @@ export async function createCocoClient(
         actualAmount,
         overpayment: actualAmount - amount,
         state: "pending",
+        mode: "offline",
+        ...(overpayCap !== undefined ? { overpayCap } : {}),
       };
     },
 

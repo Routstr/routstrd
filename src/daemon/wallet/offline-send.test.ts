@@ -6,6 +6,8 @@ import { Database } from "bun:sqlite";
 import {
   createOfflineSendHandler,
   markOfflineSendSpent,
+  OfflineOverpayCapExceededError,
+  previewOfflineSend,
   registerOfflineSendHandler,
   selectClosestProofs,
 } from "./offline-send";
@@ -171,6 +173,123 @@ describe("offline send handler", () => {
     });
   });
 
+  function setupWith(available: ReturnType<typeof proof>[]) {
+    const proofRepository = {
+      getAvailableProofs: mock(async () => available),
+      setProofState: mock(async () => {}),
+    };
+    const proofService = {
+      reserveProofs: mock(async () => ({ amount: 1024 })),
+      releaseProofs: mock(async () => {}),
+      restoreProofsToReady: mock(async () => {}),
+      setProofState: mock(async () => {}),
+    };
+    const defaultHandler: SendMethodHandler<"default"> = {
+      prepare: mock(async () => { throw new Error("unused"); }),
+      execute: mock(async () => { throw new Error("unused"); }),
+      rollback: mock(async () => {}),
+      recoverExecuting: mock(async () => { throw new Error("unused"); }),
+    };
+    return {
+      proofRepository,
+      proofService,
+      defaultHandler,
+      handler: createOfflineSendHandler(defaultHandler),
+    };
+  }
+
+  function prepareWith(
+    handler: ReturnType<typeof createOfflineSendHandler>,
+    operation: Record<string, unknown>,
+    deps: { proofRepository: unknown; proofService: unknown },
+  ) {
+    return handler.prepare({
+      operation: {
+        id: "op-offline",
+        mintUrl: MINT,
+        method: "offline",
+        state: "init",
+        createdAt: 1,
+        updatedAt: 1,
+        ...operation,
+      },
+      ...deps,
+    } as never);
+  }
+
+  it("stays offline when the closest token is within the overpay cap", async () => {
+    const { proofRepository, proofService, defaultHandler, handler } = setup();
+    const prepared = await prepareWith(
+      handler,
+      { amount: 1000, methodData: { overpayCap: 3 } },
+      { proofRepository, proofService },
+    );
+
+    expect(defaultHandler.prepare).not.toHaveBeenCalled();
+    expect(proofService.reserveProofs).toHaveBeenCalledWith(
+      MINT,
+      ["c"],
+      "op-offline",
+    );
+    expect(prepared).toMatchObject({
+      method: "offline",
+      inputAmount: 1024,
+      needsSwap: false,
+      methodData: { requestedAmount: 1000, overpayCap: 3 },
+    });
+  });
+
+  it("throws a typed cap error when the token exceeds the overpay cap", async () => {
+    const { proofRepository, proofService, defaultHandler, handler } = setupWith([
+      proof(1024, "c"),
+    ]);
+
+    await expect(
+      prepareWith(
+        handler,
+        { amount: 100, methodData: { overpayCap: 3 } },
+        { proofRepository, proofService },
+      ),
+    ).rejects.toBeInstanceOf(OfflineOverpayCapExceededError);
+
+    expect(defaultHandler.prepare).not.toHaveBeenCalled();
+    expect(proofService.reserveProofs).not.toHaveBeenCalled();
+  });
+
+  it("treats the cap as a strict boundary on the token value", async () => {
+    const { proofRepository, proofService, handler } = setupWith([proof(1024, "c")]);
+
+    // 1024 > 341 * 3 = 1023, so this request is over the cap.
+    await expect(
+      prepareWith(
+        handler,
+        { amount: 341, methodData: { overpayCap: 3 } },
+        { proofRepository, proofService },
+      ),
+    ).rejects.toBeInstanceOf(OfflineOverpayCapExceededError);
+
+    // 1024 <= 342 * 3 = 1026, so the same proof stays offline.
+    const offline = await prepareWith(
+      handler,
+      { amount: 342, methodData: { overpayCap: 3 } },
+      { proofRepository, proofService },
+    );
+    expect(offline.method).toBe("offline");
+  });
+
+  it("rejects invalid overpay caps", async () => {
+    const { proofRepository, proofService, handler } = setup();
+    for (const overpayCap of [0, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        prepareWith(
+          handler,
+          { amount: 1000, methodData: { overpayCap } },
+          { proofRepository, proofService },
+        ),
+      ).rejects.toThrow(">= 1");
+    }
+  });
+
   it("marks proofs inflight without emitting the watcher event or swapping", async () => {
     const { available, proofRepository, proofService, handler } = setup();
     const reserved = available.map((entry) => ({
@@ -264,6 +383,33 @@ describe("offline send handler", () => {
       proofService,
     } as never);
     expect(defaultHandler.rollback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("previewOfflineSend", () => {
+  function fakeManager(available: ReturnType<typeof proof>[]) {
+    return {
+      proofRepository: { getAvailableProofs: async () => available },
+    } as unknown as Manager;
+  }
+
+  it("returns the value and proof count without creating an operation", async () => {
+    const coco = fakeManager([
+      proof(512, "a"),
+      proof(512, "b"),
+      proof(1024, "c"),
+    ]);
+
+    await expect(previewOfflineSend(coco, MINT, 1020)).resolves.toEqual({
+      inputAmount: 1024,
+      proofCount: 1,
+    });
+  });
+
+  it("returns null when the balance cannot cover the request", async () => {
+    await expect(
+      previewOfflineSend(fakeManager([proof(64, "a")]), MINT, 1000),
+    ).resolves.toBeNull();
   });
 });
 
@@ -428,3 +574,56 @@ describe("offline send with a real Coco Manager", () => {
     }
   });
 });
+
+describe("offline overpay cap with a real Coco Manager", () => {
+  it("rejects a cap-exceeding prepare without reserving proofs", async () => {
+    const database = new Database(":memory:");
+    const repo = new SqliteRepositories({ database });
+    await repo.init();
+    const coco = new Manager(repo, async () => new Uint8Array(64));
+    registerOfflineSendHandler(coco);
+    const internals = coco as unknown as {
+      walletService: {
+        getWalletWithActiveKeysetId(mintUrl: string): Promise<unknown>;
+      };
+    };
+    internals.walletService.getWalletWithActiveKeysetId = async () => ({
+      wallet: {
+        unit: "sat",
+        send: mock(async () => {
+          throw new Error("offline send attempted a swap");
+        }),
+        checkProofsStates: mock(async () => []),
+      },
+    });
+
+    try {
+      await repo.mintRepository.addNewMint({
+        mintUrl: MINT,
+        name: "Offline cap test mint",
+        mintInfo: {},
+        trusted: true,
+        createdAt: 1,
+        updatedAt: 1,
+      } as never);
+      await repo.proofRepository.saveProofs(MINT, [proof(1024, "c")]);
+
+      await expect(
+        coco.ops.send.prepare({
+          mintUrl: MINT,
+          amount: 100,
+          target: { type: "offline", overpayCap: 3 },
+        }),
+      ).rejects.toBeInstanceOf(OfflineOverpayCapExceededError);
+
+      expect((await repo.proofRepository.getProofBySecret(MINT, "c"))?.state).toBe(
+        "ready",
+      );
+      expect(await coco.ops.send.listPrepared()).toHaveLength(0);
+    } finally {
+      await coco.dispose();
+      database.close();
+    }
+  });
+});
+

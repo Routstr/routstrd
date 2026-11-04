@@ -118,6 +118,10 @@ export interface OfflineCashuSendResult {
   actualAmount: number;
   overpayment: number;
   state: "pending";
+  /** `online` means the overpay cap forced a swap instead of a no-swap send. */
+  mode: "offline" | "online";
+  /** The cap that triggered the fallback, when one was supplied. */
+  overpayCap?: number;
 }
 
 export interface MarkSendSpentResult {
@@ -238,10 +242,14 @@ export interface WalletClient {
   /** Progress of a top-up, when the wallet tracks mint operations. */
   getMintQuote?(operationId: string): Promise<MintQuoteStatus | null>;
   sendCashu(amount: number, mintUrl?: string): Promise<string>;
-  /** Send the closest available proof set without a swap or mint settlement watcher. */
+  /**
+   * Send the closest available proof set without a swap. When `overpayCap` is
+   * set and the closest token would exceed it, fall back to an online send.
+   */
   sendCashuOffline(
     amount: number,
     mintUrl?: string,
+    options?: { overpayCap?: number },
   ): Promise<OfflineCashuSendResult>;
   /** Locally assert that an offline token was claimed, without contacting its mint. */
   markSendSpent(operationId: string): Promise<MarkSendSpentResult>;

@@ -496,6 +496,7 @@ Shortcuts for the common wallet operations:
 |---------|-----------|
 | `routstrd send 2100` | Numeric target → create a Cashu token for that many sats |
 | `routstrd send 2100 --offline` | Create a token from the closest available proof set, without a swap |
+| `routstrd send 2100 --offline --overpay-cap 3` | As above, but fall back to an online send when the token would exceed 3× the amount |
 | `routstrd send lnbc1...` | Non-numeric target → pay that Lightning invoice |
 | `routstrd receive 2100` | Numeric value → create a Lightning invoice for that many sats and wait for payment |
 | `routstrd receive cashuB...` | Non-numeric value → receive that Cashu token |
@@ -550,17 +551,21 @@ Create a Cashu token to send.
 |--------|-------------|
 | `--mint-url <url>` | Mint URL to use |
 | `--offline` | Use the closest available proof set with total ≥ amount, without a swap or automatic mint proof-state checks |
+| `--overpay-cap [factor]` | With `--offline`, allow a token worth at most `factor` × amount (bare flag = 3); exceeding it falls back to an online send |
 
 Offline sends may overpay because the selected proofs leave the wallet whole.
 The response includes `operationId`, `requestedAmount`, `actualAmount`, and
-`overpayment`. Once the recipient has claimed the token, finalize it locally:
+`overpayment`, plus `mode`: `offline` for a no-swap send, or `online` when
+`--overpay-cap` forced a normal swap instead. Once the recipient has claimed a
+`mode: "offline"` token, finalize it locally:
 
 ```sh
 routstrd wallet send mark-spent <operation-id>
 ```
 
 This command does not ask the mint whether the proofs are spent; it is the
-operator's explicit assertion that the token was claimed. Normal online sends
+operator's explicit assertion that the token was claimed. Online fallbacks and
+normal online sends
 keep their automatic proof-state finalization.
 
 ### `routstrd wallet send bolt11 <invoice>`
