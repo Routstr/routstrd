@@ -1644,6 +1644,16 @@ const splitProviderTargets = (
   return { indices, labels };
 };
 
+// A provider number is a position in the list the daemon just rendered, so a
+// number it cannot resolve (0, or one past the end) must say so: silently
+// acting on nothing looks exactly like success.
+const printSkippedProviderIndices = (skipped: unknown[] | undefined): void => {
+  if (!skipped || skipped.length === 0) return;
+  console.log(
+    `Ignored invalid index(es): ${skipped.join(", ")} — run \`routstrd providers list\` for the current numbers.`,
+  );
+};
+
 providersCmd
   .command("list")
   .description("List reachable providers with their enabled/disabled status")
@@ -1682,7 +1692,7 @@ providersCmd
 providersCmd
   .command("disable <targets...>")
   .description(
-    "Disable providers by index or by Nostr review label (e.g., routstrd providers disable 0 2 5, or routstrd providers disable sandbox)",
+    "Disable providers by index or by Nostr review label (e.g., routstrd providers disable 1 3 6, or routstrd providers disable sandbox)",
   )
   .action(async (targets: string[]) => {
     await ensureDaemonRunning();
@@ -1711,6 +1721,7 @@ providersCmd
           enabledReviewLabels?: string[];
           enabledLabels?: string[];
           unmatchedLabels?: string[];
+          skipped?: unknown[];
         }
       | undefined;
     if (output) {
@@ -1732,13 +1743,14 @@ providersCmd
           `No providers matched review label(s): ${output.unmatchedLabels.join(", ")}`,
         );
       }
+      printSkippedProviderIndices(output.skipped);
     }
   });
 
 providersCmd
   .command("enable <targets...>")
   .description(
-    "Enable providers by index or by Nostr review label (e.g., routstrd providers enable 0 2 5, or routstrd providers enable sandbox)",
+    "Enable providers by index or by Nostr review label (e.g., routstrd providers enable 1 3 6, or routstrd providers enable sandbox)",
   )
   .action(async (targets: string[]) => {
     await ensureDaemonRunning();
@@ -1772,6 +1784,7 @@ providersCmd
           enabledLabels?: string[];
           matchedLabels?: string[];
           unmatchedLabels?: string[];
+          skipped?: unknown[];
         }
       | undefined;
     if (output) {
@@ -1793,13 +1806,14 @@ providersCmd
           `No providers matched review label(s): ${output.unmatchedLabels.join(", ")}`,
         );
       }
+      printSkippedProviderIndices(output.skipped);
     }
   });
 
 providersCmd
   .command("nostr-sync <indices...>")
   .description(
-    "Remove manual enable/disable overrides and return providers to their Nostr review-based state (e.g., routstrd providers nostr-sync 0 2 5)",
+    "Remove manual enable/disable overrides and return providers to their Nostr review-based state (e.g., routstrd providers nostr-sync 1 3 6)",
   )
   .action(async (indices: string[]) => {
     await ensureDaemonRunning();
@@ -1836,7 +1850,7 @@ providersCmd
         console.log(`  - ${provider.baseUrl} -> ${status}`);
       }
       if (output.skipped && output.skipped.length > 0) {
-        console.log(`Skipped invalid indices: ${output.skipped.join(", ")}`);
+        printSkippedProviderIndices(output.skipped);
       }
     }
   });

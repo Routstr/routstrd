@@ -146,6 +146,27 @@ export function assessProviderReachability(
 }
 
 /**
+ * Reachable nodes first, unreachable ones at the bottom, discovery order kept
+ * inside each group.
+ *
+ * Reachability is a property of the node right now, not of where discovery
+ * happened to put it, so a list read top-down should be "what I can route to"
+ * first and "what is down" last. The caller numbers the rows *after* this
+ * sort, which is what keeps `providers list` counting 1, 2, 3… instead of
+ * inheriting the gaps that hidden nodes leave in the discovered list.
+ */
+export function orderProvidersForDisplay<
+  T extends { reachable?: boolean },
+>(providers: T[]): T[] {
+  const reachable: T[] = [];
+  const unreachable: T[] = [];
+  for (const provider of providers) {
+    (provider.reachable === false ? unreachable : reachable).push(provider);
+  }
+  return [...reachable, ...unreachable];
+}
+
+/**
  * When the node was last seen, for `providers list --all`: `never fetched`,
  * `last seen 42m ago`, `last seen 8d ago`. Coarse on purpose — the exact
  * second a node was last fetched is not something a user acts on.
@@ -170,6 +191,11 @@ export function formatLastSeen(
 
 /** One row of the daemon's `/providers` payload, as far as rendering needs. */
 export interface ProviderListEntry {
+  /**
+   * The number the row is printed with, and the number a numeric target in
+   * `providers enable|disable|nostr-sync` resolves to. The daemon numbers rows
+   * from 1 over the ordered list it renders (see orderProvidersForDisplay).
+   */
   index: number;
   baseUrl: string;
   disabled: boolean;
@@ -221,8 +247,8 @@ export function formatProviderList(
               ? "enabled (manual override)"
               : "enabled",
   }));
-  // Indices address the full discovered list, so they reach three digits; pad
-  // them or a 60-node list steps its URL column at index 10.
+  // A long discovery list still reaches three digits; pad the column or a
+  // 60-node list steps its URL column at 10.
   const indexWidth = Math.max(
     ...rows.map((row) => String(row.index).length),
     1,

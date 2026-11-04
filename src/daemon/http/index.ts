@@ -34,7 +34,10 @@ import {
   type StoredCooldownEntry,
   type StoredFailureStreak,
 } from "../../utils/cooldowns";
-import { assessProviderReachability } from "../../utils/provider-reachability";
+import {
+  assessProviderReachability,
+  orderProvidersForDisplay,
+} from "../../utils/provider-reachability";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's
@@ -295,6 +298,111 @@ function optionalStringArrayField(
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
+}
+
+/** One provider as `/providers` renders it, numbered from 1. */
+type ProviderRow = {
+  /** 1-based position in this list: the number the user types back. */
+  index: number;
+  baseUrl: string;
+  disabled: boolean;
+  manuallyDisabled: boolean;
+  manuallyEnabled: boolean;
+  reachable: boolean;
+  lastModelFetchAt: number | null;
+  modelCount: number;
+  unreachableReason?: string;
+};
+
+/**
+ * Every discovered provider, in the order and with the numbering `providers
+ * list` prints.
+ *
+ * `index` is the row's position in *this* list, so a numeric target in
+ * `providers enable|disable|nostr-sync` resolves to the node the user just
+ * read. Rows are numbered over the full discovered set — reachable first,
+ * unreachable last (see `orderProvidersForDisplay`) — so hiding unreachable
+ * nodes never renumbers the ones still listed, and `list` and `list --all`
+ * agree on every number they both show.
+ *
+ * Every reader of a provider number must resolve it through this helper: a
+ * second ordering somewhere else is exactly how a number starts pointing at
+ * the wrong node.
+ */
+function buildProviderRows(deps: DaemonDeps): ProviderRow[] {
+  const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+  // Read disable/override state from the discovery adapter (the same source
+  // the router/ProviderManager uses), not the mirror in the SdkStore, which
+  // can lag behind the scheduled kind-38425 review sync — that updates the
+  // adapter without touching the store.
+  const manuallyEnabled = new Set<string>(
+    (deps.discoveryAdapter.getManuallyEnabledProviders?.() || []) as string[],
+  );
+  const manuallyDisabled = new Set<string>(
+    (deps.discoveryAdapter.getManuallyDisabledProviders?.() || []) as string[],
+  );
+  const disabledProviders = new Set<string>(
+    [
+      ...((deps.discoveryAdapter.getDisabledProviders() || []) as string[]),
+      ...manuallyDisabled,
+    ].filter((url) => !manuallyEnabled.has(url)),
+  );
+  // Adapter URLs are normalized (trailing slash); the store list may not be.
+  const inSet = (set: Set<string>, baseUrl: string) =>
+    set.has(baseUrl) || set.has(normalizeProviderBaseUrl(baseUrl));
+
+  // ModelManager writes to the sharded discovery adapter, not the SdkStore
+  // mirror. Read the same live cache the refresh pass updates; see
+  // utils/provider-reachability.
+  const reachability = assessProviderReachability(baseUrlsList, {
+    lastModelsUpdate: Object.fromEntries(
+      baseUrlsList.map((baseUrl) => [
+        baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
+        deps.discoveryAdapter.getProviderLastUpdate(baseUrl) ?? 0,
+      ]),
+    ),
+    modelsFromAllProviders: deps.discoveryAdapter.getCachedModels(),
+  });
+
+  const rows = baseUrlsList.map((baseUrl, discoveryIndex) => {
+    const verdict = reachability[discoveryIndex];
+    return {
+      baseUrl,
+      disabled: inSet(disabledProviders, baseUrl),
+      manuallyDisabled: inSet(manuallyDisabled, baseUrl),
+      manuallyEnabled: inSet(manuallyEnabled, baseUrl),
+      // One verdict per URL is guaranteed; defaulting to reachable keeps a
+      // future helper change from hiding a working node.
+      reachable: verdict?.reachable ?? true,
+      lastModelFetchAt: verdict?.lastModelFetchAt ?? null,
+      modelCount: verdict?.modelCount ?? 0,
+      ...(verdict?.reason ? { unreachableReason: verdict.reason } : {}),
+    };
+  });
+
+  return orderProvidersForDisplay(rows).map((row, position) => ({
+    ...row,
+    index: position + 1,
+  }));
+}
+
+/**
+ * Resolve a user-facing provider number (1-based, see `buildProviderRows`) to
+ * its URL. Anything else — 0, a fraction, a string, a number past the end —
+ * resolves to nothing so the caller can report it as skipped instead of
+ * silently acting on a neighbour.
+ */
+function providerIndexToBaseUrl(
+  rows: ProviderRow[],
+  index: unknown,
+): string | undefined {
+  if (typeof index !== "number" || !Number.isInteger(index)) return undefined;
+  return rows[index - 1]?.baseUrl;
+}
+
+/** The range a provider number may take, for error messages. */
+function providerIndexRange(rows: ProviderRow[]): string {
+  return rows.length === 0 ? "none — no providers discovered" : `1-${rows.length}`;
 }
 
 async function buildStatusOutput(
@@ -1535,23 +1643,37 @@ export function createDaemonRequestHandler(deps: {
         ];
 
         const toDisable: string[] = [];
-        // 1) Explicit indices.
+        const skippedIndices: unknown[] = [];
+        // 1) Explicit provider numbers, resolved through the same ordering and
+        // numbering `providers list` prints.
+        const rows = buildProviderRows(deps);
         for (const idx of indices ?? []) {
-          if (
-            typeof idx === "number" &&
-            idx >= 0 &&
-            idx < baseUrlsList.length
-          ) {
-            const baseUrl = baseUrlsList[idx]!;
-            if (!manuallyDisabledProviders.includes(baseUrl)) {
-              manuallyDisabledProviders.push(baseUrl);
-            }
-            const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
-            if (enabledPos !== -1) {
-              manuallyEnabledProviders.splice(enabledPos, 1);
-            }
-            if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
+            skippedIndices.push(idx);
+            continue;
           }
+          if (!manuallyDisabledProviders.includes(baseUrl)) {
+            manuallyDisabledProviders.push(baseUrl);
+          }
+          const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+          if (enabledPos !== -1) {
+            manuallyEnabledProviders.splice(enabledPos, 1);
+          }
+          if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
+        }
+
+        // Numbers that resolve to nothing are reported, never guessed at: a
+        // bare "0 targeted provider(s)" reads like the disable worked.
+        if (hasIndices && !hasLabels && toDisable.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
+              skipped: skippedIndices,
+            }),
+          );
+          return;
         }
 
         // 2) Review labels: remove user opt-ins. Default labels, other enabled
@@ -1606,6 +1728,7 @@ export function createDaemonRequestHandler(deps: {
               message: parts.join(" "),
               disabled,
               remainingEnabled,
+              skipped: skippedIndices,
               matchedUrls: labelMatch?.matchedUrls ?? [],
               enabledLabels:
                 deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
@@ -1678,15 +1801,31 @@ export function createDaemonRequestHandler(deps: {
           }
         };
 
-        // 1) Explicit indices (e.g. `routstrd providers enable 0 2 5`).
+        // 1) Explicit provider numbers (e.g. `routstrd providers enable 1 3 6`),
+        // resolved through the same ordering and numbering `providers list`
+        // prints.
+        const rows = buildProviderRows(deps);
+        const skippedIndices: unknown[] = [];
         for (const idx of indices ?? []) {
-          if (
-            typeof idx === "number" &&
-            idx >= 0 &&
-            idx < baseUrlsList.length
-          ) {
-            enableProvider(baseUrlsList[idx]!);
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
+            skippedIndices.push(idx);
+            continue;
           }
+          enableProvider(baseUrl);
+        }
+
+        // Numbers that resolve to nothing are reported, never guessed at: a
+        // bare "0 targeted provider(s)" reads like the enable worked.
+        if (hasIndices && !hasLabels && toEnable.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
+              skipped: skippedIndices,
+            }),
+          );
+          return;
         }
 
         // 2) Review labels (e.g. `routstrd providers enable sandbox`). This is
@@ -1745,6 +1884,7 @@ export function createDaemonRequestHandler(deps: {
               message: parts.join(" "),
               enabled,
               remainingDisabled,
+              skipped: skippedIndices,
               matchedUrls: labelMatch?.matchedUrls ?? [],
               enabledLabels:
                 deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
@@ -1781,26 +1921,25 @@ export function createDaemonRequestHandler(deps: {
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
 
-        const validIndices: number[] = [];
+        // Provider numbers are resolved through the same ordering and
+        // numbering `providers list` prints.
+        const rows = buildProviderRows(deps);
+        const syncedUrls: string[] = [];
         const skippedIndices: unknown[] = [];
         for (const idx of indices) {
-          if (
-            typeof idx === "number" &&
-            Number.isInteger(idx) &&
-            idx >= 0 &&
-            idx < baseUrlsList.length
-          ) {
-            if (!validIndices.includes(idx)) validIndices.push(idx);
-          } else {
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
             skippedIndices.push(idx);
+          } else if (!syncedUrls.includes(baseUrl)) {
+            syncedUrls.push(baseUrl);
           }
         }
 
-        if (validIndices.length === 0) {
+        if (syncedUrls.length === 0) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error: `No valid indices provided (valid range: 0-${Math.max(baseUrlsList.length - 1, 0)}).`,
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
               skipped: skippedIndices,
             }),
           );
@@ -1819,8 +1958,7 @@ export function createDaemonRequestHandler(deps: {
         ];
 
         const synced: string[] = [];
-        for (const idx of validIndices) {
-          const baseUrl = baseUrlsList[idx]!;
+        for (const baseUrl of syncedUrls) {
           const disabledPos = manuallyDisabledProviders.indexOf(baseUrl);
           if (disabledPos !== -1) {
             manuallyDisabledProviders.splice(disabledPos, 1);
@@ -2079,8 +2217,6 @@ export function createDaemonRequestHandler(deps: {
           await deps.refreshProvidersAndModels();
         }
 
-        const state = deps.store.getState();
-        const baseUrlsList: string[] = state.baseUrlsList || [];
         // Unreachable nodes are hidden unless the caller asks for the whole
         // discovered set (`--all`): discovery keeps announcing dead nodes for
         // months, and a node that cannot be reached cannot be routed to
@@ -2088,67 +2224,19 @@ export function createDaemonRequestHandler(deps: {
         const includeUnreachable = ["1", "true"].includes(
           (url.searchParams.get("all") ?? "").toLowerCase(),
         );
-        // Read disable/override state from the discovery adapter (the same
-        // source the router/ProviderManager uses), not the mirror in the
-        // SdkStore, which can lag behind the scheduled kind-38425 review
-        // sync — that updates the adapter without touching the store.
-        const manuallyEnabled = new Set<string>(
-          (deps.discoveryAdapter.getManuallyEnabledProviders?.() || []) as string[],
-        );
-        const manuallyDisabled = new Set<string>(
-          (deps.discoveryAdapter.getManuallyDisabledProviders?.() || []) as string[],
-        );
-        const disabledProviders = new Set<string>(
-          [
-            ...((deps.discoveryAdapter.getDisabledProviders() || []) as string[]),
-            ...manuallyDisabled,
-          ].filter((url) => !manuallyEnabled.has(url)),
-        );
-        // Adapter URLs are normalized (trailing slash); the store list may
-        // not be. Compare against both forms.
-        const inSet = (set: Set<string>, baseUrl: string) =>
-          set.has(baseUrl) || set.has(normalizeProviderBaseUrl(baseUrl));
-
-        // ModelManager writes to the sharded discovery adapter, not the
-        // SdkStore mirror. Read the same live cache the refresh pass updates;
-        // see utils/provider-reachability. `index` stays the position in the
-        // *full* discovered list so `providers disable <index>` keeps meaning
-        // the same node whether or not unreachable ones are hidden.
-        const reachability = assessProviderReachability(baseUrlsList, {
-          lastModelsUpdate: Object.fromEntries(
-            baseUrlsList.map((baseUrl) => [
-              baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
-              deps.discoveryAdapter.getProviderLastUpdate(baseUrl) ?? 0,
-            ]),
-          ),
-          modelsFromAllProviders: deps.discoveryAdapter.getCachedModels(),
-        });
-        const allProviders = baseUrlsList.map((baseUrl, index) => {
-          const verdict = reachability[index];
-          return {
-            index,
-            baseUrl,
-            disabled: inSet(disabledProviders, baseUrl),
-            manuallyDisabled: inSet(manuallyDisabled, baseUrl),
-            manuallyEnabled: inSet(manuallyEnabled, baseUrl),
-            // One verdict per URL is guaranteed; defaulting to reachable keeps
-            // a future helper change from hiding a working node.
-            reachable: verdict?.reachable ?? true,
-            lastModelFetchAt: verdict?.lastModelFetchAt ?? null,
-            modelCount: verdict?.modelCount ?? 0,
-            ...(verdict?.reason ? { unreachableReason: verdict.reason } : {}),
-          };
-        });
+        // Numbered rows, reachable first: the same list (and the same
+        // numbers) every write handler resolves indices against.
+        const rows = buildProviderRows(deps);
 
         // Only count disabled providers that are actually in the current list
         // (filter out stale entries from previously disabled providers that are no longer present)
-        const activeDisabledCount = allProviders.filter((p) => p.disabled).length;
+        const activeDisabledCount = rows.filter((p) => p.disabled).length;
         // A manually enabled node stays listed even while it is unreachable:
         // the user asked for it explicitly, so hiding it would silently undo
         // that decision instead of reporting that it is down.
         const providers = includeUnreachable
-          ? allProviders
-          : allProviders.filter(
+          ? rows
+          : rows.filter(
               (provider) => provider.reachable || provider.manuallyEnabled,
             );
 
@@ -2158,11 +2246,11 @@ export function createDaemonRequestHandler(deps: {
             output: {
               providers,
               disabledCount: activeDisabledCount,
-              totalCount: allProviders.length,
-              reachableCount: allProviders.filter((p) => p.reachable).length,
-              unreachableCount: allProviders.filter((p) => !p.reachable).length,
+              totalCount: rows.length,
+              reachableCount: rows.filter((p) => p.reachable).length,
+              unreachableCount: rows.filter((p) => !p.reachable).length,
               // Nodes the filter dropped; zero when `all=true`.
-              hiddenCount: allProviders.length - providers.length,
+              hiddenCount: rows.length - providers.length,
               includeUnreachable,
             },
           }),
@@ -2236,18 +2324,10 @@ export function createDaemonRequestHandler(deps: {
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
 
-        // Read disable state from the discovery adapter (the same source the
-        // router/ProviderManager uses), not the mirror in the SdkStore, which
-        // can lag behind the review sync on warm boots.
-        const manuallyEnabled = new Set(
-          deps.discoveryAdapter.getManuallyEnabledProviders?.() || [],
-        );
-        const disabledSet = new Set(
-          [
-            ...(deps.discoveryAdapter.getDisabledProviders() || []),
-            ...(deps.discoveryAdapter.getManuallyDisabledProviders() || []),
-          ].filter((u: string) => !manuallyEnabled.has(u)),
-        );
+        // Same rows and numbering as `providers list`: `providers reviews`
+        // prints these numbers, and a user copies them into `providers
+        // enable|disable|nostr-sync`. Reachable nodes first, unreachable last.
+        const rows = buildProviderRows(deps);
 
         // Provider/review index lives in the SDK (same evidence and trust gates
         // as the review sync), so the daemon only maps it for display.
@@ -2265,7 +2345,8 @@ export function createDaemonRequestHandler(deps: {
           tags: rv.tags,
         });
 
-        const providers = baseUrlsList.map((baseUrl, index) => {
+        const providers = rows.map((row) => {
+          const baseUrl = row.baseUrl;
           const normalized = normalizeProviderBaseUrl(baseUrl);
           const nodePubkeys = Array.from(
             providerNodes.get(normalized) || new Set<string>(),
@@ -2283,9 +2364,9 @@ export function createDaemonRequestHandler(deps: {
             .map((pk) => latestLabelByNode.get(pk))
             .filter((label): label is string => Boolean(label));
           return {
-            index,
+            index: row.index,
             baseUrl,
-            disabled: disabledSet.has(baseUrl),
+            disabled: row.disabled,
             nodePubkeys,
             labels,
             reviewCount: reviews.length,

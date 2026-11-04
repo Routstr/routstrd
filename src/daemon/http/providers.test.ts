@@ -348,7 +348,7 @@ describe("GET /providers reachability", () => {
     const out = (await call(handler, "GET", "/providers")).json().output;
     expect(out.providers).toEqual([
       expect.objectContaining({
-        index: 0,
+        index: 1,
         baseUrl: PROVIDER_A,
         reachable: true,
         lastModelFetchAt: FRESH,
@@ -364,10 +364,33 @@ describe("GET /providers reachability", () => {
     // Recovery must be visible immediately without rehydrating SdkStore.
     adapter.setProviderLastUpdate(PROVIDER_B, FRESH);
     expect((await call(handler, "GET", "/providers")).json().output.providers
-      .map((p: any) => p.index)).toEqual([0, 1]);
+      .map((p: any) => p.index)).toEqual([1, 2]);
   });
 
-  it("hides nodes that never answered and keeps discovery indices stable", async () => {
+  it("numbers reachable nodes first and unreachable ones at the bottom", async () => {
+    // Discovery order puts the dead node first; the list must not inherit it.
+    const { handler } = makeDeps({
+      baseUrlsList: [PROVIDER_B, PROVIDER_A],
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH }),
+    });
+
+    const out = (await call(handler, "GET", "/providers")).json().output;
+    expect(out.providers).toEqual([
+      expect.objectContaining({ index: 1, baseUrl: PROVIDER_A }),
+    ]);
+
+    const all = (await call(handler, "GET", "/providers?all=true")).json()
+      .output;
+    expect(all.providers.map((p: any) => p.baseUrl)).toEqual([
+      PROVIDER_A,
+      PROVIDER_B,
+    ]);
+    // Continuous numbering over the ordered list: no gaps from hidden nodes,
+    // and the same numbers whether or not `--all` was passed.
+    expect(all.providers.map((p: any) => p.index)).toEqual([1, 2]);
+  });
+
+  it("hides nodes that never answered and numbers the rest from 1", async () => {
     const { handler } = makeDeps({
       baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
       reachability: reachabilityState(
@@ -380,7 +403,7 @@ describe("GET /providers reachability", () => {
     // PROVIDER_B never answered, PROVIDER_C is ~a week stale.
     expect(out.providers.map((p: any) => p.baseUrl)).toEqual([PROVIDER_A]);
     expect(out.providers[0]).toMatchObject({
-      index: 0,
+      index: 1,
       reachable: true,
       lastModelFetchAt: FRESH,
       modelCount: 2,
@@ -408,9 +431,9 @@ describe("GET /providers reachability", () => {
       PROVIDER_B,
       PROVIDER_C,
     ]);
-    // Indices address the full discovered list, so `providers disable 2`
-    // keeps meaning PROVIDER_C whether or not unreachable nodes are listed.
-    expect(out.providers.map((p: any) => p.index)).toEqual([0, 1, 2]);
+    // Numbers are positions in this ordered list, so `providers disable 3`
+    // resolves to PROVIDER_C whether or not unreachable nodes are listed.
+    expect(out.providers.map((p: any) => p.index)).toEqual([1, 2, 3]);
     expect(out.providers.map((p: any) => p.reachable)).toEqual([
       true,
       false,
@@ -447,6 +470,50 @@ describe("GET /providers reachability", () => {
     expect(out.hiddenCount).toBe(0);
   });
 
+  it("resolves a number against the ordered list, not the discovery position", async () => {
+    // Discovery order is [B, A]; A is the only reachable node, so the list
+    // shows A as [1] and `providers disable 1` must hit A, not B.
+    const { handler, adapter } = makeDeps({
+      baseUrlsList: [PROVIDER_B, PROVIDER_A],
+      reachability: reachabilityState({ [PROVIDER_A]: FRESH }),
+    });
+
+    const res = await call(handler, "POST", "/providers/disable", {
+      indices: [1],
+    });
+    expect(res.status).toBe(200);
+    expect(res.json().output.disabled).toEqual([PROVIDER_A]);
+    expect(adapter.getManuallyDisabledProviders()).toEqual([PROVIDER_A]);
+  });
+
+  it("rejects a number the list never printed and reports the valid range", async () => {
+    const { handler } = makeDeps({ baseUrlsList: [PROVIDER_A, PROVIDER_B] });
+
+    // Numbers are 1-based now: `0` is not a provider, and silently doing
+    // nothing would look like the command worked.
+    for (const action of ["disable", "enable", "nostr-sync"]) {
+      const res = await call(handler, "POST", `/providers/${action}`, {
+        indices: [0],
+      });
+      expect(res.status).toBe(400);
+      expect(res.json().error).toContain("valid range: 1-2");
+      expect(res.json().skipped).toEqual([0]);
+    }
+  });
+
+  it("reports numbers it could not resolve on a partially valid request", async () => {
+    const { handler, adapter } = makeDeps({
+      baseUrlsList: [PROVIDER_A, PROVIDER_B],
+    });
+
+    const res = await call(handler, "POST", "/providers/enable", {
+      indices: [2, 0, 99],
+    });
+    expect(res.status).toBe(200);
+    expect(res.json().output.skipped).toEqual([0, 99]);
+    expect(adapter.getManuallyEnabledProviders()).toEqual([PROVIDER_B]);
+  });
+
   it("fails open when no node has answered yet (fresh install, pass running)", async () => {
     const { handler } = makeDeps({
       baseUrlsList: [PROVIDER_A, PROVIDER_B, PROVIDER_C],
@@ -478,7 +545,7 @@ describe("POST /providers/nostr-sync", () => {
 
     // User manually enables the review-rejected provider.
     const enableRes = await call(handler, "POST", "/providers/enable", {
-      indices: [0],
+      indices: [1],
     });
     expect(enableRes.status).toBe(200);
     expect(adapter.getDisabledProviders()).not.toContain(PROVIDER_A);
@@ -490,7 +557,7 @@ describe("POST /providers/nostr-sync", () => {
 
     // nostr-sync must restore the review verdict, not the stale empty set.
     const res = await call(handler, "POST", "/providers/nostr-sync", {
-      indices: [0],
+      indices: [1],
     });
     expect(res.status).toBe(200);
     const out = res.json().output;
@@ -513,7 +580,7 @@ describe("POST /providers/nostr-sync", () => {
     adapter.setManuallyDisabledProviders([PROVIDER_B]);
 
     const res = await call(handler, "POST", "/providers/nostr-sync", {
-      indices: [1],
+      indices: [2],
     });
     expect(res.status).toBe(200);
     expect(res.json().output.providers).toEqual([
@@ -536,7 +603,7 @@ describe("POST /providers/nostr-sync", () => {
   it("reports skipped indices on partial success and dedupes", async () => {
     const { handler } = makeDeps({});
     const res = await call(handler, "POST", "/providers/nostr-sync", {
-      indices: [0, 99, 0.5, 0],
+      indices: [1, 99, 0.5, 1],
     });
     expect(res.status).toBe(200);
     const out = res.json().output;
@@ -609,7 +676,7 @@ describe("POST /providers/enable (review labels)", () => {
   it("accepts indices and labels together", async () => {
     const { handler, adapter } = makeDeps(sandboxFixture);
     const res = await call(handler, "POST", "/providers/enable", {
-      indices: [0],
+      indices: [1],
       labels: ["sandbox"],
     });
     expect(res.status).toBe(200);
@@ -666,7 +733,7 @@ describe("provider policy effective results", () => {
 
   it("does not report a manually disabled label match as enabled", async () => {
     const { handler, adapter } = makeDeps(sandboxFixture);
-    await call(handler, "POST", "/providers/disable", { indices: [1] });
+    await call(handler, "POST", "/providers/disable", { indices: [2] });
     const res = await call(handler, "POST", "/providers/enable", { labels: ["sandbox"] });
     expect(res.status).toBe(200);
     expect(res.json().output).toMatchObject({
@@ -680,7 +747,7 @@ describe("provider policy effective results", () => {
 
   it("does not report a manually enabled label match as disabled", async () => {
     const { handler, adapter } = makeDeps(sandboxFixture);
-    await call(handler, "POST", "/providers/enable", { indices: [1], labels: ["sandbox"] });
+    await call(handler, "POST", "/providers/enable", { indices: [2], labels: ["sandbox"] });
     const res = await call(handler, "POST", "/providers/disable", { labels: ["sandbox"] });
     expect(res.json().output).toMatchObject({
       disabled: [], matchedUrls: [PROVIDER_B], remainingEnabled: [PROVIDER_B],
@@ -704,8 +771,8 @@ describe("provider policy effective results", () => {
 
   it("partitions mixed index and label targets by effective state", async () => {
     const { handler } = makeDeps(sandboxFixture);
-    await call(handler, "POST", "/providers/disable", { indices: [1] });
-    const res = await call(handler, "POST", "/providers/enable", { indices: [0], labels: ["sandbox"] });
+    await call(handler, "POST", "/providers/disable", { indices: [2] });
+    const res = await call(handler, "POST", "/providers/enable", { indices: [1], labels: ["sandbox"] });
     expect(res.json().output).toMatchObject({
       enabled: [PROVIDER_A], matchedUrls: [PROVIDER_B], remainingDisabled: [PROVIDER_B],
     });
@@ -713,7 +780,7 @@ describe("provider policy effective results", () => {
 
   it("does not claim a transition when an index is already enabled", async () => {
     const { handler } = makeDeps({});
-    const res = await call(handler, "POST", "/providers/enable", { indices: [0] });
+    const res = await call(handler, "POST", "/providers/enable", { indices: [1] });
     expect(res.json().output.enabled).toEqual([PROVIDER_A]);
     expect(res.json().output.message).toBe("1 targeted provider(s) currently enabled.");
   });
@@ -726,7 +793,7 @@ describe("provider policy concurrent requests", () => {
         const { handler, store, adapter, modelManager } = makeDeps({});
         const opposite = action === "enable" ? "disable" : "enable";
         if (action === "disable") {
-          await call(handler, "POST", "/providers/disable", { indices: [0] });
+          await call(handler, "POST", "/providers/disable", { indices: [1] });
         }
 
         let signalEntered!: () => void;
@@ -756,13 +823,13 @@ describe("provider policy concurrent requests", () => {
 
         const pending = call(handler, "POST", `/providers/${action}`, {
           labels: ["lgtm"],
-          ...(mixed ? { indices: [1] } : {}),
+          ...(mixed ? { indices: [2] } : {}),
         });
         await entered;
         let concurrentWrites = 0;
         try {
           const concurrent = await call(handler, "POST", `/providers/${opposite}`, {
-            indices: [0],
+            indices: [1],
           });
           expect(concurrent.status).toBe(200);
           concurrentWrites = manualWrites;
@@ -801,6 +868,24 @@ describe("GET /providers/reviews", () => {
       label: "sandbox",
       nodePubkey: "nodeA",
     });
+  });
+
+  it("numbers providers the way `providers list` does", async () => {
+    const FRESH = Date.now() - 60_000;
+    // Discovery order is [B, A]; A is reachable, so it is listed first.
+    const { handler } = makeDeps({
+      baseUrlsList: [PROVIDER_B, PROVIDER_A],
+      reachability: {
+        lastModelsUpdate: { [PROVIDER_A]: FRESH },
+        modelsFromAllProviders: {},
+      },
+    });
+
+    const out = (await call(handler, "GET", "/providers/reviews")).json().output;
+    expect(out.providers.map((p: any) => [p.index, p.baseUrl])).toEqual([
+      [1, PROVIDER_A],
+      [2, PROVIDER_B],
+    ]);
   });
 });
 

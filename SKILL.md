@@ -201,15 +201,24 @@ List and manage providers (subcommand required).
 
 #### `routstrd providers list`
 
-List discovered providers with their enabled/disabled status. Shows the index
-into the full discovered list, the status, and the base URL.
+List discovered providers with their enabled/disabled status. Shows the number
+to pass to `providers enable|disable|nostr-sync`, the status, and the base URL.
 
 Nostr discovery (kind 38421) announces every node that exists, not every node
 that answers, so dead nodes would otherwise sit in this list for months. A node
 counts as reachable when its `GET /v1/models` fetch succeeded within the last
-two refresh passes (~42 min); unreachable nodes are hidden by default. Indices
-always address the full discovered list, so they stay stable for `providers
-disable <index>` whether or not unreachable nodes are listed.
+two refresh passes (~42 min); unreachable nodes are hidden by default.
+
+Reachable nodes are listed first and unreachable ones last, and the numbers
+count straight down the ordered list from `1`. They are positions in that
+list, not positions in the discovered set, so a hidden node no longer leaves a
+hole in the numbering. `providers list` and `providers list --all` use the same
+numbers for the nodes they both show, and `providers reviews` numbers them the
+same way. A node that is down but manually enabled keeps its place at the end
+of the list, so its number can sit below the ones above it — that is the one
+case where a gap still shows, and it marks a node you forced on that is not
+answering. A number the daemon cannot resolve (`0`, or past the end) is
+reported as ignored instead of acting on a neighbour.
 
 | Option | Description |
 |--------|-------------|
@@ -219,39 +228,42 @@ disable <index>` whether or not unreachable nodes are listed.
 ```
 Providers (28 reachable of 60 discovered, 2 disabled):
 
-  [ 0] enabled                     https://provider1.example.com
-  [ 1] enabled (manual override)   https://provider2.example.com
-  [ 2] DISABLED (nostr review)     https://provider3.example.com
+  [ 1] enabled                     https://provider1.example.com
+  [ 2] enabled (manual override)   https://provider2.example.com
+  [ 3] DISABLED (nostr review)     https://provider3.example.com
 
   32 unreachable nodes hidden — pass --all to list them.
 ```
 
-With `--all` every discovered node is listed, and unreachable ones say why:
+With `--all` every discovered node is listed, reachable ones first, and
+unreachable ones say why:
 
 ```
-  [41] UNREACHABLE (never fetched)     https://provider42.example.com
-  [42] UNREACHABLE (last seen 8d ago)  https://provider43.example.com
+  [29] UNREACHABLE (never fetched)     https://provider42.example.com
+  [30] UNREACHABLE (last seen 8d ago)  https://provider43.example.com
 ```
 
 #### `routstrd providers disable <targets...>`
 
-Disable providers by index number, by review label, or a mix of both.
+Disable providers by number, by review label, or a mix of both.
 
-Numeric targets are provider indices. Any non-numeric target is treated as a
-kind-38425 Nostr review label: the label is removed from the daemon's enabled
-label set, so providers carrying it fall back to their review verdict.
+Numeric targets are the numbers `providers list` prints. Any non-numeric target
+is treated as a kind-38425 Nostr review label: the label is removed from the
+daemon's enabled label set, so providers carrying it fall back to their review
+verdict.
 
 ```sh
-routstrd providers disable 0 2 5
+routstrd providers disable 1 3 6
 routstrd providers disable sandbox
 ```
 
 #### `routstrd providers enable <targets...>`
 
-Enable providers by index number, by review label, or a mix of both.
+Enable providers by number, by review label, or a mix of both.
 
-Numeric targets are provider indices and record a per-provider manual override.
-Any non-numeric target is a kind-38425 Nostr review label and opts that label
+Numeric targets are the numbers `providers list` prints and record a
+per-provider manual override. Any non-numeric target is a kind-38425 Nostr
+review label and opts that label
 into the daemon's review label policy: every provider whose latest review
 carries it is kept enabled — including providers discovered later — until the
 label is removed with `providers disable <label>`. Default-enabled labels are
@@ -259,7 +271,7 @@ label is removed with `providers disable <label>`. Default-enabled labels are
 are disabled until a user opts them in this way.
 
 ```sh
-routstrd providers enable 0 2 5
+routstrd providers enable 1 3 6
 routstrd providers enable sandbox
 ```
 
@@ -268,7 +280,8 @@ Labels that match no provider are reported back.
 
 #### `routstrd providers reviews`
 
-Show all known providers with their stored review events and event IDs.
+Show all known providers with their stored review events and event IDs,
+numbered the way `providers list --all` numbers them (reachable first).
 
 ### `routstrd cooldowns`
 
