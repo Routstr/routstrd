@@ -2208,6 +2208,9 @@ export async function createCocoClient(
       },
       async () => {
         await coco?.dispose();
+        // Unsubscribing while paused can reopen Coco's transport sockets.
+        // Close only after late tracked work and plugin cleanup have settled.
+        coco?.subscriptions.closeAll();
         database?.close();
         releaseLegacyPidClaim();
         releaseWalletPidClaim();
@@ -2257,6 +2260,9 @@ export async function createCocoClient(
     },
     async () => {
       await coco.dispose();
+      // pauseSubscriptions() stops watchers, but their unsubscribe sends can
+      // reopen sockets; plugin cleanup may also touch the transport.
+      coco.subscriptions.closeAll();
       database.close();
       releaseLegacyPidClaim();
       releaseWalletPidClaim();

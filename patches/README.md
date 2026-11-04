@@ -75,8 +75,11 @@ claims until work settles. Shutdown callers get the existing 30-second incomplet
 disposal error rather than an unbounded wait; cleanup continues in the background.
 The same resource-retaining rule applies when startup fails after bootstrap begins.
 Coco's `Manager.dispose()` only disposes plugins, so routstrd explicitly pauses
-subscriptions/stops watchers first, then drains tracked work, disposes plugins and
-closes the database. A permanently hung SDK request/plugin can therefore retain
+subscriptions/stops watchers first, then drains tracked work, disposes plugins,
+closes all subscription transports, and closes the database. The final
+`subscriptions.closeAll()` is necessary because watcher/plugin unsubscribe sends
+can reopen sockets even after `pauseSubscriptions()` closed them. Controlled
+fake-WebSocket tests exercise the real transport on shutdown and startup failure. A permanently hung SDK request/plugin can therefore retain
 resources until process exit; no timeout is represented as cancellation or a safe
 opportunity to close a database that may still receive writes.
 
