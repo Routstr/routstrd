@@ -4,6 +4,7 @@ import {
   formatLastSeen,
   formatProviderList,
   normalizeNodeBaseUrl,
+  orderProvidersForDisplay,
   PROVIDER_REACHABILITY_TTL_MS,
 } from "./provider-reachability";
 
@@ -292,5 +293,45 @@ describe("assessProviderReachability store key spellings", () => {
       NOW,
     );
     expect(verdict).toMatchObject({ reachable: true, lastModelFetchAt: NOW - 60_000 });
+  });
+});
+
+describe("orderProvidersForDisplay", () => {
+  it("moves unreachable nodes to the bottom and keeps discovery order inside a group", () => {
+    const rows = [
+      { baseUrl: "https://a.example/", reachable: false },
+      { baseUrl: "https://b.example/", reachable: true },
+      { baseUrl: "https://c.example/", reachable: false },
+      { baseUrl: "https://d.example/", reachable: true },
+    ];
+    expect(orderProvidersForDisplay(rows).map((row) => row.baseUrl)).toEqual([
+      "https://b.example/",
+      "https://d.example/",
+      "https://a.example/",
+      "https://c.example/",
+    ]);
+  });
+
+  it("treats a row with no verdict (an older payload) as reachable", () => {
+    const rows = [
+      { baseUrl: "https://a.example/" },
+      { baseUrl: "https://b.example/", reachable: false },
+    ];
+    expect(orderProvidersForDisplay(rows).map((row) => row.baseUrl)).toEqual([
+      "https://a.example/",
+      "https://b.example/",
+    ]);
+  });
+
+  it("does not mutate the caller's array", () => {
+    const rows = [
+      { baseUrl: "https://a.example/", reachable: false },
+      { baseUrl: "https://b.example/", reachable: true },
+    ];
+    orderProvidersForDisplay(rows);
+    expect(rows.map((row) => row.baseUrl)).toEqual([
+      "https://a.example/",
+      "https://b.example/",
+    ]);
   });
 });
