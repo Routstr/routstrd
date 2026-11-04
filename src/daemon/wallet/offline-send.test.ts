@@ -1,0 +1,373 @@
+import { describe, expect, it, mock } from "bun:test";
+import { Manager } from "@cashu/coco-core";
+import type { CoreProof, SendMethodHandler } from "@cashu/coco-core";
+import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
+import { Database } from "bun:sqlite";
+import {
+  createOfflineSendHandler,
+  markOfflineSendSpent,
+  registerOfflineSendHandler,
+  selectClosestProofs,
+  watchOnlineInflightProofs,
+} from "./offline-send";
+
+const MINT = "https://mint.example";
+
+function proof(amount: number, secret = `secret-${amount}`): CoreProof {
+  return {
+    mintUrl: MINT,
+    id: "keyset",
+    amount,
+    secret,
+    C: `C-${secret}`,
+    state: "ready",
+  };
+}
+
+function amounts(selected: readonly CoreProof[] | null): number[] | null {
+  return selected?.map((entry) => entry.amount) ?? null;
+}
+
+describe("selectClosestProofs", () => {
+  it("finds an exact subset that largest-first selection would miss", () => {
+    const selected = selectClosestProofs(
+      [proof(6, "six-a"), proof(6, "six-b"), proof(5, "five-a"), proof(5, "five-b")],
+      10,
+    );
+    expect(amounts(selected)).toEqual([5, 5]);
+  });
+
+  it("minimizes overpayment and uses fewer proofs for an equal total", () => {
+    const selected = selectClosestProofs(
+      [proof(512, "a"), proof(512, "b"), proof(1024, "c"), proof(2048, "d")],
+      1020,
+    );
+    expect(amounts(selected)).toEqual([1024]);
+  });
+
+  it("returns null instead of under-sending", () => {
+    expect(selectClosestProofs([proof(4), proof(6)], 11)).toBeNull();
+  });
+
+  it("is deterministic regardless of repository order", () => {
+    const candidates = [proof(2, "b"), proof(2, "a"), proof(3, "c")];
+    const first = selectClosestProofs(candidates, 4);
+    const second = selectClosestProofs([...candidates].reverse(), 4);
+    expect(first?.map((entry) => entry.secret)).toEqual(["a", "b"]);
+    expect(second?.map((entry) => entry.secret)).toEqual(["a", "b"]);
+  });
+
+  it("rejects invalid amounts and duplicate secrets", () => {
+    expect(() => selectClosestProofs([proof(1)], 1.5)).toThrow(
+      "positive integer",
+    );
+    expect(() =>
+      selectClosestProofs([proof(1, "same"), proof(2, "same")], 2),
+    ).toThrow("duplicate proof secret");
+  });
+});
+
+describe("offline send handler", () => {
+  function setup() {
+    const available = [proof(512, "a"), proof(512, "b"), proof(1024, "c")];
+    const proofRepository = {
+      getAvailableProofs: mock(async () => available),
+      setProofState: mock(async () => {}),
+    };
+    const proofService = {
+      reserveProofs: mock(async () => ({ amount: 1024 })),
+      releaseProofs: mock(async () => {}),
+      restoreProofsToReady: mock(async () => {}),
+      setProofState: mock(async () => {}),
+    };
+    const defaultHandler: SendMethodHandler<"default"> = {
+      prepare: mock(async () => { throw new Error("unused"); }),
+      execute: mock(async () => { throw new Error("unused"); }),
+      rollback: mock(async () => {}),
+      recoverExecuting: mock(async () => { throw new Error("unused"); }),
+    };
+    const handler = createOfflineSendHandler(defaultHandler);
+    return { available, proofRepository, proofService, defaultHandler, handler };
+  }
+
+  it("reserves the closest set and returns a no-swap preparation", async () => {
+    const { proofRepository, proofService, handler } = setup();
+    const prepared = await handler.prepare({
+      operation: {
+        id: "op-offline",
+        mintUrl: MINT,
+        amount: 1020,
+        method: "offline",
+        methodData: {},
+        state: "init",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      proofRepository,
+      proofService,
+    } as never);
+
+    expect(proofService.reserveProofs).toHaveBeenCalledWith(
+      MINT,
+      ["c"],
+      "op-offline",
+    );
+    expect(prepared).toMatchObject({
+      amount: 1020,
+      inputAmount: 1024,
+      inputProofSecrets: ["c"],
+      needsSwap: false,
+      fee: 0,
+      methodData: { requestedAmount: 1020 },
+    });
+  });
+
+  it("marks proofs inflight without emitting the watcher event or swapping", async () => {
+    const { available, proofRepository, proofService, handler } = setup();
+    const reserved = available.map((entry) => ({
+      ...entry,
+      usedByOperationId: "op-offline",
+    }));
+    const wallet = { unit: "sat", send: mock(async () => { throw new Error("swap"); }) };
+    const result = await handler.execute({
+      operation: {
+        id: "op-offline",
+        mintUrl: MINT,
+        amount: 1020,
+        method: "offline",
+        methodData: { requestedAmount: 1020 },
+        state: "executing",
+        createdAt: 1,
+        updatedAt: 1,
+        needsSwap: false,
+        fee: 0,
+        inputAmount: 1024,
+        inputProofSecrets: ["c"],
+      },
+      wallet,
+      reservedProofs: reserved,
+      proofRepository,
+      proofService,
+    } as never);
+
+    expect(proofRepository.setProofState).toHaveBeenCalledWith(
+      MINT,
+      ["c"],
+      "inflight",
+    );
+    expect(proofService.setProofState).not.toHaveBeenCalled();
+    expect(wallet.send).not.toHaveBeenCalled();
+    if (result.status !== "PENDING") throw new Error("expected pending result");
+    expect(result.token?.proofs.map((entry) => entry.amount)).toEqual([1024]);
+    expect(result.pending.state).toBe("pending");
+  });
+
+  it("keeps pending recovery local and restores interrupted executions", async () => {
+    const { proofService, handler } = setup();
+    expect(await handler.checkPending?.({} as never)).toBe("stay_pending");
+
+    const result = await handler.recoverExecuting({
+      operation: {
+        id: "op-offline",
+        mintUrl: MINT,
+        amount: 1020,
+        method: "offline",
+        methodData: {},
+        state: "executing",
+        createdAt: 1,
+        updatedAt: 1,
+        needsSwap: false,
+        fee: 0,
+        inputAmount: 1024,
+        inputProofSecrets: ["c"],
+      },
+      proofService,
+    } as never);
+
+    expect(proofService.restoreProofsToReady).toHaveBeenCalledWith(MINT, ["c"]);
+    expect(result.status).toBe("FAILED");
+  });
+
+  it("releases prepared cancellations but delegates pending reclaim to Coco", async () => {
+    const { proofService, defaultHandler, handler } = setup();
+    const base = {
+      id: "op-offline",
+      mintUrl: MINT,
+      amount: 1020,
+      method: "offline",
+      methodData: {},
+      createdAt: 1,
+      updatedAt: 1,
+      needsSwap: false,
+      fee: 0,
+      inputAmount: 1024,
+      inputProofSecrets: ["c"],
+    };
+    await handler.rollback?.({
+      operation: { ...base, state: "prepared" },
+      proofService,
+    } as never);
+    expect(proofService.releaseProofs).toHaveBeenCalledWith(MINT, ["c"]);
+    expect(defaultHandler.rollback).not.toHaveBeenCalled();
+
+    await handler.rollback?.({
+      operation: { ...base, state: "pending" },
+      proofService,
+    } as never);
+    expect(defaultHandler.rollback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("markOfflineSendSpent", () => {
+  function operation(state: string, method = "offline") {
+    return {
+      id: "op-offline",
+      mintUrl: MINT,
+      amount: 1020,
+      method,
+      methodData: {},
+      state,
+      createdAt: 1,
+      updatedAt: 1,
+      needsSwap: false,
+      fee: 0,
+      inputAmount: 1024,
+      inputProofSecrets: ["a", "b"],
+    };
+  }
+
+  it("marks the operation's proofs spent and finalizes without a wallet call", async () => {
+    const setProofState = mock(async () => {});
+    const finalize = mock(async () => {});
+    const coco = {
+      proofService: { setProofState },
+      ops: { send: { get: async () => operation("pending"), finalize } },
+    } as unknown as Manager;
+
+    await expect(markOfflineSendSpent(coco, "op-offline")).resolves.toEqual({
+      operationId: "op-offline",
+      state: "finalized",
+      markedSpent: 2,
+      actualAmount: 1024,
+    });
+    expect(setProofState).toHaveBeenCalledWith(MINT, ["a", "b"], "spent");
+    expect(finalize).toHaveBeenCalledWith("op-offline");
+  });
+
+  it("is idempotent for finalized operations", async () => {
+    const setProofState = mock(async () => {});
+    const finalize = mock(async () => {});
+    const coco = {
+      proofService: { setProofState },
+      ops: { send: { get: async () => operation("finalized"), finalize } },
+    } as unknown as Manager;
+
+    await expect(markOfflineSendSpent(coco, "op-offline")).resolves.toMatchObject({
+      markedSpent: 0,
+      state: "finalized",
+    });
+    expect(setProofState).not.toHaveBeenCalled();
+    expect(finalize).not.toHaveBeenCalled();
+  });
+
+  it("refuses online operations and non-pending offline states", async () => {
+    for (const candidate of [operation("pending", "default"), operation("prepared")]) {
+      const coco = {
+        ops: { send: { get: async () => candidate } },
+      } as unknown as Manager;
+      await expect(markOfflineSendSpent(coco, "op-offline")).rejects.toThrow();
+    }
+  });
+});
+
+describe("offline send with a real Coco Manager", () => {
+  it("creates and manually finalizes a no-swap token without mint state checks", async () => {
+    const database = new Database(":memory:");
+    const repo = new SqliteRepositories({ database });
+    await repo.init();
+    const coco = new Manager(repo, async () => new Uint8Array(64));
+    registerOfflineSendHandler(coco);
+    const send = mock(async () => { throw new Error("offline send attempted a swap"); });
+    const checkProofsStates = mock(async () => {
+      throw new Error("offline send attempted a mint state check");
+    });
+    const internals = coco as unknown as {
+      walletService: {
+        getWalletWithActiveKeysetId(mintUrl: string): Promise<unknown>;
+      };
+    };
+    internals.walletService.getWalletWithActiveKeysetId = async () => ({
+      wallet: { unit: "sat", send, checkProofsStates },
+    });
+
+    try {
+      await repo.mintRepository.addNewMint({
+        mintUrl: MINT,
+        name: "Offline test mint",
+        mintInfo: {},
+        trusted: true,
+        createdAt: 1,
+        updatedAt: 1,
+      } as never);
+      await repo.proofRepository.saveProofs(MINT, [
+        proof(512, "a"),
+        proof(512, "b"),
+        proof(1024, "c"),
+      ]);
+
+      const prepared = await coco.ops.send.prepare({
+        mintUrl: MINT,
+        amount: 1020,
+        target: { type: "offline" },
+      });
+      const { operation } = await coco.ops.send.execute(prepared.id);
+      expect(operation).toMatchObject({
+        method: "offline",
+        state: "pending",
+        inputAmount: 1024,
+        inputProofSecrets: ["c"],
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect((await repo.proofRepository.getProofBySecret(MINT, "c"))?.state).toBe(
+        "inflight",
+      );
+
+      await coco.ops.send.refresh(operation.id);
+      expect(checkProofsStates).not.toHaveBeenCalled();
+      expect((await coco.ops.send.get(operation.id))?.state).toBe("pending");
+
+      await markOfflineSendSpent(coco, operation.id);
+      expect((await repo.proofRepository.getProofBySecret(MINT, "c"))?.state).toBe(
+        "spent",
+      );
+      expect((await coco.ops.send.get(operation.id))?.state).toBe("finalized");
+      expect(checkProofsStates).not.toHaveBeenCalled();
+    } finally {
+      await coco.dispose();
+      database.close();
+    }
+  });
+});
+
+describe("watchOnlineInflightProofs", () => {
+  it("does not subscribe offline proofs after a restart", async () => {
+    const offline = { ...proof(1024, "offline"), state: "inflight" as const, usedByOperationId: "offline-op" };
+    const online = { ...proof(64, "online"), state: "inflight" as const, usedByOperationId: "default-op" };
+    const watchProof = mock(async () => {});
+    const coco = {
+      proofStateWatcher: { watchProof },
+      ops: {
+        send: {
+          get: async (id: string) => ({ id, method: id === "offline-op" ? "offline" : "default" }),
+        },
+      },
+    } as unknown as Manager;
+
+    await watchOnlineInflightProofs(coco, {
+      proofRepository: { getInflightProofs: async () => [offline, online] },
+    });
+
+    expect(watchProof).toHaveBeenCalledTimes(1);
+    expect(watchProof).toHaveBeenCalledWith(MINT, ["online"]);
+  });
+});

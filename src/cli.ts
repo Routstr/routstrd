@@ -2542,27 +2542,42 @@ program
     "Shortcut: numbers send Cashu, non-numbers pay a Lightning invoice",
   )
   .option("--mint-url <url>", "Mint URL to use")
-  .action(async (target: string, options: { mintUrl?: string }) => {
-    await warnIfWalletRecovering();
-    if (isPositiveIntegerString(target)) {
-      await handleDaemonCommand("/wallet/send/cashu", {
+  .option(
+    "--offline",
+    "Send the closest available proofs without a swap; finalize manually",
+    false,
+  )
+  .action(
+    async (
+      target: string,
+      options: { mintUrl?: string; offline: boolean },
+    ) => {
+      await warnIfWalletRecovering();
+      if (isPositiveIntegerString(target)) {
+        await handleDaemonCommand("/wallet/send/cashu", {
+          method: "POST",
+          body: {
+            amount: parsePositiveIntOrExit(target, "amount"),
+            mintUrl: options.mintUrl,
+            offline: options.offline,
+          },
+        });
+        return;
+      }
+      if (options.offline) {
+        console.error("--offline is only available when sending a Cashu amount");
+        process.exit(1);
+      }
+
+      await handleDaemonCommand("/wallet/send/bolt11", {
         method: "POST",
         body: {
-          amount: parsePositiveIntOrExit(target, "amount"),
+          invoice: target,
           mintUrl: options.mintUrl,
         },
       });
-      return;
-    }
-
-    await handleDaemonCommand("/wallet/send/bolt11", {
-      method: "POST",
-      body: {
-        invoice: target,
-        mintUrl: options.mintUrl,
-      },
-    });
-  });
+    },
+  );
 
 program
   .command("receive <value>")
@@ -3081,15 +3096,38 @@ walletSendCmd
   .command("cashu <amount>")
   .description("Create a Cashu token to send")
   .option("--mint-url <url>", "Mint URL to use")
-  .action(async (amount: string, options: { mintUrl?: string }) => {
-    await warnIfWalletRecovering();
-    await handleDaemonCommand("/wallet/send/cashu", {
-      method: "POST",
-      body: {
-        amount: parsePositiveIntOrExit(amount, "amount"),
-        mintUrl: options.mintUrl,
-      },
-    });
+  .option(
+    "--offline",
+    "Send the closest available proofs without a swap; finalize manually",
+    false,
+  )
+  .action(
+    async (
+      amount: string,
+      options: { mintUrl?: string; offline: boolean },
+    ) => {
+      await warnIfWalletRecovering();
+      await handleDaemonCommand("/wallet/send/cashu", {
+        method: "POST",
+        body: {
+          amount: parsePositiveIntOrExit(amount, "amount"),
+          mintUrl: options.mintUrl,
+          offline: options.offline,
+        },
+      });
+    },
+  );
+
+walletSendCmd
+  .command("mark-spent <operation-id>")
+  .description(
+    "Mark an offline token's proofs spent locally and finalize it (no mint check)",
+  )
+  .action(async (operationId: string) => {
+    await handleDaemonCommand(
+      `/wallet/send/cashu/${encodeURIComponent(operationId)}/mark-spent`,
+      { method: "POST" },
+    );
   });
 
 walletSendCmd

@@ -715,9 +715,29 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const amount = getRequiredPositiveNumberField(body, "amount");
         const mintUrl = optionalStringField(body, "mintUrl");
+        if (body.offline !== undefined && typeof body.offline !== "boolean") {
+          throw new WalletHttpError(400, "'offline' must be a boolean.");
+        }
+        if (body.offline === true) {
+          return {
+            output: await deps.walletClient.sendCashuOffline(amount, mintUrl),
+          };
+        }
         const token = await deps.walletClient.sendCashu(amount, mintUrl);
         return { output: { token, amount, mintUrl } };
       });
+      return;
+    }
+
+    const markSendSpentMatch = url.pathname.match(
+      /^\/wallet\/send\/cashu\/([^/]+)\/mark-spent$/,
+    );
+    if (req.method === "POST" && markSendSpentMatch?.[1]) {
+      await respond(res, async () => ({
+        output: await deps.walletClient.markSendSpent(
+          decodeURIComponent(markSendSpentMatch[1]!),
+        ),
+      }));
       return;
     }
 

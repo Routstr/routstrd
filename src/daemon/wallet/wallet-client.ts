@@ -108,6 +108,25 @@ export interface MintQuoteStatus {
   error?: string;
 }
 
+export interface OfflineCashuSendResult {
+  token: string;
+  operationId: string;
+  mintUrl: string;
+  requestedAmount: number;
+  /** Actual value of the selected proofs encoded in the token. */
+  actualAmount: number;
+  overpayment: number;
+  state: "pending";
+}
+
+export interface MarkSendSpentResult {
+  operationId: string;
+  state: "finalized";
+  /** Number marked by this call; zero when the operation was already final. */
+  markedSpent: number;
+  actualAmount: number;
+}
+
 /** Options for explicit PAID mint-quote recovery. */
 export interface WalletMintQuoteRecoveryOptions {
   /** Target only these operation ids (may include failed operations). */
@@ -218,6 +237,13 @@ export interface WalletClient {
   /** Progress of a top-up, when the wallet tracks mint operations. */
   getMintQuote?(operationId: string): Promise<MintQuoteStatus | null>;
   sendCashu(amount: number, mintUrl?: string): Promise<string>;
+  /** Send the closest available proof set without a swap or mint settlement watcher. */
+  sendCashuOffline(
+    amount: number,
+    mintUrl?: string,
+  ): Promise<OfflineCashuSendResult>;
+  /** Locally assert that an offline token was claimed, without contacting its mint. */
+  markSendSpent(operationId: string): Promise<MarkSendSpentResult>;
   sendBolt11(invoice: string, mintUrl?: string): Promise<string>;
   listMints(): Promise<string[]>;
   addMint(url: string): Promise<string>;
