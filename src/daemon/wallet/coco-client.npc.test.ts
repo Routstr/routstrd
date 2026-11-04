@@ -1,4 +1,4 @@
-import { MintApi, SendOpsApi } from "@cashu/coco-core";
+import { Manager, MintApi, SendOpsApi } from "@cashu/coco-core";
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -123,6 +123,98 @@ afterEach(() => {
 });
 
 describe("in-process coco client NPC integration", () => {
+  it("stops subscriptions before disposing plugins on actual client shutdown", async () => {
+    const events: string[] = [];
+    const pause = Manager.prototype.pauseSubscriptions;
+    const dispose = Manager.prototype.dispose;
+    const paused = spyOn(Manager.prototype, "pauseSubscriptions").mockImplementation(async function (this: Manager) {
+      await pause.call(this); events.push("paused");
+    });
+    const disposed = spyOn(Manager.prototype, "dispose").mockImplementation(async function (this: Manager) {
+      events.push("plugins"); await dispose.call(this);
+    });
+    try {
+      const client = await createCocoClient(testClientOptions());
+      await client.dispose?.();
+      expect(events).toEqual(["paused", "plugins"]);
+    } finally {
+      paused.mockRestore(); disposed.mockRestore();
+    }
+  });
+
+  it("stops the actual watcher when initialization fails after enabling it", async () => {
+    let watcher: { isRunning(): boolean } | undefined;
+    const fail = spyOn(Manager.prototype, "enableMintOperationProcessor").mockImplementationOnce(async function (this: Manager) {
+      watcher = (this as unknown as { proofStateWatcher: typeof watcher }).proofStateWatcher;
+      throw new Error("processor initialization failed");
+    });
+    try {
+      await expect(createCocoClient(testClientOptions())).rejects.toThrow("processor initialization failed");
+      expect(watcher?.isRunning()).toBe(false);
+    } finally { fail.mockRestore(); }
+  });
+
+  for (const startupFailure of [false, true]) {
+    it(`closes sockets reopened by watcher unsubscribe on ${startupFailure ? "startup failure" : "shutdown"}`, async () => {
+      const sockets: ControlledSocket[] = [];
+      class ControlledSocket extends EventTarget {
+        readyState = 0;
+        constructor(_url: string | URL) {
+          super(); sockets.push(this);
+          queueMicrotask(() => {
+            if (this.readyState !== 0) return;
+            this.readyState = 1;
+            this.dispatchEvent(new Event("open"));
+          });
+        }
+        send(_payload: string) {}
+        close() {
+          if (this.readyState === 3) return;
+          this.readyState = 3;
+          this.dispatchEvent(new Event("close"));
+        }
+      }
+      const originalWebSocket = globalThis.WebSocket;
+      globalThis.WebSocket = ControlledSocket as unknown as typeof WebSocket;
+      const enable = Manager.prototype.enableMintOperationProcessor;
+      const initialize = spyOn(Manager.prototype, "enableMintOperationProcessor").mockImplementationOnce(async function (this: Manager) {
+        const internals = this as unknown as {
+          mintService: { isTrustedMint(mint: string): Promise<boolean> };
+          proofStateWatcher: { watchProof(mint: string, secrets: string[]): Promise<void> };
+        };
+        const isTrusted = internals.mintService.isTrustedMint;
+        internals.mintService.isTrustedMint = async () => true;
+        try {
+          // Keep the real SubscriptionManager/HybridTransport/WsConnectionManager:
+          // replacing subscribe() would hide unsubscribe reopening the socket.
+          await internals.proofStateWatcher.watchProof("https://mint.example", ["socket-proof"]);
+        } finally { internals.mintService.isTrustedMint = isTrusted; }
+        if (startupFailure) throw new Error("processor initialization failed with live socket");
+        return enable.call(this);
+      });
+      let client: Awaited<ReturnType<typeof createCocoClient>> | undefined;
+      try {
+        if (startupFailure) {
+          await expect(createCocoClient(testClientOptions())).rejects.toThrow("processor initialization failed with live socket");
+        } else {
+          client = await createCocoClient(testClientOptions());
+          await client.dispose?.();
+        }
+        await Bun.sleep(0);
+        // pause closes the original socket; unsubscribe then creates another.
+        expect(sockets.length).toBeGreaterThanOrEqual(2);
+        expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+        await Bun.sleep(0);
+        expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+      } finally {
+        await client?.dispose?.();
+        for (const socket of sockets) socket.close();
+        initialize.mockRestore();
+        globalThis.WebSocket = originalWebSocket;
+      }
+    });
+  }
+
   it("registers the plugin with the interval fallback and exposes the NPC address", async () => {
     const client = await createCocoClient(testClientOptions());
     try {

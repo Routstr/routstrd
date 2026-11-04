@@ -1,8 +1,65 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc525908e1 100644
+index dbce3d4..c6cac89 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
-@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+@@ -3325,6 +3325,7 @@ var ProofStateWatcherService = class {
+ 	running = false;
+ 	unsubscribeByKey = /* @__PURE__ */ new Map();
+ 	inflightByKey = /* @__PURE__ */ new Set();
++	pendingNotifications = /* @__PURE__ */ new Set();
+ 	offProofsStateChanged;
+ 	offProofsSaved;
+ 	offUntrusted;
+@@ -3448,6 +3449,8 @@ var ProofStateWatcherService = class {
+ 				err
+ 			});
+ 		}
++		// A stopped watcher must not outlive the database its callbacks use.
++		await Promise.all(this.pendingNotifications);
+ 		this.inflightByKey.clear();
+ 		this.logger?.info("ProofStateWatcherService stopped");
+ 	}
+@@ -3457,17 +3460,21 @@ var ProofStateWatcherService = class {
+ 			this.logger?.debug("Skipping watch for untrusted mint", { mintUrl });
+ 			return;
+ 		}
++		if (!this.running) return;
+ 		const toWatch = Array.from(new Set(secrets)).filter((secret) => !this.unsubscribeByKey.has(toKey(mintUrl, secret)));
+ 		if (toWatch.length === 0) return;
+ 		const { secretByYHex, yHexBySecret } = buildYHexMapsForSecrets(toWatch);
+ 		const filters = Array.from(secretByYHex.keys());
+ 		const { subId, unsubscribe } = await this.subs.subscribe(mintUrl, "proof_state", filters, async (payload) => {
+-			if (payload.state !== "SPENT") return;
++			if (!this.running || payload.state !== "SPENT") return;
+ 			const secret = secretByYHex.get(payload.Y);
+ 			if (!secret) return;
+ 			const key = toKey(mintUrl, secret);
+ 			if (this.inflightByKey.has(key)) return;
+ 			this.inflightByKey.add(key);
++			let finish;
++			const notification = new Promise((resolve) => { finish = resolve; });
++			this.pendingNotifications.add(notification);
+ 			try {
+ 				await this.proofs.setProofState(mintUrl, [secret], "spent");
+ 				this.logger?.info("Marked inflight proof as spent from mint notification", {
+@@ -3484,8 +3491,16 @@ var ProofStateWatcherService = class {
+ 				});
+ 			} finally {
+ 				this.inflightByKey.delete(key);
++				this.pendingNotifications.delete(notification);
++				finish();
+ 			}
+ 		});
++		// stop() can run while subscribe() is awaiting the transport. Do not
++		// register late handles that stop() could not have seen.
++		if (!this.running) {
++			await unsubscribe();
++			return;
++		}
+ 		let didUnsubscribe = false;
+ 		const remaining = new Set(filters);
+ 		const groupUnsubscribeOnce = async () => {
+@@ -3849,7 +3864,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -13,7 +70,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  				const ctx = {
  					operation,
  					wallet,
-@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+@@ -3904,7 +3921,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -24,7 +81,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  				const ctx = {
  					operation: executing,
  					wallet,
-@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+@@ -4052,7 +4071,9 @@ var SendOperationService = class {
  			const handler = this.handlerProvider.get(operation.method);
  			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
  			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
@@ -35,7 +92,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  			let opForRollback = operation;
  			if (operation.state === "pending") {
  				const rollingBack = {
-@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+@@ -4170,7 +4191,9 @@ var SendOperationService = class {
  	*/
  	async recoverExecutingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -46,7 +103,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  		const result = await handler.recoverExecuting({
  			...this.buildDeps(),
  			operation: op,
-@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+@@ -4218,7 +4241,9 @@ var SendOperationService = class {
  	*/
  	async checkPendingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -58,7 +115,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  			...this.buildDeps(),
  			operation: op,
 diff --git a/dist/index.d.cts b/dist/index.d.cts
-index a3e2f5de211740aa414bf53e5952f2900c95330f..b58178c44ba352bac463aacb1f6f17af829ac505 100644
+index a3e2f5d..fc9ce53 100644
 --- a/dist/index.d.cts
 +++ b/dist/index.d.cts
 @@ -714,31 +714,31 @@ interface BaseHandlerDeps {
@@ -110,8 +167,16 @@ index a3e2f5de211740aa414bf53e5952f2900c95330f..b58178c44ba352bac463aacb1f6f17af
    prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation>;
    execute(ctx: ExecuteContext): Promise<ExecutionResult>;
    finalize?(ctx: FinalizeContext): Promise<void>;
+@@ -2757,6 +2761,7 @@ declare class ProofStateWatcherService {
+   private running;
+   private unsubscribeByKey;
+   private inflightByKey;
++  private pendingNotifications;
+   private offProofsStateChanged?;
+   private offProofsSaved?;
+   private offUntrusted?;
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-index 07b3c28e78e79e7ca368f586de5ecd61f939586b..e5fc8745a474abc1b63b3f1b124de5739f0a25eb 100644
+index 07b3c28..448d76d 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
 @@ -714,31 +714,31 @@ interface BaseHandlerDeps {
@@ -163,11 +228,76 @@ index 07b3c28e78e79e7ca368f586de5ecd61f939586b..e5fc8745a474abc1b63b3f1b124de573
    prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation>;
    execute(ctx: ExecuteContext): Promise<ExecutionResult>;
    finalize?(ctx: FinalizeContext): Promise<void>;
+@@ -2757,6 +2761,7 @@ declare class ProofStateWatcherService {
+   private running;
+   private unsubscribeByKey;
+   private inflightByKey;
++  private pendingNotifications;
+   private offProofsStateChanged?;
+   private offProofsSaved?;
+   private offUntrusted?;
 diff --git a/dist/index.js b/dist/index.js
-index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425fed33c9a 100644
+index 5ba83a0..2d0c05a 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+@@ -3325,6 +3325,7 @@ var ProofStateWatcherService = class {
+ 	running = false;
+ 	unsubscribeByKey = /* @__PURE__ */ new Map();
+ 	inflightByKey = /* @__PURE__ */ new Set();
++	pendingNotifications = /* @__PURE__ */ new Set();
+ 	offProofsStateChanged;
+ 	offProofsSaved;
+ 	offUntrusted;
+@@ -3448,6 +3449,8 @@ var ProofStateWatcherService = class {
+ 				err
+ 			});
+ 		}
++		// A stopped watcher must not outlive the database its callbacks use.
++		await Promise.all(this.pendingNotifications);
+ 		this.inflightByKey.clear();
+ 		this.logger?.info("ProofStateWatcherService stopped");
+ 	}
+@@ -3457,17 +3460,21 @@ var ProofStateWatcherService = class {
+ 			this.logger?.debug("Skipping watch for untrusted mint", { mintUrl });
+ 			return;
+ 		}
++		if (!this.running) return;
+ 		const toWatch = Array.from(new Set(secrets)).filter((secret) => !this.unsubscribeByKey.has(toKey(mintUrl, secret)));
+ 		if (toWatch.length === 0) return;
+ 		const { secretByYHex, yHexBySecret } = buildYHexMapsForSecrets(toWatch);
+ 		const filters = Array.from(secretByYHex.keys());
+ 		const { subId, unsubscribe } = await this.subs.subscribe(mintUrl, "proof_state", filters, async (payload) => {
+-			if (payload.state !== "SPENT") return;
++			if (!this.running || payload.state !== "SPENT") return;
+ 			const secret = secretByYHex.get(payload.Y);
+ 			if (!secret) return;
+ 			const key = toKey(mintUrl, secret);
+ 			if (this.inflightByKey.has(key)) return;
+ 			this.inflightByKey.add(key);
++			let finish;
++			const notification = new Promise((resolve) => { finish = resolve; });
++			this.pendingNotifications.add(notification);
+ 			try {
+ 				await this.proofs.setProofState(mintUrl, [secret], "spent");
+ 				this.logger?.info("Marked inflight proof as spent from mint notification", {
+@@ -3484,8 +3491,16 @@ var ProofStateWatcherService = class {
+ 				});
+ 			} finally {
+ 				this.inflightByKey.delete(key);
++				this.pendingNotifications.delete(notification);
++				finish();
+ 			}
+ 		});
++		// stop() can run while subscribe() is awaiting the transport. Do not
++		// register late handles that stop() could not have seen.
++		if (!this.running) {
++			await unsubscribe();
++			return;
++		}
+ 		let didUnsubscribe = false;
+ 		const remaining = new Set(filters);
+ 		const groupUnsubscribeOnce = async () => {
+@@ -3849,7 +3864,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -178,7 +308,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  				const ctx = {
  					operation,
  					wallet,
-@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+@@ -3904,7 +3921,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -189,7 +319,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  				const ctx = {
  					operation: executing,
  					wallet,
-@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+@@ -4052,7 +4071,9 @@ var SendOperationService = class {
  			const handler = this.handlerProvider.get(operation.method);
  			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
  			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
@@ -200,7 +330,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  			let opForRollback = operation;
  			if (operation.state === "pending") {
  				const rollingBack = {
-@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+@@ -4170,7 +4191,9 @@ var SendOperationService = class {
  	*/
  	async recoverExecutingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -211,7 +341,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  		const result = await handler.recoverExecuting({
  			...this.buildDeps(),
  			operation: op,
-@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+@@ -4218,7 +4241,9 @@ var SendOperationService = class {
  	*/
  	async checkPendingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);

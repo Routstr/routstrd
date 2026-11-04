@@ -153,50 +153,6 @@ interface OfflineSendManagerInternals {
   sendOperationService: {
     handlerProvider: SendHandlerRegistry;
   };
-  proofStateWatcher?: {
-    watchProof(mintUrl: string, secrets: string[]): Promise<void>;
-  };
-}
-
-interface InflightProofSource {
-  proofRepository: {
-    getInflightProofs(): Promise<CoreProof[]>;
-  };
-}
-
-/**
- * Restore subscriptions for online sends after starting Coco's watcher without
- * its bootstrap scan. The stock bootstrap checks and watches every inflight
- * proof, including offline operations that must remain manually settled.
- */
-export async function watchOnlineInflightProofs(
-  coco: Manager,
-  repo: InflightProofSource,
-): Promise<void> {
-  const watcher = (coco as unknown as OfflineSendManagerInternals).proofStateWatcher;
-  if (!watcher || typeof watcher.watchProof !== "function") {
-    throw new Error("Coco's proof-state watcher is unavailable");
-  }
-
-  const operationCache = new Map<string, Awaited<ReturnType<typeof coco.ops.send.get>>>();
-  const onlineByMint = new Map<string, string[]>();
-  for (const proof of await repo.proofRepository.getInflightProofs()) {
-    const operationId = proof.usedByOperationId ?? proof.createdByOperationId;
-    let operation = operationId ? operationCache.get(operationId) : undefined;
-    if (operationId && !operationCache.has(operationId)) {
-      operation = await coco.ops.send.get(operationId);
-      operationCache.set(operationId, operation);
-    }
-    if (operation?.method === "offline") continue;
-
-    const secrets = onlineByMint.get(proof.mintUrl) ?? [];
-    secrets.push(proof.secret);
-    onlineByMint.set(proof.mintUrl, secrets);
-  }
-
-  for (const [mintUrl, secrets] of onlineByMint) {
-    await watcher.watchProof(mintUrl, secrets);
-  }
 }
 
 export function createOfflineSendHandler(
