@@ -8,7 +8,6 @@ import {
   markOfflineSendSpent,
   registerOfflineSendHandler,
   selectClosestProofs,
-  watchOnlineInflightProofs,
 } from "./offline-send";
 
 const MINT = "https://mint.example";
@@ -427,28 +426,5 @@ describe("offline send with a real Coco Manager", () => {
       mint.stop(true);
       database.close();
     }
-  });
-});
-
-describe("watchOnlineInflightProofs", () => {
-  it("does not subscribe offline proofs after a restart", async () => {
-    const offline = { ...proof(1024, "offline"), state: "inflight" as const, usedByOperationId: "offline-op" };
-    const online = { ...proof(64, "online"), state: "inflight" as const, usedByOperationId: "default-op" };
-    const watchProof = mock(async () => {});
-    const coco = {
-      proofStateWatcher: { watchProof },
-      ops: {
-        send: {
-          get: async (id: string) => ({ id, method: id === "offline-op" ? "offline" : "default" }),
-        },
-      },
-    } as unknown as Manager;
-
-    await watchOnlineInflightProofs(coco, {
-      proofRepository: { getInflightProofs: async () => [offline, online] },
-    });
-
-    expect(watchProof).toHaveBeenCalledTimes(1);
-    expect(watchProof).toHaveBeenCalledWith(MINT, ["online"]);
   });
 });

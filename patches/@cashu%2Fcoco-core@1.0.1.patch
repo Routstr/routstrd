@@ -1,8 +1,17 @@
 diff --git a/dist/index.cjs b/dist/index.cjs
-index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc525908e1 100644
+index dbce3d417378f703b6ff9912769f9aa68e1287f2..e3ba4d65a2d34834fb320e5bd36c70e084363cc9 100644
 --- a/dist/index.cjs
 +++ b/dist/index.cjs
-@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+@@ -3459,0 +3460,1 @@ var ProofStateWatcherService = class {
++		if (!this.running) return;
+@@ -3488,0 +3490,6 @@ var ProofStateWatcherService = class {
++		// stop() can run while subscribe() is awaiting the transport. Do not
++		// register late handles that stop() could not have seen.
++		if (!this.running) {
++			await unsubscribe();
++			return;
++		}
+@@ -3849,7 +3856,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -13,7 +22,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  				const ctx = {
  					operation,
  					wallet,
-@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+@@ -3904,7 +3913,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -24,7 +33,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  				const ctx = {
  					operation: executing,
  					wallet,
-@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+@@ -4052,7 +4063,9 @@ var SendOperationService = class {
  			const handler = this.handlerProvider.get(operation.method);
  			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
  			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
@@ -35,7 +44,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  			let opForRollback = operation;
  			if (operation.state === "pending") {
  				const rollingBack = {
-@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+@@ -4170,7 +4183,9 @@ var SendOperationService = class {
  	*/
  	async recoverExecutingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -46,7 +55,7 @@ index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc
  		const result = await handler.recoverExecuting({
  			...this.buildDeps(),
  			operation: op,
-@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+@@ -4218,7 +4233,9 @@ var SendOperationService = class {
  	*/
  	async checkPendingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -164,10 +173,19 @@ index 07b3c28e78e79e7ca368f586de5ecd61f939586b..e5fc8745a474abc1b63b3f1b124de573
    execute(ctx: ExecuteContext): Promise<ExecutionResult>;
    finalize?(ctx: FinalizeContext): Promise<void>;
 diff --git a/dist/index.js b/dist/index.js
-index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425fed33c9a 100644
+index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..e0c3d6e519fa23bb20eb5f94b04185c2fca3e843 100644
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+@@ -3459,0 +3460,1 @@ var ProofStateWatcherService = class {
++		if (!this.running) return;
+@@ -3488,0 +3490,6 @@ var ProofStateWatcherService = class {
++		// stop() can run while subscribe() is awaiting the transport. Do not
++		// register late handles that stop() could not have seen.
++		if (!this.running) {
++			await unsubscribe();
++			return;
++		}
+@@ -3849,7 +3856,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -178,7 +196,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  				const ctx = {
  					operation,
  					wallet,
-@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+@@ -3904,7 +3913,9 @@ var SendOperationService = class {
  			try {
  				const handler = this.handlerProvider.get(operation.method);
  				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
@@ -189,7 +207,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  				const ctx = {
  					operation: executing,
  					wallet,
-@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+@@ -4052,7 +4063,9 @@ var SendOperationService = class {
  			const handler = this.handlerProvider.get(operation.method);
  			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
  			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
@@ -200,7 +218,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  			let opForRollback = operation;
  			if (operation.state === "pending") {
  				const rollingBack = {
-@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+@@ -4170,7 +4183,9 @@ var SendOperationService = class {
  	*/
  	async recoverExecutingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);
@@ -211,7 +229,7 @@ index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425
  		const result = await handler.recoverExecuting({
  			...this.buildDeps(),
  			operation: op,
-@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+@@ -4218,7 +4233,9 @@ var SendOperationService = class {
  	*/
  	async checkPendingOperation(op) {
  		const handler = this.handlerProvider.get(op.method);

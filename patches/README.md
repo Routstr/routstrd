@@ -49,3 +49,18 @@ upstream local-handler API when available. The real-Manager test in
 `offline-send.test.ts` uses stale metadata and a loopback mint returning 503,
 asserts zero requests on local paths, and checks that online sends still fail
 against the unavailable mint.
+
+The Coco patch also guards `ProofStateWatcherService.watchProof()` across its
+asynchronous trust check and subscription: when stopped, it must not subscribe
+or retain a subscription that completes after `stop()`. A late subscription is
+immediately unsubscribed. Both distributed runtime builds are patched.
+`online-proof-bootstrap.test.ts` exercises the real watcher shutdown race.
+
+Routstrd replaces only Coco's **existing-inflight bootstrap**, not its event
+listeners or online-send subscriptions. The replacement checks non-offline
+proofs, emits normal spent-proof events, and subscribes survivors in a caught
+background task. Offline proofs remain excluded; checks/subscriptions failing
+for one mint do not abort the others or gate wallet startup. Do not call Coco's
+`resumeSubscriptions()` without preserving this filtering: it recreates the
+watcher with the original/default unfiltered bootstrap settings. Routstrd does
+not currently call it.

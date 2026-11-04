@@ -1,3 +1,4 @@
+import { startOnlineProofBootstrap } from "./online-proof-bootstrap";
 import { sweepOfflineSends } from "./offline-sweep";
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
@@ -94,7 +95,6 @@ import { DEFAULT_MINT_URL, seedTrustedMints } from "./trusted-mints";
 import {
   markOfflineSendSpent,
   registerOfflineSendHandler,
-  watchOnlineInflightProofs,
 } from "./offline-send";
 
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
@@ -749,6 +749,7 @@ function constructCocoManager(
 async function enableCocoManager(
   coco: Manager,
   repo: SqliteRepositories,
+  shouldStop: () => boolean,
 ): Promise<void> {
   await coco.initPlugins();
   await coco.reconcileLegacyMintQuotes();
@@ -756,7 +757,9 @@ async function enableCocoManager(
   // Coco's bootstrap checks and subscribes every inflight proof. Start without
   // it, then restore subscriptions only for operations that are not offline.
   await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
-  await watchOnlineInflightProofs(coco, repo);
+  // Do not use resumeSubscriptions(): Coco recreates the watcher with its
+  // default unfiltered bootstrap, which would check/subscribe offline proofs.
+  startOnlineProofBootstrap(coco, repo, logger, shouldStop);
   await coco.enableMintOperationProcessor();
   // coco 1.0.1 maps melt quote expiry (NUT-05 20007) to UNPAID only while
   // recovering an *executing* operation. A pending melt whose quote the mint
@@ -2014,7 +2017,7 @@ export async function createCocoClient(
       );
     }
 
-    await enableCocoManager(coco, repo);
+    await enableCocoManager(coco, repo, () => disposed);
     const openDatabase = database;
 
     findFinalizedReceiveSibling = async (
@@ -2194,6 +2197,11 @@ export async function createCocoClient(
         logger.warn("Periodic mint and melt sweeps were not started because wallet recovery failed");
       });
   } catch (error) {
+    // A background bootstrap may still be awaiting a mint when startup fails.
+    disposed = true;
+    await coco?.dispose().catch((disposeError) => {
+      logger.warn("Could not dispose wallet after startup failure", { error: disposeError });
+    });
     database?.close();
     releaseLegacyPidClaim();
     releaseWalletPidClaim();
