@@ -53,8 +53,10 @@ against the unavailable mint.
 The Coco patch also guards `ProofStateWatcherService.watchProof()` across its
 asynchronous trust check and subscription: when stopped, it must not subscribe
 or retain a subscription that completes after `stop()`. A late subscription is
-immediately unsubscribed. Both distributed runtime builds are patched.
-`online-proof-bootstrap.test.ts` exercises the real watcher shutdown race.
+immediately unsubscribed. Stopped callbacks ignore late notifications, and
+`stop()` drains notifications already writing proofs before returning. Both
+distributed runtime builds and declarations are patched, with contextful hunks.
+`online-proof-bootstrap.test.ts` exercises the real watcher shutdown races.
 
 Routstrd replaces only Coco's **existing-inflight bootstrap**, not its event
 listeners or online-send subscriptions. The replacement checks non-offline
@@ -64,3 +66,21 @@ for one mint do not abort the others or gate wallet startup. Do not call Coco's
 `resumeSubscriptions()` without preserving this filtering: it recreates the
 watcher with the original/default unfiltered bootstrap settings. Routstrd does
 not currently call it.
+
+Bootstrap wallet loading, mint checks and subscription waits each have a 30-second
+budget so one stalled mint does not block later mints. A timeout is not transport
+cancellation: the actual promises and bootstrap task remain registered as recovery
+work, late check results are not applied, and shutdown retains the database/PID
+claims until work settles. Shutdown callers get the existing 30-second incomplete-
+disposal error rather than an unbounded wait; cleanup continues in the background.
+The same resource-retaining rule applies when startup fails after bootstrap begins.
+Coco's `Manager.dispose()` only disposes plugins, so routstrd explicitly pauses
+subscriptions/stops watchers first, then drains tracked work, disposes plugins and
+closes the database. A permanently hung SDK request/plugin can therefore retain
+resources until process exit; no timeout is represented as cancellation or a safe
+opportunity to close a database that may still receive writes.
+
+`resumeSubscriptions()` is not supported by the filtered bootstrap lifecycle: any
+future caller must restart this bootstrap as well as keep offline filtering. Merely
+forcing `watchExistingInflightOnStart: false` in the constructor would prevent the
+unfiltered scan but silently omit the online bootstrap after resume.

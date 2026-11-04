@@ -153,9 +153,6 @@ interface OfflineSendManagerInternals {
   sendOperationService: {
     handlerProvider: SendHandlerRegistry;
   };
-  proofStateWatcher?: {
-    watchProof(mintUrl: string, secrets: string[]): Promise<void>;
-  };
 }
 
 export function createOfflineSendHandler(

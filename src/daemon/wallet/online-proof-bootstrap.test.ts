@@ -1,6 +1,9 @@
 import { describe, expect, it, mock } from "bun:test";
 import { Manager, ProofStateWatcherService } from "@cashu/coco-core";
 import type { CoreProof } from "@cashu/coco-core";
+import { Database } from "bun:sqlite";
+import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
+import { createRecoveryDisposer, drainRecoveryWork } from "./recovery-work";
 import { startOnlineProofBootstrap, watchOnlineInflightProofs } from "./online-proof-bootstrap";
 
 function deferred<T>() {
@@ -90,6 +93,26 @@ describe("online inflight proof bootstrap", () => {
     expect(s.logger.warn).toHaveBeenCalledTimes(2);
   });
 
+  for (const phase of ["wallet", "check", "subscribe"] as const) {
+    it(`continues to later mints when ${phase} stalls and retains the actual work`, async () => {
+      const s = setup([proof("a"), proof("b", "mint-b")]);
+      const late = deferred<any>();
+      if (phase === "wallet") s.wallet.mockImplementationOnce(() => late.promise);
+      if (phase === "check") s.check.mockImplementationOnce(() => late.promise);
+      if (phase === "subscribe") s.watchProof.mockImplementationOnce(() => late.promise);
+      const outstanding = new Map<string, Promise<unknown>>();
+      await watchOnlineInflightProofs(s.coco as unknown as Manager, s.repo, s.logger, () => false,
+        { timeoutMs: 5, outstanding });
+      expect(s.check.mock.calls.some(([mint]) => mint === "mint-b")).toBe(true);
+      expect(s.watchProof.mock.calls.some(([mint]) => mint === "mint-b")).toBe(true);
+      expect(outstanding.size).toBe(1);
+      expect(JSON.stringify(s.logger.warn.mock.calls)).toContain("Timed out bootstrapping mint proofs");
+      late.resolve(phase === "wallet" ? { wallet: {} } : phase === "check" ? [{ state: "SPENT" }] : undefined);
+      await drainRecoveryWork(outstanding);
+      expect(s.setProofState).not.toHaveBeenCalled(); // late state results are not applied
+    });
+  }
+
   for (const states of [[], [{ state: "SPENT" }], [{ state: "SPENT" }, { state: "BOGUS" }], [null, { state: "SPENT" }]]) {
     it(`does not partially apply a malformed response ${JSON.stringify(states)}`, async () => {
       const s = setup([proof("a"), proof("b")]);
@@ -111,6 +134,7 @@ describe("online inflight proof bootstrap", () => {
     await Bun.sleep(0);
     expect(s.logger.warn).toHaveBeenCalledTimes(1);
     expect(s.logger.warn.mock.calls[0]![0]).toBe("Failed to bootstrap online inflight proofs");
+    expect(s.logger.warn.mock.calls[0]![1]).toEqual({ error: "database read failed" });
   });
 
   it("observes incompatible Coco internals without rejecting startup", async () => {
@@ -208,5 +232,82 @@ describe("SDK proof-state ordering", () => {
     await s.run();
     expect(s.setProofState.mock.calls).toEqual([["mint-a", ["spent"], "spent"]]);
     expect(s.watchProof.mock.calls).toEqual([["mint-a", ["unspent"]]]);
+  });
+});
+
+
+describe("real Manager bootstrap shutdown", () => {
+  it("stops the actual watcher and retains DB until timed-out metadata work finishes", async () => {
+    const database = new Database(":memory:");
+    const repo = new SqliteRepositories({ database });
+    await repo.init();
+    const coco = new Manager(repo, async () => new Uint8Array(64));
+    await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
+    const internals = coco as any;
+    internals.mintService.isTrustedMint = async () => false;
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    internals.walletService.getWalletWithActiveKeysetId = async () => {
+      entered.resolve();
+      await release.promise;
+      database.exec("CREATE TABLE late_metadata_write (id INTEGER)");
+      return { wallet: { checkProofsStates: async () => [] } };
+    };
+    const outstanding = new Map<string, Promise<unknown>>();
+    let stopped = false;
+    let closed = false;
+    const logger = { warn: mock((_message: string, _context: Record<string, unknown>) => {}) };
+    startOnlineProofBootstrap(coco, { proofRepository: { getInflightProofs: async () => [proof("a")] } },
+      logger, () => stopped, { timeoutMs: 5, outstanding });
+    await entered.promise;
+    await Bun.sleep(15);
+    const watcher = internals.proofStateWatcher;
+    const dispose = createRecoveryDisposer(() => { stopped = true; }, async () => {
+      await coco.pauseSubscriptions();
+      await drainRecoveryWork(outstanding);
+    }, async () => { await coco.dispose(); database.close(); closed = true; }, 5);
+    await expect(dispose()).rejects.toThrow("Timed out waiting for recovery");
+    expect(watcher.isRunning()).toBe(false);
+    expect(closed).toBe(false);
+    release.resolve();
+    await dispose();
+    expect(closed).toBe(true);
+  });
+
+  it("waits for a notification already writing and ignores callbacks after stop", async () => {
+    const database = new Database(":memory:");
+    const repo = new SqliteRepositories({ database });
+    await repo.init();
+    const coco = new Manager(repo, async () => new Uint8Array(64));
+    const internals = coco as any;
+    let notify!: (payload: unknown) => Promise<void>;
+    let y!: string;
+    internals.mintService.isTrustedMint = async () => true;
+    internals.subscriptions.subscribe = async (_mint: string, _kind: string, filters: string[], cb: typeof notify) => {
+      notify = cb; y = filters[0]!;
+      return { subId: "test", unsubscribe: async () => {} };
+    };
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let writes = 0;
+    internals.proofService.setProofState = async () => {
+      entered.resolve(); await release.promise;
+      database.exec("CREATE TABLE notification_write (id INTEGER)"); writes++;
+    };
+    await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
+    // No persisted proof is needed: the real finalization lookup returns none.
+    await internals.proofStateWatcher.watchProof("mint-a", ["secret"]);
+    const notification = notify({ state: "SPENT", Y: y });
+    await entered.promise;
+    let paused = false;
+    const pause = coco.pauseSubscriptions().then(() => { paused = true; });
+    await Bun.sleep(0);
+    expect(paused).toBe(false);
+    release.resolve();
+    await notification;
+    await pause;
+    await coco.dispose(); database.close();
+    await notify({ state: "SPENT", Y: y });
+    expect(writes).toBe(1);
   });
 });

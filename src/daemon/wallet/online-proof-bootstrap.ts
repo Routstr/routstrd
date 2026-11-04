@@ -1,4 +1,10 @@
 import type { CoreProof, Manager } from "@cashu/coco-core";
+import { withTimeout } from "../../utils/with-timeout";
+import { trackRecovery, type RecoveryWork } from "./recovery-work";
+
+const BOOTSTRAP_TIMEOUT_MS = 30_000;
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+interface BootstrapOptions { timeoutMs?: number; outstanding?: RecoveryWork }
 
 type Log = { warn(message: string, context: Record<string, unknown>): void };
 interface Source {
@@ -23,17 +29,25 @@ interface Internals {
 
 /** Start without gating wallet initialization; errors must remain observable. */
 export function startOnlineProofBootstrap(
-  coco: Manager, repo: Source, logger: Log, shouldStop: () => boolean,
+  coco: Manager, repo: Source, logger: Log, shouldStop: () => boolean, options: BootstrapOptions = {},
 ): void {
-  void watchOnlineInflightProofs(coco, repo, logger, shouldStop).catch((error) => {
-    logger.warn("Failed to bootstrap online inflight proofs", { error });
+  const work = watchOnlineInflightProofs(coco, repo, logger, shouldStop, options).catch((error) => {
+    logger.warn("Failed to bootstrap online inflight proofs", { error: errorMessage(error) });
   });
+  if (options.outstanding) trackRecovery(options.outstanding, "proof-bootstrap", work);
 }
 
 /** Preserve Coco's bootstrap check and subscriptions, excluding offline sends. */
 export async function watchOnlineInflightProofs(
   coco: Manager, repo: Source, logger: Log, shouldStop: () => boolean = () => false,
+  options: BootstrapOptions = {},
 ): Promise<void> {
+  // A bounded wait is not cancellation. Wallet loading can persist refreshed
+  // metadata, and late subscriptions need a live watcher to unsubscribe safely.
+  const bounded = <T>(key: string, work: Promise<T>) => withTimeout(
+    options.outstanding ? trackRecovery(options.outstanding, `proof-bootstrap:${key}`, work) : work,
+    options.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS, "Timed out bootstrapping mint proofs; underlying work may still be running",
+  );
   const internals = coco as unknown as Internals;
   const watcher = internals.proofStateWatcher;
   if (!watcher || typeof watcher.watchProof !== "function" || typeof watcher.isRunning !== "function" ||
@@ -57,7 +71,7 @@ export async function watchOnlineInflightProofs(
           operations.set(operationId, await coco.ops.send.get(operationId));
         } catch (error) {
           failedLookups.add(operationId);
-          logger.warn("Skipping inflight proofs after send lookup failed", { operationId, error });
+          logger.warn("Skipping inflight proofs after send lookup failed", { operationId, error: errorMessage(error) });
           continue;
         }
       }
@@ -72,11 +86,11 @@ export async function watchOnlineInflightProofs(
   for (const [mintUrl, proofs] of byMint) {
     if (!active()) return;
     try {
-      const { wallet } = await internals.walletService.getWalletWithActiveKeysetId(mintUrl);
+      const { wallet } = await bounded(`wallet:${mintUrl}`, internals.walletService.getWalletWithActiveKeysetId(mintUrl));
       if (!active()) return;
       // cashu-ts checkProofsStates maps mint Y values back into INPUT order.
       // Never zip raw mint responses (whose ordering is not guaranteed).
-      const states = await wallet.checkProofsStates(proofs);
+      const states = await bounded(`check:${mintUrl}`, wallet.checkProofsStates(proofs));
       if (!active()) return;
       if (!Array.isArray(states) || states.length !== proofs.length ||
           states.some((state) => !state || !["SPENT", "UNSPENT", "PENDING"].includes(state.state))) {
@@ -85,7 +99,7 @@ export async function watchOnlineInflightProofs(
       const spent = proofs.filter((_, index) => states[index]!.state === "SPENT").map((proof) => proof.secret);
       if (spent.length) await internals.proofService.setProofState(mintUrl, spent, "spent");
     } catch (error) {
-      logger.warn("Failed to check existing online inflight proofs", { mintUrl, error });
+      logger.warn("Failed to check existing online inflight proofs", { mintUrl, error: errorMessage(error) });
     }
     if (!active()) return;
     try {
@@ -94,9 +108,9 @@ export async function watchOnlineInflightProofs(
         .filter((proof) => proof.mintUrl === mintUrl).map((proof) => proof.secret));
       if (!active()) return;
       const secrets = proofs.filter((proof) => inflight.has(proof.secret)).map((proof) => proof.secret);
-      if (secrets.length) await watcher.watchProof(mintUrl, secrets);
+      if (secrets.length) await bounded(`subscribe:${mintUrl}`, watcher.watchProof(mintUrl, secrets));
     } catch (error) {
-      logger.warn("Failed to watch existing online inflight proofs", { mintUrl, error });
+      logger.warn("Failed to watch existing online inflight proofs", { mintUrl, error: errorMessage(error) });
     }
   }
 }

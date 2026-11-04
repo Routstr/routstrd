@@ -750,6 +750,7 @@ async function enableCocoManager(
   coco: Manager,
   repo: SqliteRepositories,
   shouldStop: () => boolean,
+  outstanding: RecoveryWork,
 ): Promise<void> {
   await coco.initPlugins();
   await coco.reconcileLegacyMintQuotes();
@@ -759,7 +760,7 @@ async function enableCocoManager(
   await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
   // Do not use resumeSubscriptions(): Coco recreates the watcher with its
   // default unfiltered bootstrap, which would check/subscribe offline proofs.
-  startOnlineProofBootstrap(coco, repo, logger, shouldStop);
+  startOnlineProofBootstrap(coco, repo, logger, shouldStop, { outstanding });
   await coco.enableMintOperationProcessor();
   // coco 1.0.1 maps melt quote expiry (NUT-05 20007) to UNPAID only while
   // recovering an *executing* operation. A pending melt whose quote the mint
@@ -2017,7 +2018,7 @@ export async function createCocoClient(
       );
     }
 
-    await enableCocoManager(coco, repo, () => disposed);
+    await enableCocoManager(coco, repo, () => disposed, recoveryOutstanding);
     const openDatabase = database;
 
     findFinalizedReceiveSibling = async (
@@ -2197,14 +2198,26 @@ export async function createCocoClient(
         logger.warn("Periodic mint and melt sweeps were not started because wallet recovery failed");
       });
   } catch (error) {
-    // A background bootstrap may still be awaiting a mint when startup fails.
-    disposed = true;
-    await coco?.dispose().catch((disposeError) => {
-      logger.warn("Could not dispose wallet after startup failure", { error: disposeError });
+    // Timeouts bound the caller, not cleanup: retain the DB and PID claims
+    // until late metadata writes/subscriptions and plugin disposal really settle.
+    const cleanup = createRecoveryDisposer(
+      () => { disposed = true; },
+      async () => {
+        await coco?.pauseSubscriptions();
+        await drainRecoveryWork(recoveryOutstanding);
+      },
+      async () => {
+        await coco?.dispose();
+        database?.close();
+        releaseLegacyPidClaim();
+        releaseWalletPidClaim();
+      },
+    );
+    await cleanup().catch((disposeError) => {
+      logger.warn("Wallet startup cleanup incomplete; resources retained until cleanup settles", {
+        error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+      });
     });
-    database?.close();
-    releaseLegacyPidClaim();
-    releaseWalletPidClaim();
     throw error;
   }
 
@@ -2234,6 +2247,8 @@ export async function createCocoClient(
   const disposeRecovery = createRecoveryDisposer(
     () => { disposed = true; },
     async () => {
+      // Manager.dispose() only disposes plugins; it does not stop watchers.
+      await coco.pauseSubscriptions();
       await recoveryPromise;
       await stopPendingMintSweep?.();
       await stopMeltSweep?.();

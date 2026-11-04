@@ -1,4 +1,4 @@
-import { MintApi, SendOpsApi } from "@cashu/coco-core";
+import { Manager, MintApi, SendOpsApi } from "@cashu/coco-core";
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -123,6 +123,37 @@ afterEach(() => {
 });
 
 describe("in-process coco client NPC integration", () => {
+  it("stops subscriptions before disposing plugins on actual client shutdown", async () => {
+    const events: string[] = [];
+    const pause = Manager.prototype.pauseSubscriptions;
+    const dispose = Manager.prototype.dispose;
+    const paused = spyOn(Manager.prototype, "pauseSubscriptions").mockImplementation(async function (this: Manager) {
+      await pause.call(this); events.push("paused");
+    });
+    const disposed = spyOn(Manager.prototype, "dispose").mockImplementation(async function (this: Manager) {
+      events.push("plugins"); await dispose.call(this);
+    });
+    try {
+      const client = await createCocoClient(testClientOptions());
+      await client.dispose?.();
+      expect(events).toEqual(["paused", "plugins"]);
+    } finally {
+      paused.mockRestore(); disposed.mockRestore();
+    }
+  });
+
+  it("stops the actual watcher when initialization fails after enabling it", async () => {
+    let watcher: { isRunning(): boolean } | undefined;
+    const fail = spyOn(Manager.prototype, "enableMintOperationProcessor").mockImplementationOnce(async function (this: Manager) {
+      watcher = (this as unknown as { proofStateWatcher: typeof watcher }).proofStateWatcher;
+      throw new Error("processor initialization failed");
+    });
+    try {
+      await expect(createCocoClient(testClientOptions())).rejects.toThrow("processor initialization failed");
+      expect(watcher?.isRunning()).toBe(false);
+    } finally { fail.mockRestore(); }
+  });
+
   it("registers the plugin with the interval fallback and exposes the NPC address", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
