@@ -1,0 +1,224 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index dbce3d417378f703b6ff9912769f9aa68e1287f2..d14ab076e7188bd13b89fdebf5d7bcdc525908e1 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+ 			try {
+ 				const handler = this.handlerProvider.get(operation.method);
+ 				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
+-				const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++				const wallet = handler.requiresWallet === false
++					? undefined
++					: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 				const ctx = {
+ 					operation,
+ 					wallet,
+@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+ 			try {
+ 				const handler = this.handlerProvider.get(operation.method);
+ 				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
+-				const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++				const wallet = handler.requiresWallet === false
++					? undefined
++					: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 				const ctx = {
+ 					operation: executing,
+ 					wallet,
+@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+ 			const handler = this.handlerProvider.get(operation.method);
+ 			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
+ 			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
+-			const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++			const wallet = handler.requiresWallet === false && operation.state === "prepared"
++				? undefined
++				: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 			let opForRollback = operation;
+ 			if (operation.state === "pending") {
+ 				const rollingBack = {
+@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+ 	*/
+ 	async recoverExecutingOperation(op) {
+ 		const handler = this.handlerProvider.get(op.method);
+-		const { wallet } = await this.walletService.getWalletWithActiveKeysetId(op.mintUrl);
++		const wallet = handler.requiresWallet === false
++			? undefined
++			: (await this.walletService.getWalletWithActiveKeysetId(op.mintUrl)).wallet;
+ 		const result = await handler.recoverExecuting({
+ 			...this.buildDeps(),
+ 			operation: op,
+@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+ 	*/
+ 	async checkPendingOperation(op) {
+ 		const handler = this.handlerProvider.get(op.method);
+-		const { wallet } = await this.walletService.getWalletWithActiveKeysetId(op.mintUrl);
++		const wallet = handler.requiresWallet === false
++			? undefined
++			: (await this.walletService.getWalletWithActiveKeysetId(op.mintUrl)).wallet;
+ 		const decision = await handler.checkPending?.({
+ 			...this.buildDeps(),
+ 			operation: op,
+diff --git a/dist/index.d.cts b/dist/index.d.cts
+index a3e2f5de211740aa414bf53e5952f2900c95330f..b58178c44ba352bac463aacb1f6f17af829ac505 100644
+--- a/dist/index.d.cts
++++ b/dist/index.d.cts
+@@ -714,31 +714,31 @@ interface BaseHandlerDeps {
+ }
+ interface BasePrepareContext extends BaseHandlerDeps {
+   operation: InitSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface PreparedContext extends BaseHandlerDeps {
+   operation: PreparedSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface ExecuteContext extends BaseHandlerDeps {
+   operation: ExecutingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+   reservedProofs: Proof[];
+ }
+ interface PendingContext extends BaseHandlerDeps {
+   operation: PendingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface FinalizeContext extends BaseHandlerDeps {
+   operation: PendingSendOperation;
+ }
+ interface RollbackContext extends BaseHandlerDeps {
+   operation: PreparedOrLaterOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface RecoverExecutingContext extends BaseHandlerDeps {
+   operation: ExecutingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ type ExecutionResult = {
+   status: 'PENDING';
+@@ -750,6 +750,10 @@ type ExecutionResult = {
+ };
+ type PendingCheckResult = 'finalize' | 'stay_pending' | 'rollback';
+ interface SendMethodHandler<M extends SendMethod = SendMethod> {
++  /** Opt out of wallet loading for local-only prepare, execute, recovery,
++   * pending checks and prepared rollback. Pending reclaim still loads a wallet.
++   * Such handlers receive undefined in ctx.wallet on these local paths. */
++  requiresWallet?: boolean;
+   prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation>;
+   execute(ctx: ExecuteContext): Promise<ExecutionResult>;
+   finalize?(ctx: FinalizeContext): Promise<void>;
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 07b3c28e78e79e7ca368f586de5ecd61f939586b..e5fc8745a474abc1b63b3f1b124de5739f0a25eb 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -714,31 +714,31 @@ interface BaseHandlerDeps {
+ }
+ interface BasePrepareContext extends BaseHandlerDeps {
+   operation: InitSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface PreparedContext extends BaseHandlerDeps {
+   operation: PreparedSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface ExecuteContext extends BaseHandlerDeps {
+   operation: ExecutingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+   reservedProofs: Proof[];
+ }
+ interface PendingContext extends BaseHandlerDeps {
+   operation: PendingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface FinalizeContext extends BaseHandlerDeps {
+   operation: PendingSendOperation;
+ }
+ interface RollbackContext extends BaseHandlerDeps {
+   operation: PreparedOrLaterOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ interface RecoverExecutingContext extends BaseHandlerDeps {
+   operation: ExecutingSendOperation;
+-  wallet: Wallet;
++  wallet: Wallet | undefined;
+ }
+ type ExecutionResult = {
+   status: 'PENDING';
+@@ -750,6 +750,10 @@ type ExecutionResult = {
+ };
+ type PendingCheckResult = 'finalize' | 'stay_pending' | 'rollback';
+ interface SendMethodHandler<M extends SendMethod = SendMethod> {
++  /** Opt out of wallet loading for local-only prepare, execute, recovery,
++   * pending checks and prepared rollback. Pending reclaim still loads a wallet.
++   * Such handlers receive undefined in ctx.wallet on these local paths. */
++  requiresWallet?: boolean;
+   prepare(ctx: BasePrepareContext): Promise<PreparedSendOperation>;
+   execute(ctx: ExecuteContext): Promise<ExecutionResult>;
+   finalize?(ctx: FinalizeContext): Promise<void>;
+diff --git a/dist/index.js b/dist/index.js
+index 5ba83a01593a2fbb706b9a97e458ccc570d9049e..825e6ef2146ad8184a2a96550bd48425fed33c9a 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -3849,7 +3849,9 @@ var SendOperationService = class {
+ 			try {
+ 				const handler = this.handlerProvider.get(operation.method);
+ 				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
+-				const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++				const wallet = handler.requiresWallet === false
++					? undefined
++					: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 				const ctx = {
+ 					operation,
+ 					wallet,
+@@ -3904,7 +3906,9 @@ var SendOperationService = class {
+ 			try {
+ 				const handler = this.handlerProvider.get(operation.method);
+ 				if (!handler) throw new Error(`No handler registered for method: ${operation.method}`);
+-				const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++				const wallet = handler.requiresWallet === false
++					? undefined
++					: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 				const ctx = {
+ 					operation: executing,
+ 					wallet,
+@@ -4052,7 +4056,9 @@ var SendOperationService = class {
+ 			const handler = this.handlerProvider.get(operation.method);
+ 			if (!handler.rollback) throw new Error(`Send operations of method ${operation.method} can not be rolled back`);
+ 			if (operation.state === "pending" && operation.method === "p2pk") throw new Error("Cannot rollback pending P2PK send operation");
+-			const { wallet } = await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl);
++			const wallet = handler.requiresWallet === false && operation.state === "prepared"
++				? undefined
++				: (await this.walletService.getWalletWithActiveKeysetId(operation.mintUrl)).wallet;
+ 			let opForRollback = operation;
+ 			if (operation.state === "pending") {
+ 				const rollingBack = {
+@@ -4170,7 +4176,9 @@ var SendOperationService = class {
+ 	*/
+ 	async recoverExecutingOperation(op) {
+ 		const handler = this.handlerProvider.get(op.method);
+-		const { wallet } = await this.walletService.getWalletWithActiveKeysetId(op.mintUrl);
++		const wallet = handler.requiresWallet === false
++			? undefined
++			: (await this.walletService.getWalletWithActiveKeysetId(op.mintUrl)).wallet;
+ 		const result = await handler.recoverExecuting({
+ 			...this.buildDeps(),
+ 			operation: op,
+@@ -4218,7 +4226,9 @@ var SendOperationService = class {
+ 	*/
+ 	async checkPendingOperation(op) {
+ 		const handler = this.handlerProvider.get(op.method);
+-		const { wallet } = await this.walletService.getWalletWithActiveKeysetId(op.mintUrl);
++		const wallet = handler.requiresWallet === false
++			? undefined
++			: (await this.walletService.getWalletWithActiveKeysetId(op.mintUrl)).wallet;
+ 		const decision = await handler.checkPending?.({
+ 			...this.buildDeps(),
+ 			operation: op,

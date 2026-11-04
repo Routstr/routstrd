@@ -204,9 +204,89 @@ mark it spent and finalize the operation locally:
 routstrd wallet send mark-spent <operation-id>
 ```
 
-`mark-spent` is a local assertion and does not verify claim status with the
-mint. Normal sends without `--offline` retain Coco's swap and automatic
+`mark-spent` prompts for confirmation (`--yes` bypasses it for automation).
+It is an irreversible local assertion and does not verify claim status with the
+mint: those proofs will not be checked again even if the recipient never claims
+them. As a mint-verified alternative, `wallet check-proofs` checks inflight
+proofs and can automatically finalize offline sends whose proofs are spent.
+
+`wallet cleanup` never reclaims offline sends. Use the explicitly confirmed
+`wallet sweep-offline` below instead; age alone does not mean a token was abandoned.
+Normal sends without `--offline` retain Coco's swap and automatic
 proof-state behavior.
+
+### Sweeping old offline sends (explicit operator action)
+
+Offline tokens **do not expire after seven days**. A recipient may hold one
+for months. Routstrd never automatically reclaims them during startup.
+To inspect pending offline sends aged at least seven days:
+
+```sh
+routstrd wallet sweep-offline --dry-run
+# Limit to a mint or override the age in hours:
+routstrd wallet sweep-offline --mint-url https://mint.example --min-age 336 --dry-run
+```
+
+The preview is local only: it lists operation IDs, mints and token face values;
+it does not establish whether a recipient claimed a token. Age is measured
+from the send operation's creation time, not its last refresh. Only pending
+`offline` operations qualify for reclaim; aged `rolling_back` operations are
+reported separately as **stuck** even in a dry run. Online, executing and
+prepared operations are not swept (a stale prepared send is outside this tool's scope).
+For a read-only mint-backed check of ready/inflight proofs across the wallet,
+use `routstrd wallet check-proofs --dry-run`; its report is grouped by mint,
+not by send operation.
+
+```sh
+routstrd wallet sweep-offline
+# Non-interactive use requires explicit consent:
+routstrd wallet sweep-offline --yes
+```
+
+**Reclaiming invalidates the outstanding token, even if the recipient still
+holds it.** The command warns and asks `[y/N]`; without a terminal, use `--yes`
+or it refuses to apply. Mint connectivity is required and reclaim fees may
+reduce the returned value. Amounts in the report are token face values, not net
+reclaim proceeds.
+
+For each candidate, the sweep asks the mint about its proofs:
+
+- **Claimed:** every proof is SPENT; persist mint-verified settlement and finalize
+  the send. No value is reclaimed.
+- **Reclaimed:** every proof is UNSPENT; use Coco's normal mint-backed reclaim to
+  swap into fresh local proofs. Shared proofs are never merely restored to ready.
+- **Unresolved:** mixed, PENDING or unknown states; leave the token untouched.
+- **Failed:** unreachable mint, malformed response, fee-exhausted token, or failed
+  reclaim/finalization. Continue to other operations and report the operation ID.
+  A recipient can redeem between check and reclaim; that race is reported as a
+  failure, never a successful reclaim.
+- **Stuck:** an earlier failed/interrupted reclaim left Coco in `rolling_back`.
+  The sweep does not retry it or change its proofs. Normal startup recovery only
+  warns; neither cleanup, `wallet doctor` (directory diagnostics), nor re-running
+  this sweep repairs it. Preserve the wallet database/config and seed backups,
+  inspect history, and seek manual recovery via seed restore in a compatible
+  Cashu wallet. SPENT inputs alone cannot distinguish recipient redemption from
+  our own completed swap whose response was lost; do not reset the operation or
+  restore shared proofs to ready.
+
+Mint metadata and proof-state reads have 30-second wait limits per operation;
+a failed read leaves the token untouched and the sweep continues. Reclaim swaps
+are not timed out or cancelled: an HTTP/CLI timeout does not stop daemon work.
+Shutdown waits for tracked sweep work and any late metadata reads before closing
+storage (a slow mint can delay completion).
+
+The CLI exits nonzero for failures, unresolved tokens or stuck operations.
+Dry runs report candidates and stuck operations, not claimed/reclaimed counts. This is separate from manual
+`mark-spent`, which asserts settlement without mint verification.
+The daemon API is `POST /wallet/sweep-offline` with optional `mintUrl`,
+`minAgeMs` (default 604800000), and `dryRun`; applying requires
+`confirmed: true` even for API clients. A supplied `mintUrl` must be a non-empty
+HTTP(S) URL, without credentials, query or fragment. An unmatched mint filter
+produces a CLI warning; it does not mean that mint has no outstanding tokens.
+
+**Never expose the daemon HTTP port to untrusted clients or the public internet.**
+Wallet routes are unauthenticated; a confirmed sweep can invalidate recipients'
+tokens. Keep the default loopback binding or protect access outside routstrd.
 
 ### NPC (Lightning Address)
 

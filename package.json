@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@cashu/cashu-ts": "^4.3.0",
-    "@cashu/coco-core": "^1.0.1",
+    "@cashu/coco-core": "1.0.1",
     "@cashu/coco-sqlite-bun": "^1.0.1",
     "@routstr/sdk": "^0.5.0",
     "@scure/bip39": "^2.2.0",
@@ -64,6 +64,7 @@
   },
   "patchedDependencies": {
     "npubcash-sdk@0.3.2": "patches/npubcash-sdk@0.3.2.patch",
-    "coco-cashu-plugin-npc@2.4.1": "patches/coco-cashu-plugin-npc@2.4.1.patch"
+    "coco-cashu-plugin-npc@2.4.1": "patches/coco-cashu-plugin-npc@2.4.1.patch",
+    "@cashu/coco-core@1.0.1": "patches/@cashu%2Fcoco-core@1.0.1.patch"
   }
 }

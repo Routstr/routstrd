@@ -300,3 +300,96 @@ describe("initializeWallet", () => {
     expect(permissions(walletConfig)).toBe(0o600);
   });
 });
+
+describe("offline settlement confirmation", () => {
+  test("refuses non-interactive mark-spent without --yes before contacting the daemon", async () => {
+    const proc = Bun.spawn([
+      process.execPath, join(import.meta.dir, "index.ts"), "wallet", "send", "mark-spent", "test-operation",
+    ], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const stderr = await new Response(proc.stderr).text();
+    expect(await proc.exited).toBe(1);
+    expect(stderr).toContain("use --yes for non-interactive use");
+  });
+});
+
+
+describe("offline sweep CLI", () => {
+  const summary = { dryRun: false, minAgeMs: 604800000, candidates: 0, skipped: 0,
+    stuck: 0, claimed: 0, reclaimed: 0, unresolved: 0, failed: 0, operations: [] };
+
+  async function run(args: string[], output: Record<string, unknown> = summary) {
+    const bodies: unknown[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (req) => {
+      if (new URL(req.url).pathname === "/health") return Response.json({ status: "ok" });
+      bodies.push(await req.json());
+      return Response.json({ output });
+    } });
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false }));
+    try {
+      const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), "wallet", "sweep-offline", ...args], {
+        env: { ...process.env, ROUTSTRD_DIR: dir }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+      ]);
+      return { stdout, stderr, exitCode, bodies };
+    } finally { server.stop(true); }
+  }
+
+  test("refuses invalid ages and mint filters before contacting the daemon", async () => {
+    for (const minAge of ["", "-1", "NaN", "Infinity", "1hour", "9999999999999999999"]) {
+      const result = await run(["--min-age", minAge, "--yes"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Invalid --min-age");
+      expect(result.bodies).toEqual([]);
+    }
+    for (const mint of ["", " ", "bad-url"]) {
+      const result = await run(["--mint-url", mint, "--yes"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("mintUrl");
+      expect(result.bodies).toEqual([]);
+    }
+  });
+
+  test("requires consent without a TTY", async () => {
+    const result = await run([]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("requires confirmation");
+    expect(result.bodies).toEqual([]);
+  });
+
+  test("parses fractional hours and normalizes filters for a local preview", async () => {
+    const result = await run(["--dry-run", "--min-age", "0.25", "--mint-url", "HTTPS://MINT.EXAMPLE:443/"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.bodies).toEqual([{ dryRun: true, confirmed: false, minAgeMs: 900000, mintUrl: "https://mint.example" }]);
+    expect(result.stdout).toContain("not checked with mint");
+    expect(result.stderr).toContain("No aged pending offline sends matched mint");
+  });
+
+  test("accepts explicit confirmation and defaults to seven days", async () => {
+    const result = await run(["--yes"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.bodies).toEqual([{ dryRun: false, confirmed: true, minAgeMs: 604800000 }]);
+  });
+
+  test("returns nonzero for failed, unresolved and stuck sends (including previews)", async () => {
+    for (const kind of ["failed", "unresolved", "stuck"]) {
+      const result = await run(["--yes"], { ...summary, [kind]: 1 });
+      expect(result.exitCode).toBe(1);
+    }
+    const preview = await run(["--dry-run"], { ...summary, stuck: 1,
+      operations: [{ operationId: "stuck-op", mintUrl: "https://mint.example", amount: 8, outcome: "stuck", error: "manual recovery via seed restore may be needed" }] });
+    expect(preview.exitCode).toBe(1);
+    expect(preview.stdout).toContain("stuck-op");
+    expect(preview.stdout).toContain("seed restore");
+  });
+
+  test("rejects the removed cleanup --include-offline escape hatch", async () => {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), "wallet", "cleanup", "--include-offline", "--yes"], {
+      stdin: "ignore", stdout: "pipe", stderr: "pipe",
+    });
+    expect(await new Response(proc.stderr).text()).toContain("unknown option '--include-offline'");
+    expect(await proc.exited).toBe(1);
+  });
+});

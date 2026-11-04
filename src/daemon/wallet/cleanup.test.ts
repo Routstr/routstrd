@@ -177,3 +177,13 @@ describe("mint cleanup reporting", () => {
       .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 1, leftForRecovery: 2 });
   });
 });
+
+describe("offline cleanup safety", () => {
+  it("never reclaims offline sends, even with a legacy includeOffline option", () => {
+    const options = {
+      mints: [], melts: [], nowMs: NOW_MS, minAgeMs: DAY_MS, includeOffline: true,
+      sends: [{ ...send({ id: "offline" }), method: "offline" }, { ...send({ id: "online" }), method: "default" }],
+    };
+    expect(selectCleanupOperations(options).sendsToReclaim.map((op) => op.id)).toEqual(["online"]);
+  });
+});

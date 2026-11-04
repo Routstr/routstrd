@@ -132,7 +132,7 @@ export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
 export const DAEMON_LONG_REQUEST_TIMEOUT_MS = 600_000;
 
 /** Routes that may legitimately outlive the default request timeout. */
-const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/"];
+const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/", "/wallet/sweep-offline", "/wallet/cleanup"];
 
 function requestTimeoutMs(path: string): number {
   const pathname = path.split("?")[0] ?? path;

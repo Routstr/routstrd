@@ -68,7 +68,7 @@ describe("daemon request deadline", () => {
     expect(requestedDeadlines).toEqual([DAEMON_REQUEST_TIMEOUT_MS]);
   });
 
-  for (const path of ["/wallet/send/bolt11", "/wallet/receive/cashu"]) {
+  for (const path of ["/wallet/send/bolt11", "/wallet/receive/cashu", "/wallet/sweep-offline", "/wallet/cleanup"]) {
     test(`uses the long deadline for value-moving route ${path}`, async () => {
       shortenDeadline();
       globalThis.fetch = (async () => Response.json({ output: "paid" })) as unknown as typeof fetch;

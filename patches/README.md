@@ -31,3 +31,21 @@ headers and during bodies, deadline recovery, body-stream cancellation,
 shutdown cancellation independent of the deadline, and successful pagination.
 The separate mocked wallet integration test explicitly holds recovery and
 verifies that disposal prevents a startup catch-up; it does not test transport.
+
+## Coco local-only send handlers
+
+`@cashu/coco-core@1.0.1` is pinned and patched in both ESM/CommonJS builds
+and their declarations. Send handlers can opt out of wallet loading with
+`requiresWallet: false`. Such handlers receive `undefined` for `ctx.wallet`
+in prepare, execute, pending checks, executing recovery and prepared rollback.
+Pending reclaim still loads a wallet: reclaiming a shared token requires the mint.
+Handlers without the opt-out retain Coco's original behavior.
+
+Routstrd's offline handler exports existing sat proofs without mint metadata,
+keys or wallet-cache refreshes. This does not make explicit proof checks,
+reclaim, or unrelated daemon activity offline. Re-evaluate this patch and the
+private handler-registration integration on every Coco upgrade; prefer an
+upstream local-handler API when available. The real-Manager test in
+`offline-send.test.ts` uses stale metadata and a loopback mint returning 503,
+asserts zero requests on local paths, and checks that online sends still fail
+against the unavailable mint.

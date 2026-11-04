@@ -1,3 +1,4 @@
+import { sweepOfflineSends } from "./offline-sweep";
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
 import { recoveryKey, trackRecovery, drainRecoveryWork, waitForRecoveryWork, createRecoveryDisposer, type RecoveryWork } from "./recovery-work";
 import { installMeltQuoteExpiryHandler } from "./melt-quote-expiry";
@@ -2483,24 +2484,6 @@ export async function createCocoClient(
       const { operation, token } = await coco.ops.send.execute(prepared.id);
       const actualAmount = operation.inputAmount;
 
-      // Coco creates history from operation.amount (the requested floor).
-      // For an offline overpayment, retain the value that actually left the
-      // wallet so history agrees with the encoded token and balance change.
-      try {
-        const entry = await historyRepository?.getSendHistoryEntry(
-          operation.mintUrl,
-          operation.id,
-        );
-        if (entry) {
-          entry.amount = actualAmount;
-          await historyRepository?.updateHistoryEntry(entry);
-        }
-      } catch (error) {
-        logger.warn("Could not record offline send's actual amount in history", {
-          operationId: operation.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
 
       return {
         token: getEncodedToken(token),
@@ -2511,6 +2494,16 @@ export async function createCocoClient(
         overpayment: actualAmount - amount,
         state: "pending",
       };
+    },
+
+    async sweepOfflineSends(options) {
+      await waitForRecovery();
+      // Retain actual swap work through disposal, even if the HTTP client leaves.
+      return trackRecovery(recoveryOutstanding, recoveryKey("offline-sweep", crypto.randomUUID()),
+        sweepOfflineSends(coco, options, Date.now(), {
+          shouldStop: () => disposed,
+          trackRead: (work) => { trackRecovery(recoveryOutstanding, recoveryKey("offline-sweep-read", crypto.randomUUID()), work); },
+        }));
     },
 
     async markSendSpent(operationId: string): Promise<MarkSendSpentResult> {

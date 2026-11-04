@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
-import { Manager } from "@cashu/coco-core";
+import { getDecodedToken, getEncodedToken, Manager } from "@cashu/coco-core";
 import type { CoreProof, SendMethodHandler } from "@cashu/coco-core";
 import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
 import { Database } from "bun:sqlite";
@@ -55,6 +55,56 @@ describe("selectClosestProofs", () => {
     const second = selectClosestProofs([...candidates].reverse(), 4);
     expect(first?.map((entry) => entry.secret)).toEqual(["a", "b"]);
     expect(second?.map((entry) => entry.secret)).toEqual(["a", "b"]);
+  });
+
+  it("selects from 500 binary proofs without a target-sized search", () => {
+    const candidates = Array.from({ length: 500 }, (_, i) =>
+      proof(2 ** ((i * 5) % 14), `proof-${String(i).padStart(3, "0")}`),
+    );
+    const start = performance.now();
+    const selected = selectClosestProofs(candidates, 100_000)!;
+    expect(selected.reduce((sum, entry) => sum + entry.amount, 0)).toBe(100_000);
+    expect(new Set(selected.map((entry) => entry.secret)).size).toBe(selected.length);
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  it("handles binary denominations above the 32-bit range", () => {
+    expect(amounts(selectClosestProofs([proof(2 ** 40), proof(2 ** 41)], 2 ** 40 + 1)))
+      .toEqual([2 ** 41]);
+  });
+
+  it("matches exhaustive selection for bounded binary wallets", () => {
+    let seed = 170;
+    const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+    for (let trial = 0; trial < 100; trial++) {
+      const candidates = Array.from({ length: 10 }, (_, i) =>
+        proof(2 ** (random() % 6), `p${i}`),
+      );
+      const target = 1 + random() % 150;
+      let best: CoreProof[] | null = null;
+      let bestSum = Infinity;
+      for (let mask = 0; mask < 1 << candidates.length; mask++) {
+        const subset = candidates.filter((_, i) => mask & (1 << i));
+        const sum = subset.reduce((total, entry) => total + entry.amount, 0);
+        if (sum < target) continue;
+        if (sum < bestSum || (sum === bestSum && (
+          !best || subset.length < best.length ||
+          (subset.length === best.length &&
+            subset.map((entry) => entry.secret).join("\0") < best.map((entry) => entry.secret).join("\0"))
+        ))) {
+          best = subset;
+          bestSum = sum;
+        }
+      }
+      expect(selectClosestProofs(candidates, target)).toEqual(best);
+    }
+  });
+
+  it("fails clearly when non-binary selection exceeds its work budget", () => {
+    const candidates = Array.from({ length: 500 }, (_, i) =>
+      proof(3 * 2 ** ((i * 5) % 14), `proof-${i}`),
+    );
+    expect(() => selectClosestProofs(candidates, 100_000)).toThrow("work limit");
   });
 
   it("rejects invalid amounts and duplicate secrets", () => {
@@ -113,7 +163,7 @@ describe("offline send handler", () => {
       "op-offline",
     );
     expect(prepared).toMatchObject({
-      amount: 1020,
+      amount: 1024,
       inputAmount: 1024,
       inputProofSecrets: ["c"],
       needsSwap: false,
@@ -281,69 +331,100 @@ describe("markOfflineSendSpent", () => {
 });
 
 describe("offline send with a real Coco Manager", () => {
-  it("creates and manually finalizes a no-swap token without mint state checks", async () => {
+  it("sends, refreshes and recovers locally with stale metadata and an unavailable mint", async () => {
     const database = new Database(":memory:");
     const repo = new SqliteRepositories({ database });
     await repo.init();
     const coco = new Manager(repo, async () => new Uint8Array(64));
     registerOfflineSendHandler(coco);
-    const send = mock(async () => { throw new Error("offline send attempted a swap"); });
-    const checkProofsStates = mock(async () => {
-      throw new Error("offline send attempted a mint state check");
+    let mintRequests = 0;
+    const mint = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        mintRequests++;
+        return new Response("mint unavailable", { status: 503 });
+      },
     });
-    const internals = coco as unknown as {
-      walletService: {
-        getWalletWithActiveKeysetId(mintUrl: string): Promise<unknown>;
-      };
-    };
-    internals.walletService.getWalletWithActiveKeysetId = async () => ({
-      wallet: { unit: "sat", send, checkProofsStates },
-    });
+    const mintUrl = `http://127.0.0.1:${mint.port}`;
 
     try {
       await repo.mintRepository.addNewMint({
-        mintUrl: MINT,
+        mintUrl,
         name: "Offline test mint",
         mintInfo: {},
         trusted: true,
         createdAt: 1,
-        updatedAt: 1,
+        updatedAt: Math.floor(Date.now() / 1000) - 3600,
       } as never);
-      await repo.proofRepository.saveProofs(MINT, [
-        proof(512, "a"),
-        proof(512, "b"),
-        proof(1024, "c"),
+      await repo.proofRepository.saveProofs(mintUrl, [
+        { ...proof(512, "a"), mintUrl },
+        { ...proof(512, "b"), mintUrl },
+        { ...proof(1024, "c"), mintUrl },
       ]);
 
       const prepared = await coco.ops.send.prepare({
-        mintUrl: MINT,
+        mintUrl,
         amount: 1020,
         target: { type: "offline" },
       });
-      const { operation } = await coco.ops.send.execute(prepared.id);
+      expect(prepared.amount).toBe(1024);
+      expect(prepared.methodData).toEqual({ requestedAmount: 1020 });
+      expect((await repo.historyRepository.getSendHistoryEntry(mintUrl, prepared.id))?.amount).toBe(1024);
+      const { operation, token } = await coco.ops.send.execute(prepared.id);
+      expect(getDecodedToken(getEncodedToken(token))).toMatchObject({
+        mint: mintUrl, unit: "sat", proofs: [{ amount: 1024, secret: "c" }],
+      });
       expect(operation).toMatchObject({
         method: "offline",
         state: "pending",
         inputAmount: 1024,
         inputProofSecrets: ["c"],
       });
-      expect(send).not.toHaveBeenCalled();
-      expect((await repo.proofRepository.getProofBySecret(MINT, "c"))?.state).toBe(
+      expect(mintRequests).toBe(0);
+      expect((await repo.proofRepository.getProofBySecret(mintUrl, "c"))?.state).toBe(
         "inflight",
       );
 
       await coco.ops.send.refresh(operation.id);
-      expect(checkProofsStates).not.toHaveBeenCalled();
+      expect(mintRequests).toBe(0);
       expect((await coco.ops.send.get(operation.id))?.state).toBe("pending");
 
+      await coco.ops.send.recovery.run();
+      expect((await coco.ops.send.get(operation.id))?.state).toBe("pending");
+      expect(mintRequests).toBe(0);
+
+      // Prepared cancellation also requires no wallet or mint keys.
+      const cancelled = await coco.ops.send.prepare({
+        mintUrl, amount: 512, target: { type: "offline" },
+      });
+      await coco.ops.send.cancel(cancelled.id);
+      expect((await repo.proofRepository.getProofBySecret(mintUrl, "a"))?.state).toBe("ready");
+      expect(mintRequests).toBe(0);
+
+      // Simulate a crash after persisting executing, before returning a token.
+      const interrupted = await coco.ops.send.prepare({
+        mintUrl, amount: 512, target: { type: "offline" },
+      });
+      await repo.sendOperationRepository.update({ ...interrupted, state: "executing" });
+      await coco.ops.send.recovery.run();
+      expect((await coco.ops.send.get(interrupted.id))?.state).toBe("rolled_back");
+      expect((await repo.proofRepository.getProofBySecret(mintUrl, "a"))?.state).toBe("ready");
+      expect(mintRequests).toBe(0);
+
       await markOfflineSendSpent(coco, operation.id);
-      expect((await repo.proofRepository.getProofBySecret(MINT, "c"))?.state).toBe(
+      expect((await repo.proofRepository.getProofBySecret(mintUrl, "c"))?.state).toBe(
         "spent",
       );
       expect((await coco.ops.send.get(operation.id))?.state).toBe("finalized");
-      expect(checkProofsStates).not.toHaveBeenCalled();
+      expect(mintRequests).toBe(0);
+
+      // Control: ordinary sends must still load a wallet and fail at this mint.
+      await expect(coco.ops.send.prepare({ mintUrl, amount: 512 })).rejects.toThrow();
+      expect(mintRequests).toBeGreaterThan(0);
     } finally {
       await coco.dispose();
+      mint.stop(true);
       database.close();
     }
   });
