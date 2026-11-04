@@ -2498,10 +2498,12 @@ export async function createCocoClient(
 
     async sweepOfflineSends(options) {
       await waitForRecovery();
-      return sweepOfflineSends(coco, {
-        ...options,
-        mintUrl: options.mintUrl ? normalizeMintUrl(options.mintUrl) : undefined,
-      });
+      // Retain actual swap work through disposal, even if the HTTP client leaves.
+      return trackRecovery(recoveryOutstanding, recoveryKey("offline-sweep", crypto.randomUUID()),
+        sweepOfflineSends(coco, options, Date.now(), {
+          shouldStop: () => disposed,
+          trackRead: (work) => { trackRecovery(recoveryOutstanding, recoveryKey("offline-sweep-read", crypto.randomUUID()), work); },
+        }));
     },
 
     async markSendSpent(operationId: string): Promise<MarkSendSpentResult> {
@@ -2641,7 +2643,6 @@ export async function createCocoClient(
       const selection = selectCleanupOperations({
         mints: filteredMints,
         sends: filteredSends,
-        includeOffline: options.includeOffline === true,
         melts: filteredMelts,
         nowMs,
         minAgeMs,

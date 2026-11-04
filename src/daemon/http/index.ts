@@ -1,3 +1,4 @@
+import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
@@ -587,8 +588,13 @@ export function createDaemonRequestHandler(deps: {
         if (body.dryRun !== true && body.confirmed !== true) {
           throw new WalletHttpError(400, "Confirm the offline sweep: unclaimed tokens will be invalidated.");
         }
+        let mintUrl: string | undefined;
+        if (Object.hasOwn(body, "mintUrl")) {
+          try { mintUrl = normalizeOfflineSweepMintUrl(body.mintUrl); }
+          catch (error) { throw new WalletHttpError(400, error instanceof Error ? error.message : String(error)); }
+        }
         return { output: await deps.walletClient.sweepOfflineSends({
-          mintUrl: optionalStringField(body, "mintUrl"),
+          mintUrl,
           minAgeMs: body.minAgeMs as number | undefined,
           dryRun: body.dryRun === true,
           confirmed: body.confirmed === true,
@@ -607,6 +613,9 @@ export function createDaemonRequestHandler(deps: {
         }
 
         const body = await readJsonBody(req);
+        if (Object.hasOwn(body, "includeOffline")) {
+          throw new WalletHttpError(400, "Cleanup never reclaims offline sends; use /wallet/sweep-offline with explicit confirmation.");
+        }
         const result = await deps.walletClient.cleanupStuckOperations({
           mintUrl: optionalStringField(body, "mintUrl"),
           minAgeMs:
@@ -615,7 +624,6 @@ export function createDaemonRequestHandler(deps: {
               : undefined,
           dryRun: body.dryRun === true,
           force: body.force === true,
-          includeOffline: body.includeOffline === true,
         });
         return { output: result };
       });

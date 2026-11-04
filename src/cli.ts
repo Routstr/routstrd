@@ -1,3 +1,4 @@
+import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
 import { loadRequestTraces, RequestLogFollower, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
@@ -2678,6 +2679,14 @@ walletCmd
       process.exitCode = 1;
       return;
     }
+    if (options.mintUrl !== undefined) {
+      try { options.mintUrl = normalizeOfflineSweepMintUrl(options.mintUrl); }
+      catch (error) {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+        return;
+      }
+    }
     if (!options.dryRun && !options.yes) {
       if (!process.stdin.isTTY) {
         console.error("Offline sweeping requires confirmation. Preview with --dry-run or explicitly use --yes.");
@@ -2710,11 +2719,14 @@ walletCmd
       const output = result.output as import("./daemon/wallet/offline-sweep").OfflineSweepResult;
       console.log(options.dryRun ? "Offline sweep candidates (not checked with mint):" : "Offline sweep results:");
       console.log(`  Candidates: ${output.candidates}; skipped: ${output.skipped}`);
-      console.log(`  Claimed: ${output.claimed}; reclaimed: ${output.reclaimed}; unresolved: ${output.unresolved}; failed: ${output.failed}`);
+      console.log(`  Claimed: ${output.claimed}; reclaimed: ${output.reclaimed}; unresolved: ${output.unresolved}; failed: ${output.failed}; stuck: ${output.stuck}`);
       for (const op of output.operations) {
         console.log(`  ${op.operationId} ${op.mintUrl} ${op.amount} sat ${op.outcome}${op.error ? `: ${op.error}` : ""}`);
       }
-      if (output.failed || output.unresolved) process.exitCode = 1;
+      if (options.mintUrl && output.candidates === 0 && !output.stuck) {
+        console.warn(`No aged pending offline sends matched mint ${options.mintUrl}; check the mint filter and minimum age.`);
+      }
+      if (output.failed || output.unresolved || output.stuck) process.exitCode = 1;
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
@@ -2736,7 +2748,6 @@ walletCmd
     "Fail expired mint quotes without confirming UNPAID with the mint (may strand paid quotes)",
     false,
   )
-  .option("--include-offline", "Also reclaim old offline sends, invalidating unclaimed tokens", false)
   .option("-y, --yes", "Skip confirmation prompt", false)
   .action(
     async (options: {
@@ -2744,7 +2755,6 @@ walletCmd
       minAge: string;
       dryRun: boolean;
       force: boolean;
-      includeOffline: boolean;
       yes: boolean;
     }) => {
       const minAgeHours = Number.parseFloat(options.minAge);
@@ -2758,9 +2768,6 @@ walletCmd
           input: process.stdin,
           output: process.stdout,
         });
-        if (options.includeOffline) {
-          console.warn("WARNING: offline tokens reclaimed by this cleanup can no longer be claimed by their recipients.");
-        }
         const answer = await new Promise<string>((resolve) => {
           rl.question(
             options.force
@@ -2788,7 +2795,6 @@ walletCmd
             minAgeMs: Math.round(minAgeHours * 60 * 60 * 1000),
             dryRun: options.dryRun === true,
             force: options.force === true,
-            includeOffline: options.includeOffline === true,
           },
         });
 
