@@ -2801,8 +2801,34 @@ export function createDaemonRequestHandler(deps: {
         return;
       }
 
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      // Anything reaching here is unstructured: an unclassified transport or
+      // runtime failure, not a provider envelope. Never hand those to a client
+      // verbatim — `message` is whatever the runtime's fetch threw, e.g.
+      //   ECONNRESET: The socket connection was closed unexpectedly. For more
+      //   information, pass `verbose: true` in the second argument to fetch()
+      // which leaks internals, reads like an OpenAI-compatible error but is
+      // not one, and (worse) made a transient upstream socket reset look like
+      // a caller bug. The raw text stays in the daemon log under `req:<id>`;
+      // the client gets a stable, machine-readable contract plus the request id
+      // needed to find the detail:
+      //   - 502 upstream_unavailable: the request was handed to the SDK, i.e. a
+      //     provider was involved. Retryable; the SDK already exhausts its own
+      //     retries/failover before throwing this.
+      //   - 500 local_preparation_failed: it failed before any provider was
+      //     involved (discovery bootstrap, provider selection, etc.).
+      const upstreamFailure = handedToSdk;
+      res.writeHead(upstreamFailure ? 502 : 500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: upstreamFailure
+            ? "Upstream provider request failed."
+            : "Local inference preparation failed.",
+          error_type: upstreamFailure
+            ? "upstream_unavailable"
+            : "local_preparation_failed",
+          request_id: lifecycle.requestId,
+        }),
+      );
     }
   };
 }
