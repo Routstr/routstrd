@@ -461,7 +461,7 @@ View daemon logs.
 |--------|---------|-------------|
 | `-f, --follow` | false | Follow log output (like `tail -f`) |
 | `-c, --coco` | false | Show Cashu wallet-engine (coco) logs instead of daemon logs |
-| `-n, --lines <number>` | 50 | Number of lines to show |
+| `-n, --lines <number>` | 7 | Number of lines to show |
 | `-r, --recent` | false | List recent request IDs with their model |
 | `-i, --request-id <id>` | | Only show log lines for a specific request ID |
 

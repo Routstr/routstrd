@@ -1,5 +1,5 @@
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
-import { loadRequestTraces, RequestLogFollower, type RequestLogFilters } from "./utils/request-logs";
+import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
@@ -3645,6 +3645,13 @@ program
   });
 
 // Logs
+/**
+ * How long after local midnight `logs` keeps showing yesterday's file too.
+ * Long enough to cover `tail -n 7` of daemon activity across the boundary,
+ * short enough that ordinary daytime output is a single date's file.
+ */
+const MIDNIGHT_GRACE_MS = 60 * 60 * 1000;
+
 function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -3825,7 +3832,7 @@ function filterLinesByRequestId(
 
 function parseLinesOption(value: string): number {
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 50;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 7;
 }
 
 
@@ -3842,7 +3849,7 @@ program
   .option("--base-url <url>", "Filter by provider URL")
   .option("--client-id <id>", "Filter by client ID")
   .option("-c, --coco", "Show Cashu wallet-engine (coco) logs instead of daemon logs", false)
-  .option("-n, --lines <number>", "Number of requests (or lines with --raw) to show", "50")
+  .option("-n, --lines <number>", "Number of requests (or lines with --raw) to show", "7")
   .option("-r, --recent", "List recent requests (legacy request index with --raw)", false)
   .option("-i, --request-id <id>", "Only show this lifecycle UUID (log lines with --raw)")
   .action(
@@ -3863,10 +3870,20 @@ program
       }
 
       const logsDir = options.coco ? COCO_LOGS_DIR : LOGS_DIR;
-      const todayFile = getLogFileForDate(logsDir);
-      const yesterday = new Date();
+      const now = new Date();
+      const todayFile = getLogFileForDate(logsDir, now);
+      const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
       const yesterdayFile = getLogFileForDate(logsDir, yesterday);
+      // Daily files are named after the local date of each write (see
+      // utils/logger.ts), so plain tail output should normally be today's file
+      // only. Right after midnight, though, today's file holds a handful of
+      // lines while the interesting tail still sits at the end of yesterday's
+      // file, so span the boundary for a short window.
+      const justAfterMidnight =
+        now.getTime() -
+          new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() <
+        MIDNIGHT_GRACE_MS;
 
       if (!options.raw && !options.coco) {
         // The daemon reads its persistent lifecycle DB, including failures that
@@ -3899,10 +3916,24 @@ program
 
       const lines = parseLinesOption(options.lines);
 
+      // Lookups (--recent, --request-id) reach back a day: a request started
+      // before midnight may still be the one being investigated.
       const logFiles = [yesterdayFile, todayFile].filter(
         (file, index, files) =>
           existsSync(file) && files.indexOf(file) === index,
       );
+      const tailCandidates = justAfterMidnight
+        ? [yesterdayFile, todayFile]
+        : [todayFile];
+      const existingTailFiles = tailCandidates.filter(
+        (file, index, files) =>
+          existsSync(file) && files.indexOf(file) === index,
+      );
+      // The daemon may not have written anything today yet (it was stopped
+      // overnight); fall back to the newest file rather than printing nothing.
+      const tailFiles = existingTailFiles.length > 0
+        ? existingTailFiles
+        : logFiles.slice(-1);
 
       if (options.recent) {
         const requests = collectRecentRequests(logFiles, lines);
@@ -3913,8 +3944,10 @@ program
 
         console.log("Recent requests (newest first):");
         for (const request of requests) {
-          const when = request.timestamp ? `  ${request.timestamp}` : "";
-          console.log(`  ${request.requestId}  ${request.modelId}${when}`);
+          const when = request.timestamp
+            ? utcTime(Date.parse(request.timestamp))
+            : "--:--:--";
+          console.log(`${when}  ${request.requestId}  ${request.modelId}`);
         }
         return;
       }
@@ -3943,8 +3976,8 @@ program
         return;
       }
 
-      for (const file of logFiles) {
-        if (logFiles.length > 1) {
+      for (const file of tailFiles) {
+        if (tailFiles.length > 1) {
           console.log(`==> ${file} <==`);
         }
         const output = readLastLines(file, lines);

@@ -4,8 +4,10 @@ Inference POSTs get one SDK-generated UUID, including malformed JSON, local vali
 
 ```text
 $ routstrd logs
-alice - deepseek-v4.1-flash - 400 - 402 - 200 - 11111111-2222-4333-8444-555555555555
+15:57:03  alice - deepseek-v4.1-flash - 400 - 402 - 200 - 11111111-2222-4333-8444-555555555555
 ```
+
+Summaries lead with the request's start time, in UTC, as time of day only: the covering daily log file already names the date, and a fixed-width clock keeps pasted output comparable across machines and time zones.
 
 The SQLite lifecycle tables in `DB_PATH` are authoritative, independent of usage accounting and the optional raw request/response sink. Statuses come from actual attempts in ordinal order. Network failures show `NET`; requests without attempts show their local HTTP status or terminal outcome. A 200 status can still have a failed stream outcome; inspect verbose diagnostics.
 
@@ -15,6 +17,8 @@ routstrd logs -i 11111111-2222-4333-8444-555555555555 -v
 routstrd logs --client-id alice --model-id deepseek-v4.1-flash --outcome failed
 routstrd logs -f -n 50
 ```
+
+`-n` defaults to `7` and is capped at `1000`, for both lifecycle summaries and `--raw` lines.
 
 Verbose output interleaves chronological lifecycle events, attempt summaries and eligible correlated daemon/SDK diagnostics. It never opens the raw payload sink. Supplementary correlation searches retained daily daemon log files; lifecycle records remain available even after their flat logs are removed. Follow prints an updated summary when a request changes. `--before`/`--after` accept epoch milliseconds; `--base-url` filters by provider.
 
