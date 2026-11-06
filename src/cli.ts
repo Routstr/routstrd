@@ -76,6 +76,7 @@ import {
 } from "./daemon/wallet/paths";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { parseRequiredNpubName, parseUpdatedNpubName } from "./utils/npub-name";
 import {
   HISTORY_ENTRY_TYPES,
   historyStatus,
@@ -2162,14 +2163,62 @@ type NpubEntry = {
   role: string;
 };
 
-/** Normalize a user-supplied npub display name: trim whitespace and cap at 64 chars. */
-function parseNpubName(raw: string | undefined): { name?: string | null; error?: string } {
-  if (raw === undefined) return {};
-  const trimmed = raw.trim();
-  if ([...trimmed].length > 64) {
-    return { error: "Invalid name. Maximum length is 64 characters." };
+/**
+ * Resolve the display name for a newly registered npub.
+ *
+ * Names are mandatory, so a missing `--name` prompts on a terminal and fails
+ * with a usable hint everywhere else (scripts, CI, piped invocations). Returns
+ * the trimmed name, or exits.
+ */
+async function requireNpubName(
+  raw: string | undefined,
+  subject: string,
+  usage: string,
+): Promise<string> {
+  const parsed = parseRequiredNpubName(raw);
+  if (parsed.error) {
+    console.error(parsed.error);
+    process.exit(1);
   }
-  return { name: trimmed === "" ? null : trimmed };
+  if (parsed.name !== undefined) return parsed.name;
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error(`Missing required --name.\n${usage}`);
+    process.exit(1);
+  }
+
+  const rl = require("readline").createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    while (true) {
+      // `null` means EOF/Ctrl+D, which aborts instead of re-prompting.
+      const answer = await new Promise<string | null>((resolve) => {
+        let settled = false;
+        const done = (value: string | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        rl.question(`Display name for ${subject} (required): `, (value: string) =>
+          done(value),
+        );
+        rl.once("close", () => done(null));
+      });
+
+      if (answer === null) {
+        console.error(`\nA display name is required.\n${usage}`);
+        process.exit(1);
+      }
+
+      const validated = parseRequiredNpubName(answer);
+      if (validated.name !== undefined) return validated.name;
+      console.error(validated.error ?? "Invalid display name.");
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 npubsCmd
@@ -2198,7 +2247,7 @@ npubsCmd
     for (const entry of npubs) {
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
-      const name = entry.name ? ` "${entry.name}"` : "";
+      const name = entry.name ? ` "${entry.name}"` : " (unnamed)";
       console.log(`- ${entry.npub} [${entry.role}]${name}${marker}`);
     }
     if (userNpub && !found) {
@@ -2213,7 +2262,7 @@ npubsCmd
 npubsCmd
   .command("register")
   .description("Register yourself as the first admin (only when no admins exist)")
-  .option("-n, --name <name>", "Display name for this npub (optional)")
+  .option("-n, --name <name>", "Display name for this npub (required; prompted when omitted)")
   .action(async (options: { name?: string }) => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -2242,13 +2291,15 @@ npubsCmd
       console.error("Failed to normalize user npub.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
-    if (name.error) {
-      console.error(name.error);
-      process.exit(1);
-    }
-    const body: Record<string, string | null> = { npub: npubFromPubkey(normalized) };
-    if (name.name !== undefined) body.name = name.name;
+    const name = await requireNpubName(
+      options.name,
+      npubFromPubkey(normalized),
+      "Register with a display name: routstrd npubs register --name \"Alice\"",
+    );
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+      name,
+    };
     const addResult = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -2272,7 +2323,7 @@ npubsCmd
   .command("add <npub>")
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
-  .option("-n, --name <name>", "Display name for the npub (optional)")
+  .option("-n, --name <name>", "Display name for the npub (required; prompted when omitted)")
   .action(async (npubArg: string, options: { role: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
@@ -2284,16 +2335,16 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
-    if (name.error) {
-      console.error(name.error);
-      process.exit(1);
-    }
+    const name = await requireNpubName(
+      options.name,
+      npubFromPubkey(normalized),
+      `Add a display name: routstrd npubs add ${npubFromPubkey(normalized)} --name "Alice"`,
+    );
     const body: Record<string, string | null> = {
       npub: npubFromPubkey(normalized),
       role: options.role,
+      name,
     };
-    if (name.name !== undefined) body.name = name.name;
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -2317,7 +2368,7 @@ npubsCmd
   .command("update <npub>")
   .description("Update the role and/or name of an existing npub (requires admin)")
   .option("-r, --role <role>", "New role: 'admin' or 'user'")
-  .option("-n, --name <name>", "New display name (empty string clears it)")
+  .option("-n, --name <name>", "New display name (a name cannot be removed)")
   .action(async (npubArg: string, options: { role?: string; name?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
@@ -2333,7 +2384,7 @@ npubsCmd
       console.error("Provide '--role' and/or '--name' to update.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
+    const name = parseUpdatedNpubName(options.name);
     if (name.error) {
       console.error(name.error);
       process.exit(1);
