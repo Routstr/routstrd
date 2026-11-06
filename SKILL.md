@@ -372,11 +372,17 @@ commands route through the auth proxy (`--auth-url`) and use NIP-98 auth.
 
 | Command | Description |
 |---------|-------------|
-| `routstrd npubs list` | List registered npubs with role and display name |
+| `routstrd npubs list` | List registered npubs with role, display name, monthly cap and current-month spend |
 | `routstrd npubs register [--name <name>]` | Register yourself as the first admin (bootstrap only) |
-| `routstrd npubs add <npub> [--role <role>] [--name <name>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
-| `routstrd npubs update <npub> [--role <role>] [--name <name>]` | Update role and/or name (admin only) |
+| `routstrd npubs add <npub> [--role <role>] [--name <name>] [--limit-sats <sats>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
+| `routstrd npubs update <npub> [--role <role>] [--name <name>] [--limit-sats <sats>] [--clear-limit]` | Update role, name and/or monthly spend cap (admin only) |
 | `routstrd npubs delete <npub>` | Delete an npub |
+
+`--limit-sats` sets a calendar-month spend cap for the npub, enforced by the
+auth proxy. Usage resets at the start of each month (proxy server timezone).
+Paid requests return HTTP 402 once the cap is reached; the request that crosses
+it still completes. `--limit-sats 0` blocks all paid requests and
+`--clear-limit` restores unlimited access.
 
 ### `routstrd remote [url]`
 

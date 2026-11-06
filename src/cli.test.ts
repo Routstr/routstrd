@@ -8,6 +8,7 @@ import {
   getLivePidFileOwner,
   initializeWallet,
   parseAutoModelPathArg,
+  parseMonthlyLimitSats,
   parseStructuredLogLine,
 } from "./cli";
 
@@ -391,5 +392,68 @@ describe("offline sweep CLI", () => {
     });
     expect(await new Response(proc.stderr).text()).toContain("unknown option '--include-offline'");
     expect(await proc.exited).toBe(1);
+  });
+});
+
+describe("parseMonthlyLimitSats", () => {
+  test("accepts whole non-negative numbers", () => {
+    expect(parseMonthlyLimitSats("0")).toEqual({ value: 0 });
+    expect(parseMonthlyLimitSats("5000")).toEqual({ value: 5000 });
+    expect(parseMonthlyLimitSats("  1200  ")).toEqual({ value: 1200 });
+  });
+
+  test("omits the field when no limit was supplied", () => {
+    expect(parseMonthlyLimitSats(undefined)).toEqual({});
+  });
+
+  test("rejects fractions, negatives and non-numeric values", () => {
+    for (const raw of ["-1", "1.5", "1e3", "ten", "", " "]) {
+      expect(parseMonthlyLimitSats(raw).error).toBeDefined();
+    }
+  });
+
+  test("rejects values beyond the safe integer range", () => {
+    expect(parseMonthlyLimitSats("9007199254740992").error).toBeDefined();
+  });
+});
+
+describe("npubs add limit confirmation", () => {
+  async function run(legacy: boolean) {
+    const bodies: unknown[] = [];
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (req) => {
+      if (new URL(req.url).pathname === "/health") return Response.json({ status: "ok" });
+      bodies.push(await req.json());
+      return Response.json({ npub: "npub-test", role: "user", added: true,
+        ...(legacy ? {} : { monthlyLimitSats: 5000 }) });
+    } });
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false }));
+    try {
+      const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"),
+        "npubs", "add", "ab".repeat(32), "--limit-sats", "5000"], {
+        env: { ...process.env, ROUTSTRD_DIR: dir }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+      ]);
+      return { stdout, stderr, exitCode, bodies };
+    } finally { server.stop(true); }
+  }
+
+  test("confirms a top-level proxy response and sends the requested limit", async () => {
+    const result = await run(false);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Added npub: npub-test");
+    expect(result.stdout).toContain("limit 5000 sats/month");
+    expect(result.stderr).not.toContain("did not confirm");
+    expect(result.bodies).toHaveLength(1);
+    expect(result.bodies[0]).toMatchObject({ monthlyLimitSats: 5000 });
+  });
+
+  test("warns when an older proxy does not confirm the limit", async () => {
+    const result = await run(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Added npub: npub-test");
+    expect(result.stderr).toContain("did not confirm the monthly limit");
   });
 });

@@ -2160,6 +2160,10 @@ type NpubEntry = {
   npub: string;
   name: string | null;
   role: string;
+  /** Monthly spend cap in sats, or null/undefined when unlimited. */
+  monthlyLimitSats?: number | null;
+  /** Sats spent in the current calendar month (read-only). */
+  monthlyUsedSats?: number;
 };
 
 /** Normalize a user-supplied npub display name: trim whitespace and cap at 64 chars. */
@@ -2172,9 +2176,37 @@ function parseNpubName(raw: string | undefined): { name?: string | null; error?:
   return { name: trimmed === "" ? null : trimmed };
 }
 
+/**
+ * Parse a per-npub monthly spend cap in sats. Rejects fractions, negatives and
+ * non-numeric values; 0 is a valid cap that blocks every paid request.
+ */
+export function parseMonthlyLimitSats(
+  raw: string | undefined,
+): { value?: number; error?: string } {
+  if (raw === undefined) return {};
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: "Invalid --limit-sats. Expected a non-negative whole number of sats." };
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    return { error: "Invalid --limit-sats. Value is too large." };
+  }
+  return { value };
+}
+
+/** Human-readable monthly cap line for `npubs list`. */
+function formatNpubMonthlyLimit(entry: NpubEntry): string {
+  if (typeof entry.monthlyLimitSats !== "number") return "limit: unlimited";
+  const used = typeof entry.monthlyUsedSats === "number"
+    ? ` (${entry.monthlyUsedSats} used)`
+    : "";
+  return `limit: ${entry.monthlyLimitSats} sats/month${used}`;
+}
+
 npubsCmd
   .command("list")
-  .description("List configured npubs with their roles and names")
+  .description("List configured npubs with their roles, names and monthly spend limits")
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -2199,7 +2231,7 @@ npubsCmd
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
       const name = entry.name ? ` "${entry.name}"` : "";
-      console.log(`- ${entry.npub} [${entry.role}]${name}${marker}`);
+      console.log(`- ${entry.npub} [${entry.role}]${name}${marker} — ${formatNpubMonthlyLimit(entry)}`);
     }
     if (userNpub && !found) {
       console.log("");
@@ -2273,7 +2305,8 @@ npubsCmd
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
   .option("-n, --name <name>", "Display name for the npub (optional)")
-  .action(async (npubArg: string, options: { role: string; name?: string }) => {
+  .option("-l, --limit-sats <sats>", "Monthly spend cap in sats (resets on the 1st; omit for unlimited)")
+  .action(async (npubArg: string, options: { role: string; name?: string; limitSats?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -2289,11 +2322,17 @@ npubsCmd
       console.error(name.error);
       process.exit(1);
     }
-    const body: Record<string, string | null> = {
+    const limit = parseMonthlyLimitSats(options.limitSats);
+    if (limit.error) {
+      console.error(limit.error);
+      process.exit(1);
+    }
+    const body: Record<string, unknown> = {
       npub: npubFromPubkey(normalized),
       role: options.role,
     };
     if (name.name !== undefined) body.name = name.name;
+    if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -2302,23 +2341,33 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    const output = result.output as
-      | { npub?: string; name?: string | null; role?: string; added?: boolean; error?: string }
+    const output = (result.output ?? result) as
+      | { npub?: string; name?: string | null; role?: string; monthlyLimitSats?: number | null; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
       const nameSuffix = output.name ? ` ("${output.name}")` : "";
+      const limitSuffix = typeof output.monthlyLimitSats === "number"
+        ? `, limit ${output.monthlyLimitSats} sats/month`
+        : "";
       console.log(
-        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}${limitSuffix}`,
       );
+      if (limit.value !== undefined && typeof output.monthlyLimitSats !== "number") {
+        console.warn(
+          "Warning: the auth proxy did not confirm the monthly limit. Update routstrd-auth to a version that supports spend limits.",
+        );
+      }
     }
   });
 
 npubsCmd
   .command("update <npub>")
-  .description("Update the role and/or name of an existing npub (requires admin)")
+  .description("Update the role, name and/or monthly spend limit of an existing npub (requires admin)")
   .option("-r, --role <role>", "New role: 'admin' or 'user'")
   .option("-n, --name <name>", "New display name (empty string clears it)")
-  .action(async (npubArg: string, options: { role?: string; name?: string }) => {
+  .option("-l, --limit-sats <sats>", "Monthly spend cap in sats (0 blocks all paid requests)")
+  .option("--clear-limit", "Remove the monthly spend cap (unlimited)")
+  .action(async (npubArg: string, options: { role?: string; name?: string; limitSats?: string; clearLimit?: boolean }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -2329,8 +2378,17 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    if (options.role === undefined && options.name === undefined) {
-      console.error("Provide '--role' and/or '--name' to update.");
+    if (options.limitSats !== undefined && options.clearLimit) {
+      console.error("Provide either '--limit-sats' or '--clear-limit', not both.");
+      process.exit(1);
+    }
+    if (
+      options.role === undefined &&
+      options.name === undefined &&
+      options.limitSats === undefined &&
+      !options.clearLimit
+    ) {
+      console.error("Provide '--role', '--name', '--limit-sats' and/or '--clear-limit' to update.");
       process.exit(1);
     }
     const name = parseNpubName(options.name);
@@ -2338,11 +2396,18 @@ npubsCmd
       console.error(name.error);
       process.exit(1);
     }
-    const body: Record<string, string | null> = {
+    const limit = parseMonthlyLimitSats(options.limitSats);
+    if (limit.error) {
+      console.error(limit.error);
+      process.exit(1);
+    }
+    const body: Record<string, unknown> = {
       npub: npubFromPubkey(normalized),
     };
     if (options.role !== undefined) body.role = options.role;
     if (name.name !== undefined) body.name = name.name;
+    if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
+    if (options.clearLimit) body.monthlyLimitSats = null;
     const result = await callAuth("/npubs", {
       method: "PATCH",
       body,
@@ -2353,13 +2418,30 @@ npubsCmd
     }
     // PATCH /npubs returns { npub, pubkey, name, role } at the top level, not wrapped in { output }
     const data = (result.output ?? result) as
-      | { npub?: string; pubkey?: string; name?: string | null; role?: string; error?: string }
+      | {
+          npub?: string;
+          pubkey?: string;
+          name?: string | null;
+          role?: string;
+          monthlyLimitSats?: number | null;
+          error?: string;
+        }
       | undefined;
     if (data?.npub) {
       const parts: string[] = [];
       if (data.role) parts.push(`role='${data.role}'`);
       parts.push(`name=${data.name ? `"${data.name}"` : "(none)"}`);
+      parts.push(
+        typeof data.monthlyLimitSats === "number"
+          ? `limit=${data.monthlyLimitSats} sats/month`
+          : "limit=unlimited",
+      );
       console.log(`Updated npub ${data.npub} (${parts.join(", ")}).`);
+      if (body.monthlyLimitSats !== undefined && data.monthlyLimitSats === undefined) {
+        console.warn(
+          "Warning: the auth proxy did not confirm the monthly limit. Update routstrd-auth to a version that supports spend limits.",
+        );
+      }
     } else {
       console.log("Npub not found or update failed.");
     }
