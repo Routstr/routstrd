@@ -8,6 +8,7 @@ import {
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi, truncateAnsi } from "./terminal.ts";
+import { truncateMiddle } from "../../utils/model-providers.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
 import type { TabId, TimeWindow, TimelineBucket, TimelinePoint, UpdateInfo, UsageStats } from "./types.ts";
 
@@ -825,6 +826,8 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   const minProviderCol = 12;
   const minModelCol = 10;
   const minClientCol = 6;
+  // Upper bound on the model column so one absurd id cannot eat the row.
+  const maxModelColumn = 40;
 
   // Remote mode: `Alice (claude-code)` — owner display name + the client id
   // with the `-<npub tail>` suffix stripped. Local mode (no owner/name data)
@@ -846,9 +849,14 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   // Lay out the columns against the box's inner width: start from the widest
   // layout, hand the slack to the provider column, then give space back in
-  // priority order (bar, provider, model, client) until everything fits.
+  // priority order (bar, client, provider, model) until everything fits.
   const innerWidth = Math.max(0, width - 4);
-  let modelCol = 18;
+  // The model id is what the row is about, so the column is sized to the
+  // longest id on show rather than a fixed 18 columns that cuts names such as
+  // `deepseek-v4.1-flash` down to an unrecognisable `deepseek-v4.1-flas`.
+  // Only a pathological id is capped; the give-back loop below handles the rest.
+  const maxModelLen = recentEntries.reduce((max, entry) => Math.max(max, entry.modelId.length), 0);
+  let modelCol = Math.min(maxModelColumn, Math.max(minModelCol, maxModelLen));
   let clientCol = hasOwnerInfo ? Math.min(32, Math.max(14, maxLabelLen)) : 14;
   let barWidth = maxBarWidth;
   let showProvider = false;
@@ -862,10 +870,12 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     showProvider = true;
     providerCol = innerWidth - usedWidth();
   }
+  // Give space back in reverse priority: the cache bar, then client names, then
+  // the provider URL, and only then the model id.
   while (usedWidth() > innerWidth && barWidth > minBarWidth) barWidth -= 1;
+  while (usedWidth() > innerWidth && clientCol > minClientCol) clientCol -= 1;
   while (usedWidth() > innerWidth && providerCol > minProviderCol) providerCol -= 1;
   while (usedWidth() > innerWidth && modelCol > minModelCol) modelCol -= 1;
-  while (usedWidth() > innerWidth && clientCol > minClientCol) clientCol -= 1;
 
   const tokensCol = barWidth + 1 + inOutCol;
 
@@ -897,7 +907,18 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     // Right-aligned so the `sats` unit ends at the same column on every row.
     const cost = `${formatCost(totalSats)} sats`.padStart(costCol);
     const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
-    const provider = `${baseUrl}:${entry.provider || "unknown"}`.slice(0, providerCol).padEnd(providerCol);
+    // `base:provider` is elided in the middle of the *URL*, never at its end: a
+    // node URL's head names the node and its tail carries the tunnel port, and
+    // the `:provider` that follows is where the request actually went, so it is
+    // kept whole. A plain slice used to cut the provider off entirely.
+    const providerSuffix = `:${entry.provider || "unknown"}`;
+    const providerText = providerCol >= providerSuffix.length + 8
+      // Head-light so `fips:28080/`-style host suffixes and ports survive.
+      ? `${truncateMiddle(baseUrl, providerCol - providerSuffix.length, 0.4)}${providerSuffix}`
+      // Too narrow to hold the suffix: elide the combined string rather than
+      // chop its tail off.
+      : truncateMiddle(`${baseUrl}${providerSuffix}`, providerCol);
+    const provider = providerText.padEnd(providerCol);
     const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;
     const modelColor = MODEL_COLORS[entry.modelId] || MODEL_COLORS.default;

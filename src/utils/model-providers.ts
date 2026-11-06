@@ -90,11 +90,16 @@ function satsPerMillion(perToken: number): string {
  * Elide the middle of an over-long string, keeping both ends. A node URL's
  * head carries the provider name and its tail the tunnel/path that tells two
  * sibling deployments apart, so either end alone can be ambiguous.
+ *
+ * `headRatio` is the share of the kept columns given to the front of the
+ * string. It defaults to a head-heavy 0.6 (the provider name is the wider
+ * identifier); callers that care more about the tail — a node's `fips:PORT`
+ * host suffix, say — pass something smaller.
  */
-export function truncateMiddle(value: string, max = PROVIDER_COLUMN_MAX): string {
+export function truncateMiddle(value: string, max = PROVIDER_COLUMN_MAX, headRatio = 0.6): string {
   if (value.length <= max) return value;
   const keep = max - 1; // the ellipsis takes the last column
-  const head = Math.ceil(keep * 0.6);
+  const head = Math.ceil(keep * headRatio);
   return `${value.slice(0, head)}…${value.slice(value.length - (keep - head))}`;
 }
 
