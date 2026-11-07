@@ -1,3 +1,7 @@
+// Must stay the first import: @peculiar/x509 (the SDK's confidential TLS client)
+// needs it before tsyringe loads, and the bundler runs that package's own import
+// of it too late in dist/.
+import "reflect-metadata";
 import { createServer } from "http";
 import { existsSync, unlinkSync } from "fs";
 import {
@@ -10,7 +14,7 @@ import {
 // storage (eventStoreDbPath) gets its SQLite-backed factory. The default
 // "@routstr/sdk" export is browser-safe and throws without that factory
 // (SDK 0.3.7+ browser-safe entrypoint split).
-import { ModelManager, createBunSqliteRequestLifecycleDriver } from "@routstr/sdk/bun";
+import { ModelManager, closeConfidentialPrewarm, createBunSqliteRequestLifecycleDriver } from "@routstr/sdk/bun";
 import { initializeDaemonLifecycle } from "./request-lifecycle";
 import type { SdkLogger } from "@routstr/sdk";
 import {
@@ -229,6 +233,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
       autoModelPath: config.autoModelPath === true,
+      confidentialUpstream: config.confidentialUpstream,
       maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
       routstrModelsPubkey: config.routstrModelsPubkey,
@@ -428,6 +433,9 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   });
 
   shutdownDaemon = () => {
+    // Close pre-warmed confidential sessions so the node releases their
+    // reservations now rather than at its session limit.
+    closeConfidentialPrewarm();
     server.close(() => {
       void disposeWallet().finally(() => process.exit(0));
     });

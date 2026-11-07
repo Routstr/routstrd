@@ -53,6 +53,12 @@ describe("applyDefaultOutputTokenLimit", () => {
     expect(body).not.toHaveProperty("max_completion_tokens");
   });
 
+  it("keeps a client-supplied max_completion_tokens", () => {
+    const body: Record<string, unknown> = { model: "m", messages: [], max_completion_tokens: 100 };
+    expect(applyDefaultOutputTokenLimit("/v1/chat/completions", body, MAX_TOKENS)).toBe(false);
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
   it("leaves /v1/systemone untouched — the upstream rejects unknown fields", () => {
     const body: Record<string, unknown> = {
       state: "Help! My payouts have been failing for 3 days.",
