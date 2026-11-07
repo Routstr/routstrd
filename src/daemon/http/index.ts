@@ -1,7 +1,11 @@
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
-import { type IncomingMessage, type ServerResponse } from "http";
+import {
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type ServerResponse,
+} from "http";
 import { Readable } from "stream";
 import {
   routeRequests,
@@ -59,6 +63,23 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+
+/**
+ * Preserve inbound request headers for the SDK routing boundary. The SDK owns
+ * the upstream allowlist and attribution handling (including HTTP-Referer and
+ * X-Title); routstrd must not discard those headers before handing off.
+ */
+export function collectIncomingHeaders(headers: IncomingHttpHeaders): Record<string, string> {
+  const incomingHeaders: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string") {
+      incomingHeaders[key] = value;
+    } else if (Array.isArray(value) && value.length > 0) {
+      incomingHeaders[key] = value[0]!;
+    }
+  }
+  return incomingHeaders;
+}
 
 type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
@@ -2620,15 +2641,7 @@ export function createDaemonRequestHandler(deps: {
       deps.provider ||
       undefined;
 
-    // Convert req.headers to Record<string, string>
-    const incomingHeaders: Record<string, string> = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      if (typeof value === "string") {
-        incomingHeaders[key] = value;
-      } else if (Array.isArray(value) && value.length > 0) {
-        incomingHeaders[key] = value[0]!;
-      }
-    }
+    const incomingHeaders = collectIncomingHeaders(req.headers);
 
     try {
       // Discovery is shared: cancel this waiter, not the shared bootstrap.
