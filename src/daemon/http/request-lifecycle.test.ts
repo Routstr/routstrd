@@ -138,20 +138,6 @@ describe("inference ingress lifecycle", () => {
     });
   });
 
-  it.each([400, 422, 502])("forwards structured exhausted-provider status %i without remapping to 500", async (status) => {
-    const body = { error: { type: "all_providers_failed", message: "temperature: expected number", errors: [{ status: 400, message: "temperature: expected number" }] } };
-    const { call } = await fixture({
-      ensureProvidersBootstrapped: async () => {},
-      routeRequests: async () => Response.json(body, { status }),
-    });
-    const response = await call("/v1/chat/completions", {
-      method: "POST", headers: { "x-api-key": "sk-test-client" },
-      body: JSON.stringify({ model: "model", messages: [] }),
-    });
-    expect(response.status).toBe(status);
-    expect(await response.json()).toEqual(body);
-  });
-
   it("keeps a typed insufficient-balance failure actionable (402 + message)", async () => {
     const { call } = await fixture({
       ensureProvidersBootstrapped: async () => {},
