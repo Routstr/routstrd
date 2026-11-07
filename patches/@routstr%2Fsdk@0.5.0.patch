@@ -1,3 +1,29 @@
+diff --git a/dist/index-D0HhY4ZP.d.mts b/dist/index-D0HhY4ZP.d.mts
+--- a/dist/index-D0HhY4ZP.d.mts
++++ b/dist/index-D0HhY4ZP.d.mts
+@@ -1067,7 +1067,8 @@
+      * trigger already confirmed available < required x TOPUP_MARGIN, so we
+      * deposit exactly the shortfall to land at the margin. No extra balance
+      * round-trip: the post-topup total is persisted from topUp's
+-     * toppedUpAmount so future snapshots aren't stale. Never throws.
++     * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++     * throws; other failures remain TopUpResult values.
+      */
+     private _runProactiveTopup;
+     /**
+diff --git a/dist/index-B6j35EVT.d.ts b/dist/index-B6j35EVT.d.ts
+--- a/dist/index-B6j35EVT.d.ts
++++ b/dist/index-B6j35EVT.d.ts
+@@ -1067,7 +1067,8 @@
+      * trigger already confirmed available < required x TOPUP_MARGIN, so we
+      * deposit exactly the shortfall to land at the margin. No extra balance
+      * round-trip: the post-topup total is persisted from topUp's
+-     * toppedUpAmount so future snapshots aren't stale. Never throws.
++     * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++     * throws; other failures remain TopUpResult values.
+      */
+     private _runProactiveTopup;
+     /**
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
@@ -349,15 +375,20 @@ diff --git a/dist/index.js b/dist/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -11493,6 +11569,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11490,9 +11566,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11597,7 @@
+@@ -11520,6 +11598,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -365,7 +396,15 @@ diff --git a/dist/index.js b/dist/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11556,19 +11634,35 @@
+@@ -11540,6 +11619,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11556,19 +11636,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -408,7 +447,7 @@ diff --git a/dist/index.js b/dist/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11694,7 @@
+@@ -11600,6 +11696,7 @@
            );
          }
        }
@@ -416,7 +455,7 @@ diff --git a/dist/index.js b/dist/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11708,8 @@
+@@ -11613,7 +11710,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -426,7 +465,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11842,8 @@
+@@ -11746,7 +11844,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -787,15 +826,20 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11491,6 +11567,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11488,9 +11564,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11595,7 @@
+@@ -11518,6 +11596,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -803,7 +847,15 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11554,19 +11632,35 @@
+@@ -11538,6 +11617,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11554,19 +11634,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -846,7 +898,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11692,7 @@
+@@ -11598,6 +11694,7 @@
            );
          }
        }
@@ -854,7 +906,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11706,8 @@
+@@ -11611,7 +11708,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -864,7 +916,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11840,8 @@
+@@ -11744,7 +11842,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1239,15 +1291,20 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (mustWait) {
        try {
          await topup;
-@@ -11493,6 +11569,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11490,9 +11566,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11597,7 @@
+@@ -11520,6 +11598,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1255,7 +1312,15 @@ diff --git a/dist/browser.js b/dist/browser.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11556,19 +11634,35 @@
+@@ -11540,6 +11619,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11556,19 +11636,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1298,7 +1363,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11694,7 @@
+@@ -11600,6 +11696,7 @@
            );
          }
        }
@@ -1306,7 +1371,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11708,8 @@
+@@ -11613,7 +11710,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1316,7 +1381,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11842,8 @@
+@@ -11746,7 +11844,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1677,15 +1742,20 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11549,6 +11625,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11546,9 +11622,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11653,7 @@
+@@ -11576,6 +11654,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1693,7 +1763,15 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11612,19 +11690,35 @@
+@@ -11596,6 +11675,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11612,19 +11692,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1736,7 +1814,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11750,7 @@
+@@ -11656,6 +11752,7 @@
            );
          }
        }
@@ -1744,7 +1822,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11764,8 @@
+@@ -11669,7 +11766,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1754,7 +1832,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11898,8 @@
+@@ -11802,7 +11900,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2115,15 +2193,20 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (mustWait) {
        try {
          await topup;
-@@ -11551,6 +11627,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11548,9 +11624,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11655,7 @@
+@@ -11578,6 +11656,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2131,7 +2214,15 @@ diff --git a/dist/bun.js b/dist/bun.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11614,19 +11692,35 @@
+@@ -11598,6 +11677,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11614,19 +11694,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2174,7 +2265,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11752,7 @@
+@@ -11658,6 +11754,7 @@
            );
          }
        }
@@ -2182,7 +2273,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11766,8 @@
+@@ -11671,7 +11768,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2192,7 +2283,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11900,8 @@
+@@ -11804,7 +11902,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2553,15 +2644,20 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11549,6 +11625,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11546,9 +11622,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11653,7 @@
+@@ -11576,6 +11654,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2569,7 +2665,15 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11612,19 +11690,35 @@
+@@ -11596,6 +11675,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11612,19 +11692,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2612,7 +2716,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11750,7 @@
+@@ -11656,6 +11752,7 @@
            );
          }
        }
@@ -2620,7 +2724,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11764,8 @@
+@@ -11669,7 +11766,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2630,7 +2734,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11898,8 @@
+@@ -11802,7 +11900,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2991,15 +3095,20 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11491,6 +11567,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11488,9 +11564,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11595,7 @@
+@@ -11518,6 +11596,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3007,7 +3116,15 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11554,19 +11632,35 @@
+@@ -11538,6 +11617,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11554,19 +11634,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3050,7 +3167,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11692,7 @@
+@@ -11598,6 +11694,7 @@
            );
          }
        }
@@ -3058,7 +3175,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11706,8 @@
+@@ -11611,7 +11708,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3068,7 +3185,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11840,8 @@
+@@ -11744,7 +11842,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3443,15 +3560,20 @@ diff --git a/dist/node.js b/dist/node.js
      if (mustWait) {
        try {
          await topup;
-@@ -11551,6 +11627,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -11548,9 +11624,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11655,7 @@
+@@ -11578,6 +11656,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3459,7 +3581,15 @@ diff --git a/dist/node.js b/dist/node.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11614,19 +11692,35 @@
+@@ -11598,6 +11677,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -11614,19 +11694,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3502,7 +3632,7 @@ diff --git a/dist/node.js b/dist/node.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11752,7 @@
+@@ -11658,6 +11754,7 @@
            );
          }
        }
@@ -3510,7 +3640,7 @@ diff --git a/dist/node.js b/dist/node.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11766,8 @@
+@@ -11671,7 +11768,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3520,7 +3650,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11900,8 @@
+@@ -11804,7 +11902,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3881,15 +4011,20 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -8908,6 +8984,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -8905,9 +8981,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8935,6 +9012,7 @@
+@@ -8935,6 +9013,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3897,7 +4032,15 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8971,19 +9049,35 @@
+@@ -8955,6 +9034,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -8971,19 +9051,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3940,7 +4083,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9015,6 +9109,7 @@
+@@ -9015,6 +9111,7 @@
            );
          }
        }
@@ -3948,7 +4091,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9028,7 +9123,8 @@
+@@ -9028,7 +9125,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3958,7 +4101,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9161,7 +9257,8 @@
+@@ -9161,7 +9259,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -4319,15 +4462,20 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -8906,6 +8982,7 @@
-    * toppedUpAmount so future snapshots aren't stale. Never throws.
+@@ -8903,9 +8979,11 @@
+    * trigger already confirmed available < required x TOPUP_MARGIN, so we
+    * deposit exactly the shortfall to land at the margin. No extra balance
+    * round-trip: the post-topup total is persisted from topUp's
+-   * toppedUpAmount so future snapshots aren't stale. Never throws.
++   * toppedUpAmount so future snapshots aren't stale. Only pre-send cancellation
++   * throws; other failures remain TopUpResult values.
     */
    async _runProactiveTopup(snapshot) {
 +    throwIfFundingAborted(snapshot.signal);
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8933,6 +9010,7 @@
+@@ -8933,6 +9011,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4335,7 +4483,15 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8969,19 +9047,35 @@
+@@ -8953,6 +9032,7 @@
+       }
+       return result;
+     } catch (e) {
++      if (e?.name === "AbortError") throw e;
+       this._log(
+         "WARN",
+         `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
+@@ -8969,19 +9049,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4378,7 +4534,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9013,6 +9107,7 @@
+@@ -9013,6 +9109,7 @@
            );
          }
        }
@@ -4386,7 +4542,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9026,7 +9121,8 @@
+@@ -9026,7 +9123,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4396,7 +4552,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9159,7 +9255,8 @@
+@@ -9159,7 +9257,8 @@
        mintUrl,
        amount,
        baseUrl,

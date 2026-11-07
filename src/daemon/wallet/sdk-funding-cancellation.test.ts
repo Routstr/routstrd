@@ -257,6 +257,45 @@ describe("funding cancellation boundaries", () => {
     expect(ctx.sendToken.mock.calls.map((call) => call[1])).toEqual([1, 7]);
   });
 
+  it("restarts the actual proactive wrapper for a live newcomer after queued cancellation", async () => {
+    const ctx = await setup(); const blocker = await blockedWallet(ctx);
+    const controller = new AbortController();
+    const manager = (ctx.client as any).balanceManager;
+    const deposit = vi.spyOn(manager, "_postTopUp").mockResolvedValue({ success: true });
+    const snapshot = { token: "key", baseUrl, mintUrl, requiredSats: 5,
+      tokenBalance: 0, tokenBalanceUnit: "sat", tokenBalanceUnknown: false };
+    const attempts: Promise<any>[] = [];
+    const original = (ctx.client as any)._runProactiveTopup.bind(ctx.client);
+    vi.spyOn(ctx.client as any, "_runProactiveTopup").mockImplementation((input: any) => {
+      const attempt = original(input); attempts.push(attempt); return attempt;
+    });
+    const first = (ctx.client as any)._topUpIfNeeded({ ...snapshot, signal: controller.signal });
+    // The wrapper has entered the shared wallet queue before cancellation.
+    while (!attempts.length) await Promise.resolve();
+    controller.abort();
+    const live = (ctx.client as any)._topUpIfNeeded(snapshot);
+    blocker.release(); await blocker.pending; await Promise.all([first, live]);
+    expect(attempts).toHaveLength(2);
+    await expect(attempts[0]).rejects.toMatchObject({ name: "AbortError" });
+    expect(await attempts[1]).toMatchObject({ success: true, toppedUpAmount: 7 });
+    expect(ctx.sendToken.mock.calls.map((call) => call[1])).toEqual([1, 7]);
+    expect(deposit).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves proactive financial failure results after a started send and caller cancellation", async () => {
+    const ctx = await setup(); const entered = gate(); const release = gate();
+    const controller = new AbortController();
+    ctx.sendToken.mockImplementationOnce(async () => {
+      entered.release(); await release.promise; throw new Error("financial outcome unknown");
+    });
+    const snapshot = { token: "key", baseUrl, mintUrl, requiredSats: 5,
+      tokenBalance: 0, tokenBalanceUnit: "sat", signal: controller.signal };
+    const pending = (ctx.client as any)._runProactiveTopup(snapshot);
+    await entered.promise; controller.abort(); release.release();
+    expect(await pending).toMatchObject({ success: false, message: "financial outcome unknown" });
+    expect(ctx.sendToken).toHaveBeenCalledTimes(1);
+  });
+
   it("allows normal funding and inference", async () => {
     const ctx = await setup();
     vi.spyOn((ctx.client as any).providerManager, "getModelForProvider").mockResolvedValue({
