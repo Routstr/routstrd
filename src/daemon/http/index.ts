@@ -1,3 +1,4 @@
+import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
@@ -183,6 +184,7 @@ function tagValue(tags: string[][], name: string): string | null {
   }
   return null;
 }
+
 
 function sendJson(
   res: ServerResponse,
@@ -608,6 +610,27 @@ export function createDaemonRequestHandler(deps: {
         `[daemon] Collapsing duplicated '/v1' in request path: ${url.pathname} -> ${canonicalPath}`,
       );
       url.pathname = canonicalPath;
+    }
+
+    // CORS is an allowlist of routes, not a global switch: `corsHeadersFor`
+    // returns null for every other path, so wallet, settings, token and client
+    // routes answer no preflight and carry no `access-control-allow-origin`.
+    // Vary even for denied or absent origins, so caches cannot reuse that
+    // variant for an allowed origin. Keep other routes' headers unchanged.
+    if (CORS_ROUTES.has(url.pathname)) res.setHeader("vary", "origin");
+    const cors = corsHeadersFor(req.method || "GET", url.pathname, req.headers.origin);
+    if (cors) {
+      for (const [key, value] of Object.entries(cors)) res.setHeader(key, value);
+    }
+    if (req.method === "OPTIONS") {
+      if (cors) {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Only POST is supported." }));
+      return;
     }
 
     if (req.method === "GET" && url.pathname === "/health") {
@@ -1335,7 +1358,7 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/v1/models") {
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/v1/models") {
       try {
         const forceRefresh =
           url.searchParams.get("refresh")?.toLowerCase() === "true";
@@ -2481,53 +2504,6 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/usagePi") {
-      try {
-        const timestamp = (url.searchParams.get("timestamp") || "").trim();
-        if (!timestamp) {
-          sendJson(res, 400, {
-            error: "Missing required 'timestamp' query parameter.",
-          });
-          return;
-        }
-
-        const usageDriver = deps.usageTrackingDriver;
-        const limit = parseLimit(url.searchParams.get("limit"));
-        const allMatching = await usageDriver.list();
-        const requestIdPrefix = `gen-${timestamp}-`;
-        const filtered = allMatching.filter((entry) =>
-          (entry.upstreamResponseId ?? entry.requestId).startsWith(requestIdPrefix),
-        );
-        const entries = filtered.slice(0, limit);
-        const totalEntries = filtered.length;
-        const totalSatsCost = filtered.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-        const recentSatsCost = entries.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            output: {
-              entries,
-              totalEntries,
-              totalSatsCost,
-              recentSatsCost,
-              limit,
-              timestamp,
-            },
-          }),
-        );
-      } catch (error) {
-        sendJson(res, 500, { error: toErrorMessage(error) });
-      }
-      return;
-    }
-
     if (req.method === "GET" && (url.pathname === "/requests" || url.pathname.startsWith("/requests/"))) {
       try {
         const driver = deps.requestLifecycleDriver;
@@ -2801,8 +2777,34 @@ export function createDaemonRequestHandler(deps: {
         return;
       }
 
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      // Anything reaching here is unstructured: an unclassified transport or
+      // runtime failure, not a provider envelope. Never hand those to a client
+      // verbatim — `message` is whatever the runtime's fetch threw, e.g.
+      //   ECONNRESET: The socket connection was closed unexpectedly. For more
+      //   information, pass `verbose: true` in the second argument to fetch()
+      // which leaks internals, reads like an OpenAI-compatible error but is
+      // not one, and (worse) made a transient upstream socket reset look like
+      // a caller bug. The raw text stays in the daemon log under `req:<id>`;
+      // the client gets a stable, machine-readable contract plus the request id
+      // needed to find the detail:
+      //   - 502 upstream_unavailable: the request was handed to the SDK, i.e. a
+      //     provider was involved. Retryable; the SDK already exhausts its own
+      //     retries/failover before throwing this.
+      //   - 500 local_preparation_failed: it failed before any provider was
+      //     involved (discovery bootstrap, provider selection, etc.).
+      const upstreamFailure = handedToSdk;
+      res.writeHead(upstreamFailure ? 502 : 500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: upstreamFailure
+            ? "Upstream provider request failed."
+            : "Local inference preparation failed.",
+          error_type: upstreamFailure
+            ? "upstream_unavailable"
+            : "local_preparation_failed",
+          request_id: lifecycle.requestId,
+        }),
+      );
     }
   };
 }

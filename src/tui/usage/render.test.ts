@@ -131,6 +131,64 @@ describe("renderRecent", () => {
     expect(out).not.toContain(NPUB.slice(-7));
   });
 
+  test("shows a long model id in full instead of cutting it at a fixed column", () => {
+    const stats = {
+      ...statsFor(NPUB),
+      entries: [
+        {
+          id: "1",
+          timestamp: Date.now(),
+          modelId: "deepseek-v4.1-flash",
+          baseUrl: "https://api.example.com",
+          provider: "openai",
+          requestId: "r1",
+          cost: 0,
+          satsCost: 1,
+          promptTokens: 10,
+          completionTokens: 20,
+          totalTokens: 30,
+          client: "pi-agent",
+        },
+      ],
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderRecent(stats, 140, buildClientNaming([], [])));
+    expect(out).toContain("deepseek-v4.1-flash");
+    expect(out).not.toContain("deepseek-v4.1-flas ");
+  });
+
+  test("elides a long base:provider in the middle so both ends survive", () => {
+    const fipsNpub = "npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a";
+    const stats = {
+      ...statsFor(NPUB),
+      entries: [
+        {
+          id: "1",
+          timestamp: Date.now(),
+          modelId: "deepseek-v4.1-flash",
+          baseUrl: `https://${fipsNpub}.fips:28080/`,
+          provider: "openrouter:Wafer",
+          requestId: "r1",
+          cost: 0,
+          satsCost: 0.81,
+          promptTokens: 51_200,
+          completionTokens: 140,
+          totalTokens: 51_340,
+          client: "pi-agent",
+        },
+      ],
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderRecent(stats, 120, buildClientNaming([], [])));
+    const row = out.split("\n").find((line) => line.includes("deepseek"))!;
+    // The URL is elided in its middle (`npub1pxd….fips:28080/`), keeping the
+    // node name at the head and the port at the tail...
+    expect(row).toMatch(/npub\S*…\S*\/?:openrouter:Wafer/);
+    // ...and the `:provider` suffix stays whole instead of being sliced off.
+    expect(row).toContain(":openrouter:Wafer");
+    expect(row).not.toContain("npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a.fips");
+  });
+
   test("keeps the raw client id when there is no owner metadata", () => {
     const stats = {
       ...statsFor(NPUB),

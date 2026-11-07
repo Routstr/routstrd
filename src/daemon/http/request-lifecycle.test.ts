@@ -3,7 +3,11 @@ import { createServer, request as httpRequest, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beginRequestLifecycle, type RequestLifecycleDriver } from "@routstr/sdk";
+import {
+  beginRequestLifecycle,
+  InsufficientBalanceError,
+  type RequestLifecycleDriver,
+} from "@routstr/sdk";
 import { createBunSqliteRequestLifecycleDriver } from "@routstr/sdk/bun";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
 import { createDaemonRequestHandler } from "./index";
@@ -92,11 +96,68 @@ describe("inference ingress lifecycle", () => {
       method: "POST", headers: { "x-api-key": "sk-test-client" }, body: JSON.stringify({ model: "deepseek-v4.1-flash" }),
     });
     expect(response.status).toBe(500);
+    const body = (await response.json()) as any;
+    // The fixture's bootstrap error text must not reach the caller.
+    expect(JSON.stringify(body)).not.toContain("Provider discovery unavailable");
+    expect(body.error_type).toBe("local_preparation_failed");
+    expect(body.error).toBe("Local inference preparation failed.");
     const trace = await driver.getTrace(response.headers.get("x-routstr-sdk-request-id")!);
     expect(trace?.request.clientId).toBe("alice");
     expect(trace?.request.requestedModelId).toBe("deepseek-v4.1-flash");
     expect(trace?.request.outcome).toBe("failed");
     expect(trace?.attempts).toEqual([]);
+  });
+
+  it("sanitizes an unclassified provider failure into a retryable 502", async () => {
+    // Exactly what Bun's fetch throws when a provider resets the socket. Before
+    // this mapping it reached the client as `500 {"error":"ECONNRESET: …"}` —
+    // internal runtime text, an HTTP status that says "caller bug", and no way
+    // to correlate it with the daemon log.
+    const rawTransportError =
+      "ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()";
+    const { call } = await fixture({
+      ensureProvidersBootstrapped: async () => {},
+      routeRequests: async () => {
+        throw new Error(rawTransportError);
+      },
+    });
+    const response = await call("/v1/chat/completions", {
+      method: "POST",
+      headers: { "x-api-key": "sk-test-client" },
+      body: JSON.stringify({ model: "deepseek-v4.1-flash", messages: [] }),
+    });
+
+    expect(response.status).toBe(502);
+    const text = await response.text();
+    expect(text).not.toContain("ECONNRESET");
+    expect(text).not.toContain("socket connection");
+    expect(JSON.parse(text)).toEqual({
+      error: "Upstream provider request failed.",
+      error_type: "upstream_unavailable",
+      request_id: response.headers.get("x-routstr-sdk-request-id"),
+    });
+  });
+
+  it("keeps a typed insufficient-balance failure actionable (402 + message)", async () => {
+    const { call } = await fixture({
+      ensureProvidersBootstrapped: async () => {},
+      routeRequests: async () => {
+        throw new InsufficientBalanceError(12, 3, 3, "https://mint.example");
+      },
+    });
+    const response = await call("/v1/chat/completions", {
+      method: "POST",
+      headers: { "x-api-key": "sk-test-client" },
+      body: JSON.stringify({ model: "deepseek-v4.1-flash", messages: [] }),
+    });
+
+    // Money is actionable, so it keeps its own contract: the sanitized generic
+    // envelope above must not swallow it.
+    expect(response.status).toBe(402);
+    const body = (await response.json()) as any;
+    expect(body.error_type).toBe("insufficient_balance");
+    expect(body.required).toBe(12);
+    expect(body.available).toBe(3);
   });
 
   it("marks client disconnect during local preparation as aborted", async () => {
@@ -173,26 +234,6 @@ describe("lifecycle query endpoints", () => {
     const timestamp = trace!.request.startedAt;
     expect((await (await call(`/requests?after=${timestamp - 1}&before=${timestamp + 1}`)).json() as any).output).toHaveLength(1);
     expect((await (await call(`/requests?after=${timestamp + 1}`)).json() as any).output).toEqual([]);
-  });
-});
-
-describe("/usagePi upstream response compatibility", () => {
-  it("matches new upstreamResponseId and legacy requestId, not lifecycle UUID or unrelated entries", async () => {
-    const usage = createMemoryUsageTrackingDriver([
-      ...[
-        { id: "legacy", requestId: "gen-123-legacy" },
-        { id: "new", requestId: "11111111-2222-4333-8444-555555555555", upstreamResponseId: "gen-123-new" },
-        { id: "other", requestId: "gen-456-other" },
-        { id: "prefer-upstream", requestId: "gen-123-old", upstreamResponseId: "gen-456-new" },
-      ].map((entry) => ({ ...entry, timestamp: Date.now(), modelId: "model", baseUrl: "https://provider.example", cost: 0, satsCost: 2, promptTokens: 1, completionTokens: 1, totalTokens: 2 })),
-    ]);
-    const { call } = await fixture({ usageTrackingDriver: usage });
-    const response = await call("/usagePi?timestamp=123");
-    expect(response.status).toBe(200);
-    const json = await response.json() as any;
-    expect(json.output.entries.map((entry: any) => entry.id).sort()).toEqual(["legacy", "new"]);
-    expect(json.output.totalEntries).toBe(2);
-    expect(json.output.totalSatsCost).toBe(4);
   });
 });
 

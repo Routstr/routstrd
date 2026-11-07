@@ -1,5 +1,5 @@
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
-import { loadRequestTraces, RequestLogFollower, type RequestLogFilters } from "./utils/request-logs";
+import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
@@ -76,6 +76,7 @@ import {
 } from "./daemon/wallet/paths";
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
+import { parseRequiredNpubName, parseUpdatedNpubName } from "./utils/npub-name";
 import {
   HISTORY_ENTRY_TYPES,
   historyStatus,
@@ -2170,14 +2171,62 @@ type NpubEntry = {
   monthlyUsedSats?: number;
 };
 
-/** Normalize a user-supplied npub display name: trim whitespace and cap at 64 chars. */
-function parseNpubName(raw: string | undefined): { name?: string | null; error?: string } {
-  if (raw === undefined) return {};
-  const trimmed = raw.trim();
-  if ([...trimmed].length > 64) {
-    return { error: "Invalid name. Maximum length is 64 characters." };
+/**
+ * Resolve the display name for a newly registered npub.
+ *
+ * Names are mandatory, so a missing `--name` prompts on a terminal and fails
+ * with a usable hint everywhere else (scripts, CI, piped invocations). Returns
+ * the trimmed name, or exits.
+ */
+async function requireNpubName(
+  raw: string | undefined,
+  subject: string,
+  usage: string,
+): Promise<string> {
+  const parsed = parseRequiredNpubName(raw);
+  if (parsed.error) {
+    console.error(parsed.error);
+    process.exit(1);
   }
-  return { name: trimmed === "" ? null : trimmed };
+  if (parsed.name !== undefined) return parsed.name;
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error(`Missing required --name.\n${usage}`);
+    process.exit(1);
+  }
+
+  const rl = require("readline").createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    while (true) {
+      // `null` means EOF/Ctrl+D, which aborts instead of re-prompting.
+      const answer = await new Promise<string | null>((resolve) => {
+        let settled = false;
+        const done = (value: string | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        rl.question(`Display name for ${subject} (required): `, (value: string) =>
+          done(value),
+        );
+        rl.once("close", () => done(null));
+      });
+
+      if (answer === null) {
+        console.error(`\nA display name is required.\n${usage}`);
+        process.exit(1);
+      }
+
+      const validated = parseRequiredNpubName(answer);
+      if (validated.name !== undefined) return validated.name;
+      console.error(validated.error ?? "Invalid display name.");
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 /**
@@ -2268,7 +2317,7 @@ npubsCmd
     for (const entry of npubs) {
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
-      const name = entry.name ? ` "${entry.name}"` : "";
+      const name = entry.name ? ` "${entry.name}"` : " (unnamed)";
       console.log(`- ${entry.npub} [${entry.role}]${name}${marker} — ${formatNpubMonthlyLimit(entry)}`);
     }
     if (userNpub && !found) {
@@ -2283,7 +2332,7 @@ npubsCmd
 npubsCmd
   .command("register")
   .description("Register yourself as the first admin (only when no admins exist)")
-  .option("-n, --name <name>", "Display name for this npub (optional)")
+  .option("-n, --name <name>", "Display name for this npub (required; prompted when omitted)")
   .action(async (options: { name?: string }) => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -2312,13 +2361,15 @@ npubsCmd
       console.error("Failed to normalize user npub.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
-    if (name.error) {
-      console.error(name.error);
-      process.exit(1);
-    }
-    const body: Record<string, string | null> = { npub: npubFromPubkey(normalized) };
-    if (name.name !== undefined) body.name = name.name;
+    const name = await requireNpubName(
+      options.name,
+      npubFromPubkey(normalized),
+      "Register with a display name: routstrd npubs register --name \"Alice\"",
+    );
+    const body: Record<string, string | null> = {
+      npub: npubFromPubkey(normalized),
+      name,
+    };
     const addResult = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -2342,7 +2393,7 @@ npubsCmd
   .command("add <npub>")
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
-  .option("-n, --name <name>", "Display name for the npub (optional)")
+  .option("-n, --name <name>", "Display name for the npub (required; prompted when omitted)")
   .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (resets on the 1st; omit for unlimited)")
   .action(async (npubArg: string, options: { role: string; name?: string; limitSats?: string }) => {
     await ensureDaemonRunning();
@@ -2355,21 +2406,22 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
-    if (name.error) {
-      console.error(name.error);
-      process.exit(1);
-    }
+    // Validate the cap before prompting for a name: a bad flag should fail fast.
     const limit = parseMonthlyLimitSats(options.limitSats);
     if (limit.error) {
       console.error(limit.error);
       process.exit(1);
     }
+    const name = await requireNpubName(
+      options.name,
+      npubFromPubkey(normalized),
+      `Add a display name: routstrd npubs add ${npubFromPubkey(normalized)} --name "Alice"`,
+    );
     const body: Record<string, unknown> = {
       npub: npubFromPubkey(normalized),
       role: options.role,
+      name,
     };
-    if (name.name !== undefined) body.name = name.name;
     if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
     const result = await callAuth("/npubs", {
       method: "POST",
@@ -2398,7 +2450,7 @@ npubsCmd
   .command("update <npub>")
   .description("Update the role, name and/or monthly soft spend cap of an existing npub (requires admin)")
   .option("-r, --role <role>", "New role: 'admin' or 'user'")
-  .option("-n, --name <name>", "New display name (empty string clears it)")
+  .option("-n, --name <name>", "New display name (a name cannot be removed)")
   .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (0 blocks all paid requests)")
   .option("--clear-limit", "Remove the monthly spend cap (unlimited)")
   .action(async (npubArg: string, options: { role?: string; name?: string; limitSats?: string; clearLimit?: boolean }) => {
@@ -2425,7 +2477,7 @@ npubsCmd
       console.error("Provide '--role', '--name', '--limit-sats' and/or '--clear-limit' to update.");
       process.exit(1);
     }
-    const name = parseNpubName(options.name);
+    const name = parseUpdatedNpubName(options.name);
     if (name.error) {
       console.error(name.error);
       process.exit(1);
@@ -3755,6 +3807,13 @@ program
   });
 
 // Logs
+/**
+ * How long after local midnight `logs` keeps showing yesterday's file too.
+ * Long enough to cover `tail -n 7` of daemon activity across the boundary,
+ * short enough that ordinary daytime output is a single date's file.
+ */
+const MIDNIGHT_GRACE_MS = 60 * 60 * 1000;
+
 function getLogFileForDate(logsDir: string, date: Date = new Date()): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -3935,7 +3994,7 @@ function filterLinesByRequestId(
 
 function parseLinesOption(value: string): number {
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 50;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 7;
 }
 
 
@@ -3952,7 +4011,7 @@ program
   .option("--base-url <url>", "Filter by provider URL")
   .option("--client-id <id>", "Filter by client ID")
   .option("-c, --coco", "Show Cashu wallet-engine (coco) logs instead of daemon logs", false)
-  .option("-n, --lines <number>", "Number of requests (or lines with --raw) to show", "50")
+  .option("-n, --lines <number>", "Number of requests (or lines with --raw) to show", "7")
   .option("-r, --recent", "List recent requests (legacy request index with --raw)", false)
   .option("-i, --request-id <id>", "Only show this lifecycle UUID (log lines with --raw)")
   .action(
@@ -3973,10 +4032,20 @@ program
       }
 
       const logsDir = options.coco ? COCO_LOGS_DIR : LOGS_DIR;
-      const todayFile = getLogFileForDate(logsDir);
-      const yesterday = new Date();
+      const now = new Date();
+      const todayFile = getLogFileForDate(logsDir, now);
+      const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);
       const yesterdayFile = getLogFileForDate(logsDir, yesterday);
+      // Daily files are named after the local date of each write (see
+      // utils/logger.ts), so plain tail output should normally be today's file
+      // only. Right after midnight, though, today's file holds a handful of
+      // lines while the interesting tail still sits at the end of yesterday's
+      // file, so span the boundary for a short window.
+      const justAfterMidnight =
+        now.getTime() -
+          new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() <
+        MIDNIGHT_GRACE_MS;
 
       if (!options.raw && !options.coco) {
         // The daemon reads its persistent lifecycle DB, including failures that
@@ -4009,10 +4078,24 @@ program
 
       const lines = parseLinesOption(options.lines);
 
+      // Lookups (--recent, --request-id) reach back a day: a request started
+      // before midnight may still be the one being investigated.
       const logFiles = [yesterdayFile, todayFile].filter(
         (file, index, files) =>
           existsSync(file) && files.indexOf(file) === index,
       );
+      const tailCandidates = justAfterMidnight
+        ? [yesterdayFile, todayFile]
+        : [todayFile];
+      const existingTailFiles = tailCandidates.filter(
+        (file, index, files) =>
+          existsSync(file) && files.indexOf(file) === index,
+      );
+      // The daemon may not have written anything today yet (it was stopped
+      // overnight); fall back to the newest file rather than printing nothing.
+      const tailFiles = existingTailFiles.length > 0
+        ? existingTailFiles
+        : logFiles.slice(-1);
 
       if (options.recent) {
         const requests = collectRecentRequests(logFiles, lines);
@@ -4023,8 +4106,10 @@ program
 
         console.log("Recent requests (newest first):");
         for (const request of requests) {
-          const when = request.timestamp ? `  ${request.timestamp}` : "";
-          console.log(`  ${request.requestId}  ${request.modelId}${when}`);
+          const when = request.timestamp
+            ? utcTime(Date.parse(request.timestamp))
+            : "--:--:--";
+          console.log(`${when}  ${request.requestId}  ${request.modelId}`);
         }
         return;
       }
@@ -4053,8 +4138,8 @@ program
         return;
       }
 
-      for (const file of logFiles) {
-        if (logFiles.length > 1) {
+      for (const file of tailFiles) {
+        if (tailFiles.length > 1) {
           console.log(`==> ${file} <==`);
         }
         const output = readLastLines(file, lines);

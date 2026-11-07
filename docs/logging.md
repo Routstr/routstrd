@@ -58,9 +58,16 @@ fails — or starts failing differently — still gets its own `[WARN] Provider
 ## Inspecting
 
 ```sh
+routstrd logs                 # last 7 lines (default)
 routstrd logs -n 50          # last 50 lines
 routstrd logs -f             # follow (from debug.log, the daemon's stdout)
 routstrd logs -c             # Cashu wallet-engine log instead
 ROUTSTRD_LOG_LEVEL=debug routstrd start
 ROUTSTRD_COCO_LOG_LEVEL=info routstrd start
 ```
+
+A plain `routstrd logs` tails today's dated file only. For the first hour after
+local midnight it also tails yesterday's file (with `==> <file> <==` banners),
+because today's file holds almost nothing while the interesting tail is still at
+the end of yesterday's. `--recent` and `-i <request-id>` always search both
+days, since the request under investigation may have started before midnight.

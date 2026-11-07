@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   formatRequestSummary, formatRequestVerbose, loadRequestTraces,
-  RequestLogFollower, requestLogsQuery, safeCorrelatedLog,
+  RequestLogFollower, requestLogsQuery, safeCorrelatedLog, utcTime,
   type LifecycleTrace,
 } from "./request-logs";
 
@@ -20,16 +20,29 @@ function trace(): LifecycleTrace {
 describe("lifecycle logs rendering", () => {
   test("exact one-line summary, ordered by actual attempt ordinal with full UUID", () => {
     const t = trace(); t.attempts.reverse();
-    expect(formatRequestSummary(t)).toBe(`alice - deepseek-v4.1-flash - 400 - 402 - 200 - ${id}`);
+    expect(formatRequestSummary(t)).toBe(`00:00:01  alice - deepseek-v4.1-flash - 400 - 402 - 200 - ${id}`);
     expect(t.attempts[0]!.ordinal).toBe(3); // formatter does not mutate DB results
   });
   test("failed ingress preserves client attribution and local status without an attempt", () => {
     const t = trace(); t.attempts = []; t.request.outcome = "failed"; t.request.httpStatus = 400;
-    expect(formatRequestSummary(t)).toBe(`alice - deepseek-v4.1-flash - 400 - ${id}`);
+    expect(formatRequestSummary(t)).toBe(`00:00:01  alice - deepseek-v4.1-flash - 400 - ${id}`);
     delete t.request.httpStatus;
     expect(formatRequestSummary(t)).toContain(" - FAILED - ");
     delete t.request.clientId; delete t.request.requestedModelId;
-    expect(formatRequestSummary(t)).toStartWith("unknown - unknown - ");
+    expect(formatRequestSummary(t)).toStartWith("00:00:01  unknown - unknown - ");
+  });
+  test("summary leads with UTC time of day only, never a date or local offset", () => {
+    const t = trace();
+    // 2026-11-04T15:57:03.123Z: the date and milliseconds are deliberately
+    // omitted, and the value is UTC regardless of the machine's zone.
+    t.request.startedAt = Date.UTC(2026, 10, 4, 15, 57, 3, 123);
+    expect(formatRequestSummary(t)).toStartWith("15:57:03  alice - ");
+    expect(formatRequestSummary(t)).not.toContain("2026");
+    expect(utcTime(t.request.startedAt, true)).toBe("15:57:03.123");
+  });
+  test("an unusable start time degrades to a placeholder instead of throwing", () => {
+    const t = trace(); t.request.startedAt = Number.NaN;
+    expect(formatRequestSummary(t)).toStartWith("--:--:--  alice - ");
   });
   test("network failures have NET, cancellation and active calls have explicit labels", () => {
     const t = trace(); t.attempts.forEach(a => delete a.httpStatus);
@@ -44,7 +57,7 @@ describe("lifecycle logs rendering", () => {
       `[1970-01-01T00:00:01.100Z] [INFO] [req:${id}] [model:m] Routing request with path: /v1`,
     ]);
     expect(rendered.split("\n").map(l => l.slice(0, 14))).toEqual([
-      "alice - deepse", "  00:00:01.000", "  00:00:01.100", "  00:00:01.500", "  00:00:01.800", "  00:00:02.200", "  00:00:02.500", "  00:00:03.500",
+      "00:00:01  alic", "  00:00:01.000", "  00:00:01.100", "  00:00:01.500", "  00:00:01.800", "  00:00:02.200", "  00:00:02.500", "  00:00:03.500",
     ]);
     expect(rendered).toContain("log [INFO] Retrying");
     expect(rendered).toContain("node_request_id=node-2");
@@ -132,7 +145,7 @@ describe("lifecycle logs querying and follow", () => {
   test("filters and limits are forwarded, with URL encoding", () => {
     expect(requestLogsQuery({ lines: "10", before: "200", after: "100", outcome: "failed", modelId: "a/b", clientId: "alice & bob", baseUrl: "https://a.test" }))
       .toBe("/requests?limit=10&before=200&after=100&outcome=failed&modelId=a%2Fb&baseUrl=https%3A%2F%2Fa.test&clientId=alice+%26+bob");
-    expect(requestLogsQuery({ lines: "-1" })).toBe("/requests?limit=50");
+    expect(requestLogsQuery({ lines: "-1" })).toBe("/requests?limit=7");
     expect(requestLogsQuery({ lines: "100000" })).toBe("/requests?limit=1000");
   });
   test("loads DB traces, never reconstructs statuses from flat logs; newest first", async () => {

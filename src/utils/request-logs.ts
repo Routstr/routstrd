@@ -58,6 +58,13 @@ function provider(value: string): string {
     return "unknown";
   }
 }
+/** UTC time of day, matching the `[ISO]` stamps the daemon writes to disk.
+ * Deliberately date-free: a summary line is scrollback, and the daily log files
+ * it supplements already carry the date. Non-finite input degrades to a
+ * placeholder rather than throwing `RangeError` and killing the whole listing. */
+export function utcTime(ms: number, withMillis = false): string {
+  return Number.isFinite(ms) ? new Date(ms).toISOString().slice(11, withMillis ? 23 : 19) : "--:--:--";
+}
 export function formatRequestSummary(trace: LifecycleTrace): string {
   const statuses = [...trace.attempts].sort((a, b) => a.ordinal - b.ordinal)
     .map((attempt) => attempt.httpStatus !== undefined ? String(attempt.httpStatus)
@@ -66,7 +73,7 @@ export function formatRequestSummary(trace: LifecycleTrace): string {
   const request = trace.request;
   const chain = statuses.length ? statuses.join(" - ")
     : request.httpStatus !== undefined ? String(request.httpStatus) : request.outcome.toUpperCase();
-  return `${text(request.clientId || "unknown")} - ${text(request.requestedModelId || "unknown")} - ${chain} - ${text(request.requestId)}`;
+  return `${utcTime(request.startedAt)}  ${text(request.clientId || "unknown")} - ${text(request.requestedModelId || "unknown")} - ${chain} - ${text(request.requestId)}`;
 }
 
 /** Only known diagnostic messages are eligible. Drop payload-bearing suffixes,
@@ -146,7 +153,7 @@ export function formatRequestVerbose(trace: LifecycleTrace, logLines: string[] =
   }
   timeline.sort((a, b) => a.timestamp - b.timestamp || a.order - b.order);
   return [formatRequestSummary(trace), ...timeline.map((entry) =>
-    `  ${new Date(entry.timestamp).toISOString().slice(11, 23)}  ${entry.message}`)].join("\n");
+    `  ${utcTime(entry.timestamp, true)}  ${entry.message}`)].join("\n");
 }
 
 export interface RequestLogFilters {
@@ -161,7 +168,7 @@ export interface RequestLogFilters {
 }
 export function requestLogsQuery(options: RequestLogFilters): string {
   const count = Number(options.lines);
-  const query = new URLSearchParams({ limit: String(Number.isInteger(count) && count > 0 ? Math.min(count, 1000) : 50) });
+  const query = new URLSearchParams({ limit: String(Number.isInteger(count) && count > 0 ? Math.min(count, 1000) : 7) });
   for (const key of ["before", "after", "outcome", "modelId", "baseUrl", "clientId"] as const) {
     if (options[key] !== undefined) query.set(key, options[key]!);
   }

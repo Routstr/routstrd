@@ -52,6 +52,14 @@ describe("truncateMiddle", () => {
     expect(out.endsWith("cloudflare.com/")).toBe(true);
   });
 
+  it("honours a custom head ratio for tail-heavy values", () => {
+    const url = "npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a.fips:28080/";
+    const out = truncateMiddle(url, 21, 0.4);
+    expect(out.length).toBe(21);
+    expect(out.startsWith("npub1pxd…")).toBe(true);
+    expect(out.endsWith(".fips:28080/")).toBe(true);
+  });
+
   it("elides at the default width", () => {
     const url = `https://${"a".repeat(80)}.example.com/`;
     expect(truncateMiddle(url).length).toBe(PROVIDER_COLUMN_MAX);
