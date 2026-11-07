@@ -35,7 +35,6 @@ Raw flat logs can contain sensitive diagnostics. `-v` is not permission to expos
 - `GET /requests?limit=50&before=<ms>&after=<ms>&outcome=failed&modelId=<model>&baseUrl=<provider>&clientId=alice` returns `{ output: [...] }`, newest first.
 - `GET /requests/<full-uuid>` returns `{ request, attempts, events }`, with ordinal/sequence ascending; unknown IDs return 404.
 - Inference responses, including local rejection responses, include `x-routstr-sdk-request-id`. The node's existing `x-routstr-request-id` is preserved and identifies a different object: the final node attempt.
-- `/usagePi` matches `upstreamResponseId ?? requestId`, retaining historical `gen-...` lookup while new usage rows use lifecycle UUIDs.
 
 Premature client disconnect propagates cancellation to the SDK, rather than treating response headers as completion. A clean response finish does not cancel the request. Startup records a fresh daemon owner beside the database and reconciles only the previous daemon owner's unfinished requests as `interrupted`; unrelated SDK owners are untouched. This reconciliation runs after wallet startup acquires the existing process lock.
 

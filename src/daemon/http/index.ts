@@ -2481,53 +2481,6 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/usagePi") {
-      try {
-        const timestamp = (url.searchParams.get("timestamp") || "").trim();
-        if (!timestamp) {
-          sendJson(res, 400, {
-            error: "Missing required 'timestamp' query parameter.",
-          });
-          return;
-        }
-
-        const usageDriver = deps.usageTrackingDriver;
-        const limit = parseLimit(url.searchParams.get("limit"));
-        const allMatching = await usageDriver.list();
-        const requestIdPrefix = `gen-${timestamp}-`;
-        const filtered = allMatching.filter((entry) =>
-          (entry.upstreamResponseId ?? entry.requestId).startsWith(requestIdPrefix),
-        );
-        const entries = filtered.slice(0, limit);
-        const totalEntries = filtered.length;
-        const totalSatsCost = filtered.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-        const recentSatsCost = entries.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            output: {
-              entries,
-              totalEntries,
-              totalSatsCost,
-              recentSatsCost,
-              limit,
-              timestamp,
-            },
-          }),
-        );
-      } catch (error) {
-        sendJson(res, 500, { error: toErrorMessage(error) });
-      }
-      return;
-    }
-
     if (req.method === "GET" && (url.pathname === "/requests" || url.pathname.startsWith("/requests/"))) {
       try {
         const driver = deps.requestLifecycleDriver;
