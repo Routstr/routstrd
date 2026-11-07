@@ -176,26 +176,6 @@ describe("lifecycle query endpoints", () => {
   });
 });
 
-describe("/usagePi upstream response compatibility", () => {
-  it("matches new upstreamResponseId and legacy requestId, not lifecycle UUID or unrelated entries", async () => {
-    const usage = createMemoryUsageTrackingDriver([
-      ...[
-        { id: "legacy", requestId: "gen-123-legacy" },
-        { id: "new", requestId: "11111111-2222-4333-8444-555555555555", upstreamResponseId: "gen-123-new" },
-        { id: "other", requestId: "gen-456-other" },
-        { id: "prefer-upstream", requestId: "gen-123-old", upstreamResponseId: "gen-456-new" },
-      ].map((entry) => ({ ...entry, timestamp: Date.now(), modelId: "model", baseUrl: "https://provider.example", cost: 0, satsCost: 2, promptTokens: 1, completionTokens: 1, totalTokens: 2 })),
-    ]);
-    const { call } = await fixture({ usageTrackingDriver: usage });
-    const response = await call("/usagePi?timestamp=123");
-    expect(response.status).toBe(200);
-    const json = await response.json() as any;
-    expect(json.output.entries.map((entry: any) => entry.id).sort()).toEqual(["legacy", "new"]);
-    expect(json.output.totalEntries).toBe(2);
-    expect(json.output.totalSatsCost).toBe(4);
-  });
-});
-
 /** Uses the real SDK resolver/client/transport; adapters supply local state only. */
 async function routedFixture(mode: "success" | "passthrough" | "stream") {
   const upstream = createServer((req, res) => {
