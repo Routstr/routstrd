@@ -129,12 +129,16 @@ const URL_SCHEME = /^https?:\/\//;
 
 /**
  * Split a node URL at its first dot into the opaque label routing never reads
- * and the tail that identifies the deployment. `localhost:8080` has no dot to
- * split on, so all of it is the label.
+ * and the tail that identifies the deployment. A dotless host has no suffix to
+ * split off, but its port still identifies the deployment and must not be lost
+ * to the fixed ellipsis window.
  */
 export function splitNodeUrl(url: string): { label: string; tail: string } {
   const dot = url.indexOf(".");
-  if (dot <= 0) return { label: url, tail: "" };
+  if (dot <= 0) {
+    const port = /:\d+(?:\/.*)?$/.exec(url);
+    return port ? { label: url.slice(0, port.index), tail: port[0] } : { label: url, tail: "" };
+  }
   return { label: url.slice(0, dot), tail: url.slice(dot) };
 }
 

@@ -85,8 +85,9 @@ describe("splitNodeUrl", () => {
     });
   });
 
-  it("keeps a host without a dot whole", () => {
-    expect(splitNodeUrl("localhost:8080/")).toEqual({ label: "localhost:8080/", tail: "" });
+  it("keeps a host without a dot whole and preserves its port", () => {
+    expect(splitNodeUrl("localhost")).toEqual({ label: "localhost", tail: "" });
+    expect(splitNodeUrl("localhost:8080/")).toEqual({ label: "localhost", tail: ":8080/" });
   });
 });
 
@@ -131,6 +132,18 @@ describe("formatNodeProviderCell", () => {
     // 40 columns, of which 12 are `.fips:28080/` and 22 the provider.
     expect(formatNodeProviderCell(npubUrl, "openrouter:Cloudflare", 40)).toBe(
       "npub…a.fips:28080/:openrouter:Cloudflare",
+    );
+  });
+
+  it("does not elide a dotless host when the port and provider fit", () => {
+    expect(formatNodeProviderCell("http://localhost:8080/", "openai", 40)).toBe(
+      "localhost:8080/:openai",
+    );
+  });
+
+  it("keeps a dotless host's port visible while shrinking a long label", () => {
+    expect(formatNodeProviderCell("http://my-very-long-development-hostname:8080/", "openai", 40)).toBe(
+      "my-very-l…tname:8080/:openai",
     );
   });
 
