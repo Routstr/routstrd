@@ -3,6 +3,7 @@ import {
   callAuth,
   callDaemon,
   getDaemonBaseUrl,
+  getUserNpub,
   isDaemonRunning,
   loadConfig,
 } from "../../utils/daemon-client.ts";
@@ -322,4 +323,78 @@ export function resolveClientLabel(clientId: string | undefined, naming: ClientN
 
 export function emptyClientNaming(): ClientNaming {
   return buildClientNaming([], []);
+}
+
+// ─── Monthly quota for the signed-in npub ─────────────────────────────
+
+/** Monthly spend cap for the signed-in npub, as reported by the auth proxy. */
+export interface MonthlyQuota {
+  /** Confirmed cap in sats; 0 is a real cap that blocks every paid request. */
+  limitSats: number;
+  /** Current-month spend, or null when the proxy did not report it. */
+  usedSats: number | null;
+}
+
+/** The subset of a `GET /npubs` entry the quota view needs. */
+type NpubQuotaEntry = {
+  npub?: string;
+  monthlyLimitSats?: number | null;
+  monthlyUsedSats?: number;
+};
+
+/**
+ * Pick the signed-in npub's cap out of a `GET /npubs` response.
+ *
+ * Returns null unless this exact npub reports a numeric cap: `null` means
+ * unlimited and an absent field means the auth proxy does not report caps (an
+ * older proxy), so both hide the figure. Never falls back to another entry —
+ * spend is private, so an admin's row would show someone else's numbers.
+ */
+export function monthlyQuotaForNpub(
+  response: unknown,
+  userNpub: string | null,
+): MonthlyQuota | null {
+  if (!userNpub) return null;
+  const raw = response as
+    | { npubs?: NpubQuotaEntry[]; output?: { npubs?: NpubQuotaEntry[] } }
+    | undefined;
+  const npubs = raw?.npubs ?? raw?.output?.npubs ?? [];
+  const entry = npubs.find((n) => n?.npub === userNpub);
+  if (!entry || typeof entry.monthlyLimitSats !== "number") return null;
+  return {
+    limitSats: entry.monthlyLimitSats,
+    usedSats: typeof entry.monthlyUsedSats === "number" ? entry.monthlyUsedSats : null,
+  };
+}
+
+/**
+ * Read the signed-in npub's monthly cap from the auth proxy.
+ *
+ * Returns null in local mode (no auth proxy to ask), when no Nostr identity is
+ * configured, when the response cannot be read, and when the proxy reports no
+ * cap for this npub — callers hide the figure in every one of those cases
+ * rather than inventing a budget. A failure is never answered from a previous
+ * value, so an identity or config change cannot leave a stale cap on screen.
+ */
+export async function fetchMonthlyQuota(
+  deps: {
+    loadConfig?: typeof loadConfig;
+    callAuth?: typeof callAuth;
+  } = {},
+): Promise<MonthlyQuota | null> {
+  const load = deps.loadConfig ?? loadConfig;
+  const auth = deps.callAuth ?? callAuth;
+  try {
+    const config = await load();
+    // Local mode: `callAuth` would fall back to the daemon, which does not
+    // route /npubs, and there is no proxy-side cap to report.
+    if (!config.authUrl && !config.daemonUrl) return null;
+    const userNpub = getUserNpub(config);
+    if (!userNpub) return null;
+    const result = await auth("/npubs");
+    if (result.error) return null;
+    return monthlyQuotaForNpub(result, userNpub);
+  } catch {
+    return null;
+  }
 }

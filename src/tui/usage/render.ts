@@ -9,7 +9,7 @@ import {
 import { vimState } from "./state.ts";
 import { stripAnsi, truncateAnsi } from "./terminal.ts";
 import { truncateMiddle } from "../../utils/model-providers.ts";
-import type { BalanceInfo, StatusInfo } from "./data.ts";
+import type { BalanceInfo, MonthlyQuota, StatusInfo } from "./data.ts";
 import type { TabId, TimeWindow, TimelineBucket, TimelinePoint, UpdateInfo, UsageStats } from "./types.ts";
 
 /** Format a cost value: 0.12, 1.23, 12.34, 123.45, 1.23k, 1.23m */
@@ -163,12 +163,37 @@ function combineSideBySide(left: string, right: string, leftWidth: number, right
   return lines.join("\n");
 }
 
+/**
+ * "Monthly Remaining" line for the System Status box.
+ *
+ * Only rendered when the auth proxy confirmed a numeric cap for the signed-in
+ * npub, so `null` (uncapped, older proxy, local mode) hides the line entirely
+ * instead of implying a budget. When the proxy could not report current-month
+ * spend the remainder is shown as unknown — never as the full cap, which would
+ * claim budget that may already be spent.
+ */
+export function renderMonthlyRemaining(
+  quota: MonthlyQuota | null | undefined,
+): string | null {
+  if (!quota) return null;
+  const cap = quota.limitSats.toLocaleString();
+  if (quota.usedSats === null) {
+    return `${COLORS.bold}Monthly Remaining:${COLORS.reset} ${COLORS.dim}unknown${COLORS.reset} (cap ${cap} sats)`;
+  }
+  const remaining = Math.max(0, quota.limitSats - quota.usedSats);
+  const color = remaining > 0 ? COLORS.green : COLORS.red;
+  // The proxy reports floored current-month spend, so the remainder can overstate
+  // the true budget by up to a sat. Mark it approximate rather than exact.
+  return `${COLORS.bold}Monthly Remaining:${COLORS.reset} ${color}~${remaining.toLocaleString()}${COLORS.reset} of ${cap} sats`;
+}
+
 export function renderOverview(
   stats: UsageStats,
   balance: BalanceInfo | null,
   status: StatusInfo | null,
   width: number,
   activeWindow: TimeWindow,
+  quota: MonthlyQuota | null = null,
 ): string {
   // Overview honours the [W] window selector: every figure below is scoped to
   // the selected window, so "Total Spent" means "spent in this window".
@@ -215,6 +240,11 @@ export function renderOverview(
   } else {
     statusLines.push(`${COLORS.dim}Status unavailable${COLORS.reset}`);
   }
+
+  // Calendar-month figure for the signed-in npub. Deliberately outside the
+  // [W] window scope, so it never changes with the selected window.
+  const monthlyLine = renderMonthlyRemaining(quota);
+  if (monthlyLine) statusLines.push(monthlyLine);
 
   const sections: string[] = [];
 
@@ -935,9 +965,9 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
 }
 
-export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow, height?: number): string {
+export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow, height?: number, quota: MonthlyQuota | null = null): string {
   switch (activeTab) {
-    case "overview": return renderOverview(stats, balance, status, width, activeWindow);
+    case "overview": return renderOverview(stats, balance, status, width, activeWindow, quota);
     case "history": return renderHistory(stats, width, height);
     case "models": return renderModels(stats, width);
     case "providers": return renderProviders(stats, width);

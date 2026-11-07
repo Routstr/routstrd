@@ -378,11 +378,52 @@ from the legacy admin table can appear as `(unnamed)`.
 
 | Command | Description |
 |---------|-------------|
-| `routstrd npubs list` | List registered npubs with role and display name |
+| `routstrd npubs list` | List registered npubs with role, display name, monthly cap and current-month spend |
 | `routstrd npubs register --name <name>` | Register yourself as the first admin (bootstrap only); `--name` is required |
-| `routstrd npubs add <npub> --name <name> [--role <role>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
-| `routstrd npubs update <npub> [--role <role>] [--name <name>]` | Update role and/or name (admin only); a name cannot be cleared |
+| `routstrd npubs add <npub> --name <name> [--role <role>] [--limit-sats <sats>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
+| `routstrd npubs update <npub> [--role <role>] [--name <name>] [--limit-sats <sats>] [--clear-limit]` | Update role, name and/or monthly spend cap (admin only); a name cannot be cleared |
 | `routstrd npubs delete <npub>` | Delete an npub |
+
+`--limit-sats` sets a **soft** calendar-month spend cap for the npub, enforced
+by the auth proxy. `--limit-sats 0` blocks every paid request and
+`--clear-limit` restores unlimited access.
+
+`npubs list` reports the cap in one of three states, because the auth proxy
+does not always answer with one:
+
+| Reported | Meaning |
+|----------|---------|
+| `limit: 5000 sats/month (1200 used)` | Cap set; `used` is current-month spend |
+| `limit: unlimited` | No cap (`monthlyLimitSats: null`) |
+| `limit: unknown (auth proxy does not report spend limits)` | The response omitted the field — most likely an older auth proxy. Not the same as unlimited |
+
+What the cap does and does not guarantee:
+
+- It is a threshold, not a reservation: the request that crosses the cap is
+  allowed to finish, and requests already in flight can overshoot it. Treat it
+  as a spending guard, not a hard budget. The month follows the proxy server's
+  local timezone.
+- Once the cap is reached, paid requests fail with HTTP 402
+  (`code: "monthly_quota_exceeded"`) plus `X-Routstr-Quota-*` and `Retry-After`
+  headers. Management routes keep working, so an admin can still raise the cap.
+- **Paid NIP-98 requests from a capped npub are rejected with HTTP 403
+  (`code: "capped_npub_requires_api_key"`) even at zero spend**, because the
+  proxy cannot attribute that spend. Use an API-key client instead; its spend
+  remains subject to the monthly cap. Capping your own npub therefore blocks NIP-98 inference
+  made as that npub; `routstrd` management commands still work.
+- If the proxy cannot read monthly accounting it fails closed with HTTP 503
+  (`code: "quota_accounting_unavailable"`) for capped npubs instead of assuming
+  zero spend; unlimited npubs keep working.
+
+Rollout: these flags need an auth proxy that supports monthly limits. Older
+proxies may ignore `monthlyLimitSats` or reject limit-only updates. When a
+successful response omits the field, the CLI reports `limit: unknown`; when a
+requested cap is missing or differs from the response, it warns instead of
+pretending the limit was applied. Release the auth proxy before relying on the
+flags, and bump the Cloudron image pin accordingly.
+
+`routstrd monitor` shows your own remaining monthly budget in the Overview tab
+when the proxy reports a cap for your npub.
 
 ### `routstrd remote [url]`
 
@@ -458,6 +499,14 @@ the model and client breakdowns. On **History** it chooses the chart's bucket �
 hours for `24h` and `7d`, days for `30d`, and ISO weeks for `All` — where spend
 and tokens are drawn as grouped bars against left (sats) and right (tokens)
 axes. **Recent** keeps its own all-time view and hides the selector.
+
+When the auth proxy reports a monthly spend cap for your own npub, **Overview**
+adds a `Monthly Remaining` line to the **System Status** box: remaining sats out
+of the cap, or `unknown` when current-month spend cannot be read. It is a
+calendar-month figure and ignores the `W` window. The `~` marks the remainder as
+approximate — the proxy reports floored current-month spend, so it can overstate
+the true budget by under a sat. The line is hidden when your npub is uncapped,
+when the proxy does not report caps (an older proxy), and in local mode.
 
 ### `routstrd logs`
 
