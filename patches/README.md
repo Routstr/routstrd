@@ -105,8 +105,8 @@ or recovery waits, preparation recomputes for survivors. Per-client shared top-u
 stay live while any caller is live. Active financial work remains shareable through
 settlement even when its last original caller cancels; individual aborts do not
 replace the underlying settlement result. A live newcomer restarts cancelled
-pre-send work only after that attempt drains. This does **not** deduplicate concurrent stale
-balance deficits or extend the existing batch window (Bug 1 is separate).
+pre-send work only after that attempt drains. The automatic funding coordination described below separately addresses stale
+balance deficits; manual additive batching retains its existing contract.
 
 The daemon forwards the optional signal into `sendCashu`, checking it after wallet
 recovery and immediately before Coco `send.prepare`. Once prepare starts, execute,
@@ -121,3 +121,37 @@ runtime with in-memory wallets, gated preparation/queues and mocked inference an
 deposit operations. `cancelled-funding.test.ts` covers adapter forwarding and a
 real Coco client's recovery boundary without mint traffic. Neither test spends
 funds or makes inference requests.
+
+
+## SDK automatic funding / stale-deficit coordination
+
+The SDK 0.5.0 patch also backports [SDK PR #138](https://github.com/Routstr/routstr-sdk/pull/138)
+(`BalanceManager.ensureBalance`) and switches
+proactive inference funding and local-insufficient-balance 402 funding to it.
+Unlike manual `topUp({ amount })`, an automatic ensure expresses a balance target:
+per wallet adapter, provider URL (trailing slash normalized), and API key, callers
+wait for prior automatic financial settlement, then read fresh provider available
+balance before deciding whether another deposit is justified. Each deposit applies
+the existing path's shortfall/margin/minimum rules once, not once per stale caller.
+`total_balance` is already net of reservations; reserved funds are never subtracted
+again. Unknown/invalid/non-finite balances cannot authorize funding.
+
+A stale request snapshot is only a trigger; it is no longer added to a deposit and
+persisted as a synthetic fresh balance. Actual concurrent reservations may warrant
+additional deposits after fresh reads. No universal "one deposit per burst" promise
+is made. Manual amount-based top-ups remain additive and independent of automatic
+ensures; SDK entrypoint bundles have module-local coordination (applications should
+not mix separate bundled entrypoints for the same wallet). Multiple processes and
+remote-provider eventual consistency are outside this in-process coordinator.
+
+Cancellation is checked after queue/balance waits. Financial sends already started
+still settle/persist/recover; a later live caller waits then reassesses rather than
+replacing an active transaction. Queued automatic callers do not contribute additive
+amounts that another caller's cancellation could accidentally erase.
+
+`src/daemon/wallet/sdk-ensure-balance.test.ts` verifies the installed patched runtime
+with in-memory state and gated sends/deposits: stale deficits across clients,
+arrivals during settlement, new reservation shortfalls, wallet/provider/key
+isolation, unknown balances, manual semantics, and cancellation. No real funds or
+inference traffic are used. Runtime changes cover all 12 distributed client/wallet
+ESM/CJS bundles; declaration filenames and original sourcemaps remain unchanged.
