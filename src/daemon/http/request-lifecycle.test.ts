@@ -238,16 +238,8 @@ describe("lifecycle query endpoints", () => {
 });
 
 /** Uses the real SDK resolver/client/transport; adapters supply local state only. */
-async function routedFixture(mode: "success" | "passthrough" | "stream" | "completed-stream", accountingGate?: Promise<void>, accountingStarted?: () => void) {
+async function routedFixture(mode: "success" | "passthrough" | "stream") {
   const upstream = createServer((req, res) => {
-    if (req.url === "/v1/wallet/info" && accountingGate) {
-      accountingStarted?.();
-      void accountingGate.then(() => {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ balance: 100000, reserved: 0, api_key: "sk-node-key" }));
-      });
-      return;
-    }
     if (req.url === "/v1/wallet/info") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ balance: 100000, reserved: 0, api_key: "sk-node-key" }));
@@ -255,10 +247,9 @@ async function routedFixture(mode: "success" | "passthrough" | "stream" | "compl
     }
     req.resume();
     res.setHeader("x-routstr-request-id", "node-attempt-id");
-    if (mode === "stream" || mode === "completed-stream") {
+    if (mode === "stream") {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write('data: {"id":"gen-stream","choices":[{"delta":{"content":"hello"}}]}\n\n');
-      if (mode === "completed-stream") res.end("data: [DONE]\n\n");
     } else if (mode === "passthrough") {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { type: "invalid_request_error", code: "invalid_parameter", message: "Invalid parameter" } }));
@@ -306,26 +297,6 @@ async function awaitTerminal(driver: RequestLifecycleDriver, id: string) {
 }
 
 describe("real SDK routed responses", () => {
-  it("delivers HTTP EOF while SDK accounting remains blocked", async () => {
-    let release!: () => void;
-    let entered!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    const { call, driver, closeUpstream } = await routedFixture("completed-stream", gate, entered);
-    try {
-      const response = await call("/v1/chat/completions", {
-        method: "POST", headers: { "x-api-key": "sk-test-client" },
-        body: JSON.stringify({ model: "model", messages: [], stream: true }),
-      });
-      await started;
-      const body = await Promise.race([response.text(), Bun.sleep(500).then(() => "EOF BLOCKED")]);
-      expect(body).toContain("data: [DONE]");
-      const id = response.headers.get("x-routstr-sdk-request-id")!;
-      expect((await driver.getTrace(id))?.request.outcome).toBe("in_progress");
-      release();
-      expect((await awaitTerminal(driver, id))?.request.outcome).toBe("succeeded");
-    } finally { release(); await closeUpstream(); }
-  });
   it.each(["success", "passthrough"] as const)("preserves node header beside full SDK header on %s", async (mode) => {
     const { call, driver, closeUpstream } = await routedFixture(mode);
     try {

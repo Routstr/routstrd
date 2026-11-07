@@ -121,16 +121,3 @@ runtime with in-memory wallets, gated preparation/queues and mocked inference an
 deposit operations. `cancelled-funding.test.ts` covers adapter forwarding and a
 real Coco client's recovery boundary without mint traffic. Neither test spends
 funds or makes inference requests.
-
-## SDK stream EOF / accounting boundary
-
-The SDK 0.5.0 patch also backports the stream lifecycle wrapper fix: upstream
-EOF closes the client-facing stream before awaiting wallet-info/accounting.
-Finalization remains memoized and awaitable, including terminal lifecycle writes;
-background settlement errors are observed/logged. A disconnect after delivered
-EOF cannot relabel that completed transport as aborted. Stream read errors and
-pre-EOF cancellation retain their existing terminal paths. All ten distributed
-client-containing JS/MJS bundles are patched; original sourcemaps remain unchanged.
-`src/daemon/http/request-lifecycle.test.ts` exercises the installed SDK through
-loopback HTTP with a blocked wallet-info response, proving HTTP EOF arrives first
-and accounting/lifecycle settle after release. No mint or inference traffic is used.
