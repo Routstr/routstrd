@@ -109,7 +109,7 @@ diff --git a/dist/index.js b/dist/index.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3415,27 +3448,52 @@
+@@ -3415,27 +3448,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -139,7 +139,7 @@ diff --git a/dist/index.js b/dist/index.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -152,6 +152,7 @@ diff --git a/dist/index.js b/dist/index.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -167,7 +168,7 @@ diff --git a/dist/index.js b/dist/index.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3446,7 +3504,8 @@
+@@ -3446,7 +3505,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -177,7 +178,7 @@ diff --git a/dist/index.js b/dist/index.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3510,6 +3569,7 @@
+@@ -3510,6 +3570,7 @@
          requestId
        };
      } catch (error) {
@@ -185,7 +186,7 @@ diff --git a/dist/index.js b/dist/index.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3518,10 +3578,10 @@
+@@ -3518,10 +3579,10 @@
      }
    }
    async createProviderToken(options) {
@@ -200,7 +201,7 @@ diff --git a/dist/index.js b/dist/index.js
    }
    async _createProviderToken(options) {
      const {
-@@ -3532,6 +3592,7 @@
+@@ -3532,6 +3593,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -208,7 +209,7 @@ diff --git a/dist/index.js b/dist/index.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3542,6 +3603,7 @@
+@@ -3542,6 +3604,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -216,7 +217,7 @@ diff --git a/dist/index.js b/dist/index.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3550,7 +3612,7 @@
+@@ -3550,7 +3613,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -225,7 +226,7 @@ diff --git a/dist/index.js b/dist/index.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3638,6 +3700,7 @@
+@@ -3638,6 +3701,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -233,7 +234,7 @@ diff --git a/dist/index.js b/dist/index.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3652,7 +3715,8 @@
+@@ -3652,7 +3716,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -243,7 +244,7 @@ diff --git a/dist/index.js b/dist/index.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3662,6 +3726,7 @@
+@@ -3662,6 +3727,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -251,7 +252,7 @@ diff --git a/dist/index.js b/dist/index.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3723,7 +3788,7 @@
+@@ -3723,7 +3789,7 @@
      }
      return candidates;
    }
@@ -260,7 +261,7 @@ diff --git a/dist/index.js b/dist/index.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3735,9 +3800,11 @@
+@@ -3735,9 +3801,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -272,7 +273,7 @@ diff --git a/dist/index.js b/dist/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9945,12 @@
+@@ -9878,10 +9946,12 @@
          };
        }
      }
@@ -286,7 +287,7 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const {
        token,
-@@ -9899,7 +9968,8 @@
+@@ -9899,7 +9969,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -296,7 +297,7 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10478,8 @@
+@@ -10408,7 +10479,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -306,7 +307,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10606,14 @@
+@@ -10535,12 +10607,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -323,7 +324,7 @@ diff --git a/dist/index.js b/dist/index.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11039,7 @@
+@@ -10966,6 +11040,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -331,7 +332,7 @@ diff --git a/dist/index.js b/dist/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11520,7 @@
+@@ -11446,6 +11521,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -339,7 +340,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11539,7 @@
+@@ -11464,7 +11540,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -348,7 +349,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -11493,6 +11568,7 @@
+@@ -11493,6 +11569,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -356,7 +357,7 @@ diff --git a/dist/index.js b/dist/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11596,7 @@
+@@ -11520,6 +11597,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -364,7 +365,7 @@ diff --git a/dist/index.js b/dist/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11556,19 +11633,30 @@
+@@ -11556,19 +11634,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -378,9 +379,14 @@ diff --git a/dist/index.js b/dist/index.js
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -392,7 +398,7 @@ diff --git a/dist/index.js b/dist/index.js
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -402,7 +408,7 @@ diff --git a/dist/index.js b/dist/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11688,7 @@
+@@ -11600,6 +11694,7 @@
            );
          }
        }
@@ -410,7 +416,7 @@ diff --git a/dist/index.js b/dist/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11702,8 @@
+@@ -11613,7 +11708,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -420,7 +426,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11836,8 @@
+@@ -11746,7 +11842,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -541,7 +547,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3413,27 +3446,52 @@
+@@ -3413,27 +3446,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -571,7 +577,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -584,6 +590,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -599,7 +606,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3444,7 +3502,8 @@
+@@ -3444,7 +3503,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -609,7 +616,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3508,6 +3567,7 @@
+@@ -3508,6 +3568,7 @@
          requestId
        };
      } catch (error) {
@@ -617,7 +624,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3516,10 +3576,10 @@
+@@ -3516,10 +3577,10 @@
      }
    }
    async createProviderToken(options) {
@@ -632,7 +639,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -3530,6 +3590,7 @@
+@@ -3530,6 +3591,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -640,7 +647,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3540,6 +3601,7 @@
+@@ -3540,6 +3602,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -648,7 +655,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3548,7 +3610,7 @@
+@@ -3548,7 +3611,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -657,7 +664,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3636,6 +3698,7 @@
+@@ -3636,6 +3699,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -665,7 +672,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3650,7 +3713,8 @@
+@@ -3650,7 +3714,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -675,7 +682,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3660,6 +3724,7 @@
+@@ -3660,6 +3725,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -683,7 +690,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3721,7 +3786,7 @@
+@@ -3721,7 +3787,7 @@
      }
      return candidates;
    }
@@ -692,7 +699,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3733,9 +3798,11 @@
+@@ -3733,9 +3799,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -704,7 +711,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9943,12 @@
+@@ -9876,10 +9944,12 @@
          };
        }
      }
@@ -718,7 +725,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const {
        token,
-@@ -9897,7 +9966,8 @@
+@@ -9897,7 +9967,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -728,7 +735,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10476,8 @@
+@@ -10406,7 +10477,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -738,7 +745,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10604,14 @@
+@@ -10533,12 +10605,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -755,7 +762,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11037,7 @@
+@@ -10964,6 +11038,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -763,7 +770,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11518,7 @@
+@@ -11444,6 +11519,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -771,7 +778,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11537,7 @@
+@@ -11462,7 +11538,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -780,7 +787,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11491,6 +11566,7 @@
+@@ -11491,6 +11567,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -788,7 +795,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11594,7 @@
+@@ -11518,6 +11595,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -796,7 +803,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11554,19 +11631,30 @@
+@@ -11554,19 +11632,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -810,9 +817,14 @@ diff --git a/dist/index.mjs b/dist/index.mjs
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -824,7 +836,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -834,7 +846,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11686,7 @@
+@@ -11598,6 +11692,7 @@
            );
          }
        }
@@ -842,7 +854,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11700,8 @@
+@@ -11611,7 +11706,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -852,7 +864,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11834,8 @@
+@@ -11744,7 +11840,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -987,7 +999,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3415,27 +3448,52 @@
+@@ -3415,27 +3448,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -1017,7 +1029,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -1030,6 +1042,7 @@ diff --git a/dist/browser.js b/dist/browser.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -1045,7 +1058,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3446,7 +3504,8 @@
+@@ -3446,7 +3505,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -1055,7 +1068,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3510,6 +3569,7 @@
+@@ -3510,6 +3570,7 @@
          requestId
        };
      } catch (error) {
@@ -1063,7 +1076,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3518,10 +3578,10 @@
+@@ -3518,10 +3579,10 @@
      }
    }
    async createProviderToken(options) {
@@ -1078,7 +1091,7 @@ diff --git a/dist/browser.js b/dist/browser.js
    }
    async _createProviderToken(options) {
      const {
-@@ -3532,6 +3592,7 @@
+@@ -3532,6 +3593,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -1086,7 +1099,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3542,6 +3603,7 @@
+@@ -3542,6 +3604,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -1094,7 +1107,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3550,7 +3612,7 @@
+@@ -3550,7 +3613,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -1103,7 +1116,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3638,6 +3700,7 @@
+@@ -3638,6 +3701,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -1111,7 +1124,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3652,7 +3715,8 @@
+@@ -3652,7 +3716,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -1121,7 +1134,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3662,6 +3726,7 @@
+@@ -3662,6 +3727,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -1129,7 +1142,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3723,7 +3788,7 @@
+@@ -3723,7 +3789,7 @@
      }
      return candidates;
    }
@@ -1138,7 +1151,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3735,9 +3800,11 @@
+@@ -3735,9 +3801,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -1150,7 +1163,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9945,12 @@
+@@ -9878,10 +9946,12 @@
          };
        }
      }
@@ -1164,7 +1177,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const {
        token,
-@@ -9899,7 +9968,8 @@
+@@ -9899,7 +9969,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1174,7 +1187,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10478,8 @@
+@@ -10408,7 +10479,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1184,7 +1197,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10606,14 @@
+@@ -10535,12 +10607,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1201,7 +1214,7 @@ diff --git a/dist/browser.js b/dist/browser.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11039,7 @@
+@@ -10966,6 +11040,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1209,7 +1222,7 @@ diff --git a/dist/browser.js b/dist/browser.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11520,7 @@
+@@ -11446,6 +11521,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1217,7 +1230,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11539,7 @@
+@@ -11464,7 +11540,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1226,7 +1239,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (mustWait) {
        try {
          await topup;
-@@ -11493,6 +11568,7 @@
+@@ -11493,6 +11569,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -1234,7 +1247,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11596,7 @@
+@@ -11520,6 +11597,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1242,7 +1255,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11556,19 +11633,30 @@
+@@ -11556,19 +11634,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1256,9 +1269,14 @@ diff --git a/dist/browser.js b/dist/browser.js
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -1270,7 +1288,7 @@ diff --git a/dist/browser.js b/dist/browser.js
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -1280,7 +1298,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11688,7 @@
+@@ -11600,6 +11694,7 @@
            );
          }
        }
@@ -1288,7 +1306,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11702,8 @@
+@@ -11613,7 +11708,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1298,7 +1316,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11836,8 @@
+@@ -11746,7 +11842,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1419,7 +1437,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3413,27 +3446,52 @@
+@@ -3413,27 +3446,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -1449,7 +1467,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -1462,6 +1480,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -1477,7 +1496,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3444,7 +3502,8 @@
+@@ -3444,7 +3503,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -1487,7 +1506,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3508,6 +3567,7 @@
+@@ -3508,6 +3568,7 @@
          requestId
        };
      } catch (error) {
@@ -1495,7 +1514,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3516,10 +3576,10 @@
+@@ -3516,10 +3577,10 @@
      }
    }
    async createProviderToken(options) {
@@ -1510,7 +1529,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -3530,6 +3590,7 @@
+@@ -3530,6 +3591,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -1518,7 +1537,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3540,6 +3601,7 @@
+@@ -3540,6 +3602,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -1526,7 +1545,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3548,7 +3610,7 @@
+@@ -3548,7 +3611,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -1535,7 +1554,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3636,6 +3698,7 @@
+@@ -3636,6 +3699,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -1543,7 +1562,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3650,7 +3713,8 @@
+@@ -3650,7 +3714,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -1553,7 +1572,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3660,6 +3724,7 @@
+@@ -3660,6 +3725,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -1561,7 +1580,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3721,7 +3786,7 @@
+@@ -3721,7 +3787,7 @@
      }
      return candidates;
    }
@@ -1570,7 +1589,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3733,9 +3798,11 @@
+@@ -3733,9 +3799,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -1582,7 +1601,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10001,12 @@
+@@ -9934,10 +10002,12 @@
          };
        }
      }
@@ -1596,7 +1615,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const {
        token,
-@@ -9955,7 +10024,8 @@
+@@ -9955,7 +10025,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1606,7 +1625,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10534,8 @@
+@@ -10464,7 +10535,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1616,7 +1635,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10662,14 @@
+@@ -10591,12 +10663,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1633,7 +1652,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11095,7 @@
+@@ -11022,6 +11096,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1641,7 +1660,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11576,7 @@
+@@ -11502,6 +11577,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1649,7 +1668,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11595,7 @@
+@@ -11520,7 +11596,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1658,7 +1677,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11549,6 +11624,7 @@
+@@ -11549,6 +11625,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -1666,7 +1685,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11652,7 @@
+@@ -11576,6 +11653,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1674,7 +1693,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11612,19 +11689,30 @@
+@@ -11612,19 +11690,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1688,9 +1707,14 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -1702,7 +1726,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -1712,7 +1736,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11744,7 @@
+@@ -11656,6 +11750,7 @@
            );
          }
        }
@@ -1720,7 +1744,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11758,8 @@
+@@ -11669,7 +11764,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1730,7 +1754,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11892,8 @@
+@@ -11802,7 +11898,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1851,7 +1875,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3415,27 +3448,52 @@
+@@ -3415,27 +3448,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -1881,7 +1905,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -1894,6 +1918,7 @@ diff --git a/dist/bun.js b/dist/bun.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -1909,7 +1934,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3446,7 +3504,8 @@
+@@ -3446,7 +3505,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -1919,7 +1944,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3510,6 +3569,7 @@
+@@ -3510,6 +3570,7 @@
          requestId
        };
      } catch (error) {
@@ -1927,7 +1952,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3518,10 +3578,10 @@
+@@ -3518,10 +3579,10 @@
      }
    }
    async createProviderToken(options) {
@@ -1942,7 +1967,7 @@ diff --git a/dist/bun.js b/dist/bun.js
    }
    async _createProviderToken(options) {
      const {
-@@ -3532,6 +3592,7 @@
+@@ -3532,6 +3593,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -1950,7 +1975,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3542,6 +3603,7 @@
+@@ -3542,6 +3604,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -1958,7 +1983,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3550,7 +3612,7 @@
+@@ -3550,7 +3613,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -1967,7 +1992,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3638,6 +3700,7 @@
+@@ -3638,6 +3701,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -1975,7 +2000,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3652,7 +3715,8 @@
+@@ -3652,7 +3716,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -1985,7 +2010,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3662,6 +3726,7 @@
+@@ -3662,6 +3727,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -1993,7 +2018,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3723,7 +3788,7 @@
+@@ -3723,7 +3789,7 @@
      }
      return candidates;
    }
@@ -2002,7 +2027,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3735,9 +3800,11 @@
+@@ -3735,9 +3801,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -2014,7 +2039,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10003,12 @@
+@@ -9936,10 +10004,12 @@
          };
        }
      }
@@ -2028,7 +2053,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const {
        token,
-@@ -9957,7 +10026,8 @@
+@@ -9957,7 +10027,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2038,7 +2063,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10536,8 @@
+@@ -10466,7 +10537,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2048,7 +2073,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10664,14 @@
+@@ -10593,12 +10665,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2065,7 +2090,7 @@ diff --git a/dist/bun.js b/dist/bun.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11097,7 @@
+@@ -11024,6 +11098,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2073,7 +2098,7 @@ diff --git a/dist/bun.js b/dist/bun.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11578,7 @@
+@@ -11504,6 +11579,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2081,7 +2106,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11597,7 @@
+@@ -11522,7 +11598,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2090,7 +2115,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (mustWait) {
        try {
          await topup;
-@@ -11551,6 +11626,7 @@
+@@ -11551,6 +11627,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -2098,7 +2123,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11654,7 @@
+@@ -11578,6 +11655,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2106,7 +2131,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11614,19 +11691,30 @@
+@@ -11614,19 +11692,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2120,9 +2145,14 @@ diff --git a/dist/bun.js b/dist/bun.js
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -2134,7 +2164,7 @@ diff --git a/dist/bun.js b/dist/bun.js
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -2144,7 +2174,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11746,7 @@
+@@ -11658,6 +11752,7 @@
            );
          }
        }
@@ -2152,7 +2182,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11760,8 @@
+@@ -11671,7 +11766,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2162,7 +2192,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11894,8 @@
+@@ -11804,7 +11900,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2283,7 +2313,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3413,27 +3446,52 @@
+@@ -3413,27 +3446,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -2313,7 +2343,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -2326,6 +2356,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -2341,7 +2372,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3444,7 +3502,8 @@
+@@ -3444,7 +3503,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -2351,7 +2382,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3508,6 +3567,7 @@
+@@ -3508,6 +3568,7 @@
          requestId
        };
      } catch (error) {
@@ -2359,7 +2390,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3516,10 +3576,10 @@
+@@ -3516,10 +3577,10 @@
      }
    }
    async createProviderToken(options) {
@@ -2374,7 +2405,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -3530,6 +3590,7 @@
+@@ -3530,6 +3591,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -2382,7 +2413,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3540,6 +3601,7 @@
+@@ -3540,6 +3602,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -2390,7 +2421,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3548,7 +3610,7 @@
+@@ -3548,7 +3611,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -2399,7 +2430,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3636,6 +3698,7 @@
+@@ -3636,6 +3699,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -2407,7 +2438,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3650,7 +3713,8 @@
+@@ -3650,7 +3714,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -2417,7 +2448,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3660,6 +3724,7 @@
+@@ -3660,6 +3725,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -2425,7 +2456,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3721,7 +3786,7 @@
+@@ -3721,7 +3787,7 @@
      }
      return candidates;
    }
@@ -2434,7 +2465,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3733,9 +3798,11 @@
+@@ -3733,9 +3799,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -2446,7 +2477,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10001,12 @@
+@@ -9934,10 +10002,12 @@
          };
        }
      }
@@ -2460,7 +2491,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const {
        token,
-@@ -9955,7 +10024,8 @@
+@@ -9955,7 +10025,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2470,7 +2501,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10534,8 @@
+@@ -10464,7 +10535,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2480,7 +2511,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10662,14 @@
+@@ -10591,12 +10663,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2497,7 +2528,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11095,7 @@
+@@ -11022,6 +11096,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2505,7 +2536,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11576,7 @@
+@@ -11502,6 +11577,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2513,7 +2544,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11595,7 @@
+@@ -11520,7 +11596,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2522,7 +2553,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11549,6 +11624,7 @@
+@@ -11549,6 +11625,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -2530,7 +2561,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11652,7 @@
+@@ -11576,6 +11653,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2538,7 +2569,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11612,19 +11689,30 @@
+@@ -11612,19 +11690,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2552,9 +2583,14 @@ diff --git a/dist/node.mjs b/dist/node.mjs
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -2566,7 +2602,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -2576,7 +2612,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11744,7 @@
+@@ -11656,6 +11750,7 @@
            );
          }
        }
@@ -2584,7 +2620,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11758,8 @@
+@@ -11669,7 +11764,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2594,7 +2630,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11892,8 @@
+@@ -11802,7 +11898,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2715,7 +2751,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3413,27 +3446,52 @@
+@@ -3413,27 +3446,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -2745,7 +2781,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -2758,6 +2794,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -2773,7 +2810,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3444,7 +3502,8 @@
+@@ -3444,7 +3503,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -2783,7 +2820,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3508,6 +3567,7 @@
+@@ -3508,6 +3568,7 @@
          requestId
        };
      } catch (error) {
@@ -2791,7 +2828,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3516,10 +3576,10 @@
+@@ -3516,10 +3577,10 @@
      }
    }
    async createProviderToken(options) {
@@ -2806,7 +2843,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -3530,6 +3590,7 @@
+@@ -3530,6 +3591,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -2814,7 +2851,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3540,6 +3601,7 @@
+@@ -3540,6 +3602,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -2822,7 +2859,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3548,7 +3610,7 @@
+@@ -3548,7 +3611,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -2831,7 +2868,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3636,6 +3698,7 @@
+@@ -3636,6 +3699,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -2839,7 +2876,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3650,7 +3713,8 @@
+@@ -3650,7 +3714,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -2849,7 +2886,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3660,6 +3724,7 @@
+@@ -3660,6 +3725,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -2857,7 +2894,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3721,7 +3786,7 @@
+@@ -3721,7 +3787,7 @@
      }
      return candidates;
    }
@@ -2866,7 +2903,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3733,9 +3798,11 @@
+@@ -3733,9 +3799,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -2878,7 +2915,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9943,12 @@
+@@ -9876,10 +9944,12 @@
          };
        }
      }
@@ -2892,7 +2929,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const {
        token,
-@@ -9897,7 +9966,8 @@
+@@ -9897,7 +9967,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2902,7 +2939,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10476,8 @@
+@@ -10406,7 +10477,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2912,7 +2949,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10604,14 @@
+@@ -10533,12 +10605,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2929,7 +2966,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11037,7 @@
+@@ -10964,6 +11038,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2937,7 +2974,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11518,7 @@
+@@ -11444,6 +11519,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2945,7 +2982,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11537,7 @@
+@@ -11462,7 +11538,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2954,7 +2991,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11491,6 +11566,7 @@
+@@ -11491,6 +11567,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -2962,7 +2999,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11594,7 @@
+@@ -11518,6 +11595,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2970,7 +3007,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11554,19 +11631,30 @@
+@@ -11554,19 +11632,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2984,9 +3021,14 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -2998,7 +3040,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -3008,7 +3050,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11686,7 @@
+@@ -11598,6 +11692,7 @@
            );
          }
        }
@@ -3016,7 +3058,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11700,8 @@
+@@ -11611,7 +11706,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3026,7 +3068,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11834,8 @@
+@@ -11744,7 +11840,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3161,7 +3203,7 @@ diff --git a/dist/node.js b/dist/node.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -3415,27 +3448,52 @@
+@@ -3415,27 +3448,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -3191,7 +3233,7 @@ diff --git a/dist/node.js b/dist/node.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -3204,6 +3246,7 @@ diff --git a/dist/node.js b/dist/node.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -3219,7 +3262,7 @@ diff --git a/dist/node.js b/dist/node.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -3446,7 +3504,8 @@
+@@ -3446,7 +3505,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -3229,7 +3272,7 @@ diff --git a/dist/node.js b/dist/node.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -3510,6 +3569,7 @@
+@@ -3510,6 +3570,7 @@
          requestId
        };
      } catch (error) {
@@ -3237,7 +3280,7 @@ diff --git a/dist/node.js b/dist/node.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -3518,10 +3578,10 @@
+@@ -3518,10 +3579,10 @@
      }
    }
    async createProviderToken(options) {
@@ -3252,7 +3295,7 @@ diff --git a/dist/node.js b/dist/node.js
    }
    async _createProviderToken(options) {
      const {
-@@ -3532,6 +3592,7 @@
+@@ -3532,6 +3593,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -3260,7 +3303,7 @@ diff --git a/dist/node.js b/dist/node.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -3542,6 +3603,7 @@
+@@ -3542,6 +3604,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -3268,7 +3311,7 @@ diff --git a/dist/node.js b/dist/node.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -3550,7 +3612,7 @@
+@@ -3550,7 +3613,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -3277,7 +3320,7 @@ diff --git a/dist/node.js b/dist/node.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -3638,6 +3700,7 @@
+@@ -3638,6 +3701,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -3285,7 +3328,7 @@ diff --git a/dist/node.js b/dist/node.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -3652,7 +3715,8 @@
+@@ -3652,7 +3716,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -3295,7 +3338,7 @@ diff --git a/dist/node.js b/dist/node.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -3662,6 +3726,7 @@
+@@ -3662,6 +3727,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -3303,7 +3346,7 @@ diff --git a/dist/node.js b/dist/node.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -3723,7 +3788,7 @@
+@@ -3723,7 +3789,7 @@
      }
      return candidates;
    }
@@ -3312,7 +3355,7 @@ diff --git a/dist/node.js b/dist/node.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -3735,9 +3800,11 @@
+@@ -3735,9 +3801,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -3324,7 +3367,7 @@ diff --git a/dist/node.js b/dist/node.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10003,12 @@
+@@ -9936,10 +10004,12 @@
          };
        }
      }
@@ -3338,7 +3381,7 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const {
        token,
-@@ -9957,7 +10026,8 @@
+@@ -9957,7 +10027,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3348,7 +3391,7 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10536,8 @@
+@@ -10466,7 +10537,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3358,7 +3401,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10664,14 @@
+@@ -10593,12 +10665,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3375,7 +3418,7 @@ diff --git a/dist/node.js b/dist/node.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11097,7 @@
+@@ -11024,6 +11098,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3383,7 +3426,7 @@ diff --git a/dist/node.js b/dist/node.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11578,7 @@
+@@ -11504,6 +11579,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3391,7 +3434,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11597,7 @@
+@@ -11522,7 +11598,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3400,7 +3443,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (mustWait) {
        try {
          await topup;
-@@ -11551,6 +11626,7 @@
+@@ -11551,6 +11627,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -3408,7 +3451,7 @@ diff --git a/dist/node.js b/dist/node.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11654,7 @@
+@@ -11578,6 +11655,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3416,7 +3459,7 @@ diff --git a/dist/node.js b/dist/node.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11614,19 +11691,30 @@
+@@ -11614,19 +11692,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3430,9 +3473,14 @@ diff --git a/dist/node.js b/dist/node.js
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -3444,7 +3492,7 @@ diff --git a/dist/node.js b/dist/node.js
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -3454,7 +3502,7 @@ diff --git a/dist/node.js b/dist/node.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11746,7 @@
+@@ -11658,6 +11752,7 @@
            );
          }
        }
@@ -3462,7 +3510,7 @@ diff --git a/dist/node.js b/dist/node.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11760,8 @@
+@@ -11671,7 +11766,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3472,7 +3520,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11894,8 @@
+@@ -11804,7 +11900,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3593,7 +3641,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -2205,27 +2238,52 @@
+@@ -2205,27 +2238,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -3623,7 +3671,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -3636,6 +3684,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -3651,7 +3700,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -2236,7 +2294,8 @@
+@@ -2236,7 +2295,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -3661,7 +3710,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -2300,6 +2359,7 @@
+@@ -2300,6 +2360,7 @@
          requestId
        };
      } catch (error) {
@@ -3669,7 +3718,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -2308,10 +2368,10 @@
+@@ -2308,10 +2369,10 @@
      }
    }
    async createProviderToken(options) {
@@ -3684,7 +3733,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
    }
    async _createProviderToken(options) {
      const {
-@@ -2322,6 +2382,7 @@
+@@ -2322,6 +2383,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -3692,7 +3741,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -2332,6 +2393,7 @@
+@@ -2332,6 +2394,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -3700,7 +3749,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -2340,7 +2402,7 @@
+@@ -2340,7 +2403,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -3709,7 +3758,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -2428,6 +2490,7 @@
+@@ -2428,6 +2491,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -3717,7 +3766,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -2442,7 +2505,8 @@
+@@ -2442,7 +2506,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -3727,7 +3776,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -2452,6 +2516,7 @@
+@@ -2452,6 +2517,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -3735,7 +3784,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -2513,7 +2578,7 @@
+@@ -2513,7 +2579,7 @@
      }
      return candidates;
    }
@@ -3744,7 +3793,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -2525,9 +2590,11 @@
+@@ -2525,9 +2591,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -3756,7 +3805,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7293,10 +7360,12 @@
+@@ -7293,10 +7361,12 @@
          };
        }
      }
@@ -3770,7 +3819,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const {
        token,
-@@ -7314,7 +7383,8 @@
+@@ -7314,7 +7384,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3780,7 +3829,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7823,7 +7893,8 @@
+@@ -7823,7 +7894,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3790,7 +3839,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
        } catch (error) {
          this._log(
-@@ -7950,12 +8021,14 @@
+@@ -7950,12 +8022,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3807,7 +3856,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
            );
            this._log(
              "DEBUG",
-@@ -8381,6 +8454,7 @@
+@@ -8381,6 +8455,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3815,7 +3864,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8861,6 +8935,7 @@
+@@ -8861,6 +8936,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3823,7 +3872,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8879,7 +8954,7 @@
+@@ -8879,7 +8955,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3832,7 +3881,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -8908,6 +8983,7 @@
+@@ -8908,6 +8984,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -3840,7 +3889,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8935,6 +9011,7 @@
+@@ -8935,6 +9012,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3848,7 +3897,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8971,19 +9048,30 @@
+@@ -8971,19 +9049,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3862,9 +3911,14 @@ diff --git a/dist/client/index.js b/dist/client/index.js
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -3876,7 +3930,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -3886,7 +3940,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9015,6 +9103,7 @@
+@@ -9015,6 +9109,7 @@
            );
          }
        }
@@ -3894,7 +3948,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9028,7 +9117,8 @@
+@@ -9028,7 +9123,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3904,7 +3958,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9161,7 +9251,8 @@
+@@ -9161,7 +9257,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -4025,7 +4079,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -2203,27 +2236,52 @@
+@@ -2203,27 +2236,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -4055,7 +4109,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -4068,6 +4122,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -4083,7 +4138,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -2234,7 +2292,8 @@
+@@ -2234,7 +2293,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -4093,7 +4148,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -2298,6 +2357,7 @@
+@@ -2298,6 +2358,7 @@
          requestId
        };
      } catch (error) {
@@ -4101,7 +4156,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -2306,10 +2366,10 @@
+@@ -2306,10 +2367,10 @@
      }
    }
    async createProviderToken(options) {
@@ -4116,7 +4171,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -2320,6 +2380,7 @@
+@@ -2320,6 +2381,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -4124,7 +4179,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -2330,6 +2391,7 @@
+@@ -2330,6 +2392,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -4132,7 +4187,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -2338,7 +2400,7 @@
+@@ -2338,7 +2401,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -4141,7 +4196,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -2426,6 +2488,7 @@
+@@ -2426,6 +2489,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -4149,7 +4204,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -2440,7 +2503,8 @@
+@@ -2440,7 +2504,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -4159,7 +4214,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -2450,6 +2514,7 @@
+@@ -2450,6 +2515,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -4167,7 +4222,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -2511,7 +2576,7 @@
+@@ -2511,7 +2577,7 @@
      }
      return candidates;
    }
@@ -4176,7 +4231,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -2523,9 +2588,11 @@
+@@ -2523,9 +2589,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -4188,7 +4243,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7291,10 +7358,12 @@
+@@ -7291,10 +7359,12 @@
          };
        }
      }
@@ -4202,7 +4257,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const {
        token,
-@@ -7312,7 +7381,8 @@
+@@ -7312,7 +7382,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -4212,7 +4267,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7821,7 +7891,8 @@
+@@ -7821,7 +7892,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -4222,7 +4277,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -7948,12 +8019,14 @@
+@@ -7948,12 +8020,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -4239,7 +4294,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -8379,6 +8452,7 @@
+@@ -8379,6 +8453,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -4247,7 +4302,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8859,6 +8933,7 @@
+@@ -8859,6 +8934,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -4255,7 +4310,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8877,7 +8952,7 @@
+@@ -8877,7 +8953,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -4264,7 +4319,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -8906,6 +8981,7 @@
+@@ -8906,6 +8982,7 @@
     * toppedUpAmount so future snapshots aren't stale. Never throws.
     */
    async _runProactiveTopup(snapshot) {
@@ -4272,7 +4327,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8933,6 +9009,7 @@
+@@ -8933,6 +9010,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4280,7 +4335,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8969,19 +9046,30 @@
+@@ -8969,19 +9047,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4294,9 +4349,14 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
 -    });
 -    this._inflightTopups.set(key, promise);
 -    return promise;
-+    if (existing && !existing.callers.controller.signal.aborted) {
++    if (existing) {
 +      existing.callers.add(signal);
-+      return existing.promise;
++      const joined = existing.promise.catch((error) => {
++        if (error?.name !== "AbortError" || !existing.callers.controller.signal.aborted) throw error;
++        throwIfFundingAborted(signal);
++        return this._topUpOnce(key, start, signal);
++      });
++      return awaitWithAbort(joined, signal);
 +    }
 +    const callers = new FundingCallers();
 +    callers.add(signal);
@@ -4308,7 +4368,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
 +      if (this._inflightTopups.get(key) === entry) this._inflightTopups.delete(key);
 +    }) };
 +    this._inflightTopups.set(key, entry);
-+    return entry.promise;
++    return awaitWithAbort(entry.promise, signal);
    }
    /**
     * Spend a token using CashuSpender with standardized error handling
@@ -4318,7 +4378,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9013,6 +9101,7 @@
+@@ -9013,6 +9107,7 @@
            );
          }
        }
@@ -4326,7 +4386,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9026,7 +9115,8 @@
+@@ -9026,7 +9121,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4336,7 +4396,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9159,7 +9249,8 @@
+@@ -9159,7 +9255,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -4457,7 +4517,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -1307,27 +1340,52 @@
+@@ -1307,27 +1340,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -4487,7 +4547,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -4500,6 +4560,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -4515,7 +4576,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -1338,7 +1396,8 @@
+@@ -1338,7 +1397,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -4525,7 +4586,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -1402,6 +1461,7 @@
+@@ -1402,6 +1462,7 @@
          requestId
        };
      } catch (error) {
@@ -4533,7 +4594,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -1410,10 +1470,10 @@
+@@ -1410,10 +1471,10 @@
      }
    }
    async createProviderToken(options) {
@@ -4548,7 +4609,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
    }
    async _createProviderToken(options) {
      const {
-@@ -1424,6 +1484,7 @@
+@@ -1424,6 +1485,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -4556,7 +4617,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -1434,6 +1495,7 @@
+@@ -1434,6 +1496,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -4564,7 +4625,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -1442,7 +1504,7 @@
+@@ -1442,7 +1505,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -4573,7 +4634,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -1530,6 +1592,7 @@
+@@ -1530,6 +1593,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -4581,7 +4642,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -1544,7 +1607,8 @@
+@@ -1544,7 +1608,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -4591,7 +4652,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -1554,6 +1618,7 @@
+@@ -1554,6 +1619,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -4599,7 +4660,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -1615,7 +1680,7 @@
+@@ -1615,7 +1681,7 @@
      }
      return candidates;
    }
@@ -4608,7 +4669,7 @@ diff --git a/dist/wallet/index.js b/dist/wallet/index.js
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -1627,9 +1692,11 @@
+@@ -1627,9 +1693,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);
@@ -4730,7 +4791,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
      } finally {
        this._endProviderWalletOperation(baseUrl, "topup");
      }
-@@ -1305,27 +1338,52 @@
+@@ -1305,27 +1338,53 @@
      }
      const key = JSON.stringify([options.baseUrl, options.token]);
      let batch = walletTopUps.get(key);
@@ -4760,7 +4821,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
        walletTopUps.set(key, batch);
      }
      const result = await batch.result;
-+    throwIfFundingAborted(options.signal);
++    if (!batch.fundedContributions?.includes(options)) throwIfFundingAborted(options.signal);
      if (!result.success && batch.amount > options.amount && result.message?.includes("Insufficient balance")) {
        return this._topUpImpl(options);
      }
@@ -4773,6 +4834,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
 +      const controller = new AbortController();
 +      const invalidate = () => controller.abort();
 +      for (const entry of live) entry.signal?.addEventListener("abort", invalidate, { once: true });
++      batch.fundedContributions = live;
 +      batch.amount = live.reduce((sum, entry) => sum + entry.amount, 0);
 +      try {
 +        return await this._topUpImpl({ ...options, amount: batch.amount, signal: controller.signal });
@@ -4788,7 +4850,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
      const { mintUrl, baseUrl, amount, token: apiKey } = options;
      let cashuToken = null;
      let requestId;
-@@ -1336,7 +1394,8 @@
+@@ -1336,7 +1395,8 @@
          mintUrl,
          baseUrl,
          amount,
@@ -4798,7 +4860,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
        });
        if (!tokenResult.success || !tokenResult.token) {
          return {
-@@ -1400,6 +1459,7 @@
+@@ -1400,6 +1460,7 @@
          requestId
        };
      } catch (error) {
@@ -4806,7 +4868,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
        this.logger.log(`topup error for ${baseUrl}: ${error}`);
        if (cashuToken && await this._recoverFailedTopUp(cashuToken)) {
          this.storageAdapter.removeXcashuToken(baseUrl, cashuToken);
-@@ -1408,10 +1468,10 @@
+@@ -1408,10 +1469,10 @@
      }
    }
    async createProviderToken(options) {
@@ -4821,7 +4883,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
    }
    async _createProviderToken(options) {
      const {
-@@ -1422,6 +1482,7 @@
+@@ -1422,6 +1483,7 @@
        excludeMints = [],
        p2pkPubkey
      } = options;
@@ -4829,7 +4891,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
      const adjustedAmount = Math.ceil(amount);
      this.logger.log(`createProviderToken: baseUrl=${baseUrl} mintUrl=${mintUrl} amount=${amount} adjustedAmount=${adjustedAmount} retryCount=${retryCount}`);
      if (!adjustedAmount || isNaN(adjustedAmount)) {
-@@ -1432,6 +1493,7 @@
+@@ -1432,6 +1494,7 @@
      const balanceState = await this.getBalanceState();
      const balances = await this.walletAdapter.getBalances();
      const units = this.walletAdapter.getMintUnits();
@@ -4837,7 +4899,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
      const totalMintBalance = Object.values(balanceState.mintBalances).reduce(
        (sum, value) => sum + value,
        0
-@@ -1440,7 +1502,7 @@
+@@ -1440,7 +1503,7 @@
        balanceState.providerBalances
      ).filter(([providerBaseUrl]) => providerBaseUrl !== baseUrl).reduce((sum, [, value]) => sum + value, 0);
      if (totalMintBalance < adjustedAmount && totalMintBalance + refundableProviderBalance >= adjustedAmount && retryCount < 3) {
@@ -4846,7 +4908,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
        return this._createProviderToken({
          ...options,
          retryCount: retryCount + 1
-@@ -1528,6 +1590,7 @@
+@@ -1528,6 +1591,7 @@
      }
      let lastError;
      for (const candidateMint of candidates) {
@@ -4854,7 +4916,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
        try {
          this.logger.log(`createProviderToken: attempting mint=${candidateMint} amount=${requiredAmount}`);
          const token = await this.walletAdapter.sendToken(
-@@ -1542,7 +1605,8 @@
+@@ -1542,7 +1606,8 @@
                this.storageAdapter.removeXcashuToken(baseUrl, sentToken);
                throw error;
              }
@@ -4864,7 +4926,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
          );
          this.logger.log(`createProviderToken: success from mint=${candidateMint}`);
          return {
-@@ -1552,6 +1616,7 @@
+@@ -1552,6 +1617,7 @@
            amountSpent: requiredAmount
          };
        } catch (error) {
@@ -4872,7 +4934,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
          const errorMsg = error instanceof Error ? error.message : String(error);
          this.logger.error(`createProviderToken: mint=${candidateMint} failed: ${errorMsg}`);
          if (error instanceof Error) {
-@@ -1613,7 +1678,7 @@
+@@ -1613,7 +1679,7 @@
      }
      return candidates;
    }
@@ -4881,7 +4943,7 @@ diff --git a/dist/wallet/index.mjs b/dist/wallet/index.mjs
      const apiKeyDistribution = this.storageAdapter.getApiKeyDistribution();
      const forceRefund = retryCount >= 2;
      const candidates = apiKeyDistribution.filter((apiKey) => apiKey.baseUrl !== baseUrl && apiKey.amount > 0).map((apiKey) => {
-@@ -1625,9 +1690,11 @@
+@@ -1625,9 +1691,11 @@
          key: full?.key
        };
      }).filter((c) => c.key != null && !this._refundTimedOutProviders.has(c.baseUrl)).sort((a, b) => a.lastUsed - b.lastUsed);

@@ -179,7 +179,7 @@ describe("funding cancellation boundaries", () => {
     const second = (ctx.client as any)._topUpOnce("key", start, live.signal);
     cancelled.abort(); blocker.release();
     await blocker.pending;
-    expect(await first).toMatchObject({ success: true });
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
     expect(await second).toMatchObject({ success: true });
     expect(ctx.sendToken.mock.calls.map((call) => call[1])).toEqual([1, 7]);
   });
@@ -197,7 +197,7 @@ describe("funding cancellation boundaries", () => {
     });
     const pending = manager.topUp(topup(controller.signal));
     await entered.promise; controller.abort(); release.release();
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(await pending).toMatchObject({ success: true });
     expect(deposit).toHaveBeenCalledTimes(1);
     expect(ctx.storage.getXcashuTokensForBaseUrl(baseUrl)).toEqual([]);
   });
@@ -214,10 +214,47 @@ describe("funding cancellation boundaries", () => {
     const live = manager.topUp(topup(undefined, 11));
     blocker.release(); await blocker.pending; await entered.promise;
     controller.abort(); release.release();
-    await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    expect(await cancelled).toMatchObject({ success: false, message: "financial outcome unknown" });
     expect(await live).toMatchObject({ success: false, message: "financial outcome unknown" });
     expect(ctx.sendToken).toHaveBeenCalledTimes(2); // blocker and failed financial work only
     expect(deposit).not.toHaveBeenCalled();
+  });
+
+  it("shares active financial settlement with a newcomer after the last caller cancels", async () => {
+    const ctx = await setup(); const entered = gate(); const release = gate();
+    const controller = new AbortController();
+    ctx.sendToken.mockImplementationOnce(async (_mint, _amount, _key, persist) => {
+      entered.release(); await release.promise;
+      await persist?.("cashu_active"); return "cashu_active";
+    });
+    const manager = (ctx.client as any).balanceManager;
+    const deposit = vi.spyOn(manager, "_postTopUp").mockResolvedValue({ success: true });
+    const start = (signal: AbortSignal) => manager.topUp(topup(signal));
+    const first = (ctx.client as any)._topUpOnce("key", start, controller.signal);
+    const firstOutcome = first.catch((error: Error) => error.name);
+    await entered.promise; controller.abort();
+    const newcomer = (ctx.client as any)._topUpOnce("key", start);
+    release.release();
+    expect(await firstOutcome).toBe("AbortError");
+    expect(await newcomer).toMatchObject({ success: true });
+    expect(ctx.sendToken.mock.calls.map((call) => call[1])).toEqual([7]);
+    expect(deposit).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts pre-send cancelled shared work for a live newcomer only after it drains", async () => {
+    const ctx = await setup(); const blocker = await blockedWallet(ctx);
+    const controller = new AbortController();
+    const manager = (ctx.client as any).balanceManager;
+    vi.spyOn(manager, "_postTopUp").mockResolvedValue({ success: true });
+    const start = (signal: AbortSignal) => manager.topUp(topup(signal));
+    const first = (ctx.client as any)._topUpOnce("key", start, controller.signal);
+    const firstOutcome = first.catch((error: Error) => error.name);
+    await Promise.resolve(); controller.abort();
+    const newcomer = (ctx.client as any)._topUpOnce("key", start);
+    blocker.release(); await blocker.pending;
+    expect(await firstOutcome).toBe("AbortError");
+    expect(await newcomer).toMatchObject({ success: true });
+    expect(ctx.sendToken.mock.calls.map((call) => call[1])).toEqual([1, 7]);
   });
 
   it("allows normal funding and inference", async () => {
