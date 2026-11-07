@@ -8,7 +8,7 @@ import {
 } from "./data.ts";
 import { vimState } from "./state.ts";
 import { stripAnsi, truncateAnsi } from "./terminal.ts";
-import { truncateMiddle } from "../../utils/model-providers.ts";
+import { formatNodeProviderCell, nodeProviderCellWidth, truncateMiddle } from "../../utils/model-providers.ts";
 import type { BalanceInfo, StatusInfo } from "./data.ts";
 import type { TabId, TimeWindow, TimelineBucket, TimelinePoint, UpdateInfo, UsageStats } from "./types.ts";
 
@@ -838,6 +838,15 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   );
   const maxLabelLen = clientLabels.reduce((max, label) => Math.max(max, label.length), 6);
 
+  // `BASE:PROVIDER` is measured before the layout because the provider column is
+  // sized from it: the node URL elides its own label (`.fips:28080/` and the
+  // `:provider` stay whole), so the column is sized to the widest cell on show
+  // rather than to the row's leftover slack, which it would only pad out.
+  const providerNeeds = recentEntries.reduce(
+    (max, entry) => Math.max(max, nodeProviderCellWidth(entry.baseUrl || "unknown", entry.provider)),
+    0,
+  );
+
   // Token counts are drawn as `IN - OUT` with IN pinned to the left edge of the
   // column and OUT to the right, so both halves need the widest value on show.
   const tokenRows = recentEntries.map((entry) => tokenSegments(entry));
@@ -868,7 +877,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   if (innerWidth - usedWidth() > minProviderCol + 1) {
     showProvider = true;
-    providerCol = innerWidth - usedWidth();
+    providerCol = Math.min(innerWidth - usedWidth(), Math.max(minProviderCol, providerNeeds));
   }
   // Give space back in reverse priority: the cache bar, then client names, then
   // the provider URL, and only then the model id.
@@ -906,18 +915,14 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
     // Right-aligned so the `sats` unit ends at the same column on every row.
     const cost = `${formatCost(totalSats)} sats`.padStart(costCol);
-    const baseUrl = (entry.baseUrl || "unknown").replace("https://", "").replace("http://", "");
-    // `base:provider` is elided in the middle of the *URL*, never at its end: a
-    // node URL's head names the node and its tail carries the tunnel port, and
-    // the `:provider` that follows is where the request actually went, so it is
-    // kept whole. A plain slice used to cut the provider off entirely.
-    const providerSuffix = `:${entry.provider || "unknown"}`;
-    const providerText = providerCol >= providerSuffix.length + 8
-      // Head-light so `fips:28080/`-style host suffixes and ports survive.
-      ? `${truncateMiddle(baseUrl, providerCol - providerSuffix.length, 0.4)}${providerSuffix}`
-      // Too narrow to hold the suffix: elide the combined string rather than
-      // chop its tail off.
-      : truncateMiddle(`${baseUrl}${providerSuffix}`, providerCol);
+    // `base:provider` keeps its informative halves — the URL's tail from its
+    // first dot on (`.fips:28080/`, a tunnel host) and the `:provider` the
+    // request actually went to — and elides only the opaque label in front of
+    // them (`npub1pxd3…mya5a`). A plain slice used to cut the provider off
+    // entirely, and a character-count window over the whole URL cut the tail.
+    // The label is capped at its window on every row, so the elision lands in
+    // the same column whatever the `:provider` length.
+    const providerText = formatNodeProviderCell(entry.baseUrl || "unknown", entry.provider, providerCol);
     const provider = providerText.padEnd(providerCol);
     const clientLabel = clientLabels[i]!.slice(0, clientCol).padEnd(clientCol);
     const clientColor = CLIENT_COLORS[entry.client || "unknown"] || CLIENT_COLORS.default || COLORS.white;

@@ -1,7 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import {
+  elideNodeLabel,
   formatModelProviders,
+  formatNodeProviderCell,
+  NODE_LABEL_HEAD,
+  NODE_LABEL_MAX,
+  NODE_LABEL_TAIL,
+  nodeProviderCellWidth,
   PROVIDER_COLUMN_MAX,
+  splitNodeUrl,
   truncateMiddle,
   type ModelProviderInfo,
   type ModelWithProviders,
@@ -63,6 +70,80 @@ describe("truncateMiddle", () => {
   it("elides at the default width", () => {
     const url = `https://${"a".repeat(80)}.example.com/`;
     expect(truncateMiddle(url).length).toBe(PROVIDER_COLUMN_MAX);
+  });
+});
+
+describe("splitNodeUrl", () => {
+  it("splits a node URL at its first dot", () => {
+    expect(splitNodeUrl("npub1pxd3pll90t2n8hd6ntcpx27w.fips:28080/")).toEqual({
+      label: "npub1pxd3pll90t2n8hd6ntcpx27w",
+      tail: ".fips:28080/",
+    });
+    expect(splitNodeUrl("routstr.cypherpunk.today/")).toEqual({
+      label: "routstr",
+      tail: ".cypherpunk.today/",
+    });
+  });
+
+  it("keeps a host without a dot whole", () => {
+    expect(splitNodeUrl("localhost:8080/")).toEqual({ label: "localhost:8080/", tail: "" });
+  });
+});
+
+describe("elideNodeLabel", () => {
+  const npub = "npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a";
+
+  it("elides a long label to a head-heavy window", () => {
+    const out = elideNodeLabel(npub);
+    expect(out).toBe(`${npub.slice(0, NODE_LABEL_HEAD)}…${npub.slice(-NODE_LABEL_TAIL)}`);
+    expect(out).toBe("npub1pxd3…mya5a");
+    expect(out.length).toBe(NODE_LABEL_MAX);
+  });
+
+  it("leaves a short label alone", () => {
+    expect(elideNodeLabel("routstr")).toBe("routstr");
+  });
+
+  it("shrinks head-heavy when the column is tighter", () => {
+    const out = elideNodeLabel(npub, 8);
+    expect(out.length).toBe(8);
+    expect(out.startsWith("npub1…")).toBe(true);
+  });
+});
+
+describe("formatNodeProviderCell", () => {
+  const npubUrl = "https://npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a.fips:28080/";
+
+  it("elides only the npub body, keeping the host suffix and the port", () => {
+    expect(formatNodeProviderCell(npubUrl, "openrouter:Cloudflare")).toBe(
+      "npub1pxd3…mya5a.fips:28080/:openrouter:Cloudflare",
+    );
+  });
+
+  it("does not touch a host that is already readable", () => {
+    expect(formatNodeProviderCell("https://routstr.cypherpunk.today/", "openrouter:Cloudflare")).toBe(
+      "routstr.cypherpunk.today/:openrouter:Cloudflare",
+    );
+    expect(formatNodeProviderCell("https://api.example.com", "openai")).toBe("api.example.com:openai");
+  });
+
+  it("shrinks the label before it gives up the tail", () => {
+    // 40 columns, of which 12 are `.fips:28080/` and 22 the provider.
+    expect(formatNodeProviderCell(npubUrl, "openrouter:Cloudflare", 40)).toBe(
+      "npub…a.fips:28080/:openrouter:Cloudflare",
+    );
+  });
+
+  it("falls back to eliding the whole cell when not even the tail fits", () => {
+    const out = formatNodeProviderCell(npubUrl, "openrouter:Cloudflare", 24);
+    expect(out.length).toBe(24);
+    expect(out).toContain("…");
+    expect(out.endsWith("Cloudflare")).toBe(true);
+  });
+
+  it("measures the cell it will actually render", () => {
+    expect(nodeProviderCellWidth(npubUrl, "openrouter:Cloudflare")).toBe(49);
+    expect(nodeProviderCellWidth("https://routstr.cypherpunk.today/", "openai")).toBe(25 + 7);
   });
 });
 
