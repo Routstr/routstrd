@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderBox, renderHistory, renderModels, renderNpubs, renderOverview, renderRecent, renderStackedBar, renderTimelineChart, renderWindowBar, renderWindowSelector, tokenSegments } from "./render.ts";
+import { renderBox, renderHistory, renderModels, renderMonthlyRemaining, renderNpubs, renderOverview, renderRecent, renderStackedBar, renderTimelineChart, renderWindowBar, renderWindowSelector, tokenSegments } from "./render.ts";
 import { stripAnsi } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
 import { buildClientNaming, resolveClientLabel, type ClientInfo, type NpubEntry } from "./data.ts";
@@ -364,6 +364,86 @@ describe("renderOverview", () => {
 
     expect(out).toContain("Time Window");
     expect(out).toContain("Status unavailable");
+  });
+});
+
+describe("renderMonthlyRemaining", () => {
+  const sats = (value: number) => value.toLocaleString();
+
+  test("shows the remainder of the cap", () => {
+    const out = stripAnsi(renderMonthlyRemaining({ limitSats: 5000, usedSats: 1200 })!);
+    expect(out).toBe(`Monthly Remaining: ~${sats(3800)} of ${sats(5000)} sats`);
+  });
+
+  test("treats zero as a real cap", () => {
+    const out = stripAnsi(renderMonthlyRemaining({ limitSats: 0, usedSats: 0 })!);
+    expect(out).toBe(`Monthly Remaining: ~${sats(0)} of ${sats(0)} sats`);
+  });
+
+  test("never reports more budget than remains", () => {
+    const out = stripAnsi(renderMonthlyRemaining({ limitSats: 5000, usedSats: 9000 })!);
+    expect(out).toBe(`Monthly Remaining: ~${sats(0)} of ${sats(5000)} sats`);
+  });
+
+  test("shows unknown rather than a full budget when spend is unavailable", () => {
+    const out = stripAnsi(renderMonthlyRemaining({ limitSats: 5000, usedSats: null })!);
+    expect(out).toContain("unknown");
+    expect(out).toContain(`cap ${sats(5000)} sats`);
+    expect(out).not.toContain(`${sats(5000)} of`);
+    expect(out).not.toContain("~");
+  });
+
+  test("hides the line without a confirmed cap", () => {
+    expect(renderMonthlyRemaining(null)).toBeNull();
+    expect(renderMonthlyRemaining(undefined)).toBeNull();
+  });
+});
+
+describe("renderOverview monthly remaining", () => {
+  const balance = { keys: [{ id: "wallet", name: "Wallet", balance: 1000 }], total: 1000, unit: "sat" as const, apikeysCalled: 0 };
+  const status = { daemon: "running", wallet: "connected", mode: "xcashu" as const };
+  const quota = { limitSats: 5000, usedSats: 1200 };
+
+  function rows(out: string): string[] {
+    return stripAnsi(out).split("\n");
+  }
+
+  test("renders in the System Status box, not in Stats of Sats", () => {
+    const lines = rows(renderOverview(statsFor(NPUB), balance, status, 120, "all", quota));
+    const monthlyIdx = lines.findIndex((line) => line.includes("Monthly Remaining"));
+    const statusIdx = lines.findIndex((line) => line.includes("System Status"));
+    const statsIdx = lines.findIndex((line) => line.includes("Stats of Sats"));
+
+    expect(monthlyIdx).toBeGreaterThan(statusIdx);
+    expect(monthlyIdx).toBeLessThan(statsIdx);
+    // Side-by-side layout: the right-hand column starts at width/2.
+    expect(lines[monthlyIdx]!.indexOf("Monthly Remaining")).toBeGreaterThanOrEqual(60);
+  });
+
+  test("is independent of the selected time window", () => {
+    const expected = stripAnsi(renderMonthlyRemaining(quota)!);
+    for (const window of ["all", "today", "7d", "30d"] as const) {
+      const out = stripAnsi(renderOverview(statsFor(NPUB), balance, status, 120, window, quota));
+      expect(out).toContain(expected);
+    }
+  });
+
+  test("still renders when status is unavailable", () => {
+    const lines = rows(renderOverview(statsFor(NPUB), balance, null, 120, "all", quota));
+    const monthlyIdx = lines.findIndex((line) => line.includes("Monthly Remaining"));
+
+    expect(monthlyIdx).toBeGreaterThan(lines.findIndex((line) => line.includes("Status unavailable")));
+    expect(lines[monthlyIdx]!.indexOf("Monthly Remaining")).toBeGreaterThanOrEqual(60);
+  });
+
+  test("hides the line for an uncapped npub", () => {
+    const out = stripAnsi(renderOverview(statsFor(NPUB), balance, status, 120, "all", null));
+    expect(out).not.toContain("Monthly Remaining");
+  });
+
+  test("defaults to hiding the line", () => {
+    const out = stripAnsi(renderOverview(statsFor(NPUB), balance, status, 120, "all"));
+    expect(out).not.toContain("Monthly Remaining");
   });
 });
 

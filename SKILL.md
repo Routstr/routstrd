@@ -416,6 +416,9 @@ requested cap is missing or differs from the response, it warns instead of
 pretending the limit was applied. Release the auth proxy before relying on the
 flags, and bump the Cloudron image pin accordingly.
 
+`routstrd monitor` shows your own remaining monthly budget in the Overview tab
+when the proxy reports a cap for your npub.
+
 ### `routstrd remote [url]`
 
 With no URL, print the configured remote daemon. Pass a URL to configure one — a
@@ -490,6 +493,14 @@ the model and client breakdowns. On **History** it chooses the chart's bucket �
 hours for `24h` and `7d`, days for `30d`, and ISO weeks for `All` — where spend
 and tokens are drawn as grouped bars against left (sats) and right (tokens)
 axes. **Recent** keeps its own all-time view and hides the selector.
+
+When the auth proxy reports a monthly spend cap for your own npub, **Overview**
+adds a `Monthly Remaining` line to the **System Status** box: remaining sats out
+of the cap, or `unknown` when current-month spend cannot be read. It is a
+calendar-month figure and ignores the `W` window. The `~` marks the remainder as
+approximate — the proxy reports floored current-month spend, so it can overstate
+the true budget by under a sat. The line is hidden when your npub is uncapped,
+when the proxy does not report caps (an older proxy), and in local mode.
 
 ### `routstrd logs`
 

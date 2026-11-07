@@ -1,6 +1,6 @@
 import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
-import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type NpubEntry, type StatusInfo } from "./data.ts";
+import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchMonthlyQuota, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type MonthlyQuota, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -51,6 +51,8 @@ export async function runUsageTui(): Promise<void> {
   let clients: ClientInfo[] = [];
   let npubs: NpubEntry[] = [];
   let naming: ClientNaming = emptyClientNaming();
+  // Monthly cap for the signed-in npub; only the Overview tab renders it.
+  let quota: MonthlyQuota | null = null;
   let visibleTabs: Tab[] = getVisibleTabs(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let autoRefresh = true;
@@ -115,13 +117,21 @@ export async function runUsageTui(): Promise<void> {
       const running = await isDaemonRunning();
       if (!running) {
         stats = null;
+        // No daemon reachable means no trustworthy cap either.
+        quota = null;
       } else {
-        // Fire all 4 fetches concurrently — cuts the blocked window significantly.
-        const [newStats, newBalance, newStatus, newClients] = await Promise.all([
+        // The monthly cap belongs to the signed-in npub and is a calendar-month
+        // figure, so it is only fetched while its only consumer (Overview) is
+        // active. Any other tab clears it: a stale cap must never outlive an
+        // identity or config change.
+        const wantsQuota = currentTab === "overview";
+        // Fire all fetches concurrently — cuts the blocked window significantly.
+        const [newStats, newBalance, newStatus, newClients, newQuota] = await Promise.all([
           fetchUsageSummary(requestedWindow),
           fetchBalance(),
           fetchStatus(),
           fetchClients(),
+          wantsQuota ? fetchMonthlyQuota() : Promise.resolve(null),
         ]);
         if (newStats) {
           const accepted = windowSelection.accept(requestedWindow, newStats);
@@ -130,6 +140,7 @@ export async function runUsageTui(): Promise<void> {
         if (newBalance) balance = newBalance;
         if (newStatus) status = newStatus;
         if (newClients && newClients.length > 0) clients = newClients;
+        quota = newQuota;
 
         const npubsVisible = hasAnyNpubs(clients);
         visibleTabs = getVisibleTabs(npubsVisible);
@@ -187,7 +198,7 @@ export async function runUsageTui(): Promise<void> {
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight);
+    const content = renderTabContent(currentTab, stats, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
     const visibleContent = applyScrollToContent(content, contentViewportHeight);
     const visibleLines = visibleContent === "" ? 0 : visibleContent.split("\n").length;
     // Pin the footer to the bottom even when a tab's content is short.
