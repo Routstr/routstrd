@@ -455,19 +455,42 @@ axes. **Recent** keeps its own all-time view and hides the selector.
 
 ### `routstrd logs`
 
-View daemon logs.
+Show one persistent summary per inference request, read from the daemon's
+lifecycle database, including retries, failovers and failures. Each line starts
+with the request's start time in UTC, as time of day only — the dated log file
+already names the day:
+
+```text
+15:57:03  alice - deepseek-v4.1-flash - 400 - 402 - 200 - 11111111-2222-4333-8444-555555555555
+```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-f, --follow` | false | Follow log output (like `tail -f`) |
+| `-f, --follow` | false | Follow; print an updated summary when a request changes |
+| `-v, --verbose` | false | Chronological lifecycle events, attempts and correlated diagnostics |
+| `--raw` | false | Legacy flat daemon logs (may contain sensitive diagnostics) |
+| `--before <ms>` | | Only requests started before this epoch-millisecond time |
+| `--after <ms>` | | Only requests started after this epoch-millisecond time |
+| `--outcome <outcome>` | | Filter by lifecycle outcome (`succeeded`, `failed`, `aborted`, ...) |
+| `--model-id <id>` | | Filter by requested canonical model |
+| `--base-url <url>` | | Filter by provider URL |
+| `--client-id <id>` | | Filter by client ID |
 | `-c, --coco` | false | Show Cashu wallet-engine (coco) logs instead of daemon logs |
-| `-n, --lines <number>` | 7 | Number of lines to show |
-| `-r, --recent` | false | List recent request IDs with their model |
-| `-i, --request-id <id>` | | Only show log lines for a specific request ID |
+| `-n, --lines <number>` | 7 | Number of requests (or lines with `--raw`); lifecycle queries cap at 1000 |
+| `-r, --recent` | false | List recent requests with their model (`--raw` only) |
+| `-i, --request-id <id>` | | Only this lifecycle UUID (log lines with `--raw`) |
+
+`-v` interleaves safe diagnostics and never opens the raw request/response sink;
+`--raw` is the explicit escape hatch for payload-bearing logs. The lifecycle
+view needs the local daemon — it is unavailable when `daemonUrl` points at a
+remote host.
 
 Log files are stored at `~/.routstrd/logs/YYYY-MM-DD.log`. Wallet-engine
 (Cashu/coco) diagnostics go to a separate `~/.routstrd/coco-logs/YYYY-MM-DD.log`
-so they don't pollute the main daemon logs.
+so they don't pollute the main daemon logs. A plain `logs` tails today's dated
+file only, adding yesterday's for the first hour after local midnight; `-r` and
+`-i` always search both days, since the request under investigation may have
+started before midnight.
 
 ### `routstrd service`
 
