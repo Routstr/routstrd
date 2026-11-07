@@ -24,6 +24,56 @@ function permissions(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
+type ProxyRequest = { method: string; path: string; body?: unknown };
+
+/** A 64-char hex pubkey; the CLI normalizes it to an npub1... value. */
+const TEST_NPUB = "ab".repeat(32);
+
+/**
+ * Run a `routstrd` subcommand against a fake auth proxy. `/health` answers
+ * unconditionally because the CLI probes it before every management command;
+ * every other request is recorded and answered by `respond`.
+ */
+async function runAgainstProxy(
+  args: string[],
+  respond: (request: ProxyRequest) => Response,
+) {
+  const requests: ProxyRequest[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/health") return Response.json({ status: "ok" });
+      const raw = await req.text();
+      const request = { method: req.method, path, body: raw ? JSON.parse(raw) : undefined };
+      requests.push(request);
+      return respond(request);
+    },
+  });
+  const dir = makeTempDir();
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false }),
+  );
+  try {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), ...args], {
+      env: { ...process.env, ROUTSTRD_DIR: dir },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode, requests };
+  } finally {
+    server.stop(true);
+  }
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -418,42 +468,191 @@ describe("parseMonthlyLimitSats", () => {
 });
 
 describe("npubs add limit confirmation", () => {
-  async function run(legacy: boolean) {
-    const bodies: unknown[] = [];
-    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (req) => {
-      if (new URL(req.url).pathname === "/health") return Response.json({ status: "ok" });
-      bodies.push(await req.json());
-      return Response.json({ npub: "npub-test", role: "user", added: true,
-        ...(legacy ? {} : { monthlyLimitSats: 5000 }) });
-    } });
-    const dir = makeTempDir();
-    writeFileSync(join(dir, "config.json"), JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false }));
-    try {
-      const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"),
-        "npubs", "add", "ab".repeat(32), "--limit-sats", "5000"], {
-        env: { ...process.env, ROUTSTRD_DIR: dir }, stdin: "ignore", stdout: "pipe", stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-      ]);
-      return { stdout, stderr, exitCode, bodies };
-    } finally { server.stop(true); }
-  }
-
   test("confirms a top-level proxy response and sends the requested limit", async () => {
-    const result = await run(false);
+    const result = await runAgainstProxy(["npubs", "add", TEST_NPUB, "--limit-sats", "5000"], () =>
+      Response.json({ npub: "npub-test", role: "user", added: true, monthlyLimitSats: 5000 }),
+    );
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Added npub: npub-test");
     expect(result.stdout).toContain("limit 5000 sats/month");
-    expect(result.stderr).not.toContain("did not confirm");
-    expect(result.bodies).toHaveLength(1);
-    expect(result.bodies[0]).toMatchObject({ monthlyLimitSats: 5000 });
+    expect(result.stderr).not.toContain("Warning");
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.body).toMatchObject({ monthlyLimitSats: 5000 });
   });
 
   test("warns when an older proxy does not confirm the limit", async () => {
-    const result = await run(true);
+    const result = await runAgainstProxy(["npubs", "add", TEST_NPUB, "--limit-sats", "5000"], () =>
+      Response.json({ npub: "npub-test", role: "user", added: true }),
+    );
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("Added npub: npub-test");
     expect(result.stderr).toContain("did not confirm the monthly limit");
+  });
+
+  test("warns when the proxy reports the requested cap as unlimited", async () => {
+    const result = await runAgainstProxy(["npubs", "add", TEST_NPUB, "--limit-sats", "5000"], () =>
+      Response.json({ npub: "npub-test", role: "user", added: true, monthlyLimitSats: null }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("was requested");
+    expect(result.stdout).not.toContain("sats/month");
+  });
+
+  test("warns when the proxy reports a different cap", async () => {
+    const result = await runAgainstProxy(["npubs", "add", TEST_NPUB, "--limit-sats", "5000"], () =>
+      Response.json({ npub: "npub-test", role: "user", added: true, monthlyLimitSats: 1000 }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit 1000 sats/month");
+    expect(result.stderr).toContain("was requested");
+  });
+
+  test("stays quiet when no limit was requested", async () => {
+    const result = await runAgainstProxy(["npubs", "add", TEST_NPUB], () =>
+      Response.json({ npub: "npub-test", role: "user", added: true }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toContain("Warning");
+    expect(result.requests[0]!.body).not.toHaveProperty("monthlyLimitSats");
+  });
+});
+
+describe("npubs update monthly limit", () => {
+  const updated = (monthlyLimitSats: number | null) =>
+    Response.json({
+      npub: "npub-test",
+      pubkey: TEST_NPUB,
+      name: null,
+      role: "user",
+      monthlyLimitSats,
+    });
+
+  test("sends and reports a numeric cap, including zero", async () => {
+    for (const sats of [5000, 0]) {
+      const result = await runAgainstProxy(
+        ["npubs", "update", TEST_NPUB, "--limit-sats", String(sats)],
+        () => updated(sats),
+      );
+      expect(result.exitCode).toBe(0);
+      expect(result.requests).toHaveLength(1);
+      expect(result.requests[0]!.method).toBe("PATCH");
+      expect(result.requests[0]!.body).toMatchObject({ monthlyLimitSats: sats });
+      expect(result.stdout).toContain(`limit=${sats} sats/month`);
+      expect(result.stderr).not.toContain("Warning");
+    }
+  });
+
+  test("--clear-limit sends an explicit null and reports unlimited", async () => {
+    const result = await runAgainstProxy(["npubs", "update", TEST_NPUB, "--clear-limit"], () =>
+      updated(null),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.method).toBe("PATCH");
+    const body = result.requests[0]!.body as {
+      npub?: string;
+      monthlyLimitSats?: number | null;
+    };
+    // An explicit null is what the proxy needs to clear the cap; omitting the
+    // field would be read as "leave it alone".
+    expect(body.monthlyLimitSats).toBeNull();
+    expect(Object.keys(body).sort()).toEqual(["monthlyLimitSats", "npub"]);
+    expect(result.stdout).toContain("limit=unlimited");
+    expect(result.stderr).not.toContain("Warning");
+  });
+
+  test("rejects conflicting flags before contacting the proxy", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "update", TEST_NPUB, "--limit-sats", "5000", "--clear-limit"],
+      () => updated(5000),
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not both");
+    expect(result.requests).toEqual([]);
+  });
+
+  test("rejects invalid limits before contacting the proxy", async () => {
+    for (const raw of ["-1", "1.5", "ten"]) {
+      const result = await runAgainstProxy(
+        ["npubs", "update", TEST_NPUB, "--limit-sats", raw],
+        () => updated(5000),
+      );
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Invalid --limit-sats");
+      expect(result.requests).toEqual([]);
+    }
+  });
+
+  test("legacy proxy: warns and reports unknown instead of unlimited", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "update", TEST_NPUB, "--name", "Alice", "--limit-sats", "5000"],
+      () => Response.json({ npub: "npub-test", pubkey: TEST_NPUB, name: "Alice", role: "user" }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit=unknown");
+    expect(result.stdout).not.toContain("limit=unlimited");
+    expect(result.stderr).toContain("did not confirm the monthly limit");
+  });
+
+  test("legacy proxy: reports unknown but does not warn when no limit was requested", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "update", TEST_NPUB, "--name", "Alice"],
+      () => Response.json({ npub: "npub-test", pubkey: TEST_NPUB, name: "Alice", role: "user" }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit=unknown");
+    expect(result.stderr).not.toContain("Warning");
+  });
+
+  test("warns when a requested cap comes back as a different value", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "update", TEST_NPUB, "--limit-sats", "5000"],
+      () => updated(1000),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit=1000 sats/month");
+    expect(result.stderr).toContain("was requested");
+  });
+
+  test("--clear-limit warns when the proxy keeps a numeric cap", async () => {
+    const result = await runAgainstProxy(["npubs", "update", TEST_NPUB, "--clear-limit"], () =>
+      updated(2000),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit=2000 sats/month");
+    expect(result.stderr).toContain("but unlimited was requested");
+  });
+
+  test("--clear-limit warns when the proxy does not report a cap at all", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "update", TEST_NPUB, "--clear-limit"],
+      () => Response.json({ npub: "npub-test", pubkey: TEST_NPUB, name: null, role: "user" }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("limit=unknown");
+    expect(result.stderr).toContain("did not confirm the monthly limit");
+  });
+});
+
+describe("npubs list monthly limits", () => {
+  test("reports capped, unlimited and unknown caps", async () => {
+    const result = await runAgainstProxy(["npubs", "list"], () =>
+      Response.json({
+        npubs: [
+          { npub: "npub-capped", name: "Cap", role: "user", monthlyLimitSats: 5000, monthlyUsedSats: 1200 },
+          { npub: "npub-free", name: null, role: "user", monthlyLimitSats: null },
+          { npub: "npub-legacy", name: null, role: "admin" },
+        ],
+        monthlyResetAt: 1_790_000_000,
+      }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.method).toBe("GET");
+    expect(result.stdout).toContain('npub-capped [user] "Cap" — limit: 5000 sats/month (1200 used)');
+    expect(result.stdout).toContain("npub-free [user] — limit: unlimited");
+    expect(result.stdout).toContain(
+      "npub-legacy [admin] — limit: unknown (auth proxy does not report spend limits)",
+    );
   });
 });

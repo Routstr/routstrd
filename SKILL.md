@@ -378,11 +378,43 @@ commands route through the auth proxy (`--auth-url`) and use NIP-98 auth.
 | `routstrd npubs update <npub> [--role <role>] [--name <name>] [--limit-sats <sats>] [--clear-limit]` | Update role, name and/or monthly spend cap (admin only) |
 | `routstrd npubs delete <npub>` | Delete an npub |
 
-`--limit-sats` sets a calendar-month spend cap for the npub, enforced by the
-auth proxy. Usage resets at the start of each month (proxy server timezone).
-Paid requests return HTTP 402 once the cap is reached; the request that crosses
-it still completes. `--limit-sats 0` blocks all paid requests and
+`--limit-sats` sets a **soft** calendar-month spend cap for the npub, enforced
+by the auth proxy. `--limit-sats 0` blocks every paid request and
 `--clear-limit` restores unlimited access.
+
+`npubs list` reports the cap in one of three states, because the auth proxy
+does not always answer with one:
+
+| Reported | Meaning |
+|----------|---------|
+| `limit: 5000 sats/month (1200 used)` | Cap set; `used` is current-month spend |
+| `limit: unlimited` | No cap (`monthlyLimitSats: null`) |
+| `limit: unknown (auth proxy does not report spend limits)` | The response omitted the field — most likely an older auth proxy. Not the same as unlimited |
+
+What the cap does and does not guarantee:
+
+- It is a threshold, not a reservation: the request that crosses the cap is
+  allowed to finish, and requests already in flight can overshoot it. Treat it
+  as a spending guard, not a hard budget. The month follows the proxy server's
+  local timezone.
+- Once the cap is reached, paid requests fail with HTTP 402
+  (`code: "monthly_quota_exceeded"`) plus `X-Routstr-Quota-*` and `Retry-After`
+  headers. Management routes keep working, so an admin can still raise the cap.
+- **Paid NIP-98 requests from a capped npub are rejected with HTTP 403
+  (`code: "capped_npub_requires_api_key"`) even at zero spend**, because the
+  proxy cannot attribute that spend. Use an API-key client instead; its spend
+  remains subject to the monthly cap. Capping your own npub therefore blocks NIP-98 inference
+  made as that npub; `routstrd` management commands still work.
+- If the proxy cannot read monthly accounting it fails closed with HTTP 503
+  (`code: "quota_accounting_unavailable"`) for capped npubs instead of assuming
+  zero spend; unlimited npubs keep working.
+
+Rollout: these flags need an auth proxy that supports monthly limits. Older
+proxies may ignore `monthlyLimitSats` or reject limit-only updates. When a
+successful response omits the field, the CLI reports `limit: unknown`; when a
+requested cap is missing or differs from the response, it warns instead of
+pretending the limit was applied. Release the auth proxy before relying on the
+flags, and bump the Cloudron image pin accordingly.
 
 ### `routstrd remote [url]`
 

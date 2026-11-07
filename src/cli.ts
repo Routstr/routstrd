@@ -2160,7 +2160,11 @@ type NpubEntry = {
   npub: string;
   name: string | null;
   role: string;
-  /** Monthly spend cap in sats, or null/undefined when unlimited. */
+  /**
+   * Monthly spend cap in sats. `null` means unlimited; an absent field means
+   * the response did not report a cap (typically an older auth proxy), so the
+   * cap is unknown rather than unlimited.
+   */
   monthlyLimitSats?: number | null;
   /** Sats spent in the current calendar month (read-only). */
   monthlyUsedSats?: number;
@@ -2195,13 +2199,47 @@ export function parseMonthlyLimitSats(
   return { value };
 }
 
+/**
+ * Describe a monthly cap reported by the auth proxy. The field is tri-state: a
+ * number is a cap, an explicit `null` is unlimited, and an absent field leaves
+ * the cap unknown — most likely an auth proxy that predates spend limits.
+ * Reporting absent as "unlimited" would claim enforcement we cannot verify.
+ */
+function describeMonthlyLimit(value: number | null | undefined): string {
+  if (typeof value === "number") return `${value} sats/month`;
+  if (value === null) return "unlimited";
+  return "unknown (auth proxy does not report spend limits)";
+}
+
 /** Human-readable monthly cap line for `npubs list`. */
 function formatNpubMonthlyLimit(entry: NpubEntry): string {
-  if (typeof entry.monthlyLimitSats !== "number") return "limit: unlimited";
   const used = typeof entry.monthlyUsedSats === "number"
     ? ` (${entry.monthlyUsedSats} used)`
     : "";
-  return `limit: ${entry.monthlyLimitSats} sats/month${used}`;
+  return `limit: ${describeMonthlyLimit(entry.monthlyLimitSats)}${used}`;
+}
+
+/**
+ * Warn when the cap reported back differs from the cap that was requested.
+ * Older auth proxies may ignore `monthlyLimitSats` entirely (absent field), and
+ * a proxy that validates differently may clamp or reinterpret the value, so
+ * neither case can be assumed to have applied the request. `undefined` means
+ * no cap was requested, which never warns.
+ */
+function warnIfMonthlyLimitUnconfirmed(
+  requested: number | null | undefined,
+  reported: number | null | undefined,
+): void {
+  if (requested === undefined || reported === requested) return;
+  if (reported === undefined) {
+    console.warn(
+      "Warning: the auth proxy did not confirm the monthly limit. It may be an older auth proxy that ignores spend limits; upgrade it to enforce this cap.",
+    );
+    return;
+  }
+  console.warn(
+    `Warning: the auth proxy reported ${describeMonthlyLimit(reported)} as the monthly limit, but ${describeMonthlyLimit(requested)} was requested. Check the auth proxy version before relying on this cap.`,
+  );
 }
 
 npubsCmd
@@ -2305,7 +2343,7 @@ npubsCmd
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
   .option("-n, --name <name>", "Display name for the npub (optional)")
-  .option("-l, --limit-sats <sats>", "Monthly spend cap in sats (resets on the 1st; omit for unlimited)")
+  .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (resets on the 1st; omit for unlimited)")
   .action(async (npubArg: string, options: { role: string; name?: string; limitSats?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
@@ -2352,20 +2390,16 @@ npubsCmd
       console.log(
         `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}${limitSuffix}`,
       );
-      if (limit.value !== undefined && typeof output.monthlyLimitSats !== "number") {
-        console.warn(
-          "Warning: the auth proxy did not confirm the monthly limit. Update routstrd-auth to a version that supports spend limits.",
-        );
-      }
+      warnIfMonthlyLimitUnconfirmed(limit.value, output.monthlyLimitSats);
     }
   });
 
 npubsCmd
   .command("update <npub>")
-  .description("Update the role, name and/or monthly spend limit of an existing npub (requires admin)")
+  .description("Update the role, name and/or monthly soft spend cap of an existing npub (requires admin)")
   .option("-r, --role <role>", "New role: 'admin' or 'user'")
   .option("-n, --name <name>", "New display name (empty string clears it)")
-  .option("-l, --limit-sats <sats>", "Monthly spend cap in sats (0 blocks all paid requests)")
+  .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (0 blocks all paid requests)")
   .option("--clear-limit", "Remove the monthly spend cap (unlimited)")
   .action(async (npubArg: string, options: { role?: string; name?: string; limitSats?: string; clearLimit?: boolean }) => {
     await ensureDaemonRunning();
@@ -2408,6 +2442,7 @@ npubsCmd
     if (name.name !== undefined) body.name = name.name;
     if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
     if (options.clearLimit) body.monthlyLimitSats = null;
+    const requestedLimit = options.clearLimit ? null : limit.value;
     const result = await callAuth("/npubs", {
       method: "PATCH",
       body,
@@ -2416,7 +2451,8 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    // PATCH /npubs returns { npub, pubkey, name, role } at the top level, not wrapped in { output }
+    // PATCH /npubs returns { npub, pubkey, name, role, monthlyLimitSats } at the top
+    // level, not wrapped in { output }
     const data = (result.output ?? result) as
       | {
           npub?: string;
@@ -2431,17 +2467,9 @@ npubsCmd
       const parts: string[] = [];
       if (data.role) parts.push(`role='${data.role}'`);
       parts.push(`name=${data.name ? `"${data.name}"` : "(none)"}`);
-      parts.push(
-        typeof data.monthlyLimitSats === "number"
-          ? `limit=${data.monthlyLimitSats} sats/month`
-          : "limit=unlimited",
-      );
+      parts.push(`limit=${describeMonthlyLimit(data.monthlyLimitSats)}`);
       console.log(`Updated npub ${data.npub} (${parts.join(", ")}).`);
-      if (body.monthlyLimitSats !== undefined && data.monthlyLimitSats === undefined) {
-        console.warn(
-          "Warning: the auth proxy did not confirm the monthly limit. Update routstrd-auth to a version that supports spend limits.",
-        );
-      }
+      warnIfMonthlyLimitUnconfirmed(requestedLimit, data.monthlyLimitSats);
     } else {
       console.log("Npub not found or update failed.");
     }
