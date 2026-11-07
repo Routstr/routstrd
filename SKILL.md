@@ -370,12 +370,18 @@ Delete a registered client by its ID.
 Manage registered npubs and their roles/names (subcommand required). Management
 commands route through the auth proxy (`--auth-url`) and use NIP-98 auth.
 
+A display name is **required** whenever an npub is created: pass `--name` or the
+command prompts for one on a terminal (non-interactive invocations must pass
+`--name`). Names cannot be removed afterwards, only replaced, and only npubs
+bootstrapped from the daemon's environment (`ROUTSTRD_AUTH_ADMIN_*`) or migrated
+from the legacy admin table can appear as `(unnamed)`.
+
 | Command | Description |
 |---------|-------------|
 | `routstrd npubs list` | List registered npubs with role and display name |
-| `routstrd npubs register [--name <name>]` | Register yourself as the first admin (bootstrap only) |
-| `routstrd npubs add <npub> [--role <role>] [--name <name>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
-| `routstrd npubs update <npub> [--role <role>] [--name <name>]` | Update role and/or name (admin only) |
+| `routstrd npubs register --name <name>` | Register yourself as the first admin (bootstrap only); `--name` is required |
+| `routstrd npubs add <npub> --name <name> [--role <role>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
+| `routstrd npubs update <npub> [--role <role>] [--name <name>]` | Update role and/or name (admin only); a name cannot be cleared |
 | `routstrd npubs delete <npub>` | Delete an npub |
 
 ### `routstrd remote [url]`

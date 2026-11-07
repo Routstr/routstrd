@@ -378,14 +378,18 @@ export async function createWalletAdapter(
     getAutoRefillConfig(): AutoRefillConfig | undefined {
       return options.getAutoRefillConfig?.() ?? options.autoRefill;
     },
-    async sendToken(mintUrl: string, amount: number): Promise<string> {
+    async sendToken(
+      mintUrl: string, amount: number, _p2pkPubkey?: string,
+      _persistToken?: (token: string) => Promise<void>, signal?: AbortSignal,
+    ): Promise<string> {
       const maxRetries = 3;
       const retryDelayMs = 5000;
       const retryErrorPattern = "Proof already reserved by operation";
 
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        signal?.throwIfAborted();
         try {
-          return await client.sendCashu(amount, mintUrl);
+          return await client.sendCashu(amount, mintUrl, signal);
         } catch (error) {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
