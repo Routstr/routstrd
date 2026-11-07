@@ -299,7 +299,7 @@ diff --git a/dist/index.js b/dist/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9946,12 @@
+@@ -9890,10 +9958,12 @@
          };
        }
      }
@@ -313,7 +313,7 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const {
        token,
-@@ -9899,7 +9969,8 @@
+@@ -9911,7 +9981,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -323,7 +323,38 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10479,8 @@
+@@ -10296,6 +10367,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10311,9 +10383,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10420,7 +10503,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -333,7 +364,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10607,14 @@
+@@ -10547,12 +10631,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -350,7 +381,7 @@ diff --git a/dist/index.js b/dist/index.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11040,7 @@
+@@ -10978,6 +11064,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -358,7 +389,33 @@ diff --git a/dist/index.js b/dist/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11521,7 @@
+@@ -11147,8 +11234,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11158,6 +11253,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11458,6 +11554,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -366,7 +423,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11540,7 @@
+@@ -11476,7 +11573,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -375,7 +432,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -11490,9 +11566,11 @@
+@@ -11502,9 +11599,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -388,7 +445,7 @@ diff --git a/dist/index.js b/dist/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11598,7 @@
+@@ -11532,6 +11631,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -396,7 +453,7 @@ diff --git a/dist/index.js b/dist/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11540,6 +11619,7 @@
+@@ -11552,6 +11652,7 @@
        }
        return result;
      } catch (e) {
@@ -404,7 +461,7 @@ diff --git a/dist/index.js b/dist/index.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11556,19 +11636,35 @@
+@@ -11568,19 +11669,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -447,7 +504,7 @@ diff --git a/dist/index.js b/dist/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11696,7 @@
+@@ -11612,6 +11729,7 @@
            );
          }
        }
@@ -455,7 +512,7 @@ diff --git a/dist/index.js b/dist/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11710,8 @@
+@@ -11625,7 +11743,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -465,7 +522,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11844,8 @@
+@@ -11758,7 +11877,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -750,7 +807,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9944,12 @@
+@@ -9888,10 +9956,12 @@
          };
        }
      }
@@ -764,7 +821,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const {
        token,
-@@ -9897,7 +9967,8 @@
+@@ -9909,7 +9979,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -774,7 +831,38 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10477,8 @@
+@@ -10294,6 +10365,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10309,9 +10381,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10418,7 +10501,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -784,7 +872,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10605,14 @@
+@@ -10545,12 +10629,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -801,7 +889,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11038,7 @@
+@@ -10976,6 +11062,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -809,7 +897,33 @@ diff --git a/dist/index.mjs b/dist/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11519,7 @@
+@@ -11145,8 +11232,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11156,6 +11251,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11456,6 +11552,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -817,7 +931,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11538,7 @@
+@@ -11474,7 +11571,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -826,7 +940,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11488,9 +11564,11 @@
+@@ -11500,9 +11597,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -839,7 +953,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11596,7 @@
+@@ -11530,6 +11629,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -847,7 +961,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11538,6 +11617,7 @@
+@@ -11550,6 +11650,7 @@
        }
        return result;
      } catch (e) {
@@ -855,7 +969,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11554,19 +11634,35 @@
+@@ -11566,19 +11667,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -898,7 +1012,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11694,7 @@
+@@ -11610,6 +11727,7 @@
            );
          }
        }
@@ -906,7 +1020,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11708,8 @@
+@@ -11623,7 +11741,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -916,7 +1030,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11842,8 @@
+@@ -11756,7 +11875,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1215,7 +1329,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9946,12 @@
+@@ -9890,10 +9958,12 @@
          };
        }
      }
@@ -1229,7 +1343,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const {
        token,
-@@ -9899,7 +9969,8 @@
+@@ -9911,7 +9981,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1239,7 +1353,38 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10479,8 @@
+@@ -10296,6 +10367,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10311,9 +10383,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10420,7 +10503,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1249,7 +1394,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10607,14 @@
+@@ -10547,12 +10631,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1266,7 +1411,7 @@ diff --git a/dist/browser.js b/dist/browser.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11040,7 @@
+@@ -10978,6 +11064,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1274,7 +1419,33 @@ diff --git a/dist/browser.js b/dist/browser.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11521,7 @@
+@@ -11147,8 +11234,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11158,6 +11253,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11458,6 +11554,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1282,7 +1453,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11540,7 @@
+@@ -11476,7 +11573,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1291,7 +1462,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (mustWait) {
        try {
          await topup;
-@@ -11490,9 +11566,11 @@
+@@ -11502,9 +11599,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -1304,7 +1475,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11598,7 @@
+@@ -11532,6 +11631,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1312,7 +1483,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11540,6 +11619,7 @@
+@@ -11552,6 +11652,7 @@
        }
        return result;
      } catch (e) {
@@ -1320,7 +1491,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11556,19 +11636,35 @@
+@@ -11568,19 +11669,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1363,7 +1534,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11696,7 @@
+@@ -11612,6 +11729,7 @@
            );
          }
        }
@@ -1371,7 +1542,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11710,8 @@
+@@ -11625,7 +11743,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1381,7 +1552,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11844,8 @@
+@@ -11758,7 +11877,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1666,7 +1837,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10002,12 @@
+@@ -9946,10 +10014,12 @@
          };
        }
      }
@@ -1680,7 +1851,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const {
        token,
-@@ -9955,7 +10025,8 @@
+@@ -9967,7 +10037,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1690,7 +1861,38 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10535,8 @@
+@@ -10352,6 +10423,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10367,9 +10439,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10476,7 +10559,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1700,7 +1902,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10663,14 @@
+@@ -10603,12 +10687,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1717,7 +1919,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11096,7 @@
+@@ -11034,6 +11120,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1725,7 +1927,33 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11577,7 @@
+@@ -11203,8 +11290,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11214,6 +11309,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11514,6 +11610,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1733,7 +1961,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11596,7 @@
+@@ -11532,7 +11629,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1742,7 +1970,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11546,9 +11622,11 @@
+@@ -11558,9 +11655,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -1755,7 +1983,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11654,7 @@
+@@ -11588,6 +11687,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1763,7 +1991,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11596,6 +11675,7 @@
+@@ -11608,6 +11708,7 @@
        }
        return result;
      } catch (e) {
@@ -1771,7 +1999,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11612,19 +11692,35 @@
+@@ -11624,19 +11725,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1814,7 +2042,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11752,7 @@
+@@ -11668,6 +11785,7 @@
            );
          }
        }
@@ -1822,7 +2050,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11766,8 @@
+@@ -11681,7 +11799,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1832,7 +2060,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11900,8 @@
+@@ -11814,7 +11933,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2117,7 +2345,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10004,12 @@
+@@ -9948,10 +10016,12 @@
          };
        }
      }
@@ -2131,7 +2359,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const {
        token,
-@@ -9957,7 +10027,8 @@
+@@ -9969,7 +10039,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2141,7 +2369,38 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10537,8 @@
+@@ -10354,6 +10425,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10369,9 +10441,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10478,7 +10561,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2151,7 +2410,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10665,14 @@
+@@ -10605,12 +10689,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2168,7 +2427,7 @@ diff --git a/dist/bun.js b/dist/bun.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11098,7 @@
+@@ -11036,6 +11122,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2176,7 +2435,33 @@ diff --git a/dist/bun.js b/dist/bun.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11579,7 @@
+@@ -11205,8 +11292,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11216,6 +11311,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11516,6 +11612,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2184,7 +2469,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11598,7 @@
+@@ -11534,7 +11631,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2193,7 +2478,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (mustWait) {
        try {
          await topup;
-@@ -11548,9 +11624,11 @@
+@@ -11560,9 +11657,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -2206,7 +2491,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11656,7 @@
+@@ -11590,6 +11689,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2214,7 +2499,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11598,6 +11677,7 @@
+@@ -11610,6 +11710,7 @@
        }
        return result;
      } catch (e) {
@@ -2222,7 +2507,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11614,19 +11694,35 @@
+@@ -11626,19 +11727,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2265,7 +2550,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11754,7 @@
+@@ -11670,6 +11787,7 @@
            );
          }
        }
@@ -2273,7 +2558,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11768,8 @@
+@@ -11683,7 +11801,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2283,7 +2568,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11902,8 @@
+@@ -11816,7 +11935,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2568,7 +2853,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10002,12 @@
+@@ -9946,10 +10014,12 @@
          };
        }
      }
@@ -2582,7 +2867,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const {
        token,
-@@ -9955,7 +10025,8 @@
+@@ -9967,7 +10037,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2592,7 +2877,38 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10535,8 @@
+@@ -10352,6 +10423,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10367,9 +10439,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10476,7 +10559,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2602,7 +2918,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10663,14 @@
+@@ -10603,12 +10687,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2619,7 +2935,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11096,7 @@
+@@ -11034,6 +11120,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2627,7 +2943,33 @@ diff --git a/dist/node.mjs b/dist/node.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11577,7 @@
+@@ -11203,8 +11290,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11214,6 +11309,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11514,6 +11610,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2635,7 +2977,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11596,7 @@
+@@ -11532,7 +11629,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2644,7 +2986,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11546,9 +11622,11 @@
+@@ -11558,9 +11655,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -2657,7 +2999,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11654,7 @@
+@@ -11588,6 +11687,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2665,7 +3007,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11596,6 +11675,7 @@
+@@ -11608,6 +11708,7 @@
        }
        return result;
      } catch (e) {
@@ -2673,7 +3015,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11612,19 +11692,35 @@
+@@ -11624,19 +11725,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2716,7 +3058,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11752,7 @@
+@@ -11668,6 +11785,7 @@
            );
          }
        }
@@ -2724,7 +3066,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11766,8 @@
+@@ -11681,7 +11799,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2734,7 +3076,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11900,8 @@
+@@ -11814,7 +11933,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3019,7 +3361,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9944,12 @@
+@@ -9888,10 +9956,12 @@
          };
        }
      }
@@ -3033,7 +3375,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const {
        token,
-@@ -9897,7 +9967,8 @@
+@@ -9909,7 +9979,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3043,7 +3385,38 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10477,8 @@
+@@ -10294,6 +10365,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10309,9 +10381,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10418,7 +10501,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3053,7 +3426,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10605,14 @@
+@@ -10545,12 +10629,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3070,7 +3443,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11038,7 @@
+@@ -10976,6 +11062,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3078,7 +3451,33 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11519,7 @@
+@@ -11145,8 +11232,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11156,6 +11251,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11456,6 +11552,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3086,7 +3485,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11538,7 @@
+@@ -11474,7 +11571,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3095,7 +3494,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11488,9 +11564,11 @@
+@@ -11500,9 +11597,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -3108,7 +3507,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11596,7 @@
+@@ -11530,6 +11629,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3116,7 +3515,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11538,6 +11617,7 @@
+@@ -11550,6 +11650,7 @@
        }
        return result;
      } catch (e) {
@@ -3124,7 +3523,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11554,19 +11634,35 @@
+@@ -11566,19 +11667,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3167,7 +3566,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11694,7 @@
+@@ -11610,6 +11727,7 @@
            );
          }
        }
@@ -3175,7 +3574,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11708,8 @@
+@@ -11623,7 +11741,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3185,7 +3584,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11842,8 @@
+@@ -11756,7 +11875,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3484,7 +3883,7 @@ diff --git a/dist/node.js b/dist/node.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10004,12 @@
+@@ -9948,10 +10016,12 @@
          };
        }
      }
@@ -3498,7 +3897,7 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const {
        token,
-@@ -9957,7 +10027,8 @@
+@@ -9969,7 +10039,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3508,7 +3907,38 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10537,8 @@
+@@ -10354,6 +10425,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -10369,9 +10441,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -10478,7 +10561,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3518,7 +3948,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10665,14 @@
+@@ -10605,12 +10689,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3535,7 +3965,7 @@ diff --git a/dist/node.js b/dist/node.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11098,7 @@
+@@ -11036,6 +11122,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3543,7 +3973,33 @@ diff --git a/dist/node.js b/dist/node.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11579,7 @@
+@@ -11205,8 +11292,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -11216,6 +11311,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -11516,6 +11612,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3551,7 +4007,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11598,7 @@
+@@ -11534,7 +11631,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3560,7 +4016,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (mustWait) {
        try {
          await topup;
-@@ -11548,9 +11624,11 @@
+@@ -11560,9 +11657,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -3573,7 +4029,7 @@ diff --git a/dist/node.js b/dist/node.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11656,7 @@
+@@ -11590,6 +11689,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3581,7 +4037,7 @@ diff --git a/dist/node.js b/dist/node.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11598,6 +11677,7 @@
+@@ -11610,6 +11710,7 @@
        }
        return result;
      } catch (e) {
@@ -3589,7 +4045,7 @@ diff --git a/dist/node.js b/dist/node.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11614,19 +11694,35 @@
+@@ -11626,19 +11727,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3632,7 +4088,7 @@ diff --git a/dist/node.js b/dist/node.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11754,7 @@
+@@ -11670,6 +11787,7 @@
            );
          }
        }
@@ -3640,7 +4096,7 @@ diff --git a/dist/node.js b/dist/node.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11768,8 @@
+@@ -11683,7 +11801,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3650,7 +4106,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11902,8 @@
+@@ -11816,7 +11935,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3935,7 +4391,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7293,10 +7361,12 @@
+@@ -7305,10 +7373,12 @@
          };
        }
      }
@@ -3949,7 +4405,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const {
        token,
-@@ -7314,7 +7384,8 @@
+@@ -7326,7 +7396,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3959,7 +4415,38 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7823,7 +7894,8 @@
+@@ -7711,6 +7782,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -7726,9 +7798,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -7835,7 +7918,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3969,7 +4456,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
        } catch (error) {
          this._log(
-@@ -7950,12 +8022,14 @@
+@@ -7962,12 +8046,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3986,7 +4473,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
            );
            this._log(
              "DEBUG",
-@@ -8381,6 +8455,7 @@
+@@ -8393,6 +8479,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3994,7 +4481,33 @@ diff --git a/dist/client/index.js b/dist/client/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8861,6 +8936,7 @@
+@@ -8562,8 +8649,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -8573,6 +8668,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -8873,6 +8969,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -4002,7 +4515,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8879,7 +8955,7 @@
+@@ -8891,7 +8988,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -4011,7 +4524,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -8905,9 +8981,11 @@
+@@ -8917,9 +9014,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -4024,7 +4537,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8935,6 +9013,7 @@
+@@ -8947,6 +9046,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4032,7 +4545,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8955,6 +9034,7 @@
+@@ -8967,6 +9067,7 @@
        }
        return result;
      } catch (e) {
@@ -4040,7 +4553,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -8971,19 +9051,35 @@
+@@ -8983,19 +9084,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4083,7 +4596,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9015,6 +9111,7 @@
+@@ -9027,6 +9144,7 @@
            );
          }
        }
@@ -4091,7 +4604,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9028,7 +9125,8 @@
+@@ -9040,7 +9158,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4101,7 +4614,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9161,7 +9259,8 @@
+@@ -9173,7 +9292,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -4386,7 +4899,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7291,10 +7359,12 @@
+@@ -7303,10 +7371,12 @@
          };
        }
      }
@@ -4400,7 +4913,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const {
        token,
-@@ -7312,7 +7382,8 @@
+@@ -7324,7 +7394,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -4410,7 +4923,38 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7821,7 +7892,8 @@
+@@ -7709,6 +7780,7 @@
+     const failures = params.failures ?? { attemptedProviders: /* @__PURE__ */ new Set(), errors: [] };
+     params = { ...params, failures };
+     failures.attemptedProviders.add(baseUrl);
++    (failures.statuses ??= []).push(status);
+     const errorMessage = responseBody;
+     const parsedError = parseCoreError(responseBody, status, requestId);
+     const resolvedRequestId = parsedError.requestId ?? requestId;
+@@ -7724,9 +7796,20 @@
+     );
+     const upstreamRequestError = isUpstreamRequestError(status, parsedError) || status === 404 && hasImageInput(body) && !selectedModel?.architecture?.input_modalities?.includes("image");
+     const unknownPathError = isUnknownPathError(status, parsedError);
+-    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1;
++    const aggregateFailure = upstreamRequestError || status >= 500 || status === 424 || status === 429 || status === -1 || [401, 402, 403].includes(status) && !Object.values(CoreErrorType).includes(parsedError.type ?? "");
+     if (aggregateFailure) {
+-      const redact = (value) => [params.token, xCashuRefundToken].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]");
++      const inputStrings = [];
++      const collectInput = (value) => {
++        if (typeof value === "string" && value.length > 0) inputStrings.push(value);
++        else if (Array.isArray(value)) value.forEach(collectInput);
++        else if (value && typeof value === "object") {
++          for (const [name, child] of Object.entries(value)) {
++            if (["content", "text", "input", "messages"].includes(name)) collectInput(child);
++          }
++        }
++      };
++      collectInput(params.body);
++      const redact = (value) => [params.token, xCashuRefundToken, ...inputStrings].filter((secret) => !!secret).reduce((text, secret) => text.split(secret).join("[REDACTED]"), value).replace(/cashu[AB][A-Za-z0-9_-]+/g, "[REDACTED]").replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]").replace(/https?:\/\/[^\s<>"']+/gi, "[REDACTED_URL]");
+       const message = redact(parsedError.message ?? (status === -1 ? "Network request failed" : `Upstream returned HTTP ${status}`));
+       const type = parsedError.type ? redact(parsedError.type) : void 0;
+       let code = parsedError.code ? redact(parsedError.code) : void 0;
+@@ -7833,7 +7916,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -4420,7 +4964,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -7948,12 +8020,14 @@
+@@ -7960,12 +8044,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -4437,7 +4981,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -8379,6 +8453,7 @@
+@@ -8391,6 +8477,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -4445,7 +4989,33 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8859,6 +8934,7 @@
+@@ -8560,8 +8647,16 @@
+       });
+     }
+     if (aggregateFailure) {
++      const statuses = failures.statuses ?? failures.errors.map((error) => error.status);
++      const validationOnly = statuses.every((value) => value === 400 || value === 422);
++      const uniform = statuses.every((value) => value === statuses[0]);
++      const responseStatus = validationOnly ? statuses.includes(400) ? 400 : 422 : uniform && statuses[0] === 404 ? 404 : uniform && statuses[0] >= 500 && statuses[0] <= 599 ? statuses[0] : uniform && (statuses[0] === 429 || statuses[0] === 424) ? statuses[0] : 502;
+       const response = this._upstreamErrorResponse(
+-        upstream ?? { status: 502, statusText: "Bad Gateway", headers: {} },
++        {
++          status: responseStatus,
++          statusText: upstream?.status === responseStatus ? upstream.statusText : "",
++          headers: upstream?.headers["x-routstr-request-id"] ? { "x-routstr-request-id": upstream.headers["x-routstr-request-id"] } : {}
++        },
+         JSON.stringify({ error: {
+           type: "all_providers_failed",
+           message: failures.errors.map((error) => error.message).join("; "),
+@@ -8571,6 +8666,7 @@
+       );
+       response.headers.set("content-type", "application/json");
+       response.headers.delete("x-routstr-error-scope");
++      response.headers.delete("x-routstr-provider");
+       response.passthrough = true;
+       return response;
+     }
+@@ -8871,6 +8967,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -4453,7 +5023,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8877,7 +8953,7 @@
+@@ -8889,7 +8986,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -4462,7 +5032,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -8903,9 +8979,11 @@
+@@ -8915,9 +9012,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -4475,7 +5045,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8933,6 +9011,7 @@
+@@ -8945,6 +9044,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4483,7 +5053,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8953,6 +9032,7 @@
+@@ -8965,6 +9065,7 @@
        }
        return result;
      } catch (e) {
@@ -4491,7 +5061,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -8969,19 +9049,35 @@
+@@ -8981,19 +9082,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4534,7 +5104,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9013,6 +9109,7 @@
+@@ -9025,6 +9142,7 @@
            );
          }
        }
@@ -4542,7 +5112,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9026,7 +9123,8 @@
+@@ -9038,7 +9156,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4552,7 +5122,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9159,7 +9257,8 @@
+@@ -9171,7 +9290,8 @@
        mintUrl,
        amount,
        baseUrl,
