@@ -86,6 +86,21 @@ and `cu-2pc` next to it. The SDK speaks only protocol v2 (the two-party
 handshake over a joint P-256 key share); a node that still offers only the
 retired protocol v1 is refused (`offer_unsupported_version`).
 
+It also requires an SDK with the confidential transport, which no npm release
+has yet (the daemon fails at startup with `Export named
+'closeConfidentialPrewarm' not found`, and `bun run lint` fails on the same
+name). Until one is released, build the SDK's `confidential-2pc` branch from
+<https://github.com/jooray/routstr-sdk> next to this checkout and link it
+before building:
+
+```sh
+(cd ../routstr-sdk && npm install && npm run build)
+bun install
+rm -rf node_modules/@routstr/sdk && ln -s "$PWD/../routstr-sdk" node_modules/@routstr/sdk
+bun run build
+bun link
+```
+
 ## Pre-warming
 
 Most of a cold request is the two-party
