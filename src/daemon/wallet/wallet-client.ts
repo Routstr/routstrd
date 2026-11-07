@@ -241,7 +241,7 @@ export interface WalletClient {
   ): Promise<{ invoice: string; operationId?: string }>;
   /** Progress of a top-up, when the wallet tracks mint operations. */
   getMintQuote?(operationId: string): Promise<MintQuoteStatus | null>;
-  sendCashu(amount: number, mintUrl?: string): Promise<string>;
+  sendCashu(amount: number, mintUrl?: string, signal?: AbortSignal): Promise<string>;
   /**
    * Send the closest available proof set without a swap. When `overpayCap` is
    * set and the closest token would exceed it, fall back to an online send.

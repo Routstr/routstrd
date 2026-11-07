@@ -2271,14 +2271,18 @@ export async function createCocoClient(
     },
   );
 
-  async function prepareOnlineSend(amount: number, mintUrl?: string) {
+  async function prepareOnlineSend(amount: number, mintUrl?: string, signal?: AbortSignal) {
     const targetMint = mintUrl
       ? normalizeMintUrl(mintUrl)
       : walletConfig.defaultMintUrl;
     if (!targetMint) {
       throw new Error("No trusted mint available for sending");
     }
+    signal?.throwIfAborted();
     await waitForRecovery(targetMint);
+    // Recovery/queue waits are cancellable preparation. Once prepare starts,
+    // keep the financial operation and its existing persistence/recovery intact.
+    signal?.throwIfAborted();
     const prepared = await coco!.ops.send.prepare({ mintUrl: targetMint, amount });
     const { operation, token } = await coco!.ops.send.execute(prepared.id);
     return { token: getEncodedToken(token), operation };
@@ -2493,8 +2497,8 @@ export async function createCocoClient(
       };
     },
 
-    async sendCashu(amount: number, mintUrl?: string): Promise<string> {
-      return (await prepareOnlineSend(amount, mintUrl)).token;
+    async sendCashu(amount: number, mintUrl?: string, signal?: AbortSignal): Promise<string> {
+      return (await prepareOnlineSend(amount, mintUrl, signal)).token;
     },
 
     async sendCashuOffline(
