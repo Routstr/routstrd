@@ -299,7 +299,59 @@ diff --git a/dist/index.js b/dist/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9946,12 @@
+@@ -9565,9 +9633,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9591,9 +9665,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9608,11 +9688,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9878,10 +9960,12 @@
          };
        }
      }
@@ -313,7 +365,7 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const {
        token,
-@@ -9899,7 +9969,8 @@
+@@ -9899,7 +9983,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -323,7 +375,7 @@ diff --git a/dist/index.js b/dist/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10479,8 @@
+@@ -10408,7 +10493,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -333,7 +385,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10607,14 @@
+@@ -10535,12 +10621,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -350,7 +402,7 @@ diff --git a/dist/index.js b/dist/index.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11040,7 @@
+@@ -10966,6 +11054,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -358,7 +410,7 @@ diff --git a/dist/index.js b/dist/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11521,7 @@
+@@ -11446,6 +11535,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -366,7 +418,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11540,7 @@
+@@ -11464,7 +11554,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -375,7 +427,7 @@ diff --git a/dist/index.js b/dist/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -11490,9 +11566,11 @@
+@@ -11490,9 +11580,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -388,7 +440,7 @@ diff --git a/dist/index.js b/dist/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11598,7 @@
+@@ -11520,6 +11612,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -396,7 +448,7 @@ diff --git a/dist/index.js b/dist/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11540,6 +11619,7 @@
+@@ -11540,6 +11633,7 @@
        }
        return result;
      } catch (e) {
@@ -404,7 +456,7 @@ diff --git a/dist/index.js b/dist/index.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11556,19 +11636,35 @@
+@@ -11556,19 +11650,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -447,7 +499,7 @@ diff --git a/dist/index.js b/dist/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11696,7 @@
+@@ -11600,6 +11710,7 @@
            );
          }
        }
@@ -455,7 +507,7 @@ diff --git a/dist/index.js b/dist/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11710,8 @@
+@@ -11613,7 +11724,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -465,7 +517,7 @@ diff --git a/dist/index.js b/dist/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11844,8 @@
+@@ -11746,7 +11858,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -750,7 +802,59 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9944,12 @@
+@@ -9563,9 +9631,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9589,9 +9663,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9606,11 +9686,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9876,10 +9958,12 @@
          };
        }
      }
@@ -764,7 +868,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const {
        token,
-@@ -9897,7 +9967,8 @@
+@@ -9897,7 +9981,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -774,7 +878,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10477,8 @@
+@@ -10406,7 +10491,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -784,7 +888,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10605,14 @@
+@@ -10533,12 +10619,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -801,7 +905,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11038,7 @@
+@@ -10964,6 +11052,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -809,7 +913,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11519,7 @@
+@@ -11444,6 +11533,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -817,7 +921,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11538,7 @@
+@@ -11462,7 +11552,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -826,7 +930,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11488,9 +11564,11 @@
+@@ -11488,9 +11578,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -839,7 +943,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11596,7 @@
+@@ -11518,6 +11610,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -847,7 +951,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11538,6 +11617,7 @@
+@@ -11538,6 +11631,7 @@
        }
        return result;
      } catch (e) {
@@ -855,7 +959,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11554,19 +11634,35 @@
+@@ -11554,19 +11648,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -898,7 +1002,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11694,7 @@
+@@ -11598,6 +11708,7 @@
            );
          }
        }
@@ -906,7 +1010,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11708,8 @@
+@@ -11611,7 +11722,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -916,7 +1020,7 @@ diff --git a/dist/index.mjs b/dist/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11842,8 @@
+@@ -11744,7 +11856,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1215,7 +1319,59 @@ diff --git a/dist/browser.js b/dist/browser.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9878,10 +9946,12 @@
+@@ -9565,9 +9633,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9591,9 +9665,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9608,11 +9688,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9878,10 +9960,12 @@
          };
        }
      }
@@ -1229,7 +1385,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const {
        token,
-@@ -9899,7 +9969,8 @@
+@@ -9899,7 +9983,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1239,7 +1395,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10408,7 +10479,8 @@
+@@ -10408,7 +10493,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1249,7 +1405,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
        } catch (error) {
          this._log(
-@@ -10535,12 +10607,14 @@
+@@ -10535,12 +10621,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1266,7 +1422,7 @@ diff --git a/dist/browser.js b/dist/browser.js
            );
            this._log(
              "DEBUG",
-@@ -10966,6 +11040,7 @@
+@@ -10966,6 +11054,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1274,7 +1430,7 @@ diff --git a/dist/browser.js b/dist/browser.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11446,6 +11521,7 @@
+@@ -11446,6 +11535,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1282,7 +1438,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11464,7 +11540,7 @@
+@@ -11464,7 +11554,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1291,7 +1447,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      if (mustWait) {
        try {
          await topup;
-@@ -11490,9 +11566,11 @@
+@@ -11490,9 +11580,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -1304,7 +1460,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11520,6 +11598,7 @@
+@@ -11520,6 +11612,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1312,7 +1468,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11540,6 +11619,7 @@
+@@ -11540,6 +11633,7 @@
        }
        return result;
      } catch (e) {
@@ -1320,7 +1476,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11556,19 +11636,35 @@
+@@ -11556,19 +11650,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1363,7 +1519,7 @@ diff --git a/dist/browser.js b/dist/browser.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11600,6 +11696,7 @@
+@@ -11600,6 +11710,7 @@
            );
          }
        }
@@ -1371,7 +1527,7 @@ diff --git a/dist/browser.js b/dist/browser.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11613,7 +11710,8 @@
+@@ -11613,7 +11724,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1381,7 +1537,7 @@ diff --git a/dist/browser.js b/dist/browser.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11746,7 +11844,8 @@
+@@ -11746,7 +11858,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -1666,7 +1822,59 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10002,12 @@
+@@ -9621,9 +9689,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9647,9 +9721,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9664,11 +9744,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9934,10 +10016,12 @@
          };
        }
      }
@@ -1680,7 +1888,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const {
        token,
-@@ -9955,7 +10025,8 @@
+@@ -9955,7 +10039,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -1690,7 +1898,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10535,8 @@
+@@ -10464,7 +10549,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -1700,7 +1908,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10663,14 @@
+@@ -10591,12 +10677,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -1717,7 +1925,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11096,7 @@
+@@ -11022,6 +11110,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -1725,7 +1933,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11577,7 @@
+@@ -11502,6 +11591,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -1733,7 +1941,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11596,7 @@
+@@ -11520,7 +11610,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -1742,7 +1950,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11546,9 +11622,11 @@
+@@ -11546,9 +11636,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -1755,7 +1963,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11654,7 @@
+@@ -11576,6 +11668,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -1763,7 +1971,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11596,6 +11675,7 @@
+@@ -11596,6 +11689,7 @@
        }
        return result;
      } catch (e) {
@@ -1771,7 +1979,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11612,19 +11692,35 @@
+@@ -11612,19 +11706,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -1814,7 +2022,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11752,7 @@
+@@ -11656,6 +11766,7 @@
            );
          }
        }
@@ -1822,7 +2030,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11766,8 @@
+@@ -11669,7 +11780,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -1832,7 +2040,7 @@ diff --git a/dist/bun.mjs b/dist/bun.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11900,8 @@
+@@ -11802,7 +11914,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2117,7 +2325,59 @@ diff --git a/dist/bun.js b/dist/bun.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10004,12 @@
+@@ -9623,9 +9691,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9649,9 +9723,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9666,11 +9746,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9936,10 +10018,12 @@
          };
        }
      }
@@ -2131,7 +2391,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const {
        token,
-@@ -9957,7 +10027,8 @@
+@@ -9957,7 +10041,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2141,7 +2401,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10537,8 @@
+@@ -10466,7 +10551,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2151,7 +2411,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10665,14 @@
+@@ -10593,12 +10679,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2168,7 +2428,7 @@ diff --git a/dist/bun.js b/dist/bun.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11098,7 @@
+@@ -11024,6 +11112,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2176,7 +2436,7 @@ diff --git a/dist/bun.js b/dist/bun.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11579,7 @@
+@@ -11504,6 +11593,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2184,7 +2444,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11598,7 @@
+@@ -11522,7 +11612,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2193,7 +2453,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      if (mustWait) {
        try {
          await topup;
-@@ -11548,9 +11624,11 @@
+@@ -11548,9 +11638,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -2206,7 +2466,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11656,7 @@
+@@ -11578,6 +11670,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2214,7 +2474,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11598,6 +11677,7 @@
+@@ -11598,6 +11691,7 @@
        }
        return result;
      } catch (e) {
@@ -2222,7 +2482,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11614,19 +11694,35 @@
+@@ -11614,19 +11708,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2265,7 +2525,7 @@ diff --git a/dist/bun.js b/dist/bun.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11754,7 @@
+@@ -11658,6 +11768,7 @@
            );
          }
        }
@@ -2273,7 +2533,7 @@ diff --git a/dist/bun.js b/dist/bun.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11768,8 @@
+@@ -11671,7 +11782,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2283,7 +2543,7 @@ diff --git a/dist/bun.js b/dist/bun.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11902,8 @@
+@@ -11804,7 +11916,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -2568,7 +2828,59 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9934,10 +10002,12 @@
+@@ -9621,9 +9689,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9647,9 +9721,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9664,11 +9744,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9934,10 +10016,12 @@
          };
        }
      }
@@ -2582,7 +2894,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const {
        token,
-@@ -9955,7 +10025,8 @@
+@@ -9955,7 +10039,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -2592,7 +2904,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10464,7 +10535,8 @@
+@@ -10464,7 +10549,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -2602,7 +2914,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
        } catch (error) {
          this._log(
-@@ -10591,12 +10663,14 @@
+@@ -10591,12 +10677,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -2619,7 +2931,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
            );
            this._log(
              "DEBUG",
-@@ -11022,6 +11096,7 @@
+@@ -11022,6 +11110,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -2627,7 +2939,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11502,6 +11577,7 @@
+@@ -11502,6 +11591,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -2635,7 +2947,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11520,7 +11596,7 @@
+@@ -11520,7 +11610,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -2644,7 +2956,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11546,9 +11622,11 @@
+@@ -11546,9 +11636,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -2657,7 +2969,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11576,6 +11654,7 @@
+@@ -11576,6 +11668,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -2665,7 +2977,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11596,6 +11675,7 @@
+@@ -11596,6 +11689,7 @@
        }
        return result;
      } catch (e) {
@@ -2673,7 +2985,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11612,19 +11692,35 @@
+@@ -11612,19 +11706,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -2716,7 +3028,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11656,6 +11752,7 @@
+@@ -11656,6 +11766,7 @@
            );
          }
        }
@@ -2724,7 +3036,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11669,7 +11766,8 @@
+@@ -11669,7 +11780,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -2734,7 +3046,7 @@ diff --git a/dist/node.mjs b/dist/node.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11802,7 +11900,8 @@
+@@ -11802,7 +11914,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3019,7 +3331,59 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9876,10 +9944,12 @@
+@@ -9563,9 +9631,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9589,9 +9663,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9606,11 +9686,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9876,10 +9958,12 @@
          };
        }
      }
@@ -3033,7 +3397,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const {
        token,
-@@ -9897,7 +9967,8 @@
+@@ -9897,7 +9981,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3043,7 +3407,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10406,7 +10477,8 @@
+@@ -10406,7 +10491,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3053,7 +3417,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
        } catch (error) {
          this._log(
-@@ -10533,12 +10605,14 @@
+@@ -10533,12 +10619,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3070,7 +3434,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
            );
            this._log(
              "DEBUG",
-@@ -10964,6 +11038,7 @@
+@@ -10964,6 +11052,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3078,7 +3442,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11444,6 +11519,7 @@
+@@ -11444,6 +11533,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3086,7 +3450,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11462,7 +11538,7 @@
+@@ -11462,7 +11552,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3095,7 +3459,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -11488,9 +11564,11 @@
+@@ -11488,9 +11578,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -3108,7 +3472,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11518,6 +11596,7 @@
+@@ -11518,6 +11610,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3116,7 +3480,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11538,6 +11617,7 @@
+@@ -11538,6 +11631,7 @@
        }
        return result;
      } catch (e) {
@@ -3124,7 +3488,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11554,19 +11634,35 @@
+@@ -11554,19 +11648,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3167,7 +3531,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11598,6 +11694,7 @@
+@@ -11598,6 +11708,7 @@
            );
          }
        }
@@ -3175,7 +3539,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11611,7 +11708,8 @@
+@@ -11611,7 +11722,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3185,7 +3549,7 @@ diff --git a/dist/browser.mjs b/dist/browser.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11744,7 +11842,8 @@
+@@ -11744,7 +11856,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3484,7 +3848,59 @@ diff --git a/dist/node.js b/dist/node.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -9936,10 +10004,12 @@
+@@ -9623,9 +9691,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -9649,9 +9723,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -9666,11 +9746,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -9936,10 +10018,12 @@
          };
        }
      }
@@ -3498,7 +3914,7 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const {
        token,
-@@ -9957,7 +10027,8 @@
+@@ -9957,7 +10041,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3508,7 +3924,7 @@ diff --git a/dist/node.js b/dist/node.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -10466,7 +10537,8 @@
+@@ -10466,7 +10551,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3518,7 +3934,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
        } catch (error) {
          this._log(
-@@ -10593,12 +10665,14 @@
+@@ -10593,12 +10679,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3535,7 +3951,7 @@ diff --git a/dist/node.js b/dist/node.js
            );
            this._log(
              "DEBUG",
-@@ -11024,6 +11098,7 @@
+@@ -11024,6 +11112,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3543,7 +3959,7 @@ diff --git a/dist/node.js b/dist/node.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -11504,6 +11579,7 @@
+@@ -11504,6 +11593,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -3551,7 +3967,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -11522,7 +11598,7 @@
+@@ -11522,7 +11612,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -3560,7 +3976,7 @@ diff --git a/dist/node.js b/dist/node.js
      if (mustWait) {
        try {
          await topup;
-@@ -11548,9 +11624,11 @@
+@@ -11548,9 +11638,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -3573,7 +3989,7 @@ diff --git a/dist/node.js b/dist/node.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -11578,6 +11656,7 @@
+@@ -11578,6 +11670,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -3581,7 +3997,7 @@ diff --git a/dist/node.js b/dist/node.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -11598,6 +11677,7 @@
+@@ -11598,6 +11691,7 @@
        }
        return result;
      } catch (e) {
@@ -3589,7 +4005,7 @@ diff --git a/dist/node.js b/dist/node.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -11614,19 +11694,35 @@
+@@ -11614,19 +11708,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -3632,7 +4048,7 @@ diff --git a/dist/node.js b/dist/node.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -11658,6 +11754,7 @@
+@@ -11658,6 +11768,7 @@
            );
          }
        }
@@ -3640,7 +4056,7 @@ diff --git a/dist/node.js b/dist/node.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -11671,7 +11768,8 @@
+@@ -11671,7 +11782,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -3650,7 +4066,7 @@ diff --git a/dist/node.js b/dist/node.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -11804,7 +11902,8 @@
+@@ -11804,7 +11916,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -3935,7 +4351,59 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7293,10 +7361,12 @@
+@@ -6980,9 +7048,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -7006,9 +7080,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -7023,11 +7103,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -7293,10 +7375,12 @@
          };
        }
      }
@@ -3949,7 +4417,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const {
        token,
-@@ -7314,7 +7384,8 @@
+@@ -7314,7 +7398,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -3959,7 +4427,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7823,7 +7894,8 @@
+@@ -7823,7 +7908,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -3969,7 +4437,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
        } catch (error) {
          this._log(
-@@ -7950,12 +8022,14 @@
+@@ -7950,12 +8036,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -3986,7 +4454,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
            );
            this._log(
              "DEBUG",
-@@ -8381,6 +8455,7 @@
+@@ -8381,6 +8469,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -3994,7 +4462,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8861,6 +8936,7 @@
+@@ -8861,6 +8950,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -4002,7 +4470,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8879,7 +8955,7 @@
+@@ -8879,7 +8969,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -4011,7 +4479,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      if (mustWait) {
        try {
          await topup;
-@@ -8905,9 +8981,11 @@
+@@ -8905,9 +8995,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -4024,7 +4492,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8935,6 +9013,7 @@
+@@ -8935,6 +9027,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4032,7 +4500,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8955,6 +9034,7 @@
+@@ -8955,6 +9048,7 @@
        }
        return result;
      } catch (e) {
@@ -4040,7 +4508,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -8971,19 +9051,35 @@
+@@ -8971,19 +9065,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4083,7 +4551,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9015,6 +9111,7 @@
+@@ -9015,6 +9125,7 @@
            );
          }
        }
@@ -4091,7 +4559,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9028,7 +9125,8 @@
+@@ -9028,7 +9139,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4101,7 +4569,7 @@ diff --git a/dist/client/index.js b/dist/client/index.js
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9161,7 +9259,8 @@
+@@ -9161,7 +9273,8 @@
        mintUrl,
        amount,
        baseUrl,
@@ -4386,7 +4854,59 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          const refundResult = await this.refundApiKey({
            mintUrl,
            baseUrl: candidate.baseUrl,
-@@ -7291,10 +7359,12 @@
+@@ -6978,9 +7046,15 @@
+         })();
+         return terminal;
+       };
++      let transportComplete = false;
++      let accountingPromise;
++      const accounting = () => accountingPromise ??= Promise.resolve().then(() => original.finalize?.() ?? 0);
++      let settlement;
++      const logSettlementError = (error) => this._log("ERROR", "[RoutstrClient] stream settlement failed:", error);
+       let streamController;
+       let streamReader;
+       const onAbort = () => {
++        if (transportComplete) return;
+         void finish("aborted").then(() => {
+           try {
+             streamController?.error(new DOMException("Request aborted", "AbortError"));
+@@ -7004,9 +7078,15 @@
+           try {
+             const result = await reader.read();
+             if (result.done) {
+-              await original.finalize?.();
+-              await finish(original.streamError ? "failed" : "succeeded");
++              transportComplete = true;
++              params.signal?.removeEventListener("abort", onAbort);
++              params.signal?.removeEventListener("abort", abort);
+               controller2.close();
++              settlement = accounting().then(
++                () => finish(original.streamError ? "failed" : "succeeded"),
++                async (error) => { await finish("failed", error); throw error; }
++              );
++              void settlement.catch(logSettlementError);
+             } else controller2.enqueue(result.value);
+           } catch (error) {
+             await finish(params.signal?.aborted ? "aborted" : "failed", error);
+@@ -7021,11 +7101,13 @@
+         }
+       }, { highWaterMark: 0 });
+       response = rewrapRoutstrResponse(original, stream, headers);
+-      const accounting = original.finalize;
+       response.finalize = async () => {
+-        const value = await accounting?.() ?? 0;
+-        if (terminal) await terminal;
+-        return value;
++        try {
++          return await accounting();
++        } finally {
++          if (settlement) await settlement;
++          if (terminal) await terminal;
++        }
+       };
+       params.signal?.addEventListener("abort", onAbort, { once: true });
+       if (params.signal?.aborted) onAbort();
+@@ -7291,10 +7373,12 @@
          };
        }
      }
@@ -4400,7 +4920,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const {
        token,
-@@ -7312,7 +7382,8 @@
+@@ -7312,7 +7396,8 @@
        tokenBalance,
        tokenReserved,
        tokenBalanceUnit,
@@ -4410,7 +4930,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      });
      const finalHeaders = this._withAuthAndTinfoilHeaders(
        baseHeaders,
-@@ -7821,7 +7892,8 @@
+@@ -7821,7 +7906,8 @@
            mintUrl,
            amount: params.requiredSats,
            baseUrl,
@@ -4420,7 +4940,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
        } catch (error) {
          this._log(
-@@ -7948,12 +8020,14 @@
+@@ -7948,12 +8034,14 @@
            await params.lifecycle?.event("topup_started", void 0, { baseUrl });
            const topupResult = await this._topUpOnce(
              `${baseUrl}:${params.token}`,
@@ -4437,7 +4957,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
            );
            this._log(
              "DEBUG",
-@@ -8379,6 +8453,7 @@
+@@ -8379,6 +8467,7 @@
          try {
            spendResult = await this._spendToken({
              mintUrl,
@@ -4445,7 +4965,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
              amount: newRequiredSats,
              baseUrl: nextProvider
            });
-@@ -8859,6 +8934,7 @@
+@@ -8859,6 +8948,7 @@
     * request from trying the provider (the snapshot may be stale). Never throws.
     */
    async _topUpIfNeeded(snapshot) {
@@ -4453,7 +4973,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (this.mode !== "apikeys" || !snapshot.token) return;
      if (snapshot.tokenBalanceUnknown) return;
      const snapshotAvailableSats = getAvailableBalanceInSats(
-@@ -8877,7 +8953,7 @@
+@@ -8877,7 +8967,7 @@
        "DEBUG",
        `[RoutstrClient] _topUpIfNeeded: snapshot available=${snapshotAvailableSats} sat, reserved=${snapshotReservedSats} sat < target=${targetSats} sat (required=${snapshot.requiredSats} x ${TOPUP_MARGIN}) for ${snapshot.baseUrl}; ${mustWait ? "awaiting topup" : "spinning off background topup"}`
      );
@@ -4462,7 +4982,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      if (mustWait) {
        try {
          await topup;
-@@ -8903,9 +8979,11 @@
+@@ -8903,9 +8993,11 @@
     * trigger already confirmed available < required x TOPUP_MARGIN, so we
     * deposit exactly the shortfall to land at the margin. No extra balance
     * round-trip: the post-topup total is persisted from topUp's
@@ -4475,7 +4995,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      try {
        const availableSats = getAvailableBalanceInSats(
          snapshot.tokenBalance,
-@@ -8933,6 +9011,7 @@
+@@ -8933,6 +9025,7 @@
          MIN_DEPOSIT_SATS
        );
        const result = await this.balanceManager.topUp({
@@ -4483,7 +5003,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          mintUrl: snapshot.mintUrl,
          baseUrl: snapshot.baseUrl,
          // The target already includes TOPUP_MARGIN — deposit the shortfall.
-@@ -8953,6 +9032,7 @@
+@@ -8953,6 +9046,7 @@
        }
        return result;
      } catch (e) {
@@ -4491,7 +5011,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        this._log(
          "WARN",
          `[RoutstrClient] _runProactiveTopup: failed for ${snapshot.baseUrl}`,
-@@ -8969,19 +9049,35 @@
+@@ -8969,19 +9063,35 @@
     * callers — proactive spin-offs and 402 handlers alike — share one topUp
     * call instead of stacking multiple deposits.
     */
@@ -4534,7 +5054,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
      const { mintUrl, amount, baseUrl, excludeMints = [] } = params;
      this._log(
        "DEBUG",
-@@ -9013,6 +9109,7 @@
+@@ -9013,6 +9123,7 @@
            );
          }
        }
@@ -4542,7 +5062,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
        if (!parentApiKey) {
          this._log(
            "DEBUG",
-@@ -9026,7 +9123,8 @@
+@@ -9026,7 +9137,8 @@
            mintUrl,
            amount: initialAmount,
            baseUrl,
@@ -4552,7 +5072,7 @@ diff --git a/dist/client/index.mjs b/dist/client/index.mjs
          });
          selectedMintUrl = spendResult2.selectedMintUrl;
          if (!spendResult2.token) {
-@@ -9159,7 +9257,8 @@
+@@ -9159,7 +9271,8 @@
        mintUrl,
        amount,
        baseUrl,
