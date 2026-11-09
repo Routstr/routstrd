@@ -2161,6 +2161,14 @@ type NpubEntry = {
   npub: string;
   name: string | null;
   role: string;
+  /**
+   * Monthly spend cap in sats. `null` means unlimited; an absent field means
+   * the response did not report a cap (typically an older auth proxy), so the
+   * cap is unknown rather than unlimited.
+   */
+  monthlyLimitSats?: number | null;
+  /** Sats spent in the current calendar month (read-only). */
+  monthlyUsedSats?: number;
 };
 
 /**
@@ -2221,9 +2229,71 @@ async function requireNpubName(
   }
 }
 
+/**
+ * Parse a per-npub monthly spend cap in sats. Rejects fractions, negatives and
+ * non-numeric values; 0 is a valid cap that blocks every paid request.
+ */
+export function parseMonthlyLimitSats(
+  raw: string | undefined,
+): { value?: number; error?: string } {
+  if (raw === undefined) return {};
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return { error: "Invalid --limit-sats. Expected a non-negative whole number of sats." };
+  }
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) {
+    return { error: "Invalid --limit-sats. Value is too large." };
+  }
+  return { value };
+}
+
+/**
+ * Describe a monthly cap reported by the auth proxy. The field is tri-state: a
+ * number is a cap, an explicit `null` is unlimited, and an absent field leaves
+ * the cap unknown — most likely an auth proxy that predates spend limits.
+ * Reporting absent as "unlimited" would claim enforcement we cannot verify.
+ */
+function describeMonthlyLimit(value: number | null | undefined): string {
+  if (typeof value === "number") return `${value} sats/month`;
+  if (value === null) return "unlimited";
+  return "unknown (auth proxy does not report spend limits)";
+}
+
+/** Human-readable monthly cap line for `npubs list`. */
+function formatNpubMonthlyLimit(entry: NpubEntry): string {
+  const used = typeof entry.monthlyUsedSats === "number"
+    ? ` (${entry.monthlyUsedSats} used)`
+    : "";
+  return `limit: ${describeMonthlyLimit(entry.monthlyLimitSats)}${used}`;
+}
+
+/**
+ * Warn when the cap reported back differs from the cap that was requested.
+ * Older auth proxies may ignore `monthlyLimitSats` entirely (absent field), and
+ * a proxy that validates differently may clamp or reinterpret the value, so
+ * neither case can be assumed to have applied the request. `undefined` means
+ * no cap was requested, which never warns.
+ */
+function warnIfMonthlyLimitUnconfirmed(
+  requested: number | null | undefined,
+  reported: number | null | undefined,
+): void {
+  if (requested === undefined || reported === requested) return;
+  if (reported === undefined) {
+    console.warn(
+      "Warning: the auth proxy did not confirm the monthly limit. It may be an older auth proxy that ignores spend limits; upgrade it to enforce this cap.",
+    );
+    return;
+  }
+  console.warn(
+    `Warning: the auth proxy reported ${describeMonthlyLimit(reported)} as the monthly limit, but ${describeMonthlyLimit(requested)} was requested. Check the auth proxy version before relying on this cap.`,
+  );
+}
+
 npubsCmd
   .command("list")
-  .description("List configured npubs with their roles and names")
+  .description("List configured npubs with their roles, names and monthly spend limits")
   .action(async () => {
     await ensureDaemonRunning();
     const config = await loadConfig();
@@ -2248,7 +2318,7 @@ npubsCmd
       const marker = entry.npub === userNpub ? " → you" : "";
       if (entry.npub === userNpub) found = true;
       const name = entry.name ? ` "${entry.name}"` : " (unnamed)";
-      console.log(`- ${entry.npub} [${entry.role}]${name}${marker}`);
+      console.log(`- ${entry.npub} [${entry.role}]${name}${marker} — ${formatNpubMonthlyLimit(entry)}`);
     }
     if (userNpub && !found) {
       console.log("");
@@ -2324,7 +2394,8 @@ npubsCmd
   .description("Add a npub (hex pubkey or npub1...). Defaults to 'user' role unless --role is specified.")
   .option("-r, --role <role>", "Role for the npub: 'admin' or 'user' (default: 'user')", "user")
   .option("-n, --name <name>", "Display name for the npub (required; prompted when omitted)")
-  .action(async (npubArg: string, options: { role: string; name?: string }) => {
+  .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (resets on the 1st; omit for unlimited)")
+  .action(async (npubArg: string, options: { role: string; name?: string; limitSats?: string }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -2335,16 +2406,23 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
+    // Validate the cap before prompting for a name: a bad flag should fail fast.
+    const limit = parseMonthlyLimitSats(options.limitSats);
+    if (limit.error) {
+      console.error(limit.error);
+      process.exit(1);
+    }
     const name = await requireNpubName(
       options.name,
       npubFromPubkey(normalized),
       `Add a display name: routstrd npubs add ${npubFromPubkey(normalized)} --name "Alice"`,
     );
-    const body: Record<string, string | null> = {
+    const body: Record<string, unknown> = {
       npub: npubFromPubkey(normalized),
       role: options.role,
       name,
     };
+    if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
     const result = await callAuth("/npubs", {
       method: "POST",
       body,
@@ -2353,23 +2431,29 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    const output = result.output as
-      | { npub?: string; name?: string | null; role?: string; added?: boolean; error?: string }
+    const output = (result.output ?? result) as
+      | { npub?: string; name?: string | null; role?: string; monthlyLimitSats?: number | null; added?: boolean; error?: string }
       | undefined;
     if (output?.npub) {
       const nameSuffix = output.name ? ` ("${output.name}")` : "";
+      const limitSuffix = typeof output.monthlyLimitSats === "number"
+        ? `, limit ${output.monthlyLimitSats} sats/month`
+        : "";
       console.log(
-        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}`,
+        `${output.added ? "Added" : "Already configured"} npub: ${output.npub} [${output.role ?? "user"}]${nameSuffix}${limitSuffix}`,
       );
+      warnIfMonthlyLimitUnconfirmed(limit.value, output.monthlyLimitSats);
     }
   });
 
 npubsCmd
   .command("update <npub>")
-  .description("Update the role and/or name of an existing npub (requires admin)")
+  .description("Update the role, name and/or monthly soft spend cap of an existing npub (requires admin)")
   .option("-r, --role <role>", "New role: 'admin' or 'user'")
   .option("-n, --name <name>", "New display name (a name cannot be removed)")
-  .action(async (npubArg: string, options: { role?: string; name?: string }) => {
+  .option("-l, --limit-sats <sats>", "Monthly soft cap in sats (0 blocks all paid requests)")
+  .option("--clear-limit", "Remove the monthly spend cap (unlimited)")
+  .action(async (npubArg: string, options: { role?: string; name?: string; limitSats?: string; clearLimit?: boolean }) => {
     await ensureDaemonRunning();
     const normalized = normalizeNostrPubkey(npubArg);
     if (!normalized) {
@@ -2380,8 +2464,17 @@ npubsCmd
       console.error("Invalid role. Expected 'admin' or 'user'.");
       process.exit(1);
     }
-    if (options.role === undefined && options.name === undefined) {
-      console.error("Provide '--role' and/or '--name' to update.");
+    if (options.limitSats !== undefined && options.clearLimit) {
+      console.error("Provide either '--limit-sats' or '--clear-limit', not both.");
+      process.exit(1);
+    }
+    if (
+      options.role === undefined &&
+      options.name === undefined &&
+      options.limitSats === undefined &&
+      !options.clearLimit
+    ) {
+      console.error("Provide '--role', '--name', '--limit-sats' and/or '--clear-limit' to update.");
       process.exit(1);
     }
     const name = parseUpdatedNpubName(options.name);
@@ -2389,11 +2482,19 @@ npubsCmd
       console.error(name.error);
       process.exit(1);
     }
-    const body: Record<string, string | null> = {
+    const limit = parseMonthlyLimitSats(options.limitSats);
+    if (limit.error) {
+      console.error(limit.error);
+      process.exit(1);
+    }
+    const body: Record<string, unknown> = {
       npub: npubFromPubkey(normalized),
     };
     if (options.role !== undefined) body.role = options.role;
     if (name.name !== undefined) body.name = name.name;
+    if (limit.value !== undefined) body.monthlyLimitSats = limit.value;
+    if (options.clearLimit) body.monthlyLimitSats = null;
+    const requestedLimit = options.clearLimit ? null : limit.value;
     const result = await callAuth("/npubs", {
       method: "PATCH",
       body,
@@ -2402,15 +2503,25 @@ npubsCmd
       console.log(result.error);
       process.exit(1);
     }
-    // PATCH /npubs returns { npub, pubkey, name, role } at the top level, not wrapped in { output }
+    // PATCH /npubs returns { npub, pubkey, name, role, monthlyLimitSats } at the top
+    // level, not wrapped in { output }
     const data = (result.output ?? result) as
-      | { npub?: string; pubkey?: string; name?: string | null; role?: string; error?: string }
+      | {
+          npub?: string;
+          pubkey?: string;
+          name?: string | null;
+          role?: string;
+          monthlyLimitSats?: number | null;
+          error?: string;
+        }
       | undefined;
     if (data?.npub) {
       const parts: string[] = [];
       if (data.role) parts.push(`role='${data.role}'`);
       parts.push(`name=${data.name ? `"${data.name}"` : "(none)"}`);
+      parts.push(`limit=${describeMonthlyLimit(data.monthlyLimitSats)}`);
       console.log(`Updated npub ${data.npub} (${parts.join(", ")}).`);
+      warnIfMonthlyLimitUnconfirmed(requestedLimit, data.monthlyLimitSats);
     } else {
       console.log("Npub not found or update failed.");
     }
