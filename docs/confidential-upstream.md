@@ -141,7 +141,7 @@ armed sessions and runs no timer. Configure it in `confidentialUpstream`:
 | `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends a session 600 s after accepting its websocket; clamped to 60–570) |
 | `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
 | `maxArmedWithFee` | 6 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
-| `fundsHeadroom` | 2 | arm only while the credential's available balance on the node is at least this many reservations (see Funds) |
+| `fundsHeadroom` | 2 | arm only while the credential's available balance on the node is at least this many reservations; the top-up keeps it 1.4 reservations above that (see Funds) |
 
 How many sessions it keeps per key: 1 while the key is active, 2 after 3
 requests within 5 minutes, and at least as many as the most requests that
@@ -157,11 +157,14 @@ full-context prompt plus `max_tokens` at the offer rates), like an in-flight
 request. routstrd arms only while the credential's available balance on the
 node covers `fundsHeadroom` (default 2) times the last observed reservation R
 (the new arm plus one cold request). While pre-warming is on, the automatic
-top-up keeps (`fundsHeadroom` + 0.4) × R available, instead of the 1.4 × R a
-cold request needs. The available balance excludes the armed sessions'
+top-up keeps (`fundsHeadroom` + 1.4) × R available, instead of the 1.4 × R a
+cold request needs, so the session a request claimed is replaced while that
+request is still running. The available balance excludes the armed sessions'
 reservations, so with n armed sessions the key holds about
-(n + `fundsHeadroom` + 0.4) × R at the node; `maxPerKey` and `maxTotal` bound
-n. Lower `fundsHeadroom` (e.g. to 1) to keep less on the node. An unused session is closed before the node's limit, and the node
+(n + `fundsHeadroom` + 1.4) × R at the node; `maxPerKey` and `maxTotal` bound
+n. Lower `fundsHeadroom` (e.g. to 1) to keep less on the node. Too little
+balance does not back the key off: it arms again when its next request
+settles. An unused session is closed before the node's limit, and the node
 then releases its reservation without a charge (unless it charges an abandon
 fee, below). While sessions are armed,
 the balance the node reports is lower by their reservations. Pre-warming is

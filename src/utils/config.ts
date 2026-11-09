@@ -110,7 +110,8 @@ export interface RoutstrdConfig {
        * Arm only while the credential's available balance on the node is at
        * least this many times one session's reservation (default 2: the new
        * arm plus one cold request). The automatic top-up keeps the key at
-       * this multiple + 0.4 while pre-warming is on.
+       * this multiple + 1.4 while pre-warming is on (the request in flight
+       * plus the next arm).
        */
       fundsHeadroom?: number;
     };
