@@ -127,6 +127,9 @@ export interface ModelPathsOutput {
   contextLength?: number;
   nodes: ModelPathNode[];
   skipped: ModelPathSkipped[];
+  /** Present only for the opt-in candidate API view (the CLI default). */
+  candidates?: Array<{ baseUrl: string; route: ModelPathRoute }>;
+  candidateStatus?: "ranked" | "off" | "no-policy" | "no-eligible-routes";
 }
 
 /** Decoded parts of one advertised selector. */
@@ -374,6 +377,41 @@ export function formatModelPaths(output: ModelPathsOutput): string {
     output.name && output.name !== output.id
       ? `${output.id} (${output.name})`
       : output.id;
+  if (output.candidates) {
+    const lines = [`Automatic model-path candidates for ${title}`, ""];
+    const empty = {
+      off: "Automatic model-path selection is off; requests use plain provider-price routing without a route pin.",
+      "no-policy": "No automatic policy applies to this model; requests use plain provider-price routing without a route pin.",
+      "no-eligible-routes": "No eligible automatic routes; requests fall back to plain provider-price routing without a route pin.",
+      ranked: "",
+    };
+    if (!output.candidates.length) lines.push(`  ${empty[output.candidateStatus ?? "no-eligible-routes"]}`);
+    else {
+      const safeText = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+      const rows = output.candidates.map(({ baseUrl, route }) => {
+        let node = "unknown node";
+        try {
+          const url = new URL(baseUrl);
+          node = `${url.protocol}//${url.host}${url.pathname}`;
+        } catch { /* Never print malformed URLs or embedded credentials. */ }
+        return {
+          route: safeText(upstreamLabel(route)), node: safeText(node),
+          cost: typeof route.cost === "number" && Number.isFinite(route.cost) ? route.cost.toFixed(2) : "-",
+        };
+      });
+      const routeWidth = Math.max("upstream route".length, ...rows.map(row => row.route.length));
+      const costWidth = Math.max("cost".length, ...rows.map(row => row.cost.length));
+      const rankWidth = String(rows.length).length;
+      lines.push(`  ${"#".padStart(rankWidth)}  ${"upstream route".padEnd(routeWidth)}  ${"cost".padStart(costWidth)}  proxy node`);
+      rows.forEach((row, index) => {
+        lines.push(`  ${String(index + 1).padStart(rankWidth)}  ${row.route.padEnd(routeWidth)}  ${row.cost.padStart(costWidth)}  (${row.node})`);
+      });
+    }
+    lines.push("  Cost: sats per warm request (100k input, 90% cache hit; 2k output). SDK candidate order.",
+      "  Wallet eligibility/failure scope may skip routes; exhaustion falls back unpinned. Overrides excluded.",
+      "  Use --all for full advertised inventory.");
+    return lines.join("\n");
+  }
   const routeCount = output.nodes.reduce((sum, node) => sum + node.routes.length, 0);
   const lines: string[] = [`Model paths for ${title}`, ""];
 

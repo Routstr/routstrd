@@ -1044,8 +1044,8 @@ describe("model-path display agrees with installed SDK routing", () => {
     const originalFetch = globalThis.fetch;
     clearModelPathsCache();
     globalThis.fetch = (async () => Response.json({ data: [
-      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing } }] },
-      { id, paths: [{ path, model: { sats_pricing: canonicalPricing } }] },
+      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing, context_length: 4000, max_completion_tokens: 1000 } }] },
+      { id, paths: [{ path, model: { sats_pricing: canonicalPricing, context_length: 8000, max_completion_tokens: 2000 } }] },
     ] })) as unknown as typeof fetch;
     try {
       const service = createModelService({
@@ -1065,6 +1065,11 @@ describe("model-path display agrees with installed SDK routing", () => {
       expect(node.routes[0]!.pricing).toMatchObject(canonicalPricing);
       expect(node.routes[0]!.cost).toBeCloseTo(candidate.cost, 6);
       expect(node.routes[0]!.pricingSource).toBe("path");
+      const displayCandidate = (await service.getModelPaths(alias, false, false, true, true))!.candidates![0]!;
+      expect(displayCandidate.route.contextLength).toBe(8000);
+      expect(displayCandidate.route.maxCompletionTokens).toBe(2000);
+      expect(displayCandidate.route.pricing).toMatchObject(canonicalPricing);
+      expect(displayCandidate.route.cost).toBeCloseTo(candidate.cost, 6);
     } finally {
       globalThis.fetch = originalFetch;
       clearModelPathsCache();
@@ -1091,6 +1096,7 @@ describe("model-path display agrees with installed SDK routing", () => {
       getCachedMints: () => ({}), getCachedProviderInfo: () => ({}), getBaseUrlsList: () => Object.keys(cached),
     };
     const manager = new ProviderManager(discovery as never);
+    const policyRefreshes: boolean[] = [];
     const originalCooldown = manager.isOnCooldown.bind(manager);
     let coolCheap = false;
     manager.isOnCooldown = (url, modelId, path) =>
@@ -1107,6 +1113,7 @@ describe("model-path display agrees with installed SDK routing", () => {
         bootstrapProviders: async () => Object.keys(cached), syncReviewedProvidersFromNostr: async () => null,
         getAllCachedModels: () => cached, getBaseUrls: () => Object.keys(cached),
         getModelIdMappings: discovery.getModelIdMappings, getModelPathWhitelist: discovery.getModelPathWhitelist,
+        fetchModelPathWhitelist: async (force: boolean) => { policyRefreshes.push(force); return whitelist; },
       } as never, manager, { getState: () => ({
         baseUrlsList: Object.keys(cached), disabledProviders: disabled,
         manuallyDisabledProviders: [], manuallyEnabledProviders: [],
@@ -1114,6 +1121,15 @@ describe("model-path display agrees with installed SDK routing", () => {
       const ranking = await manager.getModelPathProviderRanking(alias);
       expect(ranking[0]!.selector).toBe(cheap);
       expect(ranking[0]!.baseUrl).toBe(b); // Equal cost: policy node order beats URL order.
+      const candidates = (await service.getModelPaths(alias, false, false, true, true))!;
+      expect(candidates.candidateStatus).toBe("ranked");
+      expect(candidates.nodes).toEqual([]);
+      expect(candidates.candidates!.map(candidate => [candidate.baseUrl, candidate.route.path])).toEqual(
+        ranking.map(candidate => [candidate.baseUrl, candidate.selector]));
+      expect(candidates.candidates!.map(candidate => candidate.baseUrl)).toEqual([b, a, b, a]);
+      expect(candidates.candidates!.every(candidate => candidate.route.path !== unlisted)).toBe(true);
+      await service.getModelPaths(alias, true, false, true, true);
+      expect(policyRefreshes).toEqual([true]);
       const display = (await service.getModelPaths(alias, false, true, true))!;
       expect(display.nodes).toHaveLength(4);
       expect(display.nodes.slice(0, 2).map(node => node.baseUrl)).toEqual([b, a]);
@@ -1122,16 +1138,27 @@ describe("model-path display agrees with installed SDK routing", () => {
           [a, b].includes(node.baseUrl) ? [cheap] : []);
       }
       coolCheap = true;
+      const cooledCandidates = (await service.getModelPaths(alias, false, false, true, true))!;
+      expect(cooledCandidates.candidates!.map(candidate => candidate.route.path)).toEqual([expensive, expensive]);
+      const offCandidates = (await service.getModelPaths(alias, false, false, false, true))!;
+      expect(offCandidates.candidates).toEqual([]);
+      expect(offCandidates.candidateStatus).toBe("off");
       const cooled = (await service.getModelPaths(alias, false, true, true))!;
       expect(cooled.nodes[0]!.routes.find(route => route.pinned)!.path).toBe(expensive);
       const toggledOff = (await service.getModelPaths(alias, false, true, false))!;
       expect(toggledOff.nodes.every(node => node.routes.every(route => !route.pinned))).toBe(true);
       coolCheap = false;
       disabled = [a, b, off];
+      const disabledCandidates = (await service.getModelPaths(alias, false, false, true, true))!;
+      expect(disabledCandidates.candidates).toEqual([]);
+      expect(disabledCandidates.candidateStatus).toBe("no-eligible-routes");
       expect((await service.getModelPaths(alias, false, true, true))!.nodes.every(node =>
         node.routes.every(route => !route.pinned))).toBe(true);
       disabled = [off];
       whitelist = {} as typeof whitelist;
+      const noPolicy = (await service.getModelPaths(alias, false, false, true, true))!;
+      expect(noPolicy.candidates).toEqual([]);
+      expect(noPolicy.candidateStatus).toBe("no-policy");
       expect((await service.getModelPaths(alias, false, true, true))!.nodes.every(node =>
         node.routes.every(route => !route.pinned))).toBe(true);
     } finally {

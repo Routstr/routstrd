@@ -1,5 +1,6 @@
 import {
   canonicalIdForModel,
+  canonicalizeModelId,
   canonicalModelPath,
   clearModelPathsCache,
   findModelForId,
@@ -514,9 +515,13 @@ export function createModelService(
     refresh = false,
     includeDisabled = false,
     autoModelPath = false,
+    candidatesOnly = false,
   ): Promise<ModelPathsOutput | null> => {
     await ensureProvidersBootstrapped();
-    if (refresh) clearModelPathsCache();
+    if (refresh) {
+      clearModelPathsCache();
+      if (candidatesOnly) await modelManager.fetchModelPathWhitelist(true);
+    }
 
     const s = store.getState();
     const manuallyEnabled = new Set<string>(
@@ -542,6 +547,51 @@ export function createModelService(
     const ranking = policy
       ? await providerManager.getModelPathProviderRanking(modelId)
       : [];
+    if (candidatesOnly) {
+      const modelInfo = Object.values(allModels).flatMap(models => models as Model[])
+        .map(model => findModelForId([model], modelId, mappings)).find(Boolean);
+      if (!modelInfo) return null;
+      // Preserve every SDK-ranked (node, selector) alternative globally. Node
+      // grouping would reorder interleaved route-scoped failover candidates.
+      const pathLookups = new Map<string, Promise<NodeModelPaths | null>>();
+      const canonicalId = canonicalizeModelId(modelId, mappings).toLowerCase();
+      const candidates = await Promise.all(ranking.filter(candidate => !disabledSet.has(normalizeBaseUrl(candidate.baseUrl)))
+        .map(async candidate => {
+          let lookup = pathLookups.get(candidate.baseUrl);
+          if (!lookup) {
+            lookup = withBudget(fetchNodeModelPaths(candidate.baseUrl, modelId, {
+              mappings, extraSpellings: [candidate.model.id, ...(candidate.model.alias_ids ?? [])],
+            }), MODEL_PATH_RANKING_BUDGET_MS).then(value => value === PATHS_BUDGET_EXCEEDED ? null : value);
+            pathLookups.set(candidate.baseUrl, lookup);
+          }
+          const nodePaths = await lookup;
+          // Match the SDK resolver: canonical requested spelling wins a
+          // contested selector, then payload order. Keep its route limits but
+          // always use the SDK candidate's selected pricing, never alias price.
+          const entries = (nodePaths?.data ?? []).filter(entry =>
+            [entry.id, ...(entry.alias_ids ?? [])].some(spelling =>
+              canonicalizeModelId(spelling, mappings).toLowerCase() === canonicalId));
+          const ordered = [
+            ...entries.filter(entry => entry.id.toLowerCase() === canonicalId),
+            ...entries.filter(entry => entry.id.toLowerCase() !== canonicalId),
+          ];
+          const identity = canonicalModelPath(candidate.selector) ?? candidate.selector;
+          const metadata = ordered.flatMap(entry => entry.paths).find(entry =>
+            (canonicalModelPath(entry.path) ?? entry.path) === identity)?.model;
+          const routes = buildModelPathRoutes(candidate.baseUrl, { data: [{
+            id: candidate.model.id, alias_ids: [], paths: [{ path: candidate.selector,
+              model: { ...metadata, sats_pricing: candidate.satsPricing ?? undefined } }],
+          }], updatedAt: null }, candidate.model, modelId);
+          const route = routes[0]!;
+          return { baseUrl: candidate.baseUrl, route: { ...route, cost: candidate.cost } };
+        }));
+      return {
+        id: modelId, name: modelInfo.name, description: modelInfo.description,
+        contextLength: modelInfo.context_length, nodes: [], skipped: [], candidates,
+        candidateStatus: !autoModelPath ? "off" : !policy ? "no-policy" :
+          candidates.length ? "ranked" : "no-eligible-routes",
+      };
+    }
     const nodes: ModelPathNode[] = [];
     const skipped: ModelPathSkipped[] = [];
 

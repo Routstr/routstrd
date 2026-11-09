@@ -448,3 +448,49 @@ describe("formatModelPaths", () => {
     expect(formatModelPaths(output)).not.toContain("[disabled]");
   });
 });
+
+
+describe("automatic candidate rendering", () => {
+  it("renders global interleaved SDK order without regrouping by node", () => {
+    const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidateStatus: "ranked", candidates: [
+      { baseUrl: "https://b.example/", route: { ...route({ endpoint: "first" }), cost: 1 } },
+      { baseUrl: "https://a.example/", route: { ...route({ endpoint: "second" }), cost: 2 } },
+      { baseUrl: "https://b.example/", route: { ...route({ endpoint: "third" }), cost: 3 } },
+    ] });
+    expect(text.indexOf("[first]")).toBeLessThan(text.indexOf("[second]"));
+    expect(text.indexOf("[second]")).toBeLessThan(text.indexOf("[third]"));
+    const rows = text.split("\n").filter(line => /^\s+\d+\s/.test(line));
+    expect(rows).toHaveLength(3);
+    expect(text.match(/upstream route/g)).toHaveLength(1);
+    for (const [index, row] of rows.entries()) {
+      const routeLabel = ["[first]", "[second]", "[third]"][index]!;
+      expect(row.indexOf(routeLabel)).toBeLessThan(row.indexOf(`${index + 1}.00`));
+      expect(row.indexOf(`${index + 1}.00`)).toBeLessThan(row.indexOf("(https://"));
+    }
+    expect(rows[0]).toContain("(https://b.example/)");
+    expect(rows[2]).toContain("(https://b.example/)");
+    expect(text).not.toContain("cheapest route");
+    expect(text).not.toContain("[pin]");
+  });
+
+  it("preserves repeated upstreams and distinguishing node ports without printing URL secrets", () => {
+    const same = { ...route({ upstream: "https://openrouter.ai/api/v1", endpoint: "cloudflare" }), cost: 4.33 };
+    const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidates: [
+      { baseUrl: "https://user:secret@node.example:8443/v1?token=secret", route: same },
+      { baseUrl: "https://node.example:9443/v1", route: same },
+    ] });
+    expect(text.match(/openrouter.ai\/api\/v1 \[cloudflare\]/g)).toHaveLength(2);
+    expect(text).toContain("(https://node.example:8443/v1)");
+    expect(text).toContain("(https://node.example:9443/v1)");
+    expect(text).not.toContain("secret");
+  });
+
+  it("explains empty routing modes rather than silently hiding inventory", () => {
+    for (const [status, message] of [["off", "selection is off"], ["no-policy", "No automatic policy"], ["no-eligible-routes", "No eligible automatic routes"]] as const) {
+      const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidates: [], candidateStatus: status });
+      expect(text).toContain(message);
+      expect(text).toContain("without a route pin");
+      expect(text).toContain("Use --all");
+    }
+  });
+});

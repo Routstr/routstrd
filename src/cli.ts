@@ -1379,12 +1379,12 @@ const modelsCmd = program
   .option("-m, --model <id>", "Show providers for a specific model")
   .option(
     "-p, --paths",
-    "With --model: also show the model-path inventory (upstream routes per node, ranked like the router)",
+    "With --model: show eligible automatic model paths in SDK candidate order; --all shows inventory",
     false,
   )
   .option(
     "-a, --all",
-    "Include disabled providers and nodes (hidden by default)",
+    "Include disabled providers; with --paths show full advertised route inventory",
     false,
   )
   .action(async (options: {
@@ -1427,20 +1427,18 @@ const modelsCmd = program
         // utils/model-providers); the model-path inventory follows under
         // --paths.
         console.log("");
+        if (options.paths) console.log("Provider catalog prices (plain/unpinned ranking; NOT automatic model-path order):");
         console.log(formatModelProviders(modelData));
         console.log("");
       }
 
       if (options.paths) {
-        // The advertised upstream routes per node, ordered the way the router
-        // ranks them (see utils/model-paths). `--refresh` drops the SDK's
-        // cached path payloads so the inventory is live; `--all` adds the
-        // nodes routing excludes, flagged [disabled]. Built through
-        // URLSearchParams so the two compose instead of fighting over the
-        // leading "?".
+        // Preserve the HTTP inventory view for existing clients. The CLI opts
+        // into executable automatic candidates unless --all requests inventory.
         const pathsParams = new URLSearchParams();
         if (options.refresh) pathsParams.set("refresh", "true");
         if (options.all) pathsParams.set("includeDisabled", "true");
+        else pathsParams.set("view", "candidates");
         const query = pathsParams.toString();
         const pathsResult = await callDaemon(
           `/models/${encodeURIComponent(options.model)}/paths${query ? `?${query}` : ""}`,
