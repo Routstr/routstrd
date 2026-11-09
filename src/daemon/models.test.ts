@@ -1044,8 +1044,8 @@ describe("model-path display agrees with installed SDK routing", () => {
     const originalFetch = globalThis.fetch;
     clearModelPathsCache();
     globalThis.fetch = (async () => Response.json({ data: [
-      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing } }] },
-      { id, paths: [{ path, model: { sats_pricing: canonicalPricing } }] },
+      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing, context_length: 4000, max_completion_tokens: 1000 } }] },
+      { id, paths: [{ path, model: { sats_pricing: canonicalPricing, context_length: 8000, max_completion_tokens: 2000 } }] },
     ] })) as unknown as typeof fetch;
     try {
       const service = createModelService({
@@ -1065,6 +1065,11 @@ describe("model-path display agrees with installed SDK routing", () => {
       expect(node.routes[0]!.pricing).toMatchObject(canonicalPricing);
       expect(node.routes[0]!.cost).toBeCloseTo(candidate.cost, 6);
       expect(node.routes[0]!.pricingSource).toBe("path");
+      const displayCandidate = (await service.getModelPaths(alias, false, false, true, true))!.candidates![0]!;
+      expect(displayCandidate.route.contextLength).toBe(8000);
+      expect(displayCandidate.route.maxCompletionTokens).toBe(2000);
+      expect(displayCandidate.route.pricing).toMatchObject(canonicalPricing);
+      expect(displayCandidate.route.cost).toBeCloseTo(candidate.cost, 6);
     } finally {
       globalThis.fetch = originalFetch;
       clearModelPathsCache();

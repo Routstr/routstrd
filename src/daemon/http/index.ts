@@ -1338,6 +1338,11 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && modelPathsMatch && modelPathsMatch[1]) {
       try {
         const modelId = decodeURIComponent(modelPathsMatch[1]);
+        const view = url.searchParams.get("view");
+        if (view !== null && view !== "candidates") {
+          sendJson(res, 400, { error: "Unsupported view; omit view for inventory or use view=candidates." });
+          return;
+        }
         // `refresh=true` drops the SDK's cached path payloads so the inventory
         // is live; routing refetches on its next request as a result.
         const refresh =
@@ -1351,7 +1356,7 @@ export function createDaemonRequestHandler(deps: {
           refresh,
           includeDisabled,
           settings.autoModelPath,
-          url.searchParams.get("view") === "candidates",
+          view === "candidates",
         );
         if (!modelPaths) {
           sendJson(res, 404, { error: `Model '${modelId}' not found` });

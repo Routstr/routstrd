@@ -751,7 +751,8 @@ routable — so `404` means no node serves the model at all.
 The default HTTP response remains the advertised inventory for compatibility.
 `?view=candidates` opts into the CLI's default automatic-candidate response:
 `candidates` is a flat ordered array of `{baseUrl, route}` and `candidateStatus`
-is `ranked`, `off`, `no-policy`, or `no-eligible-routes`; `nodes` is empty.
+is `ranked`, `off`, `no-policy`, or `no-eligible-routes`; `nodes` is empty. Supplied unsupported `view` values (including empty) return 400;
+omit `view` for legacy inventory.
 `?refresh=true&view=candidates` refreshes signed policy and path caches. No
 request-specific wallet or explicit-header overrides are represented.
 
