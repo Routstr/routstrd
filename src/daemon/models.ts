@@ -632,6 +632,20 @@ export function createModelService(
       const route = node?.routes.find((entry) =>
         (canonicalModelPath(entry.path) ?? entry.path) === identity && !entry.onCooldown);
       if (!route) continue;
+      // The same selector can appear under alias and canonical entries with
+      // conflicting metadata. The SDK's selected entry, not inventory payload
+      // order, owns the price used for both this pin and its displayed cost.
+      if (candidate.satsPricing) {
+        route.pricing = {
+          prompt: candidate.satsPricing.prompt ?? 0,
+          completion: candidate.satsPricing.completion ?? 0,
+          request: candidate.satsPricing.request ?? 0,
+          max_cost: candidate.satsPricing.max_cost ?? 0,
+          input_cache_read: candidate.satsPricing.input_cache_read ?? 0,
+          input_cache_write: candidate.satsPricing.input_cache_write ?? 0,
+        };
+        route.pricingSource = "path";
+      }
       route.pinned = true;
       nodeOrder.set(baseUrl, nodeOrder.size);
     }

@@ -1027,6 +1027,50 @@ describe("createModelService.getModelProviders", () => {
 
 /** Use the installed SDK, with only provider HTTP payloads mocked. */
 describe("model-path display agrees with installed SDK routing", () => {
+  it("uses SDK-selected pricing when alias and canonical entries contest one selector", async () => {
+    const id = "display-conflicting-canonical", alias = "display-conflicting-alias";
+    const baseUrl = "https://display-conflicting.example/";
+    const path = new URLSearchParams({ url: "https://upstream.example/v1", "model-id": id }).toString();
+    const canonicalPricing = { prompt: 0.0001, completion: 0.0001, request: 0, max_cost: 0 };
+    const aliasPricing = { prompt: 0.01, completion: 0.01, request: 0, max_cost: 0 };
+    const cached = { [baseUrl]: [{ id, sats_pricing: canonicalPricing }] };
+    const mappings = { [alias]: id };
+    const whitelist = { [id]: { nodes: [baseUrl], routes: [{ url: "https://upstream.example/v1" }] } };
+    const manager = new ProviderManager({
+      getCachedModels: () => cached, getModelIdMappings: () => mappings,
+      getModelPathWhitelist: () => whitelist, getDisabledProviders: () => [],
+      getCachedMints: () => ({}), getCachedProviderInfo: () => ({}), getBaseUrlsList: () => [baseUrl],
+    } as never);
+    const originalFetch = globalThis.fetch;
+    clearModelPathsCache();
+    globalThis.fetch = (async () => Response.json({ data: [
+      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing } }] },
+      { id, paths: [{ path, model: { sats_pricing: canonicalPricing } }] },
+    ] })) as unknown as typeof fetch;
+    try {
+      const service = createModelService({
+        bootstrapProviders: async () => [baseUrl], syncReviewedProvidersFromNostr: async () => null,
+        getAllCachedModels: () => cached, getBaseUrls: () => [baseUrl],
+        getModelIdMappings: () => mappings, getModelPathWhitelist: () => whitelist,
+      } as never, manager, { getState: () => ({
+        baseUrlsList: [baseUrl], disabledProviders: [], manuallyDisabledProviders: [], manuallyEnabledProviders: [],
+      }) } as never);
+      const candidate = (await manager.getModelPathProviderRanking(alias))[0]!;
+      expect(candidate.cost).toBeCloseTo(10.2, 6);
+      expect(candidate.satsPricing).toMatchObject(canonicalPricing);
+      const node = (await service.getModelPaths(alias, false, false, true))!.nodes[0]!;
+      expect(node.rankedOnPin).toBe(true);
+      expect(node.rankCost).toBeCloseTo(candidate.cost, 6);
+      expect(node.routes).toHaveLength(1);
+      expect(node.routes[0]!.pricing).toMatchObject(canonicalPricing);
+      expect(node.routes[0]!.cost).toBeCloseTo(candidate.cost, 6);
+      expect(node.routes[0]!.pricingSource).toBe("path");
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearModelPathsCache();
+    }
+  });
+
   it("follows live policy, aliases, cheapest eligible route, cooldowns and toggle", async () => {
     const id = "display-policy-fixture";
     const alias = "display-policy-alias";
