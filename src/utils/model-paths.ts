@@ -324,14 +324,14 @@ function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
 }
 
 /** One node block: a rank header plus its route table. */
-function renderNode(node: ModelPathNode, rank: number, requestedId: string, candidate = false): string[] {
+function renderNode(node: ModelPathNode, rank: number, requestedId: string): string[] {
   const metric =
     node.rankCost === null
       ? node.routes.some((route) => route.onCooldown)
         ? "rank unavailable (no priced route off cooldown)"
         : "rank unavailable (no priced route)"
       : `rank ${node.rankCost.toFixed(2)} sats/request ${
-          candidate ? "(automatic candidate)" : node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
+          node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
         }`;
   // A disabled node is priced and ranked like any other, so the tag is what
   // keeps its rows from reading as routes a request could take.
@@ -387,14 +387,29 @@ export function formatModelPaths(output: ModelPathsOutput): string {
     };
     if (!output.candidates.length) lines.push(`  ${empty[output.candidateStatus ?? "no-eligible-routes"]}`);
     else {
-      lines.push("  SDK automatic selection / route-scoped failover order (current policy snapshot):");
-      output.candidates.forEach(({ baseUrl, route }, index) => {
-        lines.push(...renderNode({ baseUrl, routes: [route], rankCost: route.cost ?? null, rankedOnPin: false }, index + 1, output.id, true), "");
+      const safeText = (value: string) => value.replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+      const rows = output.candidates.map(({ baseUrl, route }) => {
+        let node = "unknown node";
+        try {
+          const url = new URL(baseUrl);
+          node = `${url.protocol}//${url.host}${url.pathname}`;
+        } catch { /* Never print malformed URLs or embedded credentials. */ }
+        return {
+          route: safeText(upstreamLabel(route)), node: safeText(node),
+          cost: typeof route.cost === "number" && Number.isFinite(route.cost) ? route.cost.toFixed(2) : "-",
+        };
+      });
+      const routeWidth = Math.max("upstream route".length, ...rows.map(row => row.route.length));
+      const costWidth = Math.max("cost".length, ...rows.map(row => row.cost.length));
+      const rankWidth = String(rows.length).length;
+      lines.push(`  ${"#".padStart(rankWidth)}  ${"upstream route".padEnd(routeWidth)}  ${"cost".padStart(costWidth)}  proxy node`);
+      rows.forEach((row, index) => {
+        lines.push(`  ${String(index + 1).padStart(rankWidth)}  ${row.route.padEnd(routeWidth)}  ${row.cost.padStart(costWidth)}  (${row.node})`);
       });
     }
-    lines.push("  Wallet mint eligibility and failure scope can skip candidates; retries and changing",
-      "  cooldowns can alter the sequence. Exhausted automatic routes may fall back unpinned.",
-      "  Explicit provider/model-path overrides are not represented. Use --all for advertised inventory.");
+    lines.push("  Cost: sats per warm request (100k input, 90% cache hit; 2k output). SDK candidate order.",
+      "  Wallet eligibility/failure scope may skip routes; exhaustion falls back unpinned. Overrides excluded.",
+      "  Use --all for full advertised inventory.");
     return lines.join("\n");
   }
   const routeCount = output.nodes.reduce((sum, node) => sum + node.routes.length, 0);

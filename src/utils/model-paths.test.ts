@@ -459,9 +459,30 @@ describe("automatic candidate rendering", () => {
     ] });
     expect(text.indexOf("[first]")).toBeLessThan(text.indexOf("[second]"));
     expect(text.indexOf("[second]")).toBeLessThan(text.indexOf("[third]"));
-    expect(text).toContain("(automatic candidate)");
+    const rows = text.split("\n").filter(line => /^\s+\d+\s/.test(line));
+    expect(rows).toHaveLength(3);
+    expect(text.match(/upstream route/g)).toHaveLength(1);
+    for (const [index, row] of rows.entries()) {
+      const routeLabel = ["[first]", "[second]", "[third]"][index]!;
+      expect(row.indexOf(routeLabel)).toBeLessThan(row.indexOf(`${index + 1}.00`));
+      expect(row.indexOf(`${index + 1}.00`)).toBeLessThan(row.indexOf("(https://"));
+    }
+    expect(rows[0]).toContain("(https://b.example/)");
+    expect(rows[2]).toContain("(https://b.example/)");
     expect(text).not.toContain("cheapest route");
     expect(text).not.toContain("[pin]");
+  });
+
+  it("preserves repeated upstreams and distinguishing node ports without printing URL secrets", () => {
+    const same = { ...route({ upstream: "https://openrouter.ai/api/v1", endpoint: "cloudflare" }), cost: 4.33 };
+    const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidates: [
+      { baseUrl: "https://user:secret@node.example:8443/v1?token=secret", route: same },
+      { baseUrl: "https://node.example:9443/v1", route: same },
+    ] });
+    expect(text.match(/openrouter.ai\/api\/v1 \[cloudflare\]/g)).toHaveLength(2);
+    expect(text).toContain("(https://node.example:8443/v1)");
+    expect(text).toContain("(https://node.example:9443/v1)");
+    expect(text).not.toContain("secret");
   });
 
   it("explains empty routing modes rather than silently hiding inventory", () => {
