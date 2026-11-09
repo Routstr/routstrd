@@ -3049,6 +3049,7 @@ export function confidentialPrewarmOptions(
       maxAgeMs?: number;
       maxSessionFeeMsat?: number;
       maxArmedWithFee?: number;
+      fundsHeadroom?: number;
       log: (message: string) => void;
     }
   | undefined {
@@ -3066,6 +3067,7 @@ export function confidentialPrewarmOptions(
     maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
     maxSessionFeeMsat: num(cfg?.maxSessionFeeMsat),
     maxArmedWithFee: num(cfg?.maxArmedWithFee),
+    fundsHeadroom: num(cfg?.fundsHeadroom),
     log: (message: string) => logger.log(message),
   };
 }

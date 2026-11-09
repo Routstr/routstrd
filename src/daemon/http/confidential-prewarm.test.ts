@@ -42,4 +42,11 @@ describe("confidentialUpstream.prewarm → SDK options", () => {
     expect(confidentialPrewarmOptions({ maxArmedWithFee: 6 })?.maxArmedWithFee).toBe(6);
     expect(confidentialPrewarmOptions({ maxSessionFeeMsat: -1 })?.maxSessionFeeMsat).toBeUndefined();
   });
+
+  test("passes the funds headroom through (default: the SDK's)", () => {
+    expect(confidentialPrewarmOptions(undefined)?.fundsHeadroom).toBeUndefined();
+    expect(confidentialPrewarmOptions({ fundsHeadroom: 3 })?.fundsHeadroom).toBe(3);
+    expect(confidentialPrewarmOptions({ fundsHeadroom: 1.5 })?.fundsHeadroom).toBe(1.5);
+    expect(confidentialPrewarmOptions({ fundsHeadroom: -1 })?.fundsHeadroom).toBeUndefined();
+  });
 });
