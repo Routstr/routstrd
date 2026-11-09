@@ -1,3 +1,4 @@
+import { IncrementalRequestLogs } from "./utils/incremental-request-logs";
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
 import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
@@ -4049,15 +4050,17 @@ program
         // The daemon reads its persistent lifecycle DB, including failures that
         // never created usage rows. Flat logs cannot supply the status chain.
         const follower = new RequestLogFollower();
+        const diagnostics = options.verbose && options.follow ? new IncrementalRequestLogs(LOGS_DIR) : undefined;
         let first = true;
         do {
           const traces = await loadRequestTraces(options, callDaemon);
-          // Search retained daily diagnostics, not the opt-in raw payload sink.
-          // This also permits inspecting an older request by its full UUID.
-          const logLines = options.verbose && existsSync(LOGS_DIR)
-            ? readdirSync(LOGS_DIR).filter((file) => /^\d{4}-\d{2}-\d{2}\.log$/.test(file))
-                .sort().flatMap((file) => readAllLines(join(LOGS_DIR, file)))
-            : [];
+          const ids = traces.map(trace => trace.request.requestId);
+          const poll = diagnostics?.poll(ids);
+          for (const warning of poll?.warnings ?? []) console.error(warning);
+          const logLines = diagnostics?.diagnostics(ids) ?? (options.verbose && existsSync(LOGS_DIR)
+            ? readdirSync(LOGS_DIR).filter(file => /^\d{4}-\d{2}-\d{2}\.log$/.test(file))
+                .sort().flatMap(file => readAllLines(join(LOGS_DIR, file)))
+            : []);
           const output = follower.changed(traces, options.verbose, logLines);
           for (const rendered of output) console.log(rendered);
           if (first && traces.length === 0) console.log("No requests found.");

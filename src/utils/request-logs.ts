@@ -96,7 +96,10 @@ export function safeCorrelatedLog(line: string, requestId: string): { timestamp:
   return { timestamp, message: `log [${text(match[2])}] ${label}` };
 }
 
-export function formatRequestVerbose(trace: LifecycleTrace, logLines: string[] = []): string {
+export interface CorrelatedDiagnostic { timestamp: number; message: string }
+export type RequestDiagnostics = string[] | ReadonlyMap<string, readonly CorrelatedDiagnostic[]>;
+
+export function formatRequestVerbose(trace: LifecycleTrace, logLines: RequestDiagnostics = []): string {
   const timeline: { timestamp: number; order: number; message: string }[] = [];
   for (const attempt of trace.attempts) {
     const kind = identifier(attempt.kind);
@@ -147,10 +150,10 @@ export function formatRequestVerbose(trace: LifecycleTrace, logLines: string[] =
     }
     timeline.push({ timestamp: event.timestamp, order: event.sequence, message: details.filter(Boolean).join(" ") });
   }
-  for (const line of logLines) {
-    const safe = safeCorrelatedLog(line, trace.request.requestId);
-    if (safe) timeline.push({ ...safe, order: Number.MAX_SAFE_INTEGER });
-  }
+  const diagnostics = Array.isArray(logLines)
+    ? logLines.flatMap(line => { const safe = safeCorrelatedLog(line, trace.request.requestId); return safe ? [safe] : []; })
+    : logLines.get(trace.request.requestId) ?? [];
+  for (const safe of diagnostics) timeline.push({ ...safe, order: Number.MAX_SAFE_INTEGER });
   timeline.sort((a, b) => a.timestamp - b.timestamp || a.order - b.order);
   return [formatRequestSummary(trace), ...timeline.map((entry) =>
     `  ${utcTime(entry.timestamp, true)}  ${entry.message}`)].join("\n");
@@ -204,7 +207,7 @@ export async function loadRequestTraces(
  * unchanged traces. It also catches late diagnostics on the verbose path. */
 export class RequestLogFollower {
   private seen = new Map<string, string>();
-  changed(traces: LifecycleTrace[], verbose: boolean, logs: string[] = []): string[] {
+  changed(traces: LifecycleTrace[], verbose: boolean, logs: RequestDiagnostics = []): string[] {
     const output: string[] = [];
     for (const trace of traces) {
       const rendered = verbose ? formatRequestVerbose(trace, logs) : formatRequestSummary(trace);
