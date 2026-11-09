@@ -1,15 +1,13 @@
 import {
   canonicalIdForModel,
-  canonicalizeModelId,
   canonicalModelPath,
   clearModelPathsCache,
-  DEEPSEEK_AUTO_MODEL_ID,
   findModelForId,
   getNodeModelPathsForModel,
   ModelManager,
   MODEL_PATH_RANKING_BUDGET_MS,
   ProviderManager,
-  resolveDeepSeekModelPathSelectors,
+  modelPathPolicyFor,
   type MintDiscovery,
   type Model,
   type ModelProviderPrice,
@@ -425,34 +423,16 @@ export function createModelService(
    *
    * Pricing is the route's own `sats_pricing`; a node that advertises no
    * per-route metadata falls back to its model-level catalog price, which is
-   * what routing ranks such a node on too. When `pinWhitelistedRoutes` is
-   * set, the pinned route is the first whitelisted route the node advertises
-   * (`resolveDeepSeekModelPathSelectors` order, skipping routes on cooldown)
-   * — the same route routing would use.
+   * what the inventory prices such a node on too. Pins are applied separately
+   * from the SDK's live policy ranking, never inferred from inventory order.
    */
   const buildModelPathRoutes = (
     baseUrl: string,
     nodePaths: NodeModelPaths,
     model: Model,
     requestedId: string,
-    mappings: ReturnType<ModelManager["getModelIdMappings"]>,
-    pinWhitelistedRoutes: boolean,
   ): ModelPathRoute[] => {
     type StagedRoute = ModelPathRoute & { identity: string };
-
-    const preferredOrder: string[] = [];
-    if (pinWhitelistedRoutes) {
-      const resolved = resolveDeepSeekModelPathSelectors(
-        nodePaths,
-        requestedId,
-        mappings,
-      );
-      for (const selector of resolved?.selectors ?? []) {
-        if (!selector) continue;
-        const identity = canonicalModelPath(selector) ?? selector;
-        if (!preferredOrder.includes(identity)) preferredOrder.push(identity);
-      }
-    }
 
     const byIdentity = new Map<string, StagedRoute>();
     const modelPricing = model.sats_pricing;
@@ -502,23 +482,16 @@ export function createModelService(
       }
     }
 
-    const routes = [...byIdentity.values()];
-    const pin = preferredOrder
-      .map((identity) => routes.find((route) => route.identity === identity))
-      .find((route) => route !== undefined && !route.onCooldown);
-    if (pin) pin.pinned = true;
-
-    return routes.map(({ identity: _identity, ...route }) => route);
+    return [...byIdentity.values()].map(({ identity: _identity, ...route }) => route);
   };
 
   /**
    * The advertised model-path inventory of one model, across every enabled
    * node that serves it.
    *
-   * Ranking matches the router (`rankModelPathNodes`): a node's metric is the
-   * completion price of the route routing would use first — its preferred
-   * whitelisted route when it advertises one, else its cheapest route — so the
-   * display order is the order a request would actually pick from.
+   * Automatic candidates come first in SDK policy-ranking order. All other
+   * advertised inventory is retained, sorted by cheapest warm cost; those rows
+   * are not a claim about unpinned provider routing or forced-provider pins.
    *
    * Nodes on model/provider cooldown, nodes that advertise no paths for the
    * model (an older node without the model-paths endpoint, or one filing the
@@ -540,6 +513,7 @@ export function createModelService(
     modelId: string,
     refresh = false,
     includeDisabled = false,
+    autoModelPath = false,
   ): Promise<ModelPathsOutput | null> => {
     await ensureProvidersBootstrapped();
     if (refresh) clearModelPathsCache();
@@ -559,12 +533,15 @@ export function createModelService(
 
     const mappings = modelManager.getModelIdMappings();
     const allModels = modelManager.getAllCachedModels();
-    // The whitelist governs one model only: the SDK auto-pins DeepSeek V4.1
-    // Flash, and every other model is routed by price. Marking a "pinned"
-    // route elsewhere would describe failover routing that never happens.
-    const pinWhitelistedRoutes =
-      canonicalizeModelId(modelId.trim().toLowerCase(), mappings) ===
-      DEEPSEEK_AUTO_MODEL_ID;
+    const policy = autoModelPath
+      ? modelPathPolicyFor(modelId, modelManager.getModelPathWhitelist(), mappings)
+      : undefined;
+    // Use the installed router's ranking, including policy node eligibility,
+    // route pricing, cooldowns and tie breaks. Inventory remains independent so
+    // --all and non-policy rows do not disappear from the display.
+    const ranking = policy
+      ? await providerManager.getModelPathProviderRanking(modelId)
+      : [];
     const nodes: ModelPathNode[] = [];
     const skipped: ModelPathSkipped[] = [];
 
@@ -609,8 +586,6 @@ export function createModelService(
           nodePaths,
           model,
           modelId,
-          mappings,
-          pinWhitelistedRoutes,
         );
         if (routes.length === 0) {
           skipped.push({ baseUrl, reason: SKIP_NO_PATHS });
@@ -648,12 +623,32 @@ export function createModelService(
     }
     if (!modelInfo) return null;
 
+    const nodeOrder = new Map<string, number>();
+    for (const candidate of ranking) {
+      const baseUrl = normalizeBaseUrl(candidate.baseUrl);
+      if (nodeOrder.has(baseUrl) || disabledSet.has(baseUrl)) continue;
+      const node = nodes.find((entry) => normalizeBaseUrl(entry.baseUrl) === baseUrl);
+      const identity = canonicalModelPath(candidate.selector) ?? candidate.selector;
+      const route = node?.routes.find((entry) =>
+        (canonicalModelPath(entry.path) ?? entry.path) === identity && !entry.onCooldown);
+      if (!route) continue;
+      route.pinned = true;
+      nodeOrder.set(baseUrl, nodeOrder.size);
+    }
+    const rankedNodes = rankModelPathNodes(nodes).sort((a, b) => {
+      const left = nodeOrder.get(normalizeBaseUrl(a.baseUrl));
+      const right = nodeOrder.get(normalizeBaseUrl(b.baseUrl));
+      // Stable sort preserves warm-cost inventory order outside the ranking.
+      if (left === undefined) return right === undefined ? 0 : 1;
+      return right === undefined ? -1 : left - right;
+    });
+
     return {
       id: modelId,
       name: modelInfo.name,
       description: modelInfo.description,
       contextLength: modelInfo.context_length,
-      nodes: rankModelPathNodes(nodes),
+      nodes: rankedNodes,
       skipped: skipped.sort((a, b) => a.baseUrl.localeCompare(b.baseUrl)),
     };
   };

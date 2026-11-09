@@ -61,6 +61,21 @@ describe("GET /models/:id/paths", () => {
     return { handler, calls };
   }
 
+  it("passes the handler's live auto-model-path value to inventory reads", async () => {
+    for (const autoModelPath of [false, true]) {
+      const values: boolean[] = [];
+      const handler = createDaemonRequestHandler({
+        store: { getState: () => ({}) }, autoModelPath,
+        getModelPaths: async (_id: string, _refresh: boolean, _all: boolean, enabled: boolean) => {
+          values.push(enabled);
+          return { id: "m", nodes: [], skipped: [] };
+        },
+      } as any);
+      expect((await call(handler, "GET", "/models/m/paths")).status).toBe(200);
+      expect(values).toEqual([autoModelPath]);
+    }
+  });
+
   it("returns the inventory as the daemon built it (already ranked)", async () => {
     const inventory = {
       id: "deepseek-v4.1-flash",

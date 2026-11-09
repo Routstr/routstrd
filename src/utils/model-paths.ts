@@ -19,12 +19,10 @@
  *    90% cache hit, 2k completion) — so a route's cache rate carries the 90% of
  *    the prompt it mostly serves;
  *  - inside a node, routes are listed cheapest cost first;
- *  - a node's rank is that cost on the route routing would use first: the
- *    node's preferred *whitelisted* route when the model's routes are
- *    whitelisted (the SDK's model-path whitelist), otherwise its cheapest
- *    advertised route;
- *  - nodes are ordered by that cost, cheapest first, nodes with no priced
- *    route last (ties broken by URL, like `getProviderPriceRankingForModel`).
+ *  - the service marks each eligible node's best automatic candidate from the
+ *    SDK policy ranking and preserves that node order ahead of other inventory;
+ *  - other nodes use their cheapest advertised route for inventory sorting,
+ *    not as a prediction of unpinned provider routing.
  *
  * A route on cooldown is still listed (it is advertised, just skipped for now)
  * but never decides the node's rank.
@@ -82,7 +80,7 @@ export interface ModelPathRoute {
   maxCompletionTokens: number | null;
   /** Path-scoped cooldown: routing currently skips this route on this node. */
   onCooldown: boolean;
-  /** The route the router would pin first on this node. */
+  /** Cheapest eligible automatic-policy candidate on this node, if enabled. */
   pinned: boolean;
   /**
    * Sats one warm request would cost on this route (the SDK's
@@ -228,10 +226,9 @@ function compareRoutes(a: ModelPathRoute, b: ModelPathRoute): number {
 }
 
 /**
- * Order the inventory the way the router does: every route priced against the
- * warm basket, routes cheapest cost first inside a node, then nodes by the
- * cost of the route routing would use first, cheapest first, and every node
- * without a priced route last (ordered by URL).
+ * Price and sort inventory using the warm basket. A marked automatic candidate
+ * supplies its node's metric, otherwise the cheapest route does. The service
+ * subsequently places automatic candidates first in SDK ranking order.
  *
  * Callers must resolve pricing (including the model-level fallback) and
  * per-route cooldowns before calling: a route on cooldown is shown but never
@@ -389,12 +386,10 @@ export function formatModelPaths(output: ModelPathsOutput): string {
     lines.push(
       `  ${output.nodes.length} node${output.nodes.length === 1 ? "" : "s"}, ${routeCount} advertised route${
         routeCount === 1 ? "" : "s"
-      }, ranked like the router:`,
-      "  nodes by what one warm request would cost on the route routing would use first",
-      hasPin
-        ? "  (the [pin] route when the node advertises one, else its cheapest route); nodes with"
-        : "  (the node's cheapest advertised route); nodes with",
-      "  no priced route come last, and routes are cheapest cost first inside a node.",
+      }, automatic candidates first, then inventory by warm cost:`,
+      "  Automatic candidate nodes follow SDK policy-ranking order. Other inventory nodes",
+      "  use their cheapest advertised route; this is not an unpinned routing prediction.",
+      "  Routes are cheapest cost first inside each node; unpriced routes come last.",
       "  cost = sats for the SDK's WARM_COST_BASKET (100k prompt tokens at a 90% cache hit,",
       "  2k completion) — the basket getProviderPriceRankingForModel ranks routing on. The",
       "  prompt/completion/cache columns are sats per million tokens.",
@@ -403,14 +398,15 @@ export function formatModelPaths(output: ModelPathsOutput): string {
     );
     if (hasPin) {
       lines.push(
-        "  [pin] marks the first route the router pins on that node (the SDK's model-path",
-        "  whitelist order, which governs its auto-pinned model).",
+        "  [pin] marks each node's best eligible automatic-policy candidate, not a forced-provider pin.",
+        "  The first candidate is the default ranking winner; wallet mint eligibility or explicit",
+        "  provider/model-path overrides can change the actual request selection.",
       );
     }
     if (output.nodes.some((node) => node.disabled)) {
       lines.push(
         "  [disabled] marks a node routing currently excludes: it carries its price and",
-        "  rank position like any other node, but no request is routed to it.",
+        "  inventory position, but it is never an automatic candidate.",
       );
     }
     lines.push("");
