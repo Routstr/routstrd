@@ -9,7 +9,7 @@ async function request(body: unknown, supported = true, path = "/wallet/sweep-of
   const req = new EventEmitter() as any;
   req.method = "POST";
   req.url = path;
-  req.headers = { host: "localhost" };
+  req.headers = { host: "localhost", "content-type": "application/json" };
   const res = { status: 0, body: "", writeHead(status: number) { this.status = status; }, end(chunk?: string) { this.body += chunk ?? ""; } };
   setImmediate(() => { req.emit("data", Buffer.from(JSON.stringify(body))); req.emit("end"); });
   await handler(req, res as never);

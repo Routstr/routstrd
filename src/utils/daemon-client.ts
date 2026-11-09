@@ -182,7 +182,7 @@ export async function callDaemonUrl(
 
   const headers = new Headers();
   if (authorization) headers.set("Authorization", authorization);
-  if (bodyString) headers.set("Content-Type", "application/json");
+  if (bodyString || method === "POST") headers.set("Content-Type", "application/json");
 
   const timeoutMs = requestTimeoutMs(path);
   const timeoutError = () =>

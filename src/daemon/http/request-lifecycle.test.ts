@@ -39,7 +39,7 @@ async function fixture(overrides: Record<string, unknown> = {}) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as { port: number };
   const base = `http://127.0.0.1:${address.port}`;
-  return { driver, server, base, call: (path: string, init?: RequestInit) => fetch(`${base}${path}`, init) };
+  return { driver, server, base, call: (path: string, init?: RequestInit) => fetch(`${base}${path}`, { ...init, headers: { "content-type": "application/json", ...(init?.headers as Record<string, string>) } }) };
 }
 
 async function seed(driver: RequestLifecycleDriver, clientId: string, modelId: string, status: number) {
@@ -169,7 +169,7 @@ describe("inference ingress lifecycle", () => {
       await preparationReleased;
     } });
     const serverClosed = new Promise<void>((resolve) => server.once("request", (_req, res) => res.once("close", resolve)));
-    const request = httpRequest(`${base}/v1/chat/completions`, { method: "POST", headers: { "x-api-key": "sk-test-client" } });
+    const request = httpRequest(`${base}/v1/chat/completions`, { method: "POST", headers: { "x-api-key": "sk-test-client", "content-type": "application/json" } });
     request.on("error", () => {});
     request.end(JSON.stringify({ model: "deepseek-v4.1-flash" }));
     await enteredPreparation;
@@ -323,7 +323,7 @@ describe("real SDK routed responses", () => {
     const { base, driver, closeUpstream } = await routedFixture("stream");
     try {
       const id = await new Promise<string>((resolve, reject) => {
-        const request = httpRequest(`${base}/v1/chat/completions`, { method: "POST", headers: { "x-api-key": "sk-test-client" } }, (response) => {
+        const request = httpRequest(`${base}/v1/chat/completions`, { method: "POST", headers: { "x-api-key": "sk-test-client", "content-type": "application/json" } }, (response) => {
           expect(response.statusCode).toBe(200);
           expect(response.headers["x-routstr-request-id"]).toBe("node-attempt-id");
           response.once("data", () => {
