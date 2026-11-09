@@ -362,7 +362,7 @@ describe("formatModelPaths", () => {
 
     expect(lines[0]).toBe("Model paths for deepseek-v4.1-flash (DeepSeek V4.1 Flash)");
     expect(text).toContain("1 node, 2 advertised routes");
-    expect(text).toContain("[pin] marks the first route the router pins");
+    expect(text).toContain("[pin] marks each node's best eligible automatic-policy candidate");
     expect(text).toContain(
       "   1. https://ai.redsh1ft.com/  2 routes  rank 5.19 sats/request (pinned route)",
     );

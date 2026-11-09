@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import type { SdkStore } from "@routstr/sdk";
+import { ProviderManager, clearModelPathsCache, type SdkStore } from "@routstr/sdk";
 import { createModelService } from "./models";
 
 /**
@@ -498,10 +498,8 @@ describe("model population single-flight", () => {
  * `getModelPaths` is the `routstrd models -m <id> --paths` inventory: every
  * enabled node that serves the model, with its advertised upstream routes.
  *
- * The ranking it must reproduce is the router's, not "cheapest route wins":
- * the SDK ranks a node on the completion price of the route it would use first
- * (a whitelisted route when the node advertises one), so the display order
- * matches what a request would actually pick. Nodes the inventory cannot cover
+ * Automatic candidates must follow the SDK's policy ranking; other rows are
+ * inventory, not a prediction of unpinned provider routing. Nodes it cannot cover
  * (cooldown, no paths, failed lookup) are reported instead of vanishing.
  */
 describe("createModelService.getModelPaths", () => {
@@ -548,6 +546,8 @@ describe("createModelService.getModelPaths", () => {
     cooledPaths?: string[];
     fetchNodeModelPaths: (baseUrl: string) => unknown;
     mappings?: Record<string, string>;
+    whitelist?: Record<string, unknown>;
+    ranking?: Array<{ baseUrl: string; selector: string }>;
   }) {
     const state: Record<string, unknown> = {
       baseUrlsList: Object.keys(options.cached),
@@ -566,8 +566,10 @@ describe("createModelService.getModelPaths", () => {
         getAllCachedModels: () => options.cached,
         getBaseUrls: () => Object.keys(options.cached),
         getModelIdMappings: () => options.mappings ?? {},
+        getModelPathWhitelist: () => options.whitelist ?? {},
       } as never,
       {
+        getModelPathProviderRanking: async () => options.ranking ?? [],
         isOnCooldown: (baseUrl: string, _modelId?: string, path?: string) =>
           cooledNodes.has(baseUrl) ||
           (path !== undefined && cooledPaths.has(`${baseUrl}|${path}`)),
@@ -582,7 +584,7 @@ describe("createModelService.getModelPaths", () => {
     return service;
   }
 
-  it("ranks nodes on the route routing would use first, not the cheapest route", async () => {
+  it("ranks inventory by cheapest route when automatic routing is off", async () => {
     const service = makeService({
       cached: {
         "https://a.example/": [catalogModel()],
@@ -595,8 +597,8 @@ describe("createModelService.getModelPaths", () => {
               // Expensive on the warm basket: 100k*0.0005 + 2k*0.002 = 54
               // sats, where b.example/'s pinned route costs 41.
               { path: PIN_DEEPSEEK, model: priced(0.0005, 0.002) },
-              // Cheaper than any pinned route (10.2 sats), so a "cheapest
-              // wins" ranking would put a.example/ first — routing would not.
+              // With automatic routing off, this cheap inventory route
+              // supplies a.example/'s displayed cost (10.2 sats).
               { path: CHEAP_DECART, model: priced(0.0001, 0.0001) },
             ]),
     });
@@ -604,22 +606,58 @@ describe("createModelService.getModelPaths", () => {
     const output = (await service.getModelPaths(MODEL_ID))!;
 
     expect(output.nodes.map((node) => node.baseUrl)).toEqual([
-      "https://b.example/",
       "https://a.example/",
+      "https://b.example/",
     ]);
-    // The node's rank is the warm-basket cost of the route routing would use
-    // first — its pinned route — not of its cheapest one.
-    expect(output.nodes[1]!.rankCost).toBeCloseTo(54, 6);
-    expect(output.nodes[1]!.rankedOnPin).toBe(true);
-    expect(output.nodes[1]!.routes.map((route) => route.path)).toEqual([
-      CHEAP_DECART,
-      PIN_DEEPSEEK,
-    ]);
-    expect(
-      output.nodes[1]!.routes.find((route) => route.path === PIN_DEEPSEEK)!.pinned,
-    ).toBe(true);
+    expect(output.nodes[0]!.rankCost).toBeCloseTo(10.2, 6);
+    expect(output.nodes[0]!.rankedOnPin).toBe(false);
+    expect(output.nodes.every(node => node.routes.every(route => !route.pinned))).toBe(true);
     expect(output.name).toBe("DeepSeek V4.1 Flash");
     expect(output.skipped).toEqual([]);
+  });
+
+  it("uses SDK candidate order and identity, retaining non-policy and disabled inventory", async () => {
+    const cached = Object.fromEntries(["a", "b", "outside", "off"].map(name =>
+      [`https://${name}.example/`, [catalogModel()]]));
+    const service = makeService({
+      cached, disabled: ["https://off.example/"],
+      whitelist: { [MODEL_ID]: { routes: [{ url: "https://openrouter.ai/api/v1" }] } },
+      // SDK tie breaks may prefer b even if URL/price inventory ordering prefers a.
+      ranking: [
+        { baseUrl: "https://b.example/", selector: PIN_FIREWORKS },
+        { baseUrl: "https://a.example/", selector: PIN_FIREWORKS },
+        { baseUrl: "https://a.example/", selector: PIN_DEEPSEEK },
+      ],
+      fetchNodeModelPaths: () => nodePaths([
+        { path: PIN_DEEPSEEK, model: priced(0.005, 0.002) },
+        { path: PIN_FIREWORKS, model: priced(0.0004, 0.0005) },
+        { path: CHEAP_DECART, model: priced(0.0001, 0.0001) },
+      ]),
+    });
+    const enabled = (await service.getModelPaths(MODEL_ID, false, true, true))!;
+    expect(enabled.nodes.map(node => node.baseUrl)).toEqual([
+      "https://b.example/", "https://a.example/", "https://off.example/", "https://outside.example/",
+    ]);
+    expect(enabled.nodes.flatMap(node => node.routes.filter(route => route.pinned).map(route =>
+      [node.baseUrl, route.path]))).toEqual([
+      ["https://b.example/", PIN_FIREWORKS], ["https://a.example/", PIN_FIREWORKS],
+    ]);
+    expect(enabled.nodes[0]!.rankCost).toBeCloseTo(41, 6);
+    expect(enabled.nodes.find(node => node.disabled)!.routes.every(route => !route.pinned)).toBe(true);
+    const off = (await service.getModelPaths(MODEL_ID, false, true, false))!;
+    expect(off.nodes.every(node => node.routes.every(route => !route.pinned))).toBe(true);
+    const onAgain = (await service.getModelPaths(MODEL_ID, false, false, true))!;
+    expect(onAgain.nodes[0]!.routes.find(route => route.pinned)!.path).toBe(PIN_FIREWORKS);
+  });
+
+  it("keeps inventory unpinned for an empty SDK ranking or policy kill switch", async () => {
+    for (const whitelist of [{}, { [MODEL_ID]: { routes: [{ url: "https://openrouter.ai/api/v1" }] } }]) {
+      const service = makeService({
+        cached: { "https://a.example/": [catalogModel()] }, whitelist,
+        fetchNodeModelPaths: () => nodePaths([{ path: PIN_DEEPSEEK, model: priced(0.001, 0.002) }]),
+      });
+      expect((await service.getModelPaths(MODEL_ID, false, false, true))!.nodes[0]!.routes[0]!.pinned).toBe(false);
+    }
   });
 
   it("falls back to the model-level price and metadata for path-less per-route metadata", async () => {
@@ -642,7 +680,7 @@ describe("createModelService.getModelPaths", () => {
       input_cache_write: 0,
     });
     expect(route.contextLength).toBe(1_000_000);
-    expect(route.pinned).toBe(true);
+    expect(route.pinned).toBe(false);
   });
 
   it("dedupes a route advertised under two spellings but keeps a different upstream model-id", async () => {
@@ -680,7 +718,7 @@ describe("createModelService.getModelPaths", () => {
         nodePaths([{ path: VENICE_ALIAS, model: priced(0.0005, 0.0018) }], "glm-5.3"),
     });
 
-    const node = (await service.getModelPaths("glm-5.3"))!.nodes[0]!;
+    const node = (await service.getModelPaths("glm-5.3", false, false, true))!.nodes[0]!;
 
     expect(node.routes[0]!.pinned).toBe(false);
     expect(node.rankedOnPin).toBe(false);
@@ -747,8 +785,7 @@ describe("createModelService.getModelPaths", () => {
       "https://off.example/",
       "https://on.example/",
     ]);
-    // The disabled node is priced and ranked like any other one; the flag is
-    // the only thing that distinguishes it.
+    // With automatic routing off, disabled inventory keeps warm-cost order.
     expect(shown.nodes.map((node) => [node.baseUrl, node.disabled === true])).toEqual([
       ["https://off.example/", true],
       ["https://on.example/", false],
@@ -985,5 +1022,121 @@ describe("createModelService.getModelProviders", () => {
 
   it("returns null when no node serves the model", async () => {
     expect(await makeService([]).getModelProviders(MODEL_ID)).toBeNull();
+  });
+});
+
+/** Use the installed SDK, with only provider HTTP payloads mocked. */
+describe("model-path display agrees with installed SDK routing", () => {
+  it("uses SDK-selected pricing when alias and canonical entries contest one selector", async () => {
+    const id = "display-conflicting-canonical", alias = "display-conflicting-alias";
+    const baseUrl = "https://display-conflicting.example/";
+    const path = new URLSearchParams({ url: "https://upstream.example/v1", "model-id": id }).toString();
+    const canonicalPricing = { prompt: 0.0001, completion: 0.0001, request: 0, max_cost: 0 };
+    const aliasPricing = { prompt: 0.01, completion: 0.01, request: 0, max_cost: 0 };
+    const cached = { [baseUrl]: [{ id, sats_pricing: canonicalPricing }] };
+    const mappings = { [alias]: id };
+    const whitelist = { [id]: { nodes: [baseUrl], routes: [{ url: "https://upstream.example/v1" }] } };
+    const manager = new ProviderManager({
+      getCachedModels: () => cached, getModelIdMappings: () => mappings,
+      getModelPathWhitelist: () => whitelist, getDisabledProviders: () => [],
+      getCachedMints: () => ({}), getCachedProviderInfo: () => ({}), getBaseUrlsList: () => [baseUrl],
+    } as never);
+    const originalFetch = globalThis.fetch;
+    clearModelPathsCache();
+    globalThis.fetch = (async () => Response.json({ data: [
+      { id: alias, paths: [{ path, model: { sats_pricing: aliasPricing } }] },
+      { id, paths: [{ path, model: { sats_pricing: canonicalPricing } }] },
+    ] })) as unknown as typeof fetch;
+    try {
+      const service = createModelService({
+        bootstrapProviders: async () => [baseUrl], syncReviewedProvidersFromNostr: async () => null,
+        getAllCachedModels: () => cached, getBaseUrls: () => [baseUrl],
+        getModelIdMappings: () => mappings, getModelPathWhitelist: () => whitelist,
+      } as never, manager, { getState: () => ({
+        baseUrlsList: [baseUrl], disabledProviders: [], manuallyDisabledProviders: [], manuallyEnabledProviders: [],
+      }) } as never);
+      const candidate = (await manager.getModelPathProviderRanking(alias))[0]!;
+      expect(candidate.cost).toBeCloseTo(10.2, 6);
+      expect(candidate.satsPricing).toMatchObject(canonicalPricing);
+      const node = (await service.getModelPaths(alias, false, false, true))!.nodes[0]!;
+      expect(node.rankedOnPin).toBe(true);
+      expect(node.rankCost).toBeCloseTo(candidate.cost, 6);
+      expect(node.routes).toHaveLength(1);
+      expect(node.routes[0]!.pricing).toMatchObject(canonicalPricing);
+      expect(node.routes[0]!.cost).toBeCloseTo(candidate.cost, 6);
+      expect(node.routes[0]!.pricingSource).toBe("path");
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearModelPathsCache();
+    }
+  });
+
+  it("follows live policy, aliases, cheapest eligible route, cooldowns and toggle", async () => {
+    const id = "display-policy-fixture";
+    const alias = "display-policy-alias";
+    const a = "https://display-a.example/", b = "https://display-b.example/";
+    const outside = "https://display-outside.example/", off = "https://display-off.example/";
+    const selector = (endpoint: string) => new URLSearchParams({ url: "https://upstream.example/v1", "model-id": id, endpoint }).toString();
+    const expensive = selector("first"), cheap = selector("second"), unlisted = selector("not-policy");
+    const model = { id, name: id, sats_pricing: { prompt: 1, completion: 1 } };
+    const cached = Object.fromEntries([a, b, outside, off].map(url => [url, [model]]));
+    let disabled = [off];
+    let whitelist = { [id]: { nodes: [b, a, off], routes: [
+      { url: "https://upstream.example/v1", endpoint: "first" },
+      { url: "https://upstream.example/v1", endpoint: "second" },
+    ] } };
+    const discovery = {
+      getCachedModels: () => cached, getModelIdMappings: () => ({ [alias]: id }),
+      getModelPathWhitelist: () => whitelist, getDisabledProviders: () => disabled,
+      getCachedMints: () => ({}), getCachedProviderInfo: () => ({}), getBaseUrlsList: () => Object.keys(cached),
+    };
+    const manager = new ProviderManager(discovery as never);
+    const originalCooldown = manager.isOnCooldown.bind(manager);
+    let coolCheap = false;
+    manager.isOnCooldown = (url, modelId, path) =>
+      (coolCheap && path === cheap) || originalCooldown(url, modelId, path);
+    const originalFetch = globalThis.fetch;
+    clearModelPathsCache();
+    globalThis.fetch = (async () => Response.json({ data: [
+      { path: expensive, model: { id, sats_pricing: { prompt: 0.005, completion: 0.002 } } },
+      { path: cheap, model: { id, sats_pricing: { prompt: 0.0004, completion: 0.0005 } } },
+      { path: unlisted, model: { id, sats_pricing: { prompt: 0.00001, completion: 0.00001 } } },
+    ] })) as unknown as typeof fetch;
+    try {
+      const service = createModelService({
+        bootstrapProviders: async () => Object.keys(cached), syncReviewedProvidersFromNostr: async () => null,
+        getAllCachedModels: () => cached, getBaseUrls: () => Object.keys(cached),
+        getModelIdMappings: discovery.getModelIdMappings, getModelPathWhitelist: discovery.getModelPathWhitelist,
+      } as never, manager, { getState: () => ({
+        baseUrlsList: Object.keys(cached), disabledProviders: disabled,
+        manuallyDisabledProviders: [], manuallyEnabledProviders: [],
+      }) } as never);
+      const ranking = await manager.getModelPathProviderRanking(alias);
+      expect(ranking[0]!.selector).toBe(cheap);
+      expect(ranking[0]!.baseUrl).toBe(b); // Equal cost: policy node order beats URL order.
+      const display = (await service.getModelPaths(alias, false, true, true))!;
+      expect(display.nodes).toHaveLength(4);
+      expect(display.nodes.slice(0, 2).map(node => node.baseUrl)).toEqual([b, a]);
+      for (const node of display.nodes) {
+        expect(node.routes.filter(route => route.pinned).map(route => route.path)).toEqual(
+          [a, b].includes(node.baseUrl) ? [cheap] : []);
+      }
+      coolCheap = true;
+      const cooled = (await service.getModelPaths(alias, false, true, true))!;
+      expect(cooled.nodes[0]!.routes.find(route => route.pinned)!.path).toBe(expensive);
+      const toggledOff = (await service.getModelPaths(alias, false, true, false))!;
+      expect(toggledOff.nodes.every(node => node.routes.every(route => !route.pinned))).toBe(true);
+      coolCheap = false;
+      disabled = [a, b, off];
+      expect((await service.getModelPaths(alias, false, true, true))!.nodes.every(node =>
+        node.routes.every(route => !route.pinned))).toBe(true);
+      disabled = [off];
+      whitelist = {} as typeof whitelist;
+      expect((await service.getModelPaths(alias, false, true, true))!.nodes.every(node =>
+        node.routes.every(route => !route.pinned))).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+      clearModelPathsCache();
+    }
   });
 });
