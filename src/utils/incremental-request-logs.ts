@@ -6,6 +6,8 @@ interface Cursor {
   identity: string;
   offset: number;
   modified: number;
+  changed: number;
+  checkpoint: Buffer;
   pending: Buffer;
   skipping: boolean;
 }
@@ -49,9 +51,17 @@ export class IncrementalRequestLogs {
         if (!stat.isFile()) continue;
         const identity = `${stat.dev}:${stat.ino}`;
         let cursor = this.cursors.get(name);
-        if (!cursor || cursor.identity !== identity || stat.size < cursor.offset ||
-          (stat.size === cursor.offset && stat.mtimeMs !== cursor.modified)) {
-          cursor = { identity, offset: 0, modified: stat.mtimeMs, pending: Buffer.alloc(0), skipping: false };
+        let reset = !cursor || cursor.identity !== identity || stat.size < cursor.offset;
+        if (!reset && cursor && cursor.checkpoint.length &&
+          (stat.size !== cursor.offset || stat.mtimeMs !== cursor.modified || stat.ctimeMs !== cursor.changed)) {
+          const checkpoint = Buffer.allocUnsafe(cursor.checkpoint.length);
+          const count = readSync(fd, checkpoint, 0, checkpoint.length, cursor.offset - checkpoint.length);
+          bytesRead += count;
+          reset = count !== checkpoint.length || !checkpoint.equals(cursor.checkpoint);
+        }
+        if (reset || !cursor) {
+          cursor = { identity, offset: 0, modified: stat.mtimeMs, changed: stat.ctimeMs,
+            checkpoint: Buffer.alloc(0), pending: Buffer.alloc(0), skipping: false };
           this.cursors.set(name, cursor);
         }
         // Snapshot the end so a busy writer cannot keep this poll running forever.
@@ -62,9 +72,16 @@ export class IncrementalRequestLogs {
           if (!count) break;
           cursor.offset += count;
           bytesRead += count;
-          this.consume(cursor, buffer.subarray(0, count), active);
+          const bytes = buffer.subarray(0, count);
+          this.consume(cursor, bytes, active);
+          // Save consumed bytes, not a second read: this also anchors partial
+          // UTF-8 lines and detects truncate/regrow before reusing their tail.
+          cursor.checkpoint = Buffer.from(bytes.length >= 256
+            ? bytes.subarray(bytes.length - 256)
+            : Buffer.concat([cursor.checkpoint, bytes]).subarray(-256));
         }
         cursor.modified = stat.mtimeMs;
+        cursor.changed = stat.ctimeMs;
       } catch {
         this.warnings.add("A diagnostic log changed or could not be read; retrying on the next poll.");
       } finally {

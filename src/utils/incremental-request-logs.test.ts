@@ -13,11 +13,11 @@ function setup(limits?: { requests: number; diagnostics: number; perRequest: num
 const line = (id = "one", label = "Retrying", suffix = "SECRET") => `[2026-11-09T00:00:00Z] [INFO] [req:${id}:sdk] ${label} ${suffix}\n`;
 const records = (r: IncrementalRequestLogs, id = "one") => r.diagnostics([id]).get(id)!;
 
-test("historical scan then idle reads zero bytes; append reads only delta", () => {
+test("historical scan then idle reads zero bytes; append reads delta plus bounded checkpoint", () => {
   const { file, reader } = setup(); const initial = line().repeat(10000);
   writeFileSync(file, initial); expect(reader.poll().bytesRead).toBe(Buffer.byteLength(initial));
   expect(reader.poll().bytesRead).toBe(0);
-  appendFileSync(file, line("two")); expect(reader.poll().bytesRead).toBe(Buffer.byteLength(line("two")));
+  appendFileSync(file, line("two")); expect(reader.poll().bytesRead).toBe(Buffer.byteLength(line("two")) + 256);
   expect(records(reader, "two")).toHaveLength(1);
 });
 test("unchanged lifecycle emits late safe diagnostics but no payloads", () => {
@@ -73,4 +73,26 @@ test("untrusted tag lengths cannot bypass cache byte bounds or inject terminal c
   expect(reader.poll().warnings).toHaveLength(1);
   expect(records(reader)).toHaveLength(1);
   expect(records(reader)[0]!.message).not.toContain("\x1b");
+});
+
+test("same-inode truncate/regrow past cursor recovers diagnostics before old offset", () => {
+  const { file, reader } = setup(); const old = line("old");
+  writeFileSync(file, old); reader.poll();
+  const replacement = line("new-first") + line("new-second");
+  writeFileSync(file, replacement);
+  expect(reader.poll().bytesRead).toBe(Buffer.byteLength(old) + Buffer.byteLength(replacement));
+  expect(records(reader, "new-first")).toHaveLength(1);
+  expect(records(reader, "new-second")).toHaveLength(1);
+  expect(reader.poll().bytesRead).toBe(0);
+});
+
+test("truncate/regrow discards an old partial UTF8 line instead of joining new bytes", () => {
+  const { file, reader } = setup(); const old = Buffer.from(line("réquest"));
+  const split = old.indexOf(Buffer.from("é")) + 1;
+  writeFileSync(file, old.subarray(0, split)); reader.poll();
+  writeFileSync(file, line("new-first") + line("new-second")); reader.poll();
+  expect(records(reader, "réquest")).toHaveLength(0);
+  expect(records(reader, "new-first")).toHaveLength(1);
+  expect(records(reader, "new-second")).toHaveLength(1);
+  expect(reader.poll().bytesRead).toBe(0);
 });

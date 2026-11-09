@@ -16,6 +16,6 @@ try {
   const idleMs = performance.now() - idleStart;
   appendFileSync(join(root, "2026-11-16.log"), line);
   console.log(JSON.stringify({ initialBytes: initial.bytesRead, initialMs: Math.round(initialMs), idlePolls: 20, idleBytes,
-    idleMs: Math.round(idleMs), appendBytes: reader.poll(["fixture"]).bytesRead, expectedAppendBytes: Buffer.byteLength(line),
+    idleMs: Math.round(idleMs), appendBytes: reader.poll(["fixture"]).bytesRead, newBytes: Buffer.byteLength(line), checkpointBytes: 256, expectedAppendReadBytes: Buffer.byteLength(line) + 256,
     cachedDiagnostics: reader.diagnostics(["fixture"]).get("fixture")!.length, rssMiB: Math.round(process.memoryUsage().rss / 1048576) }, null, 2));
 } finally { rmSync(root, { recursive: true, force: true }); }
