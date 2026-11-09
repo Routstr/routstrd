@@ -106,6 +106,13 @@ export interface RoutstrdConfig {
        * (default 6, for parallel agents): each one that ends unused costs the fee.
        */
       maxArmedWithFee?: number;
+      /**
+       * Arm only while the credential's available balance on the node is at
+       * least this many times one session's reservation (default 2: the new
+       * arm plus one cold request). The automatic top-up keeps the key at
+       * this multiple + 0.4 while pre-warming is on.
+       */
+      fundsHeadroom?: number;
     };
   };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
