@@ -261,6 +261,7 @@ describe("funding cancellation boundaries", () => {
     const ctx = await setup(); const blocker = await blockedWallet(ctx);
     const controller = new AbortController();
     const manager = (ctx.client as any).balanceManager;
+    vi.spyOn(manager, "getTokenBalance").mockResolvedValue({ amount: 0, reserved: 0, unit: "sat", apiKey: "key", readSeq: 1 });
     const deposit = vi.spyOn(manager, "_postTopUp").mockResolvedValue({ success: true });
     const snapshot = { token: "key", baseUrl, mintUrl, requiredSats: 5,
       tokenBalance: 0, tokenBalanceUnit: "sat", tokenBalanceUnknown: false };
@@ -290,6 +291,7 @@ describe("funding cancellation boundaries", () => {
     });
     const snapshot = { token: "key", baseUrl, mintUrl, requiredSats: 5,
       tokenBalance: 0, tokenBalanceUnit: "sat", signal: controller.signal };
+    vi.spyOn(ctx.client.getBalanceManager(), "getTokenBalance").mockResolvedValue({ amount: 0, reserved: 0, unit: "sat", apiKey: "key", readSeq: 1 });
     const pending = (ctx.client as any)._runProactiveTopup(snapshot);
     await entered.promise; controller.abort(); release.release();
     expect(await pending).toMatchObject({ success: false, message: "financial outcome unknown" });

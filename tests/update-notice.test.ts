@@ -17,7 +17,7 @@ async function pingWithCache(updateCheck?: boolean, current = VERSION, checkedAt
     fetch: (req) => Response.json(new URL(req.url).pathname === "/health" ? { ok: true } : { output: "pong" }),
   });
   writeFileSync(join(dir, "config.json"), JSON.stringify({ port: server.port, host: "127.0.0.1", updateCheck }));
-  writeFileSync(join(dir, "update-state.json"), JSON.stringify({ current, latest: "0.5.0", hasUpdate: true, checkedAt }));
+  writeFileSync(join(dir, "update-state.json"), JSON.stringify({ current, latest: "9.9.9", hasUpdate: true, checkedAt }));
   try {
     const proc = Bun.spawn([process.execPath, join(import.meta.dir, "../src/index.ts"), "ping"], {
       env: { ...process.env, ROUTSTRD_DIR: dir, ROUTSTRD_NO_UPDATE_CHECK: "1" },

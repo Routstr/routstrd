@@ -44,4 +44,4 @@ Premature client disconnect propagates cancellation to the SDK, rather than trea
 
 ## SDK prerequisite
 
-This feature requires `@routstr/sdk` 0.5.0 or newer, which ships the request-lifecycle API (`RequestLifecycleDriver`, `createBunSqliteRequestLifecycleDriver`). The dependency is the normal registry version; no local path or feature-branch dependency is shipped.
+This feature requires `@routstr/sdk` 0.5.0 or newer (routstrd 0.5.0 pins 0.5.1), which ships the request-lifecycle API (`RequestLifecycleDriver`, `createBunSqliteRequestLifecycleDriver`). The dependency is the normal registry version; no local path or feature-branch dependency is shipped.

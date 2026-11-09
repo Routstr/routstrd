@@ -41,9 +41,10 @@ async function callVersion(state: UpdateState | null, enabled = true) {
   return res;
 }
 
+const newest = "9.9.9";
 const behind: UpdateState = {
   current: VERSION,
-  latest: "0.5.0",
+  latest: newest,
   hasUpdate: true,
   checkedAt: new Date().toISOString(),
 };
@@ -55,7 +56,7 @@ describe("GET /version", () => {
     expect(res.json().output).toEqual({
       version: VERSION,
       current: VERSION,
-      latest: "0.5.0",
+      latest: newest,
       hasUpdate: true,
       checkedAt: behind.checkedAt,
     });
