@@ -103,6 +103,95 @@ export function truncateMiddle(value: string, max = PROVIDER_COLUMN_MAX, headRat
   return `${value.slice(0, head)}…${value.slice(value.length - (keep - head))}`;
 }
 
+/**
+ * Columns kept at each end of the opaque label of a node URL — the `npub1…`
+ * body or a tunnel host's first label — and so the widest it ever renders:
+ * 9 + the ellipsis + 5 = 15.
+ *
+ * The recent-requests table prints `BASE:PROVIDER` in one column. Only the
+ * label is elided: everything from the URL's first dot on (`.fips:28080/`, a
+ * `*.trycloudflare.com` host) and the `:provider` after it stay whole, because
+ * those are the halves that tell two nodes — and two requests — apart. A
+ * character-count window over the whole URL instead mangled short, readable
+ * hosts (`routstr.cypherpunk.today/` → `routstr…oday/`) while cutting the
+ * useful tail off the long ones (`….fips:28080/` → `…8080/`).
+ */
+export const NODE_LABEL_HEAD = 9;
+export const NODE_LABEL_TAIL = 5;
+
+/** Widest the label renders: 9 + ellipsis + 5. */
+export const NODE_LABEL_MAX = NODE_LABEL_HEAD + 1 + NODE_LABEL_TAIL;
+
+/** Narrowest label window still worth rendering beside the tail. */
+const MIN_LABEL_BUDGET = 4;
+
+const URL_SCHEME = /^https?:\/\//;
+
+/**
+ * Split a node URL at its first dot into the opaque label routing never reads
+ * and the tail that identifies the deployment. A dotless host has no suffix to
+ * split off, but its port still identifies the deployment and must not be lost
+ * to the fixed ellipsis window.
+ */
+export function splitNodeUrl(url: string): { label: string; tail: string } {
+  const dot = url.indexOf(".");
+  if (dot <= 0) {
+    const port = /:\d+(?:\/.*)?$/.exec(url);
+    return port ? { label: url.slice(0, port.index), tail: port[0] } : { label: url, tail: "" };
+  }
+  return { label: url.slice(0, dot), tail: url.slice(dot) };
+}
+
+/**
+ * Elide the middle of an opaque label to at most `max` columns, head-heavy so
+ * the `npub1…` prefix survives. A label that already fits is left untouched —
+ * a short host name is not worth eliding just because the window is wider.
+ */
+export function elideNodeLabel(label: string, max = NODE_LABEL_MAX): string {
+  if (label.length <= max) return label;
+  if (max <= 1) return "…";
+  const keep = max - 1; // the ellipsis takes the last column
+  const head = Math.min(NODE_LABEL_HEAD, Math.ceil((keep * NODE_LABEL_HEAD) / (NODE_LABEL_HEAD + NODE_LABEL_TAIL)));
+  return `${label.slice(0, head)}…${label.slice(label.length - (keep - head))}`;
+}
+
+function providerSuffix(provider: string | undefined): string {
+  return `:${provider || "unknown"}`;
+}
+
+/**
+ * Render `BASE:PROVIDER` for the recent-requests table into `budget` columns.
+ *
+ * The label is capped at its window even when the column could afford more —
+ * `npub1pxd3…mya5a` is all of an npub anyone reads — while the tail and the
+ * `:provider` are kept whole for as long as the column allows. Only a column
+ * too narrow for both is elided as a whole.
+ */
+export function formatNodeProviderCell(
+  baseUrl: string,
+  provider: string | undefined,
+  budget = Number.POSITIVE_INFINITY,
+): string {
+  const url = baseUrl.replace(URL_SCHEME, "");
+  const suffix = providerSuffix(provider);
+  const { label, tail } = splitNodeUrl(url);
+  const labelBudget = Math.min(NODE_LABEL_MAX, budget - tail.length - suffix.length);
+  if (labelBudget >= MIN_LABEL_BUDGET) {
+    return `${elideNodeLabel(label, labelBudget)}${tail}${suffix}`;
+  }
+  // Too narrow to hold a label beside the tail: elide the combined string
+  // rather than chop the `:provider` off.
+  return truncateMiddle(`${url}${suffix}`, budget, 0.5);
+}
+
+/**
+ * Widest a `BASE:PROVIDER` cell renders once its label is capped — what the
+ * recent-requests table sizes its provider column from.
+ */
+export function nodeProviderCellWidth(baseUrl: string, provider?: string): number {
+  return formatNodeProviderCell(baseUrl, provider).length;
+}
+
 interface ProviderRow {
   provider: string;
   prompt: string;

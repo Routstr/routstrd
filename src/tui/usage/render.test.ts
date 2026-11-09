@@ -157,7 +157,7 @@ describe("renderRecent", () => {
     expect(out).not.toContain("deepseek-v4.1-flas ");
   });
 
-  test("elides a long base:provider in the middle so both ends survive", () => {
+  test("elides the npub body but keeps the host suffix, port and provider whole", () => {
     const fipsNpub = "npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a";
     const stats = {
       ...statsFor(NPUB),
@@ -179,16 +179,78 @@ describe("renderRecent", () => {
       ],
     } as unknown as UsageStats;
 
-    const out = stripAnsi(renderRecent(stats, 120, buildClientNaming([], [])));
+    const out = stripAnsi(renderRecent(stats, 160, buildClientNaming([], [])));
     const row = out.split("\n").find((line) => line.includes("deepseek"))!;
-    // The URL is elided in its middle (`npub1pxd….fips:28080/`), keeping the
-    // node name at the head and the port at the tail...
-    expect(row).toMatch(/npub\S*…\S*\/?:openrouter:Wafer/);
-    // ...and the `:provider` suffix stays whole instead of being sliced off.
-    expect(row).toContain(":openrouter:Wafer");
-    expect(row).not.toContain("npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a.fips");
+    // Only the opaque npub body is elided; the `.fips:28080/` deployment tail
+    // and the `:provider` the request went to stay whole.
+    expect(row).toContain("npub1pxd3…mya5a.fips:28080/:openrouter:Wafer");
+    expect(row).not.toContain(fipsNpub);
   });
 
+  test("leaves a readable node host whole instead of mangling it", () => {
+    // A character-count window over the whole URL used to turn this into
+    // `routstr…oday/`, which named no node at all.
+    const stats = {
+      ...statsFor(NPUB),
+      entries: [
+        {
+          id: "1",
+          timestamp: Date.now(),
+          modelId: "deepseek-v4.1-flash",
+          baseUrl: "https://routstr.cypherpunk.today/",
+          provider: "openrouter:Cloudflare",
+          requestId: "r1",
+          cost: 0,
+          satsCost: 0.81,
+          promptTokens: 51_200,
+          completionTokens: 140,
+          totalTokens: 51_340,
+          client: "pi-agent",
+        },
+      ],
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderRecent(stats, 160, buildClientNaming([], [])));
+    expect(out).toContain("routstr.cypherpunk.today/:openrouter:Cloudflare");
+  });
+
+  test("elides the node URL at the same column on every row, whatever the provider", () => {
+    // The URL window is fixed, so the same node must not elide at one column
+    // next to `:openrouter:Cloudflare` and at another next to the longer
+    // `:openrouter:Claude Platform on AWS` — that read as two different nodes.
+    const fipsNpub = "npub1pxd3pll90t2n8hd6ntcpx27wzr9yws4hspzfxfhg5329qkjnx2aqfmya5a";
+    const entry = (id: string, modelId: string, provider: string) => ({
+      id,
+      timestamp: Date.now(),
+      modelId,
+      baseUrl: `https://${fipsNpub}.fips:28080/`,
+      provider,
+      requestId: `r${id}`,
+      cost: 0,
+      satsCost: 1,
+      promptTokens: 10,
+      completionTokens: 20,
+      totalTokens: 30,
+      client: "pi-agent",
+    });
+    const stats = {
+      ...statsFor(NPUB),
+      entries: [
+        entry("1", "deepseek-v4.1-flash", "openrouter:Cloudflare"),
+        entry("2", "claude-opus-5.5", "openrouter:Claude Platform on AWS"),
+      ],
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderRecent(stats, 200, buildClientNaming([], [])));
+    const urls = out
+      .split("\n")
+      .filter((line) => line.includes(":openrouter:"))
+      .map((line) => line.slice(line.indexOf("npub"), line.indexOf(":openrouter:")));
+
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toBe(urls[1]!);
+    expect(urls[0]).toBe("npub1pxd3…mya5a.fips:28080/");
+  });
   test("keeps the raw client id when there is no owner metadata", () => {
     const stats = {
       ...statsFor(NPUB),
