@@ -637,6 +637,14 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (
+      req.method === "POST" &&
+      (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json"
+    ) {
+      sendJson(res, 415, { error: "Content-Type must be application/json." });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, { ok: true });
       return;

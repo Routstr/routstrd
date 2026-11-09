@@ -51,7 +51,7 @@ async function refund(
   Object.assign(req, {
     method: "POST",
     url: path,
-    headers: { host: "localhost" },
+    headers: { host: "localhost", "content-type": "application/json" },
   });
   const res = {
     status: 0,

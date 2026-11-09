@@ -6,7 +6,7 @@ function makeReq(path: string, body?: unknown) {
   const req = new EventEmitter() as any;
   req.method = "POST";
   req.url = path;
-  req.headers = { host: "localhost" };
+  req.headers = { host: "localhost", "content-type": "application/json" };
   setImmediate(() => {
     if (body !== undefined) req.emit("data", Buffer.from(JSON.stringify(body)));
     req.emit("end");
