@@ -93,6 +93,7 @@ type DaemonDeps = {
     refresh?: boolean,
     includeDisabled?: boolean,
     autoModelPath?: boolean,
+    candidatesOnly?: boolean,
   ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
@@ -557,6 +558,7 @@ export function createDaemonRequestHandler(deps: {
     refresh?: boolean,
     includeDisabled?: boolean,
     autoModelPath?: boolean,
+    candidatesOnly?: boolean,
   ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
@@ -1349,6 +1351,7 @@ export function createDaemonRequestHandler(deps: {
           refresh,
           includeDisabled,
           settings.autoModelPath,
+          url.searchParams.get("view") === "candidates",
         );
         if (!modelPaths) {
           sendJson(res, 404, { error: `Model '${modelId}' not found` });

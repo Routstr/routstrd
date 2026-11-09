@@ -76,6 +76,17 @@ describe("GET /models/:id/paths", () => {
     }
   });
 
+  it("opts into candidate view explicitly while preserving legacy inventory requests", async () => {
+    const calls: unknown[][] = [];
+    const handler = createDaemonRequestHandler({
+      store: { getState: () => ({}) }, autoModelPath: true,
+      getModelPaths: async (...args: unknown[]) => { calls.push(args); return { id: "m", nodes: [], skipped: [] }; },
+    } as any);
+    await call(handler, "GET", "/models/m/paths?view=candidates");
+    await call(handler, "GET", "/models/m/paths?includeDisabled=true");
+    expect(calls).toEqual([["m", false, false, true, true], ["m", false, true, true, false]]);
+  });
+
   it("returns the inventory as the daemon built it (already ranked)", async () => {
     const inventory = {
       id: "deepseek-v4.1-flash",

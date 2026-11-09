@@ -101,8 +101,8 @@ List available routstr21 models (discovered via Nostr).
 |--------|-------------|
 | `-r, --refresh` | Force refresh models from Nostr (with `--paths`, also drop the SDK's cached model-path payloads) |
 | `-m, --model <id>` | Show the providers serving a specific model |
-| `-p, --paths` | With `--model`: also list the model-path inventory (see below). Requires `--model` |
-| `-a, --all` | With `--model`: include disabled providers and nodes, marked. They are hidden by default |
+| `-p, --paths` | With `--model`: list eligible automatic paths in SDK candidate order; `--all` shows inventory |
+| `-a, --all` | With `--model`: include disabled providers; with `--paths`, show full advertised inventory |
 
 `--model` prints one table of the nodes serving that model, in the order the
 router ranks them — cheapest sats for one warm request first, the basket
@@ -122,25 +122,19 @@ model served only by disabled nodes still resolves: it prints
 `No enabled node serves this model (N disabled; pass --all to show them)` rather
 than failing as unknown.
 
-`--paths` shows every upstream route the nodes advertise for that
-model, one block per node, ranked like the router. Every route is priced with
-the SDK's `estimateCost` against `WARM_COST_BASKET` (100k prompt tokens at a
-90% cache hit, 2k completion) — the same function and basket
-`getProviderPriceRankingForModel` ranks routing on — routes are listed cheapest
-`cost` first inside each node, and nodes are ordered by that cost on the route
-the router would use first: the pinned route (`[pin]`, the SDK's model-path
-whitelist order, which governs its auto-pinned `deepseek-v4.1-flash`) when the
-node advertises one, otherwise its cheapest route.
-`cost` is sats for one such warm request; the prompt, completion, cache read
-and cache write columns are sats per million tokens (a `-` cache cell means the
-node advertises no cache rate there, so those tokens bill at the prompt rate).
-Each route row also shows the route's context length. Routes are shown with the upstream they
-reach (`openrouter.ai/api/v1 [deepseek]`), tagged `[cooldown]` when routing is
-currently skipping them, `[model price]` when the node advertises no per-route
-pricing, and `[id <spelling>]` when the route is only reachable by requesting
-the model under that spelling. Nodes left out (on cooldown, no paths
-advertised, lookup failed or timed out) are listed under `Not shown`; a node
-included only because of `--all` is tagged `[disabled]` on its header.
+`--paths` shows only the current automatic-policy candidates, in the SDK's
+route-major selection / route-scoped failover order. Nodes can recur because
+candidates from different nodes interleave by cost. It reads the normal signed
+kind-38427 policy cache; `--refresh` refreshes the policy and path caches through
+the SDK. Wallet mint eligibility, failure scope and changing cooldowns can skip
+candidates; exhausted automatic routes may fall back to plain unpinned routing.
+When automatic selection is off, no policy applies, or no eligible route remains,
+the command says so explicitly. The provider catalog-price table is separate,
+not the automatic-path order.
+
+`--paths --all` opts into the full advertised inventory, including non-policy
+routes and disabled nodes. `[pin]` marks a node's best automatic candidate, not
+a forced-provider pin. Full inventory is not a predicted request sequence.
 
 ```sh
 routstrd models -m deepseek-v4.1-flash                       # enabled nodes only
@@ -754,10 +748,18 @@ routable — so `404` means no node serves the model at all.
 
 ### `GET /models/:id/paths`
 
-The model-path inventory of one model, as rendered by
-`routstrd models -m <id> --paths`: per node, the advertised upstream routes
-(model-path selectors) with their per-route pricing, ordered the way the
-router ranks them. `?refresh=true` drops the SDK's cached path payloads first,
+The default HTTP response remains the advertised inventory for compatibility.
+`?view=candidates` opts into the CLI's default automatic-candidate response:
+`candidates` is a flat ordered array of `{baseUrl, route}` and `candidateStatus`
+is `ranked`, `off`, `no-policy`, or `no-eligible-routes`; `nodes` is empty.
+`?refresh=true&view=candidates` refreshes signed policy and path caches. No
+request-specific wallet or explicit-header overrides are represented.
+
+
+The legacy model-path inventory of one model, as rendered by
+`routstrd models -m <id> --paths --all`: per node, advertised upstream routes
+(model-path selectors) with per-route pricing. Automatic candidate nodes lead
+in SDK order; remaining rows are inventory, not a routing prediction. `?refresh=true` drops the SDK's cached path payloads first,
 so the inventory is live. `?includeDisabled=true` (the CLI's `--all`) also
 lists the nodes routing currently excludes, flagged `disabled: true` and
 ranked like any other node; by default they are skipped without being probed.

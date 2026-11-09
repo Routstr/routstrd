@@ -448,3 +448,28 @@ describe("formatModelPaths", () => {
     expect(formatModelPaths(output)).not.toContain("[disabled]");
   });
 });
+
+
+describe("automatic candidate rendering", () => {
+  it("renders global interleaved SDK order without regrouping by node", () => {
+    const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidateStatus: "ranked", candidates: [
+      { baseUrl: "https://b.example/", route: { ...route({ endpoint: "first" }), cost: 1 } },
+      { baseUrl: "https://a.example/", route: { ...route({ endpoint: "second" }), cost: 2 } },
+      { baseUrl: "https://b.example/", route: { ...route({ endpoint: "third" }), cost: 3 } },
+    ] });
+    expect(text.indexOf("[first]")).toBeLessThan(text.indexOf("[second]"));
+    expect(text.indexOf("[second]")).toBeLessThan(text.indexOf("[third]"));
+    expect(text).toContain("(automatic candidate)");
+    expect(text).not.toContain("cheapest route");
+    expect(text).not.toContain("[pin]");
+  });
+
+  it("explains empty routing modes rather than silently hiding inventory", () => {
+    for (const [status, message] of [["off", "selection is off"], ["no-policy", "No automatic policy"], ["no-eligible-routes", "No eligible automatic routes"]] as const) {
+      const text = formatModelPaths({ id: "m", nodes: [], skipped: [], candidates: [], candidateStatus: status });
+      expect(text).toContain(message);
+      expect(text).toContain("without a route pin");
+      expect(text).toContain("Use --all");
+    }
+  });
+});

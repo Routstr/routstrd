@@ -514,9 +514,13 @@ export function createModelService(
     refresh = false,
     includeDisabled = false,
     autoModelPath = false,
+    candidatesOnly = false,
   ): Promise<ModelPathsOutput | null> => {
     await ensureProvidersBootstrapped();
-    if (refresh) clearModelPathsCache();
+    if (refresh) {
+      clearModelPathsCache();
+      if (candidatesOnly) await modelManager.fetchModelPathWhitelist(true);
+    }
 
     const s = store.getState();
     const manuallyEnabled = new Set<string>(
@@ -542,6 +546,28 @@ export function createModelService(
     const ranking = policy
       ? await providerManager.getModelPathProviderRanking(modelId)
       : [];
+    if (candidatesOnly) {
+      const modelInfo = Object.values(allModels).flatMap(models => models as Model[])
+        .map(model => findModelForId([model], modelId, mappings)).find(Boolean);
+      if (!modelInfo) return null;
+      // Preserve every SDK-ranked (node, selector) alternative globally. Node
+      // grouping would reorder interleaved route-scoped failover candidates.
+      const candidates = ranking.filter(candidate => !disabledSet.has(normalizeBaseUrl(candidate.baseUrl)))
+        .map(candidate => {
+          const routes = buildModelPathRoutes(candidate.baseUrl, { data: [{
+            id: candidate.model.id, alias_ids: [], paths: [{ path: candidate.selector,
+              model: { sats_pricing: candidate.satsPricing ?? undefined } }],
+          }], updatedAt: null }, candidate.model, modelId);
+          const route = routes[0]!;
+          return { baseUrl: candidate.baseUrl, route: { ...route, cost: candidate.cost } };
+        });
+      return {
+        id: modelId, name: modelInfo.name, description: modelInfo.description,
+        contextLength: modelInfo.context_length, nodes: [], skipped: [], candidates,
+        candidateStatus: !autoModelPath ? "off" : !policy ? "no-policy" :
+          candidates.length ? "ranked" : "no-eligible-routes",
+      };
+    }
     const nodes: ModelPathNode[] = [];
     const skipped: ModelPathSkipped[] = [];
 

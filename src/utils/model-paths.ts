@@ -127,6 +127,9 @@ export interface ModelPathsOutput {
   contextLength?: number;
   nodes: ModelPathNode[];
   skipped: ModelPathSkipped[];
+  /** Present only for the opt-in candidate API view (the CLI default). */
+  candidates?: Array<{ baseUrl: string; route: ModelPathRoute }>;
+  candidateStatus?: "ranked" | "off" | "no-policy" | "no-eligible-routes";
 }
 
 /** Decoded parts of one advertised selector. */
@@ -321,14 +324,14 @@ function toRow(route: ModelPathRoute, requestedId: string): RouteRow {
 }
 
 /** One node block: a rank header plus its route table. */
-function renderNode(node: ModelPathNode, rank: number, requestedId: string): string[] {
+function renderNode(node: ModelPathNode, rank: number, requestedId: string, candidate = false): string[] {
   const metric =
     node.rankCost === null
       ? node.routes.some((route) => route.onCooldown)
         ? "rank unavailable (no priced route off cooldown)"
         : "rank unavailable (no priced route)"
       : `rank ${node.rankCost.toFixed(2)} sats/request ${
-          node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
+          candidate ? "(automatic candidate)" : node.rankedOnPin ? "(pinned route)" : "(cheapest route)"
         }`;
   // A disabled node is priced and ranked like any other, so the tag is what
   // keeps its rows from reading as routes a request could take.
@@ -374,6 +377,26 @@ export function formatModelPaths(output: ModelPathsOutput): string {
     output.name && output.name !== output.id
       ? `${output.id} (${output.name})`
       : output.id;
+  if (output.candidates) {
+    const lines = [`Automatic model-path candidates for ${title}`, ""];
+    const empty = {
+      off: "Automatic model-path selection is off; requests use plain provider-price routing without a route pin.",
+      "no-policy": "No automatic policy applies to this model; requests use plain provider-price routing without a route pin.",
+      "no-eligible-routes": "No eligible automatic routes; requests fall back to plain provider-price routing without a route pin.",
+      ranked: "",
+    };
+    if (!output.candidates.length) lines.push(`  ${empty[output.candidateStatus ?? "no-eligible-routes"]}`);
+    else {
+      lines.push("  SDK automatic selection / route-scoped failover order (current policy snapshot):");
+      output.candidates.forEach(({ baseUrl, route }, index) => {
+        lines.push(...renderNode({ baseUrl, routes: [route], rankCost: route.cost ?? null, rankedOnPin: false }, index + 1, output.id, true), "");
+      });
+    }
+    lines.push("  Wallet mint eligibility and failure scope can skip candidates; retries and changing",
+      "  cooldowns can alter the sequence. Exhausted automatic routes may fall back unpinned.",
+      "  Explicit provider/model-path overrides are not represented. Use --all for advertised inventory.");
+    return lines.join("\n");
+  }
   const routeCount = output.nodes.reduce((sum, node) => sum + node.routes.length, 0);
   const lines: string[] = [`Model paths for ${title}`, ""];
 
