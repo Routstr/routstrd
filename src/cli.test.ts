@@ -735,3 +735,124 @@ describe("npub shown without a remote node", () => {
     }
   });
 });
+
+/**
+ * A URL that is reachable but is not a routstrd daemon — the reported failure
+ * was a Cloudron dashboard answering every path with its SPA. Before the probe,
+ * `routstrd remote` saved such a URL and every later command died with Bun's
+ * `JSON Parse error: Unrecognized token '<'`.
+ */
+describe("remote URL that is not a daemon", () => {
+  const SPA = "<!DOCTYPE html>\n<html><body><div id=app></div></body></html>";
+
+  /** Serve a fixed body/content-type for every request. */
+  async function withServer(
+    body: string,
+    contentType: string,
+    status: number,
+    run: (origin: string) => Promise<void>,
+  ): Promise<void> {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response(body, { status, headers: { "content-type": contentType } }),
+    });
+    try {
+      await run(server.url.origin);
+    } finally {
+      server.stop(true);
+    }
+  }
+
+  async function runCli(args: string[], config: Record<string, unknown>) {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), ...args], {
+      env: { ...process.env, ROUTSTRD_DIR: dir },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode, configPath: join(dir, "config.json") };
+  }
+
+  test("`remote` refuses to save it and names the cause", async () => {
+    await withServer(SPA, "text/html", 200, async (origin) => {
+      const result = await runCli(["remote", origin], { updateCheck: false });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("Refusing to set the remote daemon");
+      expect(result.stderr).toContain("This looks like a web page, not a routstrd daemon");
+      expect(result.stderr).toContain("--force");
+      // Nothing was written, so the bad URL cannot leak into later commands.
+      expect(JSON.parse(readFileSync(result.configPath, "utf-8")).daemonUrl).toBeUndefined();
+    });
+  });
+
+  test("`remote --force` saves it without probing", async () => {
+    await withServer(SPA, "text/html", 200, async (origin) => {
+      const result = await runCli(["remote", origin, "--force"], { updateCheck: false });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toContain("Skipping the reachability probe");
+      expect(JSON.parse(readFileSync(result.configPath, "utf-8")).daemonUrl).toBe(origin);
+    });
+  });
+
+  test("`remote --force` does not wait on an unreachable host", async () => {
+    // The flag exists for a host that cannot be reached from here, so probing
+    // would only burn the full timeout before saving.
+    const started = Date.now();
+    const result = await runCli(["remote", "http://10.255.255.1:9", "--force"], {
+      updateCheck: false,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("`remote` still accepts a routstrd /health", async () => {
+    await withServer('{"ok":true}', "application/json", 200, async (origin) => {
+      const result = await runCli(["remote", origin], { updateCheck: false });
+
+      expect(result.exitCode).toBe(0);
+      expect(JSON.parse(readFileSync(result.configPath, "utf-8")).daemonUrl).toBe(origin);
+    });
+  });
+
+  test("`remote` accepts a JSON 401 from an auth proxy", async () => {
+    // The generated npub is unregistered until the operator adds it, so a JSON
+    // rejection must not block setup.
+    await withServer(
+      '{"error":"Missing Authorization header."}',
+      "application/json",
+      401,
+      async (origin) => {
+        const result = await runCli(["remote", origin], { updateCheck: false });
+
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(readFileSync(result.configPath, "utf-8")).daemonUrl).toBe(origin);
+      },
+    );
+  });
+
+  test("a saved dashboard URL fails fast instead of mid-integration", async () => {
+    // The regression: `clients add --pi-agent` used to print Bun's raw
+    // "JSON Parse error: Unrecognized token '<'" with no hint about the URL.
+    await withServer(SPA, "text/html", 200, async (origin) => {
+      const result = await runCli(["clients", "add", "--pi-agent"], {
+        daemonUrl: origin,
+        updateCheck: false,
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("This looks like a web page, not a routstrd daemon");
+      expect(result.stderr).not.toContain("Unrecognized token");
+    });
+  });
+});

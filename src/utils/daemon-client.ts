@@ -116,6 +116,119 @@ export class DaemonHttpError extends Error {
 }
 
 /**
+ * How much of a response body is kept when explaining a non-JSON answer.
+ *
+ * Only the opening tag matters for the diagnosis, but keeping a few KB makes a
+ * `DaemonNotJsonError` useful when logged or inspected in a debugger.
+ */
+const BODY_SNIFF_LENGTH = 4096;
+
+/**
+ * Whether a body opens like an HTML document.
+ *
+ * The content type is only a hint — proxies relabel bodies — so the markup is
+ * checked as well. Used for the wording of the diagnosis and for
+ * {@link DaemonNotJsonError.looksLikeHtml}, so the two cannot disagree.
+ */
+function looksLikeHtml(contentType: string, body: string): boolean {
+  if (contentType.toLowerCase().includes("html")) return true;
+  const head = body.slice(0, BODY_SNIFF_LENGTH).trimStart().slice(0, 64).toLowerCase();
+  return head.startsWith("<!doctype html") || head.startsWith("<html");
+}
+
+/**
+ * A 2xx answer whose body is not the JSON envelope every routstrd route returns.
+ *
+ * This is the signature of a URL that is reachable but is not a routstrd
+ * daemon: a reverse proxy's dashboard, an SPA that answers every path with
+ * `index.html`, a captive portal. Without this check the body reaches
+ * `response.json()` and the CLI dies with the parser's own message
+ * ("JSON Parse error: Unrecognized token '<'"), which names neither the URL nor
+ * the cause. The message is a complete, actionable sentence because that is
+ * what the CLI prints.
+ */
+export class DaemonNotJsonError extends Error {
+  constructor(
+    readonly url: string,
+    readonly contentType: string,
+    /** The body, already truncated to {@link BODY_SNIFF_LENGTH}. */
+    readonly body: string,
+  ) {
+    super(describeNonJsonBody(url, contentType, body));
+    this.name = "DaemonNotJsonError";
+  }
+
+  /** True when the body is a web page rather than merely malformed JSON. */
+  get looksLikeHtml(): boolean {
+    return looksLikeHtml(this.contentType, this.body);
+  }
+}
+
+/**
+ * Word a non-JSON response as a diagnosis of the URL, not of the parser.
+ *
+ * Kept as a free function so the message can be asserted without constructing
+ * the error, and so the request path and the health probe share one wording.
+ */
+export function describeNonJsonBody(
+  url: string,
+  contentType: string,
+  body: string,
+): string {
+  const type = contentType.split(";")[0]?.trim() || "unknown content type";
+  if (looksLikeHtml(contentType, body)) {
+    return (
+      `${url} did not return JSON (content-type: ${type}). ` +
+      "This looks like a web page, not a routstrd daemon — check 'routstrd remote'."
+    );
+  }
+  return (
+    `${url} did not return JSON (content-type: ${type}). ` +
+    "Check that it points at a routstrd daemon — see 'routstrd remote'."
+  );
+}
+
+/**
+ * Parse a 2xx response body as the routstrd JSON envelope.
+ *
+ * Throws {@link DaemonNotJsonError} instead of the parser's `SyntaxError`, so a
+ * misconfigured URL is reported as such. An empty body is likewise not JSON: it
+ * means something other than routstrd answered the request.
+ */
+async function parseJsonBody(response: Response, url: string): Promise<CommandResponse> {
+  // Read as text first: `response.json()` would throw a SyntaxError with no
+  // URL in it, and the body is needed to tell an HTML page from malformed JSON.
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as CommandResponse;
+  } catch {
+    throw new DaemonNotJsonError(
+      url,
+      response.headers.get("content-type") ?? "",
+      text.slice(0, BODY_SNIFF_LENGTH),
+    );
+  }
+}
+
+/**
+ * Whether a body parses as a JSON object.
+ *
+ * routstrd's own answers are objects (`{"ok":true}`, `{"output":...}`,
+ * `{"error":...}`); anything else — an HTML page, an empty body, plain text —
+ * means something other than routstrd answered.
+ */
+export function isJsonBody(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return parsed !== null && typeof parsed === "object";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Upper bound for a single daemon request, including response-body
  * consumption. The daemon bounds its own NWC operations, so this only guards
  * against a wedged server; without it a hung request would block the CLI
@@ -124,7 +237,24 @@ export class DaemonHttpError extends Error {
 export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
 
 /**
- * Upper bound for value-moving wallet routes. A cashu melt/swap can
+ * Upper bound for the `/health` probe.
+ *
+ * The body is read now (to tell a daemon from a web page), which the probe used
+ * to skip entirely, so both the headers and the body need a bound — otherwise a
+ * host that sends headers and then stalls the body would hang every management
+ * command.
+ */
+export const DAEMON_HEALTH_TIMEOUT_MS = 10_000;
+
+/**
+ * Bound for a loopback `/health` probe.
+ *
+ * Shorter than the remote bound because this runs against a daemon on this
+ * machine: either it is listening or it is not, so there is nothing to wait for.
+ */
+export const LOCAL_DAEMON_HEALTH_TIMEOUT_MS = 2_000;
+
+/** Upper bound for value-moving wallet routes. A cashu melt/swap can
  * legitimately run longer than {@link DAEMON_REQUEST_TIMEOUT_MS} (the mint has
  * no request timeout in routstrd), so these get a more generous bound that
  * still prevents an indefinite CLI hang.
@@ -221,7 +351,9 @@ export async function callDaemonUrl(
         errorData.error || `HTTP ${response.status}`,
       );
     }
-    return (await response.json()) as CommandResponse;
+    // A 2xx body is JSON or the URL is not a routstrd daemon; parseJsonBody
+    // turns the parser's SyntaxError into a diagnosis naming the URL.
+    return await parseJsonBody(response, url);
   } catch (error) {
     if (signal.aborted) throw timeoutError();
     throw error;
@@ -307,48 +439,168 @@ export async function callAuth(
   return callRemoteDaemon(getAuthBaseUrl(config), path, options, config);
 }
 
-export async function isDaemonRunning(): Promise<boolean> {
-  try {
-    const config = await loadConfig();
+/**
+ * Outcome of the daemon reachability probe.
+ *
+ * `json-error` and `not-json` are deliberately distinct. A non-2xx status with
+ * a JSON body is a routstrd-shaped endpoint rejecting this caller — typically a
+ * fresh, unregistered npub behind an auth proxy — and is a configuration worth
+ * keeping. A body that is not JSON at all is a web page, which is not.
+ */
+export type HealthProbe =
+  | { kind: "ok"; url: string }
+  | { kind: "json-error"; url: string; status: number }
+  | { kind: "not-json"; url: string; status: number; contentType: string; body: string }
+  | { kind: "unreachable" };
 
-    if (config.daemonUrl) {
-      for (const baseUrl of baseUrlCandidates(config.daemonUrl)) {
-        const url = `${baseUrl}/health`;
-        let authorization: string | undefined;
-        if (config.nsec) {
-          const secretKey = parseSecretKey(config.nsec);
-          authorization = await createNIP98Authorization(secretKey, url, "GET");
-        }
+/**
+ * Paths probed to decide whether an origin is a routstrd daemon.
+ *
+ * `/health` is tried first because it is the cheapest and needs no auth, but it
+ * is not authoritative on its own: an ingress or load balancer commonly
+ * intercepts `/health` and answers it itself ("OK" as `text/plain`, a 200 HTML
+ * page, ...) while proxying everything else to the daemon. Gating only on
+ * `/health` would turn that proxy convention into a total outage for a daemon
+ * that is in fact fully working, so a non-JSON `/health` falls through to a real
+ * API route before the origin is declared not-a-daemon.
+ *
+ * Both fallbacks answer with a routstrd JSON envelope whether or not the caller
+ * is authenticated — `/version` is unauthenticated, and `/status` answers a JSON
+ * 401/403 rather than HTML when auth is required — so any of them distinguishes
+ * "a routstrd-shaped API" from "a web page".
+ */
+const PROBE_PATHS = ["/health", "/version", "/status"] as const;
+
+/**
+ * Probe an origin for a routstrd daemon.
+ *
+ * A 2xx alone is not proof: a reverse proxy's dashboard answers every path with
+ * its SPA, and accepting it makes `ensureDaemonRunning` hand the following
+ * command to a web page. The body therefore has to parse as JSON — but from any
+ * of {@link PROBE_PATHS}, not just `/health`, so an intercepted health check is
+ * not mistaken for a non-daemon.
+ *
+ * Candidate hosts are tried in order, but an HTTP answer — even an error — is
+ * authoritative and stops the walk: only a connection failure means the next
+ * loopback family is worth trying.
+ */
+async function probeHealth(config: RoutstrdConfig): Promise<HealthProbe> {
+  const remote = config.daemonUrl;
+  const candidates = remote
+    ? baseUrlCandidates(remote)
+    : localDaemonBaseUrls(config);
+
+  for (const baseUrl of candidates) {
+    let unreachable = true;
+    // The first path that answers anything at all decides the origin; a later
+    // path only runs when the previous one was not JSON, i.e. when the origin
+    // may still be a proxy that intercepts that particular path. The first
+    // non-JSON answer is the one reported, because it is the most
+    // representative (`/health`) and the reason the origin was rejected.
+    let firstNonJson: HealthProbe | undefined;
+
+    for (const path of PROBE_PATHS) {
+      const url = `${baseUrl}${path}`;
+      let authorization: string | undefined;
+      if (remote && config.nsec) {
         try {
-          const response = await fetch(url, {
-            headers: authorization ? { Authorization: authorization } : {},
-          });
-          return response.ok;
+          authorization = await createNIP98Authorization(
+            parseSecretKey(config.nsec),
+            url,
+            "GET",
+          );
         } catch {
-          // Try the next candidate host.
+          // An unusable nsec must not turn a reachable daemon into "not
+          // running"; these paths are unauthenticated unless a proxy in front
+          // demands NIP-98.
+          authorization = undefined;
         }
       }
-      return false;
-    }
 
-    // A wildcard bind may be listening on either loopback family.
-    for (const baseUrl of localDaemonBaseUrls(config)) {
+      // Every probe is bounded, local and remote. A remote daemon gets the
+      // longer bound because it may be genuinely slow; loopback only has to
+      // prove something is listening, so it keeps its original short deadline.
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const timeoutMs = remote
+        ? DAEMON_HEALTH_TIMEOUT_MS
+        : LOCAL_DAEMON_HEALTH_TIMEOUT_MS;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
       try {
-        const response = await fetch(`${baseUrl}/health`, {
+        const response = await fetch(url, {
+          headers: authorization ? { Authorization: authorization } : {},
           signal: controller.signal,
         });
-        return response.ok;
+        unreachable = false;
+
+        // Read once, for both the status check and the JSON check below.
+        const body = await response.text();
+        const contentType = response.headers.get("content-type") ?? "";
+
+        if (isJsonBody(body)) {
+          return response.ok
+            ? { kind: "ok", url }
+            : { kind: "json-error", url, status: response.status };
+        }
+
+        firstNonJson ??= {
+          kind: "not-json",
+          url,
+          status: response.status,
+          contentType,
+          body: body.slice(0, BODY_SNIFF_LENGTH),
+        };
       } catch {
-        // Try the next candidate host.
+        // Connection failure or timeout: this origin is not answering at all.
+        // Report the first path's failure rather than trying the rest — a host
+        // that does not answer `/health` will not answer `/version` either.
+        break;
       } finally {
         clearTimeout(timeoutId);
       }
     }
-    return false;
+
+    if (firstNonJson) return firstNonJson;
+    if (unreachable) continue; // try the next candidate host
+  }
+
+  return { kind: "unreachable" };
+}
+
+export async function isDaemonRunning(): Promise<boolean> {
+  try {
+    return (await probeHealth(await loadConfig())).kind === "ok";
   } catch {
     return false;
+  }
+}
+
+/**
+ * Explain why the configured URL is not a usable daemon.
+ *
+ * Returned instead of a bare "not reachable" so a URL that points at a
+ * dashboard, an SPA, or another web app is named as such — the failure mode
+ * that otherwise only shows up later as a JSON parse error from an unrelated
+ * command.
+ */
+export function describeHealthFailure(
+  probe: Exclude<HealthProbe, { kind: "ok" }>,
+  config: RoutstrdConfig,
+): string {
+  const target = config.daemonUrl ? normalizeBaseUrl(config.daemonUrl) : getDaemonBaseUrl(config);
+  switch (probe.kind) {
+    case "not-json":
+      return (
+        `Daemon is not reachable at ${target}. ` +
+        describeNonJsonBody(probe.url, probe.contentType, probe.body)
+      );
+    case "json-error":
+      return (
+        `Daemon at ${target} rejected the health probe (HTTP ${probe.status} from ${probe.url}). ` +
+        "It answered JSON, so it is probably a routstrd node or its auth proxy."
+      );
+    case "unreachable":
+      return `Daemon is not reachable at ${target}.`;
   }
 }
 
@@ -371,14 +623,52 @@ export async function startDaemonProcess(): Promise<void> {
   });
 }
 
-export async function ensureDaemonRunning(): Promise<void> {
-  if (await isDaemonRunning()) {
-    return;
-  }
+export type RemoteUrlCheck = { ok: true } | { ok: false; reason: string };
 
+/**
+ * Whether a probe result describes something routstrd-shaped.
+ *
+ * Shared by {@link checkRemoteUrl} and {@link ensureDaemonRunning} so the two
+ * cannot disagree about which URL is usable: `remote` would otherwise save a URL
+ * that the very next command rejects.
+ *
+ * A JSON error counts. It is a routstrd node (or its auth proxy) rejecting this
+ * particular caller — commonly a fresh, still unregistered npub, which resolves
+ * itself once the npub is registered — and the real request reports that far
+ * better than a reachability check can.
+ */
+function isUsableEndpoint(
+  probe: HealthProbe,
+): probe is Extract<HealthProbe, { kind: "ok" | "json-error" }> {
+  return probe.kind === "ok" || probe.kind === "json-error";
+}
+
+/**
+ * Decide whether a remote daemon URL is worth saving.
+ *
+ * Only a URL that answers like a web page, or not at all, blocks the write; see
+ * {@link isUsableEndpoint} for why a JSON error is allowed through.
+ */
+export async function checkRemoteUrl(
+  config: RoutstrdConfig,
+): Promise<RemoteUrlCheck> {
+  const probe = await probeHealth(config);
+  if (isUsableEndpoint(probe)) return { ok: true };
+  return { ok: false, reason: describeHealthFailure(probe, config) };
+}
+
+export async function ensureDaemonRunning(): Promise<void> {
   const config = await loadConfig();
   if (config.daemonUrl) {
-    throw new Error(`Daemon is not reachable at ${config.daemonUrl}`);
+    const probe = await probeHealth(config);
+    if (isUsableEndpoint(probe)) return;
+    // Local mode auto-starts a daemon, but a remote URL cannot be started from
+    // here, so report why the configured one is unusable instead.
+    throw new Error(describeHealthFailure(probe, config));
+  }
+
+  if (await isDaemonRunning()) {
+    return;
   }
 
   console.log("Starting daemon...");
