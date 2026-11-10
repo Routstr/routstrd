@@ -372,11 +372,17 @@ from the legacy admin table can appear as `(unnamed)`.
 
 | Command | Description |
 |---------|-------------|
+| `routstrd npubs whoami` | Print your own npub from the local config; works with no remote node and needs no auth proxy |
 | `routstrd npubs list` | List registered npubs with role, display name, monthly cap and current-month spend |
 | `routstrd npubs register --name <name>` | Register yourself as the first admin (bootstrap only); `--name` is required |
 | `routstrd npubs add <npub> --name <name> [--role <role>] [--limit-sats <sats>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
 | `routstrd npubs update <npub> [--role <role>] [--name <name>] [--limit-sats <sats>] [--clear-limit]` | Update role, name and/or monthly spend cap (admin only); a name cannot be cleared |
 | `routstrd npubs delete <npub>` | Delete an npub |
+
+Every other `npubs` subcommand needs a remote node, because the npub list lives
+on the auth proxy. Without one they exit 1 and print your own npub so you can
+hand it to an admin rather than go looking for the key. A bare `routstrd npubs`
+prints the same line above its usage block.
 
 `--limit-sats` sets a **soft** calendar-month spend cap for the npub, enforced
 by the auth proxy. `--limit-sats 0` blocks every paid request and
@@ -423,6 +429,10 @@ when the proxy reports a cap for your npub.
 
 With no URL, print the configured remote daemon. Pass a URL to configure one — a
 Nostr identity (nsec/npub) is generated automatically for NIP-98 authentication.
+
+When no remote node is configured, the command reports your own npub along with
+the setup hint, so the identity you would register is visible before there is
+anywhere to register it.
 
 | Option | Description |
 |--------|-------------|
