@@ -4,7 +4,6 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { generateSecretKey, nip19 } from "nostr-tools";
 import { npubFromSecretKey } from "./utils/nip98";
-import { VERSION } from "./version";
 import {
   collectRecentRequestsFromLines,
   formatAutoModelPathStatus,
@@ -728,17 +727,8 @@ describe("npub shown without a remote node", () => {
     expect(result.stderr).toContain("Pass a URL to set one up");
   });
 
-  test("`--version` keeps stdout bare and reports the npub on stderr", async () => {
-    const result = await runWithConfig(["--version"], { nsec });
-    expect(result.exitCode).toBe(0);
-    // install.sh, the release workflow and the self-updater compare stdout
-    // verbatim, so the npub must never land there.
-    expect(result.stdout.trim()).toBe(VERSION);
-    expect(result.stderr).toContain(`Your npub: ${expectedNpub}`);
-  });
-
   test("omits the line entirely when no identity is configured", async () => {
-    for (const args of [["npubs", "whoami"], ["npubs"], ["remote"], ["--version"]]) {
+    for (const args of [["npubs", "whoami"], ["npubs"], ["remote"]]) {
       const result = await runWithConfig(args, { port: 8008 });
       expect(result.stdout).not.toContain("Your npub");
       expect(result.stderr).not.toContain("Your npub");

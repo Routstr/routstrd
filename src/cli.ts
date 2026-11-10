@@ -78,7 +78,7 @@ import {
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { parseRequiredNpubName, parseUpdatedNpubName } from "./utils/npub-name";
-import { formatOwnNpub, formatOwnNpubSync } from "./utils/own-npub";
+import { formatOwnNpub } from "./utils/own-npub";
 import {
   HISTORY_ENTRY_TYPES,
   historyStatus,
@@ -778,13 +778,6 @@ async function initDaemon(integrationKey?: IntegrationKey): Promise<void> {
 program
   .name("routstrd")
   .description("Routstr daemon - Manage routstr processes")
-  // Still answer "which npub am I?" when the command is just a version probe.
-  // The npub goes to stderr so stdout stays the bare version string that
-  // install.sh, the release workflow and the self-updater compare verbatim.
-  .on("option:version", () => {
-    const npubLine = formatOwnNpubSync();
-    if (npubLine) console.error(npubLine);
-  })
   .version(VERSION, "--version", "output the version number");
 
 program
