@@ -794,14 +794,26 @@ describe("remote URL that is not a daemon", () => {
     });
   });
 
-  test("`remote --force` saves it with a warning", async () => {
+  test("`remote --force` saves it without probing", async () => {
     await withServer(SPA, "text/html", 200, async (origin) => {
       const result = await runCli(["remote", origin, "--force"], { updateCheck: false });
 
       expect(result.exitCode).toBe(0);
-      expect(result.stderr).toContain("Warning:");
+      expect(result.stderr).toContain("Skipping the reachability probe");
       expect(JSON.parse(readFileSync(result.configPath, "utf-8")).daemonUrl).toBe(origin);
     });
+  });
+
+  test("`remote --force` does not wait on an unreachable host", async () => {
+    // The flag exists for a host that cannot be reached from here, so probing
+    // would only burn the full timeout before saving.
+    const started = Date.now();
+    const result = await runCli(["remote", "http://10.255.255.1:9", "--force"], {
+      updateCheck: false,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   test("`remote` still accepts a routstrd /health", async () => {

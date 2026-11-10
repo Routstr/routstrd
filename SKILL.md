@@ -449,13 +449,16 @@ anywhere to register it.
 | Option | Description |
 |--------|-------------|
 | `--auth-url <authUrl>` | URL of the auth proxy used by management commands (`npubs`, `clients`, `usage`) |
-| `--force` | Save the URL even if the probe does not recognize a routstrd daemon |
+| `--force` | Skip the probe and save the URL regardless |
 
 ```sh
 routstrd remote                                  # show current remote
 routstrd remote https://your-remote-daemon.com   # configure one
-routstrd remote https://behind-a-vpn.internal --force   # save despite a failed probe
+routstrd remote https://behind-a-vpn.internal --force   # skip the probe
 ```
+
+`--force` skips the probe entirely rather than ignoring its result, so an
+unreachable host is saved immediately instead of after the probe timeout.
 
 ### `routstrd local`
 

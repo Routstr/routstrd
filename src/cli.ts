@@ -1007,17 +1007,22 @@ program
     // daemon and fail every later command with a JSON parse error from deep
     // inside an integration. Refusing here keeps the diagnosis at the command
     // that caused it.
-    const check = await checkRemoteUrl({ ...config, ...updates });
-    if (!check.ok) {
-      if (!options.force) {
+    //
+    // `--force` skips the probe entirely rather than running it and ignoring
+    // the result: the flag exists for a host that cannot be reached from here
+    // (behind a VPN, not yet deployed), where the probe could only burn its
+    // full timeout before saving anyway.
+    if (!options.force) {
+      const check = await checkRemoteUrl({ ...config, ...updates });
+      if (!check.ok) {
         console.error(`Refusing to set the remote daemon: ${check.reason}`);
         console.error("");
         console.error("  Pass --force to save it anyway (e.g. behind a proxy that");
         console.error("  is not reachable from this machine yet).");
         process.exit(1);
       }
-      console.error(`Warning: ${check.reason}`);
-      console.error("Saving it anyway because --force was passed.");
+    } else {
+      console.error("Skipping the reachability probe because --force was passed.");
     }
 
     let generatedNpub: string | undefined;
