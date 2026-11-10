@@ -430,6 +430,18 @@ when the proxy reports a cap for your npub.
 With no URL, print the configured remote daemon. Pass a URL to configure one — a
 Nostr identity (nsec/npub) is generated automatically for NIP-98 authentication.
 
+Before saving, the URL is probed for a routstrd-shaped answer. A URL that only
+serves a web page — a reverse proxy's dashboard, an SPA that returns
+`index.html` for every path, a captive portal — is refused, because such a URL
+would otherwise make every later command die with a JSON parse error from deep
+inside an unrelated operation. The probe tries `/health`, then `/version` and
+`/status`, so an ingress that intercepts `/health` itself (answering `OK` as
+text, a common convention) does not make a working daemon look broken.
+
+An HTTP error carrying a JSON body is accepted: that is a routstrd node or its
+auth proxy rejecting this particular key, which is normal for a freshly
+generated, still unregistered npub.
+
 When no remote node is configured, the command reports your own npub along with
 the setup hint, so the identity you would register is visible before there is
 anywhere to register it.
@@ -437,10 +449,12 @@ anywhere to register it.
 | Option | Description |
 |--------|-------------|
 | `--auth-url <authUrl>` | URL of the auth proxy used by management commands (`npubs`, `clients`, `usage`) |
+| `--force` | Save the URL even if the probe does not recognize a routstrd daemon |
 
 ```sh
 routstrd remote                                  # show current remote
 routstrd remote https://your-remote-daemon.com   # configure one
+routstrd remote https://behind-a-vpn.internal --force   # save despite a failed probe
 ```
 
 ### `routstrd local`
