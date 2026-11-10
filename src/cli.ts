@@ -78,6 +78,7 @@ import {
 import * as QRCode from "qrcode";
 import { normalizeNostrPubkey, npubFromPubkey, npubFromSecretKey } from "./utils/nip98";
 import { parseRequiredNpubName, parseUpdatedNpubName } from "./utils/npub-name";
+import { formatOwnNpub } from "./utils/own-npub";
 import {
   HISTORY_ENTRY_TYPES,
   historyStatus,
@@ -962,6 +963,8 @@ program
         return;
       }
       console.error("No remote node is set up.");
+      const npubLine = formatOwnNpub(config);
+      if (npubLine) console.error(npubLine);
       console.error(
         "Pass a URL to set one up, e.g. 'routstrd remote https://<host>:<port>'.",
       );
@@ -2148,10 +2151,17 @@ clientsCmd
 const npubsCmd = program
   .command("npubs")
   .description("Manage npubs on the daemon (admin or user roles)")
-  .hook("preAction", async () => {
+  .hook("preAction", async (_thisCommand, actionCommand) => {
+    // Both the bare command and `whoami` answer from the local config, so they
+    // must work without a node.
+    if (actionCommand === npubsCmd || actionCommand?.name() === "whoami") {
+      return;
+    }
     const config = await loadConfig();
     if (!config.daemonUrl && !config.authUrl) {
       console.error("npubs needs a remote node. Run 'routstrd remote <url>' to set one up.");
+      const npubLine = formatOwnNpub(config);
+      if (npubLine) console.error(npubLine);
       process.exit(1);
     }
   });
@@ -2289,6 +2299,32 @@ function warnIfMonthlyLimitUnconfirmed(
     `Warning: the auth proxy reported ${describeMonthlyLimit(reported)} as the monthly limit, but ${describeMonthlyLimit(requested)} was requested. Check the auth proxy version before relying on this cap.`,
   );
 }
+
+npubsCmd
+  .command("whoami")
+  .description("Print your own npub from the local config (works without a remote node)")
+  .action(async () => {
+    const config = await loadConfig();
+    const npubLine = formatOwnNpub(config);
+    if (!npubLine) {
+      console.error(
+        "No Nostr identity configured. Run 'routstrd onboard' (local) or 'routstrd remote <url>' to create one.",
+      );
+      process.exit(1);
+    }
+    console.log(npubLine);
+  });
+
+// A bare `routstrd npubs` is a help request, but it is also the moment an
+// operator most wants their own npub — so print it above the usage block
+// instead of only listing subcommands. Both go to stderr, matching where
+// commander writes help for a command that needs a subcommand.
+npubsCmd.action(async () => {
+  const config = await loadConfig();
+  const npubLine = formatOwnNpub(config);
+  if (npubLine) console.error(npubLine);
+  npubsCmd.help({ error: true });
+});
 
 npubsCmd
   .command("list")

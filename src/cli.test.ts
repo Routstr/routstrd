@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { generateSecretKey, nip19 } from "nostr-tools";
+import { npubFromSecretKey } from "./utils/nip98";
 import {
   collectRecentRequestsFromLines,
   formatAutoModelPathStatus,
@@ -663,5 +665,73 @@ describe("npubs list monthly limits", () => {
     expect(result.stdout).toContain(
       "npub-legacy [admin] (unnamed) — limit: unknown (auth proxy does not report spend limits)",
     );
+  });
+});
+
+/**
+ * The npub is the one useful answer when a command has no node to talk to, so
+ * these cases spawn the CLI with a config that has an identity but no
+ * `daemonUrl`, exactly like a fresh local install.
+ */
+describe("npub shown without a remote node", () => {
+  const secret = generateSecretKey();
+  const nsec = nip19.nsecEncode(secret);
+  const expectedNpub = npubFromSecretKey(secret);
+
+  /** Run a command against a config dir holding `config.json` contents. */
+  async function runWithConfig(
+    args: string[],
+    config: Record<string, unknown>,
+  ) {
+    const dir = makeTempDir();
+    writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), ...args], {
+      env: { ...process.env, ROUTSTRD_DIR: dir },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  test("`npubs whoami` prints the npub and exits 0 with no remote node", async () => {
+    const result = await runWithConfig(["npubs", "whoami"], { nsec });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(`Your npub: ${expectedNpub}`);
+  });
+
+  test("a bare `npubs` prints the npub above the usage block", async () => {
+    const result = await runWithConfig(["npubs"], { nsec });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`Your npub: ${expectedNpub}`);
+    expect(result.stderr).toContain("Usage: routstrd npubs");
+  });
+
+  test("`npubs list` still refuses without a node, but names the npub to add", async () => {
+    const result = await runWithConfig(["npubs", "list"], { nsec });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("npubs needs a remote node");
+    expect(result.stderr).toContain(`Your npub: ${expectedNpub}`);
+  });
+
+  test("`remote` with no URL prints the npub alongside the setup hint", async () => {
+    const result = await runWithConfig(["remote"], { nsec });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("No remote node is set up.");
+    expect(result.stderr).toContain(`Your npub: ${expectedNpub}`);
+    expect(result.stderr).toContain("Pass a URL to set one up");
+  });
+
+  test("omits the line entirely when no identity is configured", async () => {
+    for (const args of [["npubs", "whoami"], ["npubs"], ["remote"]]) {
+      const result = await runWithConfig(args, { port: 8008 });
+      expect(result.stdout).not.toContain("Your npub");
+      expect(result.stderr).not.toContain("Your npub");
+    }
   });
 });
