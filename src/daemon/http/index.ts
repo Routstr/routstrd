@@ -2716,6 +2716,7 @@ export function createDaemonRequestHandler(deps: {
               ? { allowInsecureTransport: true }
               : {}),
             prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
+            http2: confidentialHttp2Options(confidentialConfig.http2),
           }
         : undefined;
 
@@ -2971,6 +2972,49 @@ const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   "response_verification",
   "timeout",
 ]);
+
+/**
+ * routstrd's `confidentialUpstream.http2` block → the SDK's `http2` options
+ * (`http: 2` sessions: reused HTTP/2 connections). On by default; the SDK
+ * uses it only with nodes whose signed offer lists it.
+ */
+export function confidentialHttp2Options(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["http2"]
+): {
+  enabled: boolean;
+  reuse?: "credential" | "model" | "none";
+  maxConnectionsPerKey?: number;
+  maxConnections?: number;
+  maxIdleMs?: number;
+  maxRequestsPerConnection?: number;
+  log: (message: string) => void;
+  onRequest: (stats: object) => void;
+} {
+  // Only a literal `false` switches it off (as for `prewarm.enabled`).
+  if (cfg?.enabled === false) {
+    return { enabled: false, log: () => {}, onRequest: () => {} };
+  }
+  const count = (v: unknown) =>
+    typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : undefined;
+  const seconds =
+    typeof cfg?.maxIdleSeconds === "number" && Number.isFinite(cfg.maxIdleSeconds) && cfg.maxIdleSeconds > 0
+      ? cfg.maxIdleSeconds
+      : undefined;
+  const reuse = cfg?.reuse;
+  return {
+    enabled: true,
+    // An unknown value keeps the default scope rather than widening it.
+    reuse: reuse === "credential" || reuse === "model" || reuse === "none" ? reuse : undefined,
+    maxConnectionsPerKey: count(cfg?.maxConnections),
+    maxConnections: count(cfg?.maxTotal),
+    maxIdleMs: seconds !== undefined ? Math.max(seconds, 1) * 1000 : undefined,
+    maxRequestsPerConnection: count(cfg?.maxRequestsPerConnection),
+    log: (message: string) => logger.log(message),
+    // Where each request ran and what it cost on the wire (no content, no credentials).
+    onRequest: (stats: object) =>
+      logger.log(`[confidential http2] request ${JSON.stringify(stats)}`),
+  };
+}
 
 /**
  * routstrd's `confidentialUpstream.prewarm` block → the SDK's pre-warm

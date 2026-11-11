@@ -115,6 +115,32 @@ export interface RoutstrdConfig {
        */
       fundsHeadroom?: number;
     };
+    /**
+     * `http: 2` sessions (protocol v3, option A): with a node whose signed
+     * offer lists them, chat requests run on HTTP/2 connections to the
+     * provider that are kept open and reused, one two-party handshake per
+     * connection instead of one per request. On by default; other nodes,
+     * image requests and `xcashu` mode use the v2 flow (and `prewarm`).
+     */
+    http2?: {
+      /** Default true. `false` keeps every request on the v2 flow. */
+      enabled?: boolean;
+      /**
+       * Which requests may share a connection, and so be linked to each
+       * other by the provider and the node: `credential` (default: all
+       * requests to one node with one credential), `model` (only requests
+       * for the same model), `none` (a connection per request).
+       */
+      reuse?: "credential" | "model" | "none";
+      /** Open connections per node and credential (default 4): overlapping requests served without waiting. */
+      maxConnections?: number;
+      /** Open connections in total (default 8). */
+      maxTotal?: number;
+      /** Close a connection idle this long (default: 20 s before the node's own limit, 300 s). */
+      maxIdleSeconds?: number;
+      /** Close a connection after this many requests (default: the node's limit, 100). */
+      maxRequestsPerConnection?: number;
+    };
   };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {

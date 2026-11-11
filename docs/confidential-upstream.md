@@ -101,6 +101,82 @@ bun run build
 bun link
 ```
 
+## HTTP/2 connections (`http2`)
+
+Prototype (protocol v3, option A). A node whose signed offer lists
+`"http": ["1.1", "2"]` lets routstrd keep an HTTP/2 connection to the provider
+open through it: one two-party handshake per connection instead of one per
+request. The first confidential chat request to such a node opens a
+connection, which costs what a cold request costs (the ~22 MB of two-party
+preprocessing); it then stays open, and every later request on it skips the
+handshake. Requests on one connection run one at a time, so a request that
+arrives while every connection is busy opens another, up to `maxConnections`.
+Nothing is opened ahead of traffic.
+
+It is on by default and used only with nodes that offer it. Other nodes,
+image requests and `xcashu` mode use the flow above (and `prewarm`).
+
+```json
+{
+  "confidentialUpstream": {
+    "enabled": true,
+    "http2": {
+      "enabled": true,
+      "reuse": "credential",
+      "maxConnections": 4,
+      "maxTotal": 8,
+      "maxIdleSeconds": 280,
+      "maxRequestsPerConnection": 100
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` keeps every request on the v2 flow (one session per request, pre-warmed if `prewarm` is on) |
+| `reuse` | `credential` | which requests may share a connection: `credential` (all requests to one node with your credential there), `model` (only requests for the same model), `none` (a new connection per request) |
+| `maxConnections` | 4 | open connections per node and credential: the number of overlapping requests served without waiting for a free connection |
+| `maxTotal` | 8 | open connections in total |
+| `maxIdleSeconds` | 20 s less than the node's limit (300 s) | close a connection that has been idle this long |
+| `maxRequestsPerConnection` | the node's limit (100) | close a connection after this many requests |
+
+**Linkability.** Requests that share a connection share one TLS connection to
+the provider, so the provider can tell they come from the same client. It
+still sees the node's API key, not yours; without `http2`, each request is a
+separate connection the provider cannot tell apart from other clients of the
+node. The node sees your credential on every request in both modes. Use
+`"reuse": "model"`, a low `maxRequestsPerConnection` or `maxIdleSeconds` to
+link less, or `"enabled": false` for none.
+
+**Failures.** A connection is closed after any error or non-2xx answer, when
+idle, and at the node's limits; the next request opens a new one. If a kept
+connection turns out to be dead when a request arrives, the request runs on a
+new connection, as long as nothing of it was released towards the provider.
+After that point a request is never repeated, on any connection or node.
+
+**Funds.** An idle connection holds no reservation: the node reserves per
+request, as for a request without `http2`. The pre-warm top-up rule (below)
+does not apply to these requests.
+
+Measured through routstrd on loopback (local node, real provider, a 20-token
+answer; no bandwidth limit): the first request, which opens the connection,
+reached the first token in 1.6 s and moved 23.7 MB to the daemon and 2.7 MB to
+the node; the next four took 0.5-0.7 s and moved 0.5-1.0 MB and 85 kB each.
+With `"enabled": false` the same requests took 1.7 s cold and 0.9-1.0 s
+pre-warmed, and every one moved the full 23.7 MB / 2.7 MB (in the background
+when pre-warmed). On a real link the difference is the download.
+
+It needs the SDK's `confidential-v3` branch (see Enable for linking a local
+SDK build) and a node on routstr-core `confidential-v3` with a sidecar whose
+offer has an `h2` block.
+
+Responses carry `x-routstr-confidential-http: 2` and
+`x-routstr-confidential-connection: new|reused; request=<n>`. The daemon log
+has one line per connection event and per request (`[confidential http2]`:
+the connection, whether it was reused, time to the first token, bytes to and
+from the node), without content or credentials.
+
 ## Pre-warming
 
 Most of a cold request is the two-party
