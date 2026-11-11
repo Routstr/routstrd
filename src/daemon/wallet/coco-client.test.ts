@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { gunzipSync } from "bun";
+import { describeRecoveryState } from "./wallet-client";
 import {
   existsSync,
   mkdtempSync,
@@ -1735,5 +1736,74 @@ describe("createRecoveryGate", () => {
     expect(await settled(waiting)).toBe(false);
     gate.complete();
     await waiting;
+  });
+
+  // The gate is a union now, so these transitions must be *idempotent* and
+  // order-independent instead of relying on flag assignment order. Each case
+  // below used to be reachable only by reasoning about three separate fields.
+  it("ignores a late stuck-mint publication after completion", async () => {
+    const gate = createRecoveryGate();
+    gate.complete();
+    // A sweep that reports enumeration after the gate closed must not reopen it
+    // and strand callers that already returned.
+    gate.publishStuckMints(new Set([STUCK]));
+    await gate.waitForRecovery(STUCK);
+  });
+
+  it("stays failed when complete() is called afterwards", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    gate.fail("disk exploded");
+    // A shutdown path calling complete() must not clear the failure.
+    gate.complete();
+    await expect(gate.waitForRecovery(HEALTHY)).rejects.toThrow(
+      "Wallet is not ready: disk exploded",
+    );
+  });
+
+  it("keeps the first published stuck set when called twice", async () => {
+    const gate = createRecoveryGate();
+    gate.publishStuckMints(new Set([STUCK]));
+    // The second publisher must not replace the set the first decision used.
+    gate.publishStuckMints(new Set([HEALTHY]));
+    await gate.waitForRecovery(HEALTHY);
+  });
+});
+
+/**
+ * The recovery lifecycle used to be three independent fields (`recoveryDone`,
+ * `recoveryError`, a free-form `recoveryPhase`) that readers had to combine in
+ * the right order. It is now one union, projected onto the wire shape by
+ * `describeRecoveryState`. These pin the projection: `state` and `phase` are
+ * always consistent, and a failed recovery never reports a live phase.
+ */
+describe("describeRecoveryState", () => {
+  it("reports a queued recovery as RECOVERING at the queued phase", () => {
+    expect(describeRecoveryState({ status: "queued" })).toEqual({
+      state: "RECOVERING",
+      phase: "queued",
+    });
+  });
+
+  it("reports the stage currently running", () => {
+    expect(
+      describeRecoveryState({ status: "running", phase: "Mint recovery" }),
+    ).toEqual({ state: "RECOVERING", phase: "Mint recovery" });
+  });
+
+  it("reports a completed recovery as UNLOCKED at the done phase", () => {
+    expect(describeRecoveryState({ status: "recovered", phase: "done" })).toEqual({
+      state: "UNLOCKED",
+      phase: "done",
+    });
+  });
+
+  it("reports a failed recovery as ERROR with no live phase", () => {
+    // Previously this was `done = true` plus an error string, so a reader that
+    // checked `done` first saw a healthy wallet.
+    expect(describeRecoveryState({ status: "failed", error: "disk exploded" })).toEqual({
+      state: "ERROR",
+      phase: null,
+    });
   });
 });

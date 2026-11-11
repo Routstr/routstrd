@@ -20,17 +20,80 @@ export type WalletRuntimeState =
   | "RECOVERING"
   | "ERROR";
 
+/**
+ * Every stage background wallet recovery can report.
+ *
+ * Declared as a union so the set is discoverable from the type instead of from
+ * eight scattered `onProgress({ phase: "..." })` string literals. `done` is the
+ * terminal success stage; failure is reported through
+ * {@link WalletRecoveryProgress.state}, never as a phase value.
+ */
+export type WalletRecoveryPhase =
+  | "queued"
+  | "Probing mints"
+  | "Settling expired mint quotes"
+  | "Settled expired mint quotes"
+  | "Send recovery"
+  | "Melt recovery"
+  | "Receive recovery"
+  | "Mint recovery"
+  | "done";
+
+/**
+ * Lifecycle of the startup recovery pass.
+ *
+ * This used to be three independent fields — a `recoveryDone` boolean, an
+ * optional `recoveryError` string, and a free-form `recoveryPhase` — that
+ * together stood for one lifecycle. `done: false, error: "..."` and
+ * `done: true, phase: "error"` were both representable and meant the same
+ * thing; readers had to know which field to test first. As a union, the state is
+ * exhaustive: recovery is queued, running a named phase, finished, or failed
+ * with a message.
+ */
+export type WalletRecoveryState =
+  | { status: "queued" }
+  | { status: "running"; phase: WalletRecoveryPhase }
+  | { status: "recovered"; phase: "done" }
+  | { status: "failed"; error: string };
+
 /** Live progress for background wallet recovery started at daemon startup. */
 export interface WalletRecoveryProgress {
   state: "RECOVERING" | "UNLOCKED" | "ERROR";
-  /** Current recovery phase, e.g. "Mint recovery" or "done". */
-  phase: string;
+  /**
+   * Current recovery stage, or `null` when recovery failed (the failure is
+   * carried by `error`, and no stage was in progress).
+   */
+  phase: WalletRecoveryPhase | null;
   pendingSends: number;
   inflightProofs: number;
   pendingMints: number;
   /** Expired unpaid mint quotes failed locally without a mint round-trip. */
   failedMintQuotes: number;
   error?: string;
+}
+
+/**
+ * Project the recovery lifecycle onto the wire fields the CLI/TUI read.
+ *
+ * Kept next to the state so the two rulers (`state` and `phase`) are derived
+ * from the same value in one place: a reader cannot see "UNLOCKED" alongside a
+ * mid-flight phase, because both come out of this one switch.
+ */
+export function describeRecoveryState(state: WalletRecoveryState): {
+  state: WalletRecoveryProgress["state"];
+  phase: WalletRecoveryProgress["phase"];
+} {
+  switch (state.status) {
+    case "queued":
+      return { state: "RECOVERING", phase: "queued" };
+    case "running":
+      return { state: "RECOVERING", phase: state.phase };
+    case "recovered":
+      return { state: "UNLOCKED", phase: "done" };
+    case "failed":
+      // No stage is "current" after a failure; `error` carries the reason.
+      return { state: "ERROR", phase: null };
+  }
 }
 
 /** NPC (npubx.cash) Lightning address details for this wallet. */
