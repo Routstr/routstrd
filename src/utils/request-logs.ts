@@ -178,9 +178,23 @@ export function requestLogsQuery(options: RequestLogFilters): string {
   return `/requests?${query}`;
 }
 
+/** A request stays mutable while its lifecycle outcome is `in_progress`. Follow
+ * must keep reading it even after newer requests push it out of the list window. */
+function requestInFlight(trace: LifecycleTrace): boolean {
+  return trace.request.outcome === "in_progress";
+}
+
+/** Upper bound on requests followed past the list window. Each one costs a
+ * detail request per poll, so a leaked `in_progress` row cannot grow the load
+ * without limit; the oldest are dropped first because a stuck row is the most
+ * likely reason a slot is never freed. */
+export const MAX_TRACKED_IN_FLIGHT = 100;
+
 export async function loadRequestTraces(
   options: RequestLogFilters,
   call: (path: string) => Promise<unknown>,
+  /** Ids to read individually when the list window no longer covers them. */
+  carryOver: readonly string[] = [],
 ): Promise<LifecycleTrace[]> {
   const read = async (path: string): Promise<unknown> => {
     const result = await call(path) as { output?: unknown; error?: string; request?: unknown };
@@ -200,22 +214,54 @@ export async function loadRequestTraces(
     const trace = await read(`/requests/${encodeURIComponent(request.requestId)}`);
     if (trace) traces.push(trace as LifecycleTrace);
   }
+  // The list is only ever the newest `limit` requests, so a request that was in
+  // flight when newer ones arrived would otherwise never report its final state.
+  const listed = new Set(traces.map(trace => trace.request.requestId));
+  for (const requestId of carryOver) {
+    if (listed.has(requestId)) continue;
+    const trace = await read(`/requests/${encodeURIComponent(requestId)}`);
+    if (trace) traces.push(trace as LifecycleTrace);
+  }
   return traces.sort((a, b) => b.request.startedAt - a.request.startedAt || b.request.requestId.localeCompare(a.request.requestId));
 }
 
 /** Follow emits a replacement summary when a request changes, without duplicating
- * unchanged traces. It also catches late diagnostics on the verbose path. */
+ * unchanged traces. It also catches late diagnostics on the verbose path.
+ *
+ * A stream cannot rewrite an already-printed line, so a state transition is
+ * appended where it happened rather than where the request started. Rendered
+ * updates carry an `(updated)` marker: without it a completed request reads as a
+ * second, newer request sharing an older timestamp. */
 export class RequestLogFollower {
   private seen = new Map<string, string>();
+  /** Requests not yet terminal, so follow keeps reading them past the list window. */
+  private inFlight = new Set<string>();
   changed(traces: LifecycleTrace[], verbose: boolean, logs: RequestDiagnostics = []): string[] {
     const output: string[] = [];
     for (const trace of traces) {
+      const requestId = trace.request.requestId;
       const rendered = verbose ? formatRequestVerbose(trace, logs) : formatRequestSummary(trace);
-      if (this.seen.get(trace.request.requestId) !== rendered) output.push(rendered);
-      this.seen.set(trace.request.requestId, rendered);
+      const previous = this.seen.get(requestId);
+      if (previous !== rendered) output.push(previous === undefined ? rendered : markUpdated(rendered));
+      this.seen.set(requestId, rendered);
+      if (requestInFlight(trace)) this.inFlight.add(requestId);
+      else this.inFlight.delete(requestId);
     }
     // Bound state during long-running follow sessions.
     while (this.seen.size > 10000) this.seen.delete(this.seen.keys().next().value!);
+    while (this.inFlight.size > MAX_TRACKED_IN_FLIGHT) this.inFlight.delete(this.inFlight.values().next().value!);
     return output;
   }
+  /** Ids of requests still in flight, to be carried past the newest-N window. */
+  awaiting(): string[] {
+    return [...this.inFlight];
+  }
+}
+
+/** Flag a re-render on its first line so an appended transition is not read as a
+ * duplicate of the earlier line it supersedes. Initial renders stay unchanged. */
+function markUpdated(rendered: string): string {
+  const newline = rendered.indexOf("\n");
+  const head = newline === -1 ? rendered : rendered.slice(0, newline);
+  return newline === -1 ? `${head}  (updated)` : `${head}  (updated)${rendered.slice(newline)}`;
 }
