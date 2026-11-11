@@ -113,8 +113,14 @@ handshake. Requests on one connection run one at a time, so a request that
 arrives while every connection is busy opens another, up to `maxConnections`.
 Nothing is opened ahead of traffic.
 
-It is on by default and used only with nodes that offer it. Other nodes,
-image requests and `xcashu` mode use the flow above (and `prewarm`).
+It is on by default and used only with nodes that offer it. An image request
+(`POST /v1/images/generations` with the opt-in header) runs on such a
+connection too when the node's offer serves images there (`h2.kinds` lists
+`images`): it is one more request on a connection a chat request may have
+opened, so it skips the handshake as well (measured on loopback: a 150 kB
+image in 4.1 s, 0.69 MB to the daemon and 38 kB to the node, against the
+~24 MB and 2.6 MB of an image session of its own). Other nodes and `xcashu`
+mode use the flow above (and `prewarm`).
 
 ```json
 {
