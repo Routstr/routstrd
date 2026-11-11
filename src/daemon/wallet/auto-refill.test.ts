@@ -1,4 +1,4 @@
-import { describe, expect, it, test } from "bun:test";
+import { describe, expect, it, spyOn, test } from "bun:test";
 import type { WalletConnect } from "applesauce-wallet-connect";
 import { startAutoRefillLoop, type AutoRefillConfig } from "./auto-refill";
 import type { MintQuoteStatus, WalletClient } from "./wallet-client";
@@ -168,6 +168,59 @@ describe("auto-refill fatal payment errors", () => {
     stop();
     expect(payCalls).toBe(1);
     expect(receiveCalls).toBe(1);
+  });
+
+  test("a fatal cool-down is not extended by the scheduled cooldown", async () => {
+    // Regression: the fatal cool-down used to be written as a *future* value
+    // into the same field the scheduled cooldown measured from, so a fatal
+    // error blocked for FATAL_COOLDOWN_MS + cooldownMs (15 min by default)
+    // while the log promised only FATAL_COOLDOWN_MS. The two gates are now
+    // independent, so the fatal deadline alone decides. This drives a fake
+    // clock across the boundary to measure the window rather than infer it.
+    const FATAL_MS = 10 * 60 * 1000;
+    const startedAt = 1_000_000_000_000;
+    let clock = startedAt;
+    const nowSpy = spyOn(Date, "now").mockImplementation(() => clock);
+
+    let payCalls = 0;
+    const client = {
+      getBalances: async () => ({ [MINT]: 1_000 }),
+      getDefaultMint: async () => MINT,
+      receiveBolt11: async (amount: number) => ({ invoice: `lnbc${amount}` }),
+    } as unknown as WalletClient;
+
+    const stop = startAutoRefillLoop(
+      client,
+      () => connectedWallet,
+      // A long scheduled cooldown would have stacked on top of the fatal one.
+      () => ({ threshold: 40_000, amount: 50_000, cooldownMs: 60 * 60 * 1000 }),
+      5,
+      async () => {
+        payCalls++;
+        throw new Error("Unexpected response type: error");
+      },
+      async () => 60_000,
+    );
+
+    try {
+      await sleep(40);
+      expect(payCalls).toBe(1); // the fatal cool-down is now armed
+
+      // One millisecond before the fatal window ends: still blocked. Under the
+      // old combined field this point was 5 minutes away from reopening.
+      clock = startedAt + FATAL_MS - 1;
+      await sleep(40);
+      expect(payCalls).toBe(1);
+
+      // Past the fatal window: the loop retries, proving it is not waiting for
+      // the extra hour the scheduled cooldown would have added.
+      clock = startedAt + FATAL_MS + 1;
+      await sleep(40);
+      expect(payCalls).toBe(2);
+    } finally {
+      stop();
+      nowSpy.mockRestore();
+    }
   });
 });
 
