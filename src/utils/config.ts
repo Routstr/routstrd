@@ -119,8 +119,9 @@ export interface RoutstrdConfig {
      * `http: 2` sessions (protocol v3, option A): with a node whose signed
      * offer lists them, chat requests run on HTTP/2 connections to the
      * provider that are kept open and reused, one two-party handshake per
-     * connection instead of one per request. On by default; other nodes,
-     * image requests and `xcashu` mode use the v2 flow (and `prewarm`).
+     * connection instead of one per request. On by default; image requests
+     * use such a connection too when the node's offer serves them there.
+     * Other nodes and `xcashu` mode use the v2 flow (and `prewarm`).
      */
     http2?: {
       /** Default true. `false` keeps every request on the v2 flow. */
