@@ -6,7 +6,7 @@ import {
   resolveClientLabel,
   type ClientNaming,
 } from "./data.ts";
-import { vimState } from "./state.ts";
+import { isSearching, vimState } from "./state.ts";
 import { stripAnsi, truncateAnsi } from "./terminal.ts";
 import { formatNodeProviderCell, nodeProviderCellWidth, truncateMiddle } from "../../utils/model-providers.ts";
 import type { BalanceInfo, MonthlyQuota, StatusInfo } from "./data.ts";
@@ -43,7 +43,7 @@ export function renderHeader(activeTab: TabId, width: number, visibleTabs: Tab[]
 }
 
 export function renderSearchBar(): string {
-  if (!vimState.isSearching) return "";
+  if (!isSearching()) return "";
   const prompt = vimState.searchReverse ? "?" : "/";
   const matches = vimState.searchResults.length > 0
     ? ` (${vimState.currentSearchIdx + 1}/${vimState.searchResults.length})`

@@ -3,7 +3,10 @@ import type { Tab } from "./types.ts";
 import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchMonthlyQuota, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type MonthlyQuota, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
+  clearPendingMotion,
+  consumeMotionPrefix,
   exitSearchMode,
+  isSearching,
   nextSearchResult,
   pageDown,
   pageUp,
@@ -209,7 +212,10 @@ export async function runUsageTui(): Promise<void> {
   }
 
   const handleKey = (key: string) => {
-    if (vimState.isSearching) {
+    // Any key that is not `g` cancels a half-typed `gg`, so a prefix cannot
+    // linger and complete against an unrelated later press.
+    if (key !== "g") clearPendingMotion();
+    if (isSearching()) {
       if (key === "\x1b" || key === "\x1b[3~") {
         exitSearchMode();
         render();
@@ -292,14 +298,11 @@ export async function runUsageTui(): Promise<void> {
     }
 
     if (key === "g") {
-      if (vimState.lastKey === "g" && Date.now() - vimState.lastKeyTime < 300) {
+      if (consumeMotionPrefix("g")) {
         scrollToBottom();
-        vimState.lastKey = "";
         render();
         return;
       }
-      vimState.lastKey = "g";
-      vimState.lastKeyTime = Date.now();
       scrollToTop();
       render();
       return;
