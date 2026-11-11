@@ -22,6 +22,7 @@ import {
 } from "../utils/config";
 import { logger } from "../utils/logger";
 import { createUpdateCheckJob } from "./update-check-job";
+import { createRecurringJob } from "./recurring-job";
 
 
 function makeSdkLogger(prefix?: string): SdkLogger {
@@ -272,9 +273,9 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     return { enabled: autoRefresh?.enabled !== false, intervalMs };
   };
 
-  // Recurring job to refresh routstr21 models
-  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let refreshJobActive = false;
+  // Recurring job to refresh routstr21 models. The job reads its own cadence
+  // from config on every pass, so enabling/disabling takes effect without a
+  // restart; `createRecurringJob` owns the timer and the start/stop lifecycle.
   let disabledNoticeLogged = false;
 
   const runScheduledRefresh = async (): Promise<void> => {
@@ -303,9 +304,14 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
     }
   };
 
-  const scheduleNextRefresh = (): void => {
-    if (!refreshJobActive) return;
-
+  /**
+   * Wait until the next pass, or `null` when the job must not arm a timer.
+   *
+   * A disabled job still polls slowly so `clients --enable-automatic-refresh`
+   * takes effect without a daemon restart; that is the only reason this returns
+   * a delay at all while disabled.
+   */
+  const nextRefreshDelayMs = (): number | null => {
     const { enabled, intervalMs } = readAutoRefreshSettings();
     if (!enabled) {
       if (!disabledNoticeLogged) {
@@ -314,96 +320,91 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
         );
         disabledNoticeLogged = true;
       }
-      refreshTimer = setTimeout(
-        scheduleNextRefresh,
-        Math.min(intervalMs, DISABLED_REFRESH_POLL_MS),
-      );
-      return;
+      return Math.min(intervalMs, DISABLED_REFRESH_POLL_MS);
     }
-
     if (disabledNoticeLogged) {
       logger.log("Scheduled refresh job re-enabled.");
       disabledNoticeLogged = false;
     }
-
-    refreshTimer = setTimeout(() => {
-      void runScheduledRefresh()
-        .catch((error) => logger.error("Model refresh interval escaped:", error))
-        .finally(() => scheduleNextRefresh());
-    }, intervalMs);
+    return intervalMs;
   };
 
+  const modelRefreshJob = createRecurringJob({
+    delayMs: nextRefreshDelayMs,
+    run: runScheduledRefresh,
+    onError: (error) => logger.error("Model refresh interval escaped:", error),
+  });
+
   const startModelRefreshJob = () => {
-    refreshJobActive = true;
     const { enabled, intervalMs } = readAutoRefreshSettings();
     logger.log(
       enabled
         ? `Starting recurring model refresh job (every ${Math.round(intervalMs / 60_000)} minutes)`
         : "Recurring model refresh job is disabled (autoRefresh.enabled=false).",
     );
-    scheduleNextRefresh();
+    modelRefreshJob.start();
   };
 
   const stopModelRefreshJob = () => {
-    refreshJobActive = false;
-    if (refreshTimer) {
-      clearTimeout(refreshTimer);
-      refreshTimer = null;
-      logger.log("Stopped recurring model refresh job.");
-    }
+    if (modelRefreshJob.status() === "idle") return;
+    modelRefreshJob.stop();
+    logger.log("Stopped recurring model refresh job.");
   };
 
-  // Recurring job to refund pending tokens every 42 minutes
+  // Recurring job to refund pending tokens every 42 minutes.
+  //
+  // This was a `setInterval`, which starts a new pass on the tick regardless of
+  // whether the previous one finished: a slow pool refund could overlap itself
+  // and double-refund. The recurring-job primitive runs one pass at a time and
+  // measures the next delay from when the pass settled.
   const REFUND_INTERVAL_MS = 42 * 60 * 1000; // 42 minutes
-  let refundInterval: ReturnType<typeof setInterval> | null = null;
 
-  const startRefundJob = async () => {
+  const runScheduledRefund = async (): Promise<void> => {
+    logger.log("Running scheduled refund...");
+    // Runs before the "nothing to refund" early return: a parked token can
+    // exist with no API key left to refund.
+    await recoverParkedTokens(refundClient);
+
+    const state = store.getState() as any;
+    if ((state.apiKeys || []).length === 0) {
+      logger.log("No pending tokens to refund.");
+      return;
+    }
+
+    const mintUrl = walletAdapter.getActiveMintUrl();
+    if (!mintUrl) {
+      logger.log("No active mint URL for refund.");
+      return;
+    }
+
+    const spender = refundClient.getCashuSpender();
+    const results = await spender.refundProviders(mintUrl);
+
+    const successCount = results.filter(
+      (r: { success: boolean }) => r.success,
+    ).length;
+    logger.log(
+      `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
+    );
+  };
+
+  const refundJob = createRecurringJob({
+    delayMs: () => REFUND_INTERVAL_MS,
+    run: runScheduledRefund,
+    onError: (error) => logger.error("Scheduled refund failed:", error),
+  });
+
+  const startRefundJob = () => {
     logger.log(
       `Starting recurring refund job (every ${REFUND_INTERVAL_MS / 1000 / 60} minutes)`,
     );
-
-    refundInterval = setInterval(() => {
-      (async () => {
-        logger.log("Running scheduled refund...");
-        try {
-          // Runs before the "nothing to refund" early return: a parked token
-          // can exist with no API key left to refund.
-          await recoverParkedTokens(refundClient);
-
-          const state = store.getState() as any;
-          if ((state.apiKeys || []).length === 0) {
-            logger.log("No pending tokens to refund.");
-            return;
-          }
-
-          const mintUrl = walletAdapter.getActiveMintUrl();
-          if (!mintUrl) {
-            logger.log("No active mint URL for refund.");
-            return;
-          }
-
-          const spender = refundClient.getCashuSpender();
-          const results = await spender.refundProviders(mintUrl);
-
-          const successCount = results.filter(
-            (r: { success: boolean }) => r.success,
-          ).length;
-          logger.log(
-            `Scheduled refund completed: ${successCount}/${results.length} providers refunded.`,
-          );
-        } catch (error) {
-          logger.error("Scheduled refund failed:", error);
-        }
-      })().catch((error) => logger.error("Refund interval escaped:", error));
-    }, REFUND_INTERVAL_MS);
+    refundJob.start();
   };
 
   const stopRefundJob = () => {
-    if (refundInterval) {
-      clearInterval(refundInterval);
-      refundInterval = null;
-      logger.log("Stopped recurring refund job.");
-    }
+    if (refundJob.status() === "idle") return;
+    refundJob.stop();
+    logger.log("Stopped recurring refund job.");
   };
 
   // Low-frequency background update check. It only caches the answer in

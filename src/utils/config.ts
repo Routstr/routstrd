@@ -8,6 +8,20 @@ export const CONFIG_FILE = `${CONFIG_DIR}/config.json`;
 export const LOGS_DIR = `${CONFIG_DIR}/logs`;
 export const REQUEST_RESPONSE_LOGS_DIR = `${CONFIG_DIR}/request-response-logs`;
 
+/**
+ * How the daemon settles clients' inference costs.
+ *
+ * Declared once, in config, because that is where it is persisted and where
+ * the CLI writes it. `apikeys` keeps a pseudonymous balance with each Routstr
+ * node and refunds unused credit; `xcashu` is reserved (the CLI refuses to
+ * select it and the daemon does not branch on it yet).
+ *
+ * `lazyrefund` was a member here for a while, but nothing ever persisted it -
+ * it is only a prose alias for `apikeys` in `routstrd mode` and SKILL.md, so
+ * treating it as a state the daemon could be in was misleading.
+ */
+export type ClientMode = "apikeys" | "xcashu";
+
 /** NWC auto-refill configuration */
 export interface NwcAutoRefillConfig {
   /** Whether auto-refill is enabled */
@@ -46,7 +60,7 @@ export interface RoutstrdConfig {
   port: number;
   host: string;
   provider: string | null;
-  mode?: "xcashu" | "apikeys";
+  mode?: ClientMode;
   /**
    * Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash.
    * Disabled by default. Change it through `routstrd models auto-model-path`
