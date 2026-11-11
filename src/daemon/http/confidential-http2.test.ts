@@ -40,6 +40,16 @@ describe("confidentialUpstream.http2 → SDK options", () => {
     expect(o.maxRequestsPerConnection).toBe(10);
   });
 
+  test("passes the largest accepted connection deposit through", () => {
+    expect(confidentialHttp2Options({}).maxConnectionDepositMsat).toBeUndefined();
+    expect(confidentialHttp2Options({ maxConnectionDepositMsat: 5000 }).maxConnectionDepositMsat).toBe(5000);
+    // 0 is a value: accept no deposit at all.
+    expect(confidentialHttp2Options({ maxConnectionDepositMsat: 0 }).maxConnectionDepositMsat).toBe(0);
+    for (const bad of [-1, 1.5, "5000", null]) {
+      expect(confidentialHttp2Options({ maxConnectionDepositMsat: bad as never }).maxConnectionDepositMsat).toBeUndefined();
+    }
+  });
+
   test("ignores limits that are not positive integers", () => {
     const o = confidentialHttp2Options({
       maxConnections: 0,
