@@ -274,6 +274,32 @@ describe("renderRecent", () => {
     const out = stripAnsi(renderRecent(stats, 120, buildClientNaming([], [])));
     expect(out).toContain("pi-agent");
   });
+
+  test("shows the image count for an image reply that reports no tokens", () => {
+    const stats = {
+      entries: [
+        {
+          id: "img1",
+          timestamp: Date.now(),
+          modelId: "wan-2-7-pro-edit",
+          baseUrl: "https://routstr.otrta.me",
+          requestId: "r-img",
+          cost: 0,
+          satsCost: 140.577,
+          totalMsats: 140577,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          provider: "venice",
+          outputImages: 1,
+        },
+      ],
+    } as unknown as UsageStats;
+
+    const out = stripAnsi(renderRecent(stats, 200, buildClientNaming([], [])));
+    expect(out).toContain("0 - 1 img");
+    expect(out).toContain("routstr.otrta.me:venice");
+  });
 });
 
 describe("renderStackedBar", () => {
