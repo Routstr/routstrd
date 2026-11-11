@@ -125,8 +125,9 @@ image requests and `xcashu` mode use the flow above (and `prewarm`).
       "reuse": "credential",
       "maxConnections": 4,
       "maxTotal": 8,
-      "maxIdleSeconds": 280,
-      "maxRequestsPerConnection": 100
+      "maxIdleSeconds": 100,
+      "maxRequestsPerConnection": 100,
+      "maxConnectionDepositMsat": 100000
     }
   }
 }
@@ -138,8 +139,9 @@ image requests and `xcashu` mode use the flow above (and `prewarm`).
 | `reuse` | `credential` | which requests may share a connection: `credential` (all requests to one node with your credential there), `model` (only requests for the same model), `none` (a new connection per request) |
 | `maxConnections` | 4 | open connections per node and credential: the number of overlapping requests served without waiting for a free connection |
 | `maxTotal` | 8 | open connections in total |
-| `maxIdleSeconds` | 20 s less than the node's limit (300 s) | close a connection that has been idle this long |
+| `maxIdleSeconds` | 20 s less than the node's idle timeout (its offer's `h2.idle_timeout_s`, 120 s by default) | close a connection that has been idle this long; never longer than the default |
 | `maxRequestsPerConnection` | the node's limit (100) | close a connection after this many requests |
+| `maxConnectionDepositMsat` | 100000 (100 sat) | the largest connection deposit accepted from a node; a node that asks for more is served by the flow above (one session per request) |
 
 **Linkability.** Requests that share a connection share one TLS connection to
 the provider, so the provider can tell they come from the same client. It
@@ -155,7 +157,16 @@ connection turns out to be dead when a request arrives, the request runs on a
 new connection, as long as nothing of it was released towards the provider.
 After that point a request is never repeated, on any connection or node.
 
-**Funds.** An idle connection holds no reservation: the node reserves per
+**Funds.** A node may take a connection deposit (its offer's
+`h2.connection_deposit_msat`): it is reserved from your balance there when a
+connection is opened and released with the connection's first settled
+request. A connection that ends without one loses the deposit, unless the
+node, its sidecar or the provider failed first. routstrd opens a connection
+only for a request, so this happens when that first request is refused by the
+node (most likely: the balance covers the deposit but not the request's
+reservation) or is aborted before it reached the provider. A balance below
+the deposit is refused before anything is set up (402). After its first
+request an idle connection holds no reservation: the node reserves per
 request, as for a request without `http2`. The pre-warm top-up rule (below)
 does not apply to these requests.
 

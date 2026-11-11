@@ -136,8 +136,19 @@ export interface RoutstrdConfig {
       maxConnections?: number;
       /** Open connections in total (default 8). */
       maxTotal?: number;
-      /** Close a connection idle this long (default: 20 s before the node's own limit, 300 s). */
+      /**
+       * Close a connection idle this long (default: 20 s before the node's
+       * idle timeout, which its signed offer names). Never longer than that.
+       */
       maxIdleSeconds?: number;
+      /**
+       * The largest connection deposit (msat) to accept from a node (default
+       * 100000 = 100 sat). The node reserves it when a connection is opened
+       * and releases it with the connection's first settled request; a
+       * connection that ends without one loses it. A node that asks for more
+       * is served by the v2 flow (one session per request).
+       */
+      maxConnectionDepositMsat?: number;
       /** Close a connection after this many requests (default: the node's limit, 100). */
       maxRequestsPerConnection?: number;
     };

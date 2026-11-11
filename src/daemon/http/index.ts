@@ -2987,6 +2987,7 @@ export function confidentialHttp2Options(
   maxConnections?: number;
   maxIdleMs?: number;
   maxRequestsPerConnection?: number;
+  maxConnectionDepositMsat?: number;
   log: (message: string) => void;
   onRequest: (stats: object) => void;
 } {
@@ -3009,6 +3010,13 @@ export function confidentialHttp2Options(
     maxConnections: count(cfg?.maxTotal),
     maxIdleMs: seconds !== undefined ? Math.max(seconds, 1) * 1000 : undefined,
     maxRequestsPerConnection: count(cfg?.maxRequestsPerConnection),
+    // 0 is a value: no deposit is accepted (such nodes use the v2 flow).
+    maxConnectionDepositMsat:
+      typeof cfg?.maxConnectionDepositMsat === "number" &&
+      Number.isInteger(cfg.maxConnectionDepositMsat) &&
+      cfg.maxConnectionDepositMsat >= 0
+        ? cfg.maxConnectionDepositMsat
+        : undefined,
     log: (message: string) => logger.log(message),
     // Where each request ran and what it cost on the wire (no content, no credentials).
     onRequest: (stats: object) =>
