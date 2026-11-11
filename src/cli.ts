@@ -4089,7 +4089,9 @@ program
         const diagnostics = options.verbose && options.follow ? new IncrementalRequestLogs(LOGS_DIR) : undefined;
         let first = true;
         do {
-          const traces = await loadRequestTraces(options, callDaemon);
+          // Requests still in flight from an earlier poll are read by id, since
+          // newer ones may have pushed them out of the newest-`-n` window.
+          const traces = await loadRequestTraces(options, callDaemon, follower.awaiting());
           const ids = traces.map(trace => trace.request.requestId);
           const poll = diagnostics?.poll(ids);
           for (const warning of poll?.warnings ?? []) console.error(warning);

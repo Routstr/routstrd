@@ -22,6 +22,17 @@ routstrd logs -f -n 50
 
 Verbose output interleaves chronological lifecycle events, attempt summaries and eligible correlated daemon/SDK diagnostics. It never opens the raw payload sink. Supplementary correlation searches retained daily daemon log files; lifecycle records remain available even after their flat logs are removed. Follow prints an updated summary when a request changes. `--before`/`--after` accept epoch milliseconds; `--base-url` filters by provider.
 
+### Following in-flight requests
+
+`-n` bounds the initial window, but it does not bound what follow keeps watching. A request that is still `in_progress` is re-read by ID on later polls even after newer requests push it out of the newest-`-n` window, so its final status is always reported. IDs are dropped as soon as their outcome is terminal, and at most 100 are carried at once, so a request stuck in `in_progress` cannot grow the per-poll cost without limit.
+
+A stream cannot rewrite a line it has already printed, so an update is appended at the point the change was observed, not at the request's start position. Re-renders therefore carry an `(updated)` marker on their summary line, which distinguishes a completed request from a second, newer request sitting at an older timestamp:
+
+```text
+02:59:47  pi-agent - deepseek-v4.1-flash-1017 - IN_PROGRESS - 4b908851-2df8-47e5-b99a-f07e6026b14d
+02:59:47  pi-agent - deepseek-v4.1-flash-1017 - 200 - 4b908851-2df8-47e5-b99a-f07e6026b14d  (updated)
+```
+
 Legacy behavior remains available explicitly:
 
 ```sh
