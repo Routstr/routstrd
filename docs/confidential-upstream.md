@@ -70,8 +70,9 @@ the offer's `max_count`); the prompt and the other options (`aspect_ratio`,
 `msat_per_image × count` plus the session fee, checked against the receipt.
 The answer is OpenAI-shaped (`{created, data: [{b64_json}]}`) with the headers
 `x-routstr-confidential-variant` and `x-routstr-cost-msats`; a provider error
-keeps its status. Image requests are never pre-warmed: each one sets up its
-own session (about 23 MB of 2PC traffic before the image).
+keeps its status. An image request runs on an open framing-"2" connection
+when the node's offer serves images there, else on a framing-"1.1"
+connection of its own; an armed connection serves it too.
 
 Confidential requests are never written by the raw request/response logging
 (`requestResponseLogging` or `ROUTSTRD_REQUEST_RESPONSE_LOG_DIR`): it would
@@ -82,14 +83,21 @@ metadata only, never the body.
 Requires the `cu-prover` binary (build it
 from <https://github.com/jooray/routstr-confidential>: `cd crypto && cargo build
 --release -p zkbench --bin cu-prover`, binary in `crypto/zkbench/target/release/`),
-and `cu-2pc` next to it. The SDK speaks only protocol v2 (the two-party
-handshake over a joint P-256 key share); a node that still offers only the
-retired protocol v1 is refused (`offer_unsupported_version`).
+and `cu-2pc` next to it, of the same release as the node's sidecar (else
+requests fail with `twopc_version_mismatch`).
+
+**Protocol version.** routstrd speaks routstr-confidential protocol **v3**
+only and asks for offers as `/v1/confidential/offer?v=3`. A node whose offer
+names an older version is not used for confidential requests; the daemon
+logs `node_protocol_outdated: <node> offers routstr-confidential v2 …` once
+per node per day, and when no other node can serve the request the error
+body says so (`error_type: "node_protocol_outdated"`, status 502). A node
+that is newer than the daemon answers `upgrade_required` (update routstrd).
 
 It also requires an SDK with the confidential transport, which no npm release
 has yet (the daemon fails at startup with `Export named
-'closeConfidentialPrewarm' not found`, and `bun run lint` fails on the same
-name). Until one is released, build the SDK's `confidential-2pc` branch from
+'closeConfidentialConnections' not found`, and `bun run lint` fails on the same
+name). Until one is released, build the SDK's `confidential-v3` branch from
 <https://github.com/jooray/routstr-sdk> next to this checkout and link it
 before building:
 
@@ -101,199 +109,100 @@ bun run build
 bun link
 ```
 
-## HTTP/2 connections (`http2`)
+## Connections, framings and reuse
 
-Prototype (protocol v3, option A). A node whose signed offer lists
-`"http": ["1.1", "2"]` lets routstrd keep an HTTP/2 connection to the provider
-open through it: one two-party handshake per connection instead of one per
-request. The first confidential chat request to such a node opens a
-connection, which costs what a cold request costs (the ~22 MB of two-party
-preprocessing); it then stays open, and every later request on it skips the
-handshake. Requests on one connection run one at a time, so a request that
-arrives while every connection is busy opens another, up to `maxConnections`.
-Nothing is opened ahead of traffic.
-
-It is on by default and used only with nodes that offer it. An image request
-(`POST /v1/images/generations` with the opt-in header) runs on such a
-connection too when the node's offer serves images there (`h2.kinds` lists
-`images`): it is one more request on a connection a chat request may have
-opened, so it skips the handshake as well (measured on loopback: a 150 kB
-image in 4.1 s, 0.69 MB to the daemon and 38 kB to the node, against the
-~24 MB and 2.6 MB of an image session of its own). Other nodes and `xcashu`
-mode use the flow above (and `prewarm`).
+A confidential request runs on a **connection** through the node to the
+provider. Its framing towards the provider is `"2"` (HTTP/2: the connection is
+kept and serves many requests one after another, after one two-party
+handshake) or `"1.1"` (HTTP/1.1: a connection per request). Your local API does
+not change either way.
 
 ```json
 {
   "confidentialUpstream": {
     "enabled": true,
-    "http2": {
-      "enabled": true,
-      "reuse": "credential",
-      "maxConnections": 4,
-      "maxTotal": 8,
-      "maxIdleSeconds": 100,
-      "maxRequestsPerConnection": 100,
-      "maxConnectionDepositMsat": 100000
-    }
+    "http": "auto",
+    "maxConnectionDepositMsat": 100000,
+    "http2": { "reuse": "per-client", "maxConnections": 4, "maxTotal": 8 },
+    "prewarm": { "enabled": true }
   }
 }
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | `false` keeps every request on the v2 flow (one session per request, pre-warmed if `prewarm` is on) |
-| `reuse` | `credential` | which requests may share a connection: `credential` (all requests to one node with your credential there), `model` (only requests for the same model), `none` (a new connection per request) |
-| `maxConnections` | 4 | open connections per node and credential: the number of overlapping requests served without waiting for a free connection |
-| `maxTotal` | 8 | open connections in total |
-| `maxIdleSeconds` | 20 s less than the node's idle timeout (its offer's `h2.idle_timeout_s`, 120 s by default) | close a connection that has been idle this long; never longer than the default |
-| `maxRequestsPerConnection` | the node's limit (100) | close a connection after this many requests |
-| `maxConnectionDepositMsat` | 100000 (100 sat) | the largest connection deposit accepted from a node; a node that asks for more is served by the flow above (one session per request) |
+| `http` | `auto` | `auto`: the first framing the node's signed offer lists (the operator's preference); when a framing-`"2"` connection fails before the request's body was sent (handshake, ALPN, the provider closing, the node's `h2_withdrawn`), the request is served on `"1.1"` on the same node and `"2"` is not tried there for 10 minutes (`framing "2" marked bad` in the log). `"2"` or `"1.1"`: only that framing; a node that does not offer it is not used |
+| `maxConnectionDepositMsat` | 100000 | the largest connection deposit accepted (below). A node asking for more is not used (`http2.maxConnectionDepositMsat`, its earlier place, is still read) |
+| `http2.reuse` | `per-client` | which requests may share a framing-`"2"` connection. `per-client`: the requests of one local client, i.e. one API key in the `Authorization` (or `x-api-key`) header, or without one the caller's address; `shared`: every request of the daemon to that node; `none`: a connection per request |
+| `http2.maxConnections` | 4 | open connections per node, credential and client: overlapping requests are served on separate connections without waiting up to this many |
+| `http2.maxTotal` | 8 | open connections in total |
+| `http2.maxIdleSeconds` | node's `idle_timeout_s` − 20 s | close an idle connection after this; never longer than the node allows |
+| `http2.maxRequestsPerConnection` | the node's `h2.max_requests` | close a connection after this many requests |
 
-**Linkability.** Requests that share a connection share one TLS connection to
-the provider, so the provider can tell they come from the same client. It
-still sees the node's API key, not yours; without `http2`, each request is a
-separate connection the provider cannot tell apart from other clients of the
-node. The node sees your credential on every request in both modes. Use
-`"reuse": "model"`, a low `maxRequestsPerConnection` or `maxIdleSeconds` to
-link less, or `"enabled": false` for none.
+**Linkability.** The requests of one connection share one TLS connection to
+the provider, so the provider can tell they come from one client (as it can
+for requests under one API key anyway). `per-client` keeps two local clients
+(two agents, two users of a shared daemon) on separate connections; `none`
+gives every request its own.
 
-**Failures.** A connection is closed after any error or non-2xx answer, when
-idle, and at the node's limits; the next request opens a new one. If a kept
-connection turns out to be dead when a request arrives, the request runs on a
-new connection, as long as nothing of it was released towards the provider.
-After that point a request is never repeated, on any connection or node.
+**The connection deposit.** A node reserves `connection_deposit_msat` (its
+signed offer) when a connection is set up and releases it with the
+connection's first settled request (its receipt says so). A connection that
+ends without a settled request loses it, unless the node, its sidecar or the
+provider failed. So the balance a request needs before a connection opens is
+the deposit plus the request's reservation (a full-context prompt plus
+`max_tokens` at the offer's rates, plus the larger of the session and abandon
+fees); routstrd tops up for that. The session fee is charged once per
+connection, with its first request.
 
-**Funds.** A node may take a connection deposit (its offer's
-`h2.connection_deposit_msat`): it is reserved from your balance there when a
-connection is opened and released with the connection's first settled
-request. A connection that ends without one loses the deposit, unless the
-node, its sidecar or the provider failed first. routstrd opens a connection
-only for a request, so this happens when that first request is refused by the
-node (most likely: the balance covers the deposit but not the request's
-reservation) or is aborted before it reached the provider. A balance below
-the deposit is refused before anything is set up (402). After its first
-request an idle connection holds no reservation: the node reserves per
-request, as for a request without `http2`. The pre-warm top-up rule (below)
-does not apply to these requests.
+**Refused requests.** When the node refuses a request (402 for the balance,
+a model it does not serve, an expired offer), the caller gets the node's
+error and the connection stays open: nothing was held for the request, and
+the next one runs on the same connection.
 
-Measured through routstrd on loopback (local node, real provider, a 20-token
-answer; no bandwidth limit): the first request, which opens the connection,
-reached the first token in 1.6 s and moved 23.7 MB to the daemon and 2.7 MB to
-the node; the next four took 0.5-0.7 s and moved 0.5-1.0 MB and 85 kB each.
-With `"enabled": false` the same requests took 1.7 s cold and 0.9-1.0 s
-pre-warmed, and every one moved the full 23.7 MB / 2.7 MB (in the background
-when pre-warmed). On a real link the difference is the download.
-
-It needs the SDK's `confidential-v3` branch (see Enable for linking a local
-SDK build) and a node on routstr-core `confidential-v3` with a sidecar whose
-offer has an `h2` block.
-
-Responses carry `x-routstr-confidential-http: 2` and
-`x-routstr-confidential-connection: new|reused; request=<n>`. The daemon log
-has one line per connection event and per request (`[confidential http2]`:
-the connection, whether it was reused, time to the first token, bytes to and
-from the node), without content or credentials.
+Responses carry `x-routstr-confidential-http` (the framing) and
+`x-routstr-confidential-connection` (`new`, `armed` or `reused`, and the
+request's number on its connection). The daemon logs one line per request
+(`[confidential] request {...}`: framing, what it found, time to first
+token, bytes each way), without content or credentials.
 
 ## Pre-warming
 
-Most of a cold request is the two-party
-preprocessing: about 22 MB from the node and 1.2 MB to it, about 7 s on a home
-link with a 2 Mbit/s uplink. routstrd
-can run it before a request arrives. It keeps a few **armed** sessions per
-(node, model, `max_tokens`) that recently had traffic. An armed session has
-done the setup and the preprocessing but not the TLS handshake, so a request
-that claims one only waits for the fast part (about 2 s plus the provider's
-own latency).
+Most of a cold request is the two-party preprocessing (about 18 MB from the
+node and 2.5 MB to it). routstrd can run it before a request arrives: an
+**armed connection** has the deposit held, the preprocessing, the key share
+and the proof setup done, and no provider connection yet. It is bound to the
+credential only (not to a model or a body length).
 
-It is on by default and only reacts to traffic. An idle routstrd keeps no
-armed sessions and runs no timer. Configure it in `confidentialUpstream`:
+- Framing `"1.1"`: one armed connection per (node, credential, client) while
+  that key has traffic.
+- Framing `"2"`: one armed connection per key while it has traffic **and every
+  open connection of it is busy**, so a burst does not wait for a handshake.
+  A single client sending one request at a time reuses its open connection
+  and needs none.
 
-```json
-{
-  "confidentialUpstream": {
-    "enabled": true,
-    "prewarm": {
-      "enabled": true,
-      "activityWindowMinutes": 10,
-      "maxPerKey": 6,
-      "maxTotal": 6,
-      "maxAgeSeconds": 480,
-      "maxSessionFeeMsat": 5000,
-      "fundsHeadroom": 2
-    }
-  }
-}
-```
+It is on by default and only reacts to traffic (a key is armed only after one
+of its requests settled, one arm at a time); an idle routstrd keeps none.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `enabled` | `true` | `false` turns pre-warming off (every request runs cold) |
-| `activityWindowMinutes` | 10 | a (node, model, `max_tokens`) with no request in this window keeps no armed sessions; any it holds are closed at once |
-| `maxPerKey` | 6 | armed sessions per key |
-| `maxTotal` | 6 | armed sessions in total. Nodes limit unused sessions per client address (default 12, `CONFIDENTIAL_MAX_UNUSED_PER_IP`), counting armed sessions and requests still in their handshake; keep `maxTotal` below that limit |
-| `maxAgeSeconds` | 480 | retire an armed session this long after its setup (the node ends a session 600 s after accepting its websocket; clamped to 60–570) |
-| `maxSessionFeeMsat` | 5000 | pre-warm only nodes whose abandon fee (`abandon_fee_msat` in the signed offer: what an unused session costs) is at most this; `0` never pre-warms a node that charges one |
-| `maxArmedWithFee` | 6 | armed sessions in total for nodes that charge an abandon fee. Raise it for parallel agents (subagents): each session that ends unused costs the fee. Keep it below the node's unused-sessions-per-address limit |
-| `fundsHeadroom` | 2 | arm only while the credential's available balance on the node is at least this many reservations; the top-up keeps it 1.4 reservations above that (see Funds) |
+| `enabled` | `true` | `false` turns pre-warming off |
+| `activityWindowMinutes` | 10 | a key with no request in this window keeps no armed connection; one it holds is closed |
+| `maxTotal` | 4 | armed connections in total. Nodes limit unused connections per client address (default 12, `CONFIDENTIAL_MAX_UNUSED_PER_IP`); keep this below |
+| `maxAgeSeconds` | 480 | retire an armed connection this long after its setup (the node ends it after 600 s; clamped to 60–570) |
+| `maxDepositMsat` | 5000 | pre-warm only nodes whose connection deposit (what an armed connection that is never used costs) is at most this; `0` never pre-warms a node that takes one |
 
-How many sessions it keeps per key: 1 while the key is active, 2 after 3
-requests within 5 minutes, and at least as many as the most requests that
-overlapped in the window. The arming of a session starts only after a request
-for that key has settled, and only one arm runs at a time. No arm starts
-while a cold request is still in its own preprocessing. Each session is armed
-for a body-length bucket (a power of two ≥ 4 KiB, from the largest of the
-last 20 request bodies × 1.25). A larger request runs cold and raises the
-bucket. Smaller bodies are padded with spaces inside the JSON.
+An armed connection that is retired unused loses its deposit; routstrd logs
+each (`retiring armed … unused …; its deposit of N msat is charged (M msat
+for unused spares so far)`). A failed arm, or an armed connection that died
+before it was used, pauses arming for that key (30 s, doubling up to 10 min);
+too little balance for the deposit retries after 30 s without escalating.
+Pre-warming is not used for one-off Cashu bearers (`xcashu` mode): they run
+on framing `"1.1"` (a connection per token), or `"2"` with a connection of
+their own.
 
-**Funds.** Each armed session holds a reservation on the node credential (a
-full-context prompt plus `max_tokens` at the offer rates), like an in-flight
-request. routstrd arms only while the credential's available balance on the
-node covers `fundsHeadroom` (default 2) times the last observed reservation R
-(the new arm plus one cold request). While pre-warming is on, the automatic
-top-up keeps (`fundsHeadroom` + 1.4) × R available, instead of the 1.4 × R a
-cold request needs, so the session a request claimed is replaced while that
-request is still running. The available balance excludes the armed sessions'
-reservations, so with n armed sessions the key holds about
-(n + `fundsHeadroom` + 1.4) × R at the node; `maxPerKey` and `maxTotal` bound
-n. Lower `fundsHeadroom` (e.g. to 1) to keep less on the node. Too little
-balance does not back the key off: it arms again when its next request
-settles. An unused session is closed before the node's limit, and the node
-then releases its reservation without a charge (unless it charges an abandon
-fee, below). While sessions are armed,
-the balance the node reports is lower by their reservations. Pre-warming is
-not used in `xcashu` mode, where every request spends a fresh token.
-
-**Session fees.** A node may charge for its own work (most charge nothing):
-a rate surcharge (already in the offer's rates), a session fee added to every
-completed request, and an abandon fee (at least the session fee) for a session
-that ends without a request reaching the provider. A pre-warmed session that
-is used costs its usage + the session fee; one that expires unused costs the
-abandon fee. routstrd therefore arms at most `maxArmedWithFee` (default 6) sessions for a node with
-an abandon fee (whatever `maxPerKey` says), none if the fee is above
-`maxSessionFeeMsat`, and logs the fee of each session it closes unused
-(`… abandon fee N msats paid, M msats on unused sessions so far`). Worst case,
-an active key that goes idle pays one abandon fee per idle period. Set
-`maxSessionFeeMsat` to `0` to never pay for unused sessions (every request
-then runs cold). The deposit routstrd tops up for a request includes the
-larger fee and any rate surcharge; the receipt check allows usage × signed
-rates + the session fee.
-
-**Failures.** A failed arm, and an armed session that dies before it is used
-(the node or the network ended it, or it failed when a request claimed it),
-pause arming for that key: 30 s, doubling up to 10 min. The count of dead
-armed sessions resets only when a request served from an armed session
-settles, so a node that keeps ending armed sessions costs a few arms (and
-abandon fees), not one per minute.
-
-Pool activity is logged at info level in the daemon log (`[confidential-prewarm]`:
-arming, armed, claim, retire, backoff), without credentials. Responses carry
-`x-routstr-confidential-prewarmed: 1` when served from an armed session.
-
-
-Each armed session also pre-generates the setup of its three zero-knowledge proofs (a "proof channel"), so
-a request that finds an armed session spends well under a second on proofs. Measured against a production node: about 2–3 s to the first token warm (mostly the provider's
-latency). Cold requests are dominated by receiving ~22 MB of 2PC data: seconds on a fast connection, about
-14–16 s from a good home connection (100 Mbit/s down) and 45–70 s on a slow, download-limited
-link. Arming one session takes
-about as long as a cold two-party computation and moves about 22 MB to the client and 1.2 MB from it, in the
-background.
+Measured on loopback against Venice (time to first token at the local API):
+a cold request 1.3–1.9 s, a request on an open framing-`"2"` connection
+0.5–1.0 s, a request served by an armed connection about as fast as on an
+open one plus its handshake. On a slow link the cold case is dominated by the
+~18 MB of preprocessing that pre-warming moves off the request path.
