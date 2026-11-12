@@ -97,7 +97,7 @@ that is newer than the daemon answers `upgrade_required` (update routstrd).
 It also requires an SDK with the confidential transport, which no npm release
 has yet (the daemon fails at startup with `Export named
 'closeConfidentialConnections' not found`, and `bun run lint` fails on the same
-name). Until one is released, build the SDK's `confidential-v3` branch from
+name). Until one is released, build the SDK's `confidential-2pc` branch from
 <https://github.com/jooray/routstr-sdk> next to this checkout and link it
 before building:
 
