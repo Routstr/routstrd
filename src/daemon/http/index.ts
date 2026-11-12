@@ -1,6 +1,6 @@
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
 import {
@@ -2715,8 +2715,13 @@ export function createDaemonRequestHandler(deps: {
             ...(confidentialConfig.allow_insecure_transport === true
               ? { allowInsecureTransport: true }
               : {}),
+            http: confidentialFraming(confidentialConfig.http),
+            maxConnectionDepositMsat: confidentialMaxDeposit(confidentialConfig),
             prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
             http2: confidentialHttp2Options(confidentialConfig.http2),
+            // Which requests may share a connection to the provider (per request).
+            reuseScope: confidentialReuseScope(confidentialConfig.http2?.reuse, req),
+            onNodeProtocolOutdated: noteOutdatedNode,
           }
         : undefined;
 
@@ -2955,7 +2960,7 @@ const CONFIDENTIAL_CALLER_CODES = new Set([
   "not_configured",
   "pinned_parameter",
 ]);
-/** The node's offer, session, proofs or receipt failed (the SDK's other codes). */
+/** The node's offer, connection, proofs or receipt failed (the SDK's other codes). */
 const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   "offer_unavailable",
   "offer_malformed",
@@ -2963,6 +2968,14 @@ const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   "offer_unpinned",
   "offer_pin_mismatch",
   "offer_unsupported_version",
+  // No node can serve the request: the ones that offer the model still run
+  // an older protocol (routstr-confidential §11). The message names it.
+  "node_protocol_outdated",
+  // The node runs a newer protocol than this daemon: update routstrd.
+  "upgrade_required",
+  // cu-2pc and the node's sidecar are of different releases.
+  "twopc_version_mismatch",
+  "request_refused",
   "trusted_host_rejected",
   "session_protocol",
   "session_rejected",
@@ -2973,54 +2986,96 @@ const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   "timeout",
 ]);
 
+/** `confidentialUpstream.http` → the SDK's framing choice (anything else: `auto`). */
+export function confidentialFraming(value: unknown): "auto" | "2" | "1.1" {
+  return value === "2" || value === "1.1" ? value : "auto";
+}
+
+/** The largest connection deposit accepted (msat), from either place of the setting; 0 is a value. */
+export function confidentialMaxDeposit(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
+): number | undefined {
+  const ok = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+  if (ok(cfg.maxConnectionDepositMsat)) return cfg.maxConnectionDepositMsat;
+  if (ok(cfg.http2?.maxConnectionDepositMsat)) return cfg.http2!.maxConnectionDepositMsat;
+  return undefined;
+}
+
+/**
+ * The reuse scope of a request (`confidentialUpstream.http2.reuse`):
+ * `per-client` (default, and for any unknown value: the narrower scope)
+ * derives it from the local caller, its API key or without one its address,
+ * so two local clients never share a connection to the provider; `shared`
+ * and `none` name no scope. Only a hash leaves this function.
+ */
+export function confidentialReuseScope(
+  reuse: unknown,
+  req: { headers: Record<string, string | string[] | undefined>; socket?: { remoteAddress?: string } }
+): string | undefined {
+  if (reuse === "shared" || reuse === "none") return undefined;
+  const auth = req.headers.authorization;
+  const bearer = typeof auth === "string" ? auth.match(/^Bearer\s+(.+)$/i)?.[1] : undefined;
+  const apiKey = bearer ?? req.headers["x-api-key"];
+  const who =
+    typeof apiKey === "string" && apiKey.length > 0
+      ? `key\0${apiKey}`
+      : `addr\0${req.socket?.remoteAddress ?? "unknown"}`;
+  return `client-${createHash("sha256").update(`routstrd-reuse-scope\0${who}`).digest("hex").slice(0, 32)}`;
+}
+
+/** When each node's outdated protocol was last logged. */
+const outdatedNodeLogged = new Map<string, number>();
+const OUTDATED_LOG_EVERY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A node offered an older confidential protocol than this daemon speaks: it
+ * is not used for confidential requests. Logged once per node per day.
+ * Returns whether this call logged.
+ */
+export function noteOutdatedNode(baseUrl: string, nodeVersion: number, now = Date.now()): boolean {
+  const node = baseUrl.replace(/\/$/, "");
+  const last = outdatedNodeLogged.get(node);
+  if (last !== undefined && now - last < OUTDATED_LOG_EVERY_MS) return false;
+  outdatedNodeLogged.set(node, now);
+  logger.log(
+    `[confidential] node_protocol_outdated: ${node} offers routstr-confidential v${nodeVersion}, this daemon speaks v3; ` +
+      "the node is not used for confidential requests until it is updated (logged once per day)",
+  );
+  return true;
+}
+
 /**
  * routstrd's `confidentialUpstream.http2` block → the SDK's `http2` options
- * (`http: 2` sessions: reused HTTP/2 connections). On by default; the SDK
- * uses it only with nodes whose signed offer lists it.
+ * (the pool of framing-"2" connections).
  */
 export function confidentialHttp2Options(
   cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["http2"]
 ): {
-  enabled: boolean;
-  reuse?: "credential" | "model" | "none";
+  reuse: "shared" | "none";
   maxConnectionsPerKey?: number;
   maxConnections?: number;
   maxIdleMs?: number;
   maxRequestsPerConnection?: number;
-  maxConnectionDepositMsat?: number;
   log: (message: string) => void;
   onRequest: (stats: object) => void;
 } {
-  // Only a literal `false` switches it off (as for `prewarm.enabled`).
-  if (cfg?.enabled === false) {
-    return { enabled: false, log: () => {}, onRequest: () => {} };
-  }
   const count = (v: unknown) =>
     typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : undefined;
   const seconds =
     typeof cfg?.maxIdleSeconds === "number" && Number.isFinite(cfg.maxIdleSeconds) && cfg.maxIdleSeconds > 0
       ? cfg.maxIdleSeconds
       : undefined;
-  const reuse = cfg?.reuse;
   return {
-    enabled: true,
-    // An unknown value keeps the default scope rather than widening it.
-    reuse: reuse === "credential" || reuse === "model" || reuse === "none" ? reuse : undefined,
+    // `per-client` is `shared` within a client's scope (`confidentialReuseScope`).
+    reuse: cfg?.reuse === "none" ? "none" : "shared",
     maxConnectionsPerKey: count(cfg?.maxConnections),
     maxConnections: count(cfg?.maxTotal),
     maxIdleMs: seconds !== undefined ? Math.max(seconds, 1) * 1000 : undefined,
     maxRequestsPerConnection: count(cfg?.maxRequestsPerConnection),
-    // 0 is a value: no deposit is accepted (such nodes use the v2 flow).
-    maxConnectionDepositMsat:
-      typeof cfg?.maxConnectionDepositMsat === "number" &&
-      Number.isInteger(cfg.maxConnectionDepositMsat) &&
-      cfg.maxConnectionDepositMsat >= 0
-        ? cfg.maxConnectionDepositMsat
-        : undefined,
     log: (message: string) => logger.log(message),
     // Where each request ran and what it cost on the wire (no content, no credentials).
     onRequest: (stats: object) =>
-      logger.log(`[confidential http2] request ${JSON.stringify(stats)}`),
+      logger.log(`[confidential] request ${JSON.stringify(stats)}`),
   };
 }
 
@@ -3034,12 +3089,9 @@ export function confidentialPrewarmOptions(
   | {
       enabled: boolean;
       activityWindowMs?: number;
-      maxPerKey?: number;
       maxTotal?: number;
       maxAgeMs?: number;
-      maxSessionFeeMsat?: number;
-      maxArmedWithFee?: number;
-      fundsHeadroom?: number;
+      maxDepositMsat?: number;
       log: (message: string) => void;
     }
   | undefined {
@@ -3050,14 +3102,12 @@ export function confidentialPrewarmOptions(
   return {
     enabled: true,
     activityWindowMs: minutes !== undefined ? minutes * 60_000 : undefined,
-    maxPerKey: num(cfg?.maxPerKey),
     maxTotal: num(cfg?.maxTotal),
-    // The node and the sidecar end a session 600 s after setup; below 60 s
-    // sessions would be armed and retired (traffic, abandon fees) every tick.
+    // The node and the sidecar end an armed connection 600 s after its
+    // setup; below 60 s connections would be armed and retired (traffic,
+    // deposits) every tick.
     maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
-    maxSessionFeeMsat: num(cfg?.maxSessionFeeMsat),
-    maxArmedWithFee: num(cfg?.maxArmedWithFee),
-    fundsHeadroom: num(cfg?.fundsHeadroom),
+    maxDepositMsat: num(cfg?.maxDepositMsat),
     log: (message: string) => logger.log(message),
   };
 }

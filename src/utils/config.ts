@@ -79,61 +79,61 @@ export interface RoutstrdConfig {
      */
     allow_insecure_transport?: boolean;
     /**
-     * Traffic-driven pre-warming of protocol v2 sessions (the 2PC
-     * preprocessing runs before a request arrives). Only keys with recent
-     * traffic keep armed sessions; an idle daemon keeps none.
+     * The framing of the connection to the provider (routstr-confidential
+     * protocol v3): `"2"` is HTTP/2, a connection that is kept and serves many
+     * requests after one two-party handshake; `"1.1"` is HTTP/1.1, a
+     * connection per request. `auto` (default) takes the first one the node's
+     * signed offer lists (the operator's preference) and falls back from
+     * `"2"` to `"1.1"` on the same node when a connection fails to open
+     * (`"2"` is then not tried on that node for 10 minutes). `"2"` or `"1.1"`
+     * uses only that framing; a node that does not offer it is not used.
+     * The local API is the same either way.
+     */
+    http?: "auto" | "2" | "1.1";
+    /**
+     * The largest connection deposit (msat) to accept from a node (default
+     * 100000 = 100 sat). The node reserves it when a connection is set up and
+     * releases it with the connection's first settled request; a connection
+     * that ends without one loses it. A node that asks for more is not used.
+     */
+    maxConnectionDepositMsat?: number;
+    /**
+     * Pre-warming: armed connections (the deposit held, the two-party
+     * preprocessing and key share done, no provider connection yet), bound to
+     * the credential only. Only keys with recent traffic keep one; an idle
+     * daemon keeps none. Framing `"1.1"`: one per key. Framing `"2"`: one per
+     * key while every open connection of the key is busy, so a burst does not
+     * wait for a handshake.
      */
     prewarm?: {
       /** Default true. */
       enabled?: boolean;
-      /** A key idle this long keeps no armed sessions (default 10). */
+      /** A key idle this long keeps no armed connection (default 10). */
       activityWindowMinutes?: number;
-      /** Armed sessions per (node, model, max_tokens) (default 6). */
-      maxPerKey?: number;
-      /** Armed sessions in total (default 6). */
+      /** Armed connections in total (default 4). */
       maxTotal?: number;
-      /** Retire an armed session this old (default 480; the node ends it at 600). */
+      /** Retire an armed connection this old (default 480; the node ends it at 600). */
       maxAgeSeconds?: number;
       /**
-       * Arm only for nodes whose abandon fee (what a session that is never
-       * used costs, `abandon_fee_msat` in the signed offer) is at most this
-       * many msats (default 5000; 0 never pre-warms a node that charges one).
-       * For such a node at most `maxArmedWithFee` sessions are armed.
+       * Arm only for nodes whose connection deposit (what an armed connection
+       * that is never used costs) is at most this many msats (default 5000;
+       * 0 never pre-warms a node that takes a deposit).
        */
-      maxSessionFeeMsat?: number;
-      /**
-       * Armed sessions in total for nodes that charge an abandon fee
-       * (default 6, for parallel agents): each one that ends unused costs the fee.
-       */
-      maxArmedWithFee?: number;
-      /**
-       * Arm only while the credential's available balance on the node is at
-       * least this many times one session's reservation (default 2: the new
-       * arm plus one cold request). The automatic top-up keeps the key at
-       * this multiple + 1.4 while pre-warming is on (the request in flight
-       * plus the next arm).
-       */
-      fundsHeadroom?: number;
+      maxDepositMsat?: number;
     };
     /**
-     * `http: 2` sessions (protocol v3, option A): with a node whose signed
-     * offer lists them, chat requests run on HTTP/2 connections to the
-     * provider that are kept open and reused, one two-party handshake per
-     * connection instead of one per request. On by default; image requests
-     * use such a connection too when the node's offer serves them there.
-     * Other nodes and `xcashu` mode use the v2 flow (and `prewarm`).
+     * Framing-`"2"` connections: the pool that keeps and reuses them.
      */
     http2?: {
-      /** Default true. `false` keeps every request on the v2 flow. */
-      enabled?: boolean;
       /**
        * Which requests may share a connection, and so be linked to each
-       * other by the provider and the node: `credential` (default: all
-       * requests to one node with one credential), `model` (only requests
-       * for the same model), `none` (a connection per request).
+       * other by the provider (which sees them on one TLS connection):
+       * `per-client` (default): the requests of one local client (its API
+       * key, or without one its address) to one node; `shared`: all requests
+       * to one node; `none`: a connection per request.
        */
-      reuse?: "credential" | "model" | "none";
-      /** Open connections per node and credential (default 4): overlapping requests served without waiting. */
+      reuse?: "per-client" | "shared" | "none";
+      /** Open connections per node, credential and client (default 4): overlapping requests served without waiting. */
       maxConnections?: number;
       /** Open connections in total (default 8). */
       maxTotal?: number;
@@ -142,13 +142,7 @@ export interface RoutstrdConfig {
        * idle timeout, which its signed offer names). Never longer than that.
        */
       maxIdleSeconds?: number;
-      /**
-       * The largest connection deposit (msat) to accept from a node (default
-       * 100000 = 100 sat). The node reserves it when a connection is opened
-       * and releases it with the connection's first settled request; a
-       * connection that ends without one loses it. A node that asks for more
-       * is served by the v2 flow (one session per request).
-       */
+      /** Earlier place of `maxConnectionDepositMsat` (above); still read. */
       maxConnectionDepositMsat?: number;
       /** Close a connection after this many requests (default: the node's limit, 100). */
       maxRequestsPerConnection?: number;
