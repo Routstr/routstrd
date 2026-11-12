@@ -28,7 +28,7 @@ receive("6"); // Sessions without Npubs
 await Bun.sleep(0);
 for (const key of ["/", "?"]) {
  receive("\r");
- if (!output.includes("Transcript: /fixture")) throw Error("detail did not open");
+ if (!output.includes("Title:") || !output.includes("Session: s")) throw Error("detail did not open");
  receive("\x06"); // existing page-down reaches the shared request table
  if (vimState.scrollPos === 0) throw Error("request page scroll failed");
  receive("\x1b[H");

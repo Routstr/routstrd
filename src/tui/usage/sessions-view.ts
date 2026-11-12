@@ -43,7 +43,7 @@ export function sessionRequestEntries(session: PiSession): RequestTableEntry[] {
 export function renderSessions(v: SessionsView, width: number, height = 20, naming: ClientNaming = emptyClientNaming()): string[] {
   const lines: string[] = [];
   const add = (s: string) => lines.push(s);
-  add(`Sessions ${v.loading ? "· Loading…" : ""}  / filter: ${cleanText(v.filter)}${v.searching ? "_" : ""}`);
+  if (!v.detail) add(`Sessions ${v.loading ? "· Loading…" : ""}  / filter: ${cleanText(v.filter)}${v.searching ? "_" : ""}`);
   if (v.result?.error) add(`Error: ${cleanText(v.result.error)}`);
   if (!v.result) { add(v.loading ? "Reading recent Pi sessions…" : "Press R to load sessions"); return lines; }
   const sessions = filteredSessions(v);
@@ -74,10 +74,9 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     if (v.result.more) add("More sessions available: M");
   } else {
     const totals = sessionTotals(session.turns);
-    add("Esc back · ↑↓ scroll · R refresh");
-    add(session.title);
+    add(`${COLORS.bold}Title:${COLORS.reset} ${session.title}`);
     // Paths and identifiers are wrapped, never permanently lost to truncation.
-    for (const text of [`Session: ${session.id}`, `Project: ${session.cwd}`, `Transcript: ${session.path}`]) {
+    for (const text of [`Session: ${session.id}`, `Project: ${session.cwd}`]) {
       for (let i = 0; i < text.length; i += Math.max(1, width)) add(text.slice(i, i + Math.max(1, width)));
     }
     add(`Recorded: ${money(totals.sats)} sats · priced ${totals.priced}/${session.turns.length} · matched ${totals.matched}/${session.turns.length}`);

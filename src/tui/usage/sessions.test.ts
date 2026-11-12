@@ -1,3 +1,4 @@
+import { COLORS } from "./constants.ts";
 import { renderSessionBreakdown } from "./sessions-breakdown.ts";
 import { renderRecent, renderRequestTable } from "./render.ts";
 import { emptyClientNaming } from "./data.ts";
@@ -138,4 +139,27 @@ test("node/provider breakdown is a bounded aligned table with partial accounting
  }
  expect(s.turns[0]!.node).toBe("https://ai.redsh1ft.com/");
  expect(s.turns[0]!.provider).toBe("openrouter:Cloudflare");
+});
+
+test("detail header is Title/Session/Project only while list filter stays available", async () => {
+ const s = await parseSession(fixture([
+  { type: "session", id: "session-id", cwd: "/project" },
+  { type: "message", message: { role: "user", content: "User first prompt" } },
+  assistant(100),
+ ]), 0);
+ const v = createSessionsView(); v.result = { sessions: [s], more: false };
+ expect(renderSessions(v, 120)[0]).toContain("/ filter:");
+ sessionsKey(v, "/"); sessionsKey(v, "U");
+ expect(renderSessions(v, 120)[0]).toContain("/ filter: U_");
+ sessionsKey(v, "\r"); sessionsKey(v, "\r");
+ const lines = renderSessions(v, 120);
+ expect(lines.slice(0, 3)).toEqual([`${COLORS.bold}Title:${COLORS.reset} User first prompt`, "Session: session-id", "Project: /project"]);
+ const detail = stripAnsi(lines.join("\n"));
+ expect(detail).not.toContain("/ filter:");
+ expect(detail).not.toContain("Esc back · ↑↓ scroll · R refresh");
+ expect(detail).not.toContain("Transcript:");
+ expect(detail).not.toContain(s.path);
+ expect(detail).toContain("Recorded:"); expect(detail).toContain("* Pi heuristic;");
+ expect(detail).toContain("NODE × PROVIDER"); expect(detail).toContain("Session Requests");
+ sessionsKey(v, "\x1b"); expect(renderSessions(v, 120)[0]).toContain("/ filter: U");
 });
