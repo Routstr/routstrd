@@ -140,10 +140,20 @@ not change either way.
 | `http2.maxRequestsPerConnection` | the node's `h2.max_requests` | close a connection after this many requests |
 
 **Linkability.** The requests of one connection share one TLS connection to
-the provider, so the provider can tell they come from one client (as it can
-for requests under one API key anyway). `per-client` keeps two local clients
-(two agents, two users of a shared daemon) on separate connections; `none`
-gives every request its own.
+the provider, so the provider (and its CDN, and anyone watching the node's
+traffic to it) can tell they come from one client, in order. With the default
+`per-client`, *every* request made with one local API key is connection-
+linkable in this way, across conversations and applications that share the
+key; `per-client` only keeps two local clients (two agents, two users of a
+shared daemon) apart. Narrower choices:
+
+- a request header `x-routstr-reuse-scope: <any string up to 256 bytes>`
+  (one per conversation, say) puts the request in its own partition within
+  its client's (under `shared`: within the daemon's) connections; it can only
+  narrow, never widen, what is shared;
+- `http2.reuse: "none"` gives every request its own connection;
+- `http: "1.1"` (framing "1.1", one request per connection) turns HTTP/2 off
+  for confidential requests altogether.
 
 **The connection deposit.** A node reserves `connection_deposit_msat` (its
 signed offer) when a connection is set up and releases it with the

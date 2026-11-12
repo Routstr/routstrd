@@ -3012,7 +3012,18 @@ export function confidentialReuseScope(
   reuse: unknown,
   req: { headers: Record<string, string | string[] | undefined>; socket?: { remoteAddress?: string } }
 ): string | undefined {
-  if (reuse === "shared" || reuse === "none") return undefined;
+  if (reuse === "none") return undefined;
+  // A caller may narrow the scope further (one conversation, one task):
+  // `x-routstr-reuse-scope` partitions within the client's (or, under
+  // `shared`, the daemon's) connections. It can never widen one.
+  const raw = req.headers["x-routstr-reuse-scope"];
+  const own = typeof raw === "string" && raw.length > 0 && raw.length <= 256 ? raw : undefined;
+  const narrow = own === undefined ? "" : `\0scope\0${own}`;
+  if (reuse === "shared") {
+    return own === undefined
+      ? undefined
+      : `scope-${createHash("sha256").update(`routstrd-reuse-scope${narrow}`).digest("hex").slice(0, 32)}`;
+  }
   const auth = req.headers.authorization;
   const bearer = typeof auth === "string" ? auth.match(/^Bearer\s+(.+)$/i)?.[1] : undefined;
   const apiKey = bearer ?? req.headers["x-api-key"];
@@ -3020,7 +3031,7 @@ export function confidentialReuseScope(
     typeof apiKey === "string" && apiKey.length > 0
       ? `key\0${apiKey}`
       : `addr\0${req.socket?.remoteAddress ?? "unknown"}`;
-  return `client-${createHash("sha256").update(`routstrd-reuse-scope\0${who}`).digest("hex").slice(0, 32)}`;
+  return `client-${createHash("sha256").update(`routstrd-reuse-scope\0${who}${narrow}`).digest("hex").slice(0, 32)}`;
 }
 
 /** When each node's outdated protocol was last logged. */
