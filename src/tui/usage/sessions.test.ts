@@ -81,3 +81,9 @@ test("worker loads bounded fixture page and never creates absent accounting DB",
   expect(existsSync(join(home, ".routstrd/routstr.db"))).toBe(false);
  } finally { rmSync(runner, { force: true }); }
 });
+
+test("full app dispatch: details search keys, Escape, tabs, refresh, quit", async () => {
+ const child = Bun.spawn(["bun", join(import.meta.dir, "sessions-dispatch-smoke.ts")], { stdout: "pipe", stderr: "pipe" });
+ const err = await new Response(child.stderr).text();
+ expect(await child.exited).toBe(0); expect(err).toContain("full dispatch OK");
+});

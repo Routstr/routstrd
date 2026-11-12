@@ -38,3 +38,13 @@ entries per transcript. A page stops after roughly 20,000 assistant entries.
 Truncation/malformed data is warned about; malformed gaps reset the heuristic
 baseline conservatively. Filter only searches loaded sessions. These deliberate
 bounds favor a responsive monitor over exhaustive historical reporting.
+
+## Runtime regression checks
+
+Run `systemd-run --user --scope -q -p MemoryMax=768M -p MemorySwapMax=0 bash scripts/check-sessions-worker.sh`
+to exercise worker startup in source, bundled, and compiled-executable modes.
+The check creates a temporary HOME with one synthetic Pi transcript and verifies
+that a missing accounting database is not created. Compiled workers use Bun's
+embedded `tui/usage/sessions-worker.js` entry, not a sibling of the main executable.
+The TUI test suite also executes an isolated full-app key-dispatch harness for
+Sessions details → `/` and `?` → Escape → tab switch / refresh / quit.

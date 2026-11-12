@@ -1,3 +1,4 @@
+import { sessionsWorkerPath } from "./sessions-worker-path.ts";
 import { createSessionsView, renderSessions, sessionsKey, filteredSessions } from "./sessions-view.ts";
 import type { SessionsResult } from "./sessions-data.ts";
 import { truncateAnsi } from "./terminal.ts";
@@ -55,7 +56,7 @@ export async function runUsageTui(): Promise<void> {
     sessionsView.loading = true;
     try {
       if (!sessionsWorker) {
-        sessionsWorker = new Worker(new URL("./sessions-worker.ts", import.meta.url).href);
+        sessionsWorker = new Worker(sessionsWorkerPath());
         sessionsWorker.onmessage = (event: MessageEvent<SessionsResult>) => {
           const selectedPath = filteredSessions(sessionsView)[sessionsView.selected]?.path;
           sessionsView.result = event.data;
@@ -251,6 +252,8 @@ export async function runUsageTui(): Promise<void> {
       if (sessionsKey(sessionsView, key)) { vimState.scrollPos = sessionsView.detail ? vimState.scrollPos : 0; render(); return; }
       if (key === "m" || key === "M") { sessionsView.limit = Math.min(200, sessionsView.limit + 20); loadSessions(true); render(); return; }
     }
+    // Sessions owns its filter; request search must never capture its keys.
+    if (currentTab === "sessions" && (key === "/" || key === "?")) return;
     if (vimState.isSearching) {
       if (key === "\x1b" || key === "\x1b[3~") {
         exitSearchMode();
