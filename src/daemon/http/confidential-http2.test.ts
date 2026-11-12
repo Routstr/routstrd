@@ -101,6 +101,14 @@ describe("the reuse scope of a request (per-client by default)", () => {
 
   test("shared and none name no scope; an unknown value keeps the narrower per-client scope", () => {
     expect(confidentialReuseScope("shared", req({ authorization: "Bearer sk-aaa" }))).toBeUndefined();
+    // A caller's own scope narrows (never widens) the reuse scope.
+    const conv1 = confidentialReuseScope(undefined, req({ authorization: "Bearer sk-aaa", "x-routstr-reuse-scope": "conv-1" }));
+    const conv2 = confidentialReuseScope(undefined, req({ authorization: "Bearer sk-aaa", "x-routstr-reuse-scope": "conv-2" }));
+    const otherKey = confidentialReuseScope(undefined, req({ authorization: "Bearer sk-bbb", "x-routstr-reuse-scope": "conv-1" }));
+    const plain = confidentialReuseScope(undefined, req({ authorization: "Bearer sk-aaa" }));
+    expect(new Set([plain, conv1, conv2, otherKey]).size).toBe(4);
+    expect(confidentialReuseScope("shared", req({ "x-routstr-reuse-scope": "conv-1" }))).toMatch(/^scope-/);
+    expect(confidentialReuseScope("none", req({ "x-routstr-reuse-scope": "conv-1" }))).toBeUndefined();
     expect(confidentialReuseScope("none", req({ authorization: "Bearer sk-aaa" }))).toBeUndefined();
     expect(confidentialReuseScope("everything", req({ authorization: "Bearer sk-aaa" }))).toBeDefined();
   });
