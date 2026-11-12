@@ -1,10 +1,14 @@
+import { renderRecent, renderRequestTable } from "./render.ts";
+import { emptyClientNaming } from "./data.ts";
+import type { UsageStats } from "./types.ts";
+import { stripAnsi } from "./terminal.ts";
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attributeUsage, parseSession, sessionTotals, SessionsLoader } from "./sessions-data.ts";
-import { createSessionsView, sessionsKey, renderSessions } from "./sessions-view.ts";
+import { createSessionsView, sessionsKey, renderSessions, sessionRequestEntries } from "./sessions-view.ts";
 import { getVisibleTabs, tabSupportsWindow } from "./constants.ts";
 const dirs: string[] = [];
 afterEach(() => { dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })); });
@@ -86,4 +90,28 @@ test("full app dispatch: details search keys, Escape, tabs, refresh, quit", asyn
  const child = Bun.spawn(["bun", join(import.meta.dir, "sessions-dispatch-smoke.ts")], { stdout: "pipe", stderr: "pipe" });
  const err = await new Response(child.stderr).text();
  expect(await child.exited).toBe(0); expect(err).toContain("full dispatch OK");
+});
+
+test("session requests share Recent table layout, newest first, without losing unknown entries", async () => {
+ const s = await parseSession(fixture([assistant(0, 7000, 0, "first"), assistant(8000, 0, 0, "last")]), 0);
+ s.turns[0]!.sats = 1.25; s.turns[0]!.match = "matched"; s.turns[0]!.client = "pi-agent";
+ s.turns[1]!.prompt = null; s.turns[1]!.output = null;
+ const entries = sessionRequestEntries(s);
+ expect(entries.map(e => e.requestId)).toEqual(["last", "first"]);
+ const view = createSessionsView(); view.result = { sessions: [s], more: false }; view.detail = true;
+ for (const width of [40, 80, 160]) {
+  const shared = renderRequestTable(entries, width, emptyClientNaming(), "Session Requests (2 shown)");
+  const detail = renderSessions(view, width).join("\n");
+  expect(detail).toContain(shared);
+  const recent = renderRecent({ entries } as unknown as UsageStats, width, emptyClientNaming());
+  // Only box title differs: all request headers/rows/borders are identical.
+  expect(recent.split("\n").slice(1)).toEqual(shared.split("\n").slice(1));
+  if (width >= 80) {
+   expect(stripAnsi(shared)).toContain("— sats");
+   expect(stripAnsi(shared)).toContain("1.25 sats");
+  }
+  // Recent itself clips lower-priority columns at very narrow widths.
+  for (const line of stripAnsi(shared).split("\n")) expect(line.length).toBeLessThanOrEqual(width);
+  expect(detail).toContain("missing · last · price unknown · tokens unknown");
+ }
 });

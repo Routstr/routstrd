@@ -1,3 +1,5 @@
+import { renderRequestTable, type RequestTableEntry } from "./render.ts";
+import { emptyClientNaming, type ClientNaming } from "./data.ts";
 import { basename } from "node:path";
 import { COLORS } from "./constants.ts";
 import { cleanText, sessionTotals, type PiSession, type SessionsResult } from "./sessions-data.ts";
@@ -29,7 +31,15 @@ const count = (n: number) => n.toLocaleString("en-US");
 const fit = (s: string, n: number) => s.length <= n ? s.padEnd(n) : s.slice(0, Math.max(0, n - 1)) + "…";
 const age = (t: number) => !t ? "unknown" : Math.max(0, Math.floor((Date.now() - t) / 60000)) < 60 ? `${Math.max(0, Math.floor((Date.now() - t) / 60000))}m ago` : `${Math.floor((Date.now() - t) / 3600000)}h ago`;
 
-export function renderSessions(v: SessionsView, width: number, height = 20): string[] {
+export function sessionRequestEntries(session: PiSession): RequestTableEntry[] {
+  return session.turns.map((t, i) => ({
+    id: `${session.id}:${i}`, requestId: t.responseId ?? "", timestamp: Date.parse(t.timestamp) || 0,
+    modelId: t.model, baseUrl: t.node, provider: t.provider, client: t.client ?? "unknown",
+    satsCost: t.sats, cost: 0, promptTokens: t.prompt, completionTokens: t.output,
+    totalTokens: (t.prompt ?? 0) + (t.output ?? 0), cacheReadInputTokens: t.cacheRead ?? undefined,
+  })).reverse();
+}
+export function renderSessions(v: SessionsView, width: number, height = 20, naming: ClientNaming = emptyClientNaming()): string[] {
   const lines: string[] = [];
   const add = (s: string) => lines.push(s);
   add(`Sessions ${v.loading ? "· Loading…" : ""}  / filter: ${cleanText(v.filter)}${v.searching ? "_" : ""}`);
@@ -87,14 +97,19 @@ export function renderSessions(v: SessionsView, width: number, height = 20): str
       for (let i = 0; i < key.length; i += Math.max(1, width)) add(key.slice(i, i + Math.max(1, width)));
       add(`  ${turns.length} turns | ${money(t.sats)} sats${t.priced < turns.length ? " + unknown" : ""} | ${t.eligible ? t.misses : "—"} misses | ${t.eligible ? count(t.missed) : "—"} tokens`);
     }
-    add(""); add("PER REQUEST (transcript order): time · cache reads · missed tokens* · sats");
-    session.turns.forEach((t, i) => {
-      const marker = t.missed ? "!" : " ";
-      const label = `${marker}${i + 1} ${t.timestamp} · read ${t.cacheRead ?? "—"} · miss ${t.eligible ? t.missed : "—"} · ${money(t.sats)} sats [${t.match}]`;
-      add(t.missed ? `${COLORS.yellow}${label}${COLORS.reset}` : label);
-      add(`  ${t.model} · ${t.provider}`);
-      for (let j = 0; j < t.node.length; j += Math.max(1, width - 2)) add(`  ${t.node.slice(j, j + Math.max(1, width - 2))}`);
-    });
+    add("");
+    add("Requests: same table as Recent, newest first; unknown accounting is — sats.");
+    lines.push(...renderRequestTable(sessionRequestEntries(session), width, naming, `Session Requests (${session.turns.length} shown)`).split("\n"));
+    const misses = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.missed > 0);
+    if (misses.length) {
+      add("Estimated cache miss events (transcript positions):");
+      for (const { t, i } of misses) add(`#${i + 1} ${t.timestamp} · ${t.missed} missed tokens · ${t.node} × ${t.provider}`);
+    }
+    const unresolved = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.match !== "matched" || t.sats === null || t.prompt === null || t.output === null);
+    if (unresolved.length) {
+      add("Accounting / usage gaps (transcript positions):");
+      for (const { t, i } of unresolved) add(`#${i + 1} ${t.timestamp} · ${t.match} · ${t.responseId ?? "no response ID"}${t.sats === null ? " · price unknown" : ""}${t.prompt === null || t.output === null ? " · tokens unknown" : ""}`);
+    }
   }
   return lines;
 }

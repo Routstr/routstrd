@@ -48,3 +48,17 @@ that a missing accounting database is not created. Compiled workers use Bun's
 embedded `tui/usage/sessions-worker.js` entry, not a sibling of the main executable.
 The TUI test suite also executes an isolated full-app key-dispatch harness for
 Sessions details → `/` and `?` → Escape → tab switch / refresh / quit.
+
+### Session request table
+
+Session details reuse Recent's request table directly: the same TIME, MODEL,
+CACHE HIT bar, IN/OUT, COST (sats), BASE:PROVIDER and CLIENT layout and formatting.
+Requests are newest first and scoped to that transcript; unlike Recent's 50-row
+preview, details include all requests within the loader's existing safety bounds.
+The monitor's existing line/page/Home/End scrolling applies. Recent has no row
+selection or request drill-down, so Sessions does not invent one. At narrow widths,
+columns are clipped with the same priority as Recent; full node/provider statistics
+remain above the table. Unknown prices/tokens display a dash, and an explicit
+accounting-gap list below the table preserves transcript-only, ambiguous and
+repeated-ID entries. Estimated miss-event annotations remain separate from the
+shared table. `/` and `?` do not activate global request search inside details.

@@ -844,8 +844,18 @@ const TOKEN_BAR_COLORS = {
 };
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
-  const recentEntries = stats.entries.slice(0, 50);
-  if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
+  if (stats.entries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
+  return renderRequestTable(stats.entries.slice(0, 50), width, naming, `Recent Requests (${stats.entries.length} shown)`);
+}
+
+/** Shared request UI for Recent and session-scoped history; unknown cells stay explicit. */
+export type RequestTableEntry = Omit<UsageStats["entries"][number], "satsCost" | "promptTokens" | "completionTokens"> & {
+  satsCost: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+export function renderRequestTable(recentEntries: RequestTableEntry[], width: number, naming: ClientNaming, title = "Recent Requests"): string {
+  if (recentEntries.length === 0) return renderBox(["No recent entries"], width, title);
 
   const timeCol = 8;
   const costCol = 12;
@@ -879,9 +889,9 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   // Token counts are drawn as `IN - OUT` with IN pinned to the left edge of the
   // column and OUT to the right, so both halves need the widest value on show.
-  const tokenRows = recentEntries.map((entry) => tokenSegments(entry));
-  const inputTexts = tokenRows.map((row) => formatNumber(row.input));
-  const outputTexts = tokenRows.map((row) => formatNumber(row.output));
+  const tokenRows = recentEntries.map((entry) => tokenSegments({ ...entry, promptTokens: entry.promptTokens ?? undefined, completionTokens: entry.completionTokens ?? undefined }));
+  const inputTexts = tokenRows.map((row, i) => recentEntries[i]!.promptTokens === null ? "—" : formatNumber(row.input));
+  const outputTexts = tokenRows.map((row, i) => recentEntries[i]!.completionTokens === null ? "—" : formatNumber(row.output));
   const inputCol = Math.max(...inputTexts.map((text) => text.length));
   const outputCol = Math.max(...outputTexts.map((text) => text.length));
   const inOutCol = inputCol + outputCol + " - ".length;
@@ -940,11 +950,12 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const bar = renderStackedBar([
       { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
       { value: segments.notCached, color: TOKEN_BAR_COLORS.notCached },
-    ], barWidth);
-    const tokens = `${bar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;
+    ], entry.promptTokens === null ? 0 : barWidth);
+    const cacheBar = entry.promptTokens === null ? "—".padEnd(barWidth) : bar;
+    const tokens = `${cacheBar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
     // Right-aligned so the `sats` unit ends at the same column on every row.
-    const cost = `${formatCost(totalSats)} sats`.padStart(costCol);
+    const cost = (totalSats === null ? "— sats" : `${formatCost(totalSats)} sats`).padStart(costCol);
     // `base:provider` keeps its informative halves — the URL's tail from its
     // first dot on (`.fips:28080/`, a tunnel host) and the `:provider` the
     // request actually went to — and elides only the opaque label in front of
@@ -967,7 +978,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     ].join(" "));
   }
 
-  return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
+  return renderBox(lines, width, title);
 }
 
 export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow, height?: number, quota: MonthlyQuota | null = null): string {

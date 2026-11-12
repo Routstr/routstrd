@@ -8,7 +8,7 @@ export interface SessionTurn {
   responseId?: string; timestamp: string; model: string;
   prompt: number | null; output: number | null; cacheRead: number | null;
   missed: number; eligible: boolean; node: string; provider: string;
-  sats: number | null; match: "missing" | "matched" | "ambiguous" | "duplicate";
+  client?: string; sats: number | null; match: "missing" | "matched" | "ambiguous" | "duplicate";
 }
 export interface PiSession {
   id: string; path: string; cwd: string; title: string; active: number;
@@ -86,7 +86,7 @@ export function attributeUsage(session: PiSession, db: Database): void {
   const matches = new Map<string, any[]>();
   for (let i = 0; i < ids.length; i += 200) {
     const batch = ids.slice(i, i + 200);
-    const rows = db.query(`SELECT ${key} AS response_key, ${["base_url", "provider", "sats_cost", "total_msats"].map(select).join(",")} FROM usage_tracking WHERE ${key} IN (${batch.map(() => "?").join(",")})`).all(...batch) as any[];
+    const rows = db.query(`SELECT ${key} AS response_key, ${["base_url", "provider", "client", "sats_cost", "total_msats"].map(select).join(",")} FROM usage_tracking WHERE ${key} IN (${batch.map(() => "?").join(",")})`).all(...batch) as any[];
     for (const row of rows) { const values = matches.get(row.response_key) ?? []; values.push(row); matches.set(row.response_key, values); }
   }
   const seen = new Set<string>();
@@ -96,6 +96,7 @@ export function attributeUsage(session: PiSession, db: Database): void {
     if (rows.length > 1) { turn.match = "ambiguous"; continue; }
     if (!rows.length) continue;
     const row = rows[0];
+    turn.client = typeof row.client === "string" ? cleanText(row.client) : undefined;
     turn.node = typeof row.base_url === "string" && row.base_url ? cleanText(row.base_url) : "Unknown";
     turn.provider = typeof row.provider === "string" && row.provider ? cleanText(row.provider) : "Unknown";
     if (seen.has(turn.responseId)) { turn.match = "duplicate"; continue; }

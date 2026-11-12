@@ -235,7 +235,7 @@ export async function runUsageTui(): Promise<void> {
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
 
-    const content = currentTab === "sessions" ? renderSessions(sessionsView, width, contentViewportHeight).map(line => truncateAnsi(line, width)).join("\n") : renderTabContent(currentTab, stats!, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
+    const content = currentTab === "sessions" ? renderSessions(sessionsView, width, contentViewportHeight, naming).map(line => truncateAnsi(line, width)).join("\n") : renderTabContent(currentTab, stats!, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
     const visibleContent = currentTab === "sessions" && !sessionsView.detail
       ? content.split("\n").slice(0, contentViewportHeight).join("\n")
       : applyScrollToContent(content, contentViewportHeight);

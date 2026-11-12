@@ -18,7 +18,7 @@ let receive: (key: string) => void = () => {};
 process.stdin.on = ((event: string, handler: (key: string) => void) => { if (event === "data") receive = handler; return process.stdin; }) as typeof process.stdin.on;
 (globalThis as any).Worker = class {
  onmessage: any; onerror: any;
- postMessage() { queueMicrotask(() => this.onmessage({ data: { sessions: [{ id: "s", path: "/fixture", cwd: "/fixture", title: "fixture", active: 0, turns: [], warnings: [] }], more: false } })); }
+ postMessage() { queueMicrotask(() => this.onmessage({ data: { sessions: [{ id: "s", path: "/fixture", cwd: "/fixture", title: "fixture", active: 0, turns: Array.from({ length: 30 }, (_, i) => ({ timestamp: "2026-01-01T00:00:00Z", model: `model-${i}`, prompt: 7000, output: 20, cacheRead: 5000, missed: 0, eligible: true, node: "Unknown", provider: "Unknown", sats: null, match: "missing" })), warnings: [] }], more: false } })); }
  terminate() {}
 };
 let quit = false;
@@ -29,6 +29,10 @@ await Bun.sleep(0);
 for (const key of ["/", "?"]) {
  receive("\r");
  if (!output.includes("Transcript: /fixture")) throw Error("detail did not open");
+ receive("\x06"); // existing page-down reaches the shared request table
+ if (vimState.scrollPos === 0) throw Error("request page scroll failed");
+ receive("\x1b[H");
+ if (vimState.scrollPos !== 0) throw Error("request scroll-to-top failed");
  receive(key); receive("\x1b");
  if (vimState.isSearching) throw Error("Sessions leaked global search");
  receive("7");
