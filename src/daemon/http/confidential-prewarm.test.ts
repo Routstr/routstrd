@@ -1,52 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { confidentialPrewarmOptions } from "./index";
 
-describe("confidentialUpstream.prewarm → SDK options", () => {
-  test("on by default with the SDK defaults", () => {
+describe("confidentialUpstream.prewarm → SDK pre-warm options", () => {
+  test("is on by default, with the SDK's defaults", () => {
     const o = confidentialPrewarmOptions(undefined);
     expect(o?.enabled).toBe(true);
     expect(o?.activityWindowMs).toBeUndefined();
+    expect(o?.maxTotal).toBeUndefined();
     expect(o?.maxAgeMs).toBeUndefined();
-    expect(typeof o?.log).toBe("function");
+    expect(o?.maxDepositMsat).toBeUndefined();
   });
 
-  test("enabled: false turns it off", () => {
+  test("enabled: false switches it off", () => {
     expect(confidentialPrewarmOptions({ enabled: false })).toBeUndefined();
   });
 
-  test("converts units and caps the age below the node's 600 s limit", () => {
-    const o = confidentialPrewarmOptions({
-      activityWindowMinutes: 2,
-      maxPerKey: 2,
-      maxTotal: 3,
-      maxAgeSeconds: 900,
-    });
-    expect(o?.activityWindowMs).toBe(120_000);
-    expect(o?.maxPerKey).toBe(2);
-    expect(o?.maxTotal).toBe(3);
-    expect(o?.maxAgeMs).toBe(570_000);
-    expect(confidentialPrewarmOptions({ maxAgeSeconds: 300 })?.maxAgeMs).toBe(300_000);
+  test("maps minutes and seconds to milliseconds, and passes the deposit bound", () => {
+    const o = confidentialPrewarmOptions({ activityWindowMinutes: 5, maxTotal: 2, maxAgeSeconds: 300, maxDepositMsat: 0 });
+    expect(o?.activityWindowMs).toBe(300_000);
+    expect(o?.maxTotal).toBe(2);
+    expect(o?.maxAgeMs).toBe(300_000);
+    // 0 is a value: never arm for a node that takes a deposit.
+    expect(o?.maxDepositMsat).toBe(0);
   });
 
-  test("floors the age at 60 s so sessions are not armed and retired every tick", () => {
-    expect(confidentialPrewarmOptions({ maxAgeSeconds: 0 })?.maxAgeMs).toBe(60_000);
-    expect(confidentialPrewarmOptions({ maxAgeSeconds: 5 })?.maxAgeMs).toBe(60_000);
-    expect(confidentialPrewarmOptions({ maxAgeSeconds: 60 })?.maxAgeMs).toBe(60_000);
-  });
-
-  test("passes the session-fee limit through (default: the SDK's)", () => {
-    expect(confidentialPrewarmOptions(undefined)?.maxSessionFeeMsat).toBeUndefined();
-    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 0 })?.maxSessionFeeMsat).toBe(0);
-    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: 2500 })?.maxSessionFeeMsat).toBe(2500);
-    expect(confidentialPrewarmOptions(undefined)?.maxArmedWithFee).toBeUndefined();
-    expect(confidentialPrewarmOptions({ maxArmedWithFee: 6 })?.maxArmedWithFee).toBe(6);
-    expect(confidentialPrewarmOptions({ maxSessionFeeMsat: -1 })?.maxSessionFeeMsat).toBeUndefined();
-  });
-
-  test("passes the funds headroom through (default: the SDK's)", () => {
-    expect(confidentialPrewarmOptions(undefined)?.fundsHeadroom).toBeUndefined();
-    expect(confidentialPrewarmOptions({ fundsHeadroom: 3 })?.fundsHeadroom).toBe(3);
-    expect(confidentialPrewarmOptions({ fundsHeadroom: 1.5 })?.fundsHeadroom).toBe(1.5);
-    expect(confidentialPrewarmOptions({ fundsHeadroom: -1 })?.fundsHeadroom).toBeUndefined();
+  test("keeps an armed connection's age within what the node allows", () => {
+    expect(confidentialPrewarmOptions({ maxAgeSeconds: 1 })?.maxAgeMs).toBe(60_000);
+    expect(confidentialPrewarmOptions({ maxAgeSeconds: 9999 })?.maxAgeMs).toBe(570_000);
   });
 });
