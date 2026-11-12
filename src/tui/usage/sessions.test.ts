@@ -159,7 +159,7 @@ test("detail header is Title/Session/Project only while list filter stays availa
  expect(detail).not.toContain("Esc back · ↑↓ scroll · R refresh");
  expect(detail).not.toContain("Transcript:");
  expect(detail).not.toContain(s.path);
- expect(detail).toContain("Recorded:"); expect(detail).toContain("* Pi heuristic;");
+ expect(detail).toContain("Recorded:"); expect(detail).not.toContain("* Pi heuristic;"); expect(detail).not.toContain("Pi tokens:");
  expect(detail).toContain("NODE × PROVIDER"); expect(detail).toContain("Session Requests");
  sessionsKey(v, "\x1b"); expect(renderSessions(v, 120)[0]).toContain("/ filter: U");
 });

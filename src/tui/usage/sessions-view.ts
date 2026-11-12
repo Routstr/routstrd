@@ -81,8 +81,6 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     }
     add(`Recorded: ${money(totals.sats)} sats · priced ${totals.priced}/${session.turns.length} · matched ${totals.matched}/${session.turns.length}`);
     add(`Estimated misses*: ${totals.eligible ? totals.misses : "—"} · missed tokens*: ${totals.eligible ? count(totals.missed) : "—"} · eligible comparisons ${totals.eligible}`);
-    add(`Pi tokens: ${count(session.turns.reduce((s, t) => s + (t.prompt ?? 0), 0))} prompt / ${count(session.turns.reduce((s, t) => s + (t.output ?? 0), 0))} output (known usage only)`);
-    add("* Pi heuristic; assumes unchanged prefix, does not compare prompt contents.");
     for (const warning of session.warnings) add(`Warning: ${warning}`);
     const issues = session.turns.filter(t => t.match !== "matched");
     if (issues.length) add(`Incomplete attribution: ${issues.length} missing / ambiguous / repeated response IDs; spend not assumed zero.`);
