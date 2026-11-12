@@ -1,3 +1,4 @@
+import { renderSessionBreakdown } from "./sessions-breakdown.ts";
 import { renderRequestTable, type RequestTableEntry } from "./render.ts";
 import { emptyClientNaming, type ClientNaming } from "./data.ts";
 import { basename } from "node:path";
@@ -86,17 +87,8 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     for (const warning of session.warnings) add(`Warning: ${warning}`);
     const issues = session.turns.filter(t => t.match !== "matched");
     if (issues.length) add(`Incomplete attribution: ${issues.length} missing / ambiguous / repeated response IDs; spend not assumed zero.`);
-    add(""); add("NODE × PROVIDER | turns | sats | misses* | missed tokens*");
-    const buckets = new Map<string, typeof session.turns>();
-    for (const turn of session.turns) {
-      const k = `${turn.node} × ${turn.provider}`;
-      const group = buckets.get(k) ?? []; group.push(turn); buckets.set(k, group);
-    }
-    for (const [key, turns] of buckets) {
-      const t = sessionTotals(turns);
-      for (let i = 0; i < key.length; i += Math.max(1, width)) add(key.slice(i, i + Math.max(1, width)));
-      add(`  ${turns.length} turns | ${money(t.sats)} sats${t.priced < turns.length ? " + unknown" : ""} | ${t.eligible ? t.misses : "—"} misses | ${t.eligible ? count(t.missed) : "—"} tokens`);
-    }
+    add("");
+    lines.push(...renderSessionBreakdown(session.turns, width).split("\n"));
     add("");
     add("Requests: same table as Recent, newest first; unknown accounting is — sats.");
     lines.push(...renderRequestTable(sessionRequestEntries(session), width, naming, `Session Requests (${session.turns.length} shown)`).split("\n"));

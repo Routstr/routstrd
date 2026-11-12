@@ -1,3 +1,4 @@
+import { renderSessionBreakdown } from "./sessions-breakdown.ts";
 import { renderRecent, renderRequestTable } from "./render.ts";
 import { emptyClientNaming } from "./data.ts";
 import type { UsageStats } from "./types.ts";
@@ -114,4 +115,27 @@ test("session requests share Recent table layout, newest first, without losing u
   for (const line of stripAnsi(shared).split("\n")) expect(line.length).toBeLessThanOrEqual(width);
   expect(detail).toContain("missing · last · price unknown · tokens unknown");
  }
+});
+
+test("node/provider breakdown is a bounded aligned table with partial accounting", async () => {
+ const s = await parseSession(fixture([assistant(0, 7000), assistant(8000), assistant(9000)]), 0);
+ for (const t of s.turns.slice(0, 2)) { t.node = "https://ai.redsh1ft.com/"; t.provider = "openrouter:Cloudflare"; }
+ s.turns[0]!.sats = 12.5;
+ for (const width of [40, 80, 160]) {
+  const raw = renderSessionBreakdown(s.turns, width);
+  const lines = stripAnsi(raw).split("\n");
+  expect(lines[0]).toContain("NODE × PROVIDER");
+  expect(lines[1]).toContain("Node"); if (width >= 80) expect(lines[1]).toContain("Provider");
+  expect(lines[1]).toContain("sats");
+  expect(lines.filter(l => l.includes("12.50+?"))).toHaveLength(1);
+  expect(lines).toHaveLength(7); // border, header, separator, two combos, partial legend, border
+  expect(lines.join("\n")).toContain("+? = additional unknown spend");
+  for (const line of lines) expect(line.length).toBe(width);
+  const satsRight = lines[1]!.indexOf("sats") + 4;
+  const row = lines.find(l => l.includes("12.50+?"))!;
+  expect(row.indexOf("12.50+?") + 7).toBe(satsRight);
+  if (width >= 80) { expect(lines[1]).toContain("Missed tokens*"); expect(raw).toContain("openrouter:Cloudflare"); }
+ }
+ expect(s.turns[0]!.node).toBe("https://ai.redsh1ft.com/");
+ expect(s.turns[0]!.provider).toBe("openrouter:Cloudflare");
 });
