@@ -978,6 +978,7 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "providers": return renderProviders(stats, width);
     case "clients": return renderClients(stats, width);
     case "npubs": return renderNpubs(stats, naming, width);
+    case "sessions": return "Sessions loading…";
     case "recent": return renderRecent(stats, width, naming);
     default: return "Unknown tab";
   }

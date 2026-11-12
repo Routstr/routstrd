@@ -7,7 +7,8 @@ export const ALL_TABS: Tab[] = [
   { id: "providers", name: "Providers", key: "4" },
   { id: "clients", name: "Clients", key: "5" },
   { id: "npubs", name: "Npubs", key: "6" },
-  { id: "recent", name: "Recent", key: "7" },
+  { id: "sessions", name: "Sessions", key: "7" },
+  { id: "recent", name: "Recent", key: "8" },
 ];
 
 /**
@@ -45,7 +46,7 @@ export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWin
  * Models, Providers, Clients and Npubs all follow it.
  */
 export function tabSupportsWindow(tabId: Tab["id"]): boolean {
-  return tabId !== "recent";
+  return tabId !== "recent" && tabId !== "sessions";
 }
 
 /**
