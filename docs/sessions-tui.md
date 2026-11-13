@@ -62,3 +62,18 @@ remain above the table. Unknown prices/tokens display a dash, and an explicit
 accounting-gap list below the table preserves transcript-only, ambiguous and
 repeated-ID entries. Estimated miss-event annotations remain separate from the
 shared table. `/` and `?` do not activate global request search inside details.
+
+### Recent cache-miss estimates
+
+Recent now starts the same bounded worker in the background without requiring a
+visit to Sessions. The first 20 loaded recent sessions supply canonical Pi
+session-sequence estimates. Only eligible unique exact response-ID matches are
+attached to Recent requests (`upstreamResponseId`, or legacy `requestId`). Missing,
+ambiguous, first-turn, unsupported-cache and incomplete-transcript matches remain
+unknown. Requests from different sessions never become each other's predecessor.
+Coverage below Recent counts eligible exact matches; blue means uncached with no
+identified miss, **not** proof of a zero miss. The estimate index is rebuilt on
+worker results, throttled to ten seconds and refreshed explicitly with R; estimates
+are withheld while refreshing. Repeated refreshes queue one follow-up worker pass.
+Remote/auth-proxy monitoring disables local transcript estimates entirely, to avoid
+mixing local Pi history with another daemon's accounting. No payload logs are used.

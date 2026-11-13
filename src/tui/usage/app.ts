@@ -1,3 +1,5 @@
+import { loadConfig } from "../../utils/daemon-client.ts";
+import { annotateRecent, recentEstimateIndex } from "./recent-estimates.ts";
 import { sessionsWorkerPath } from "./sessions-worker-path.ts";
 import { createSessionsView, renderSessions, sessionsKey, filteredSessions } from "./sessions-view.ts";
 import type { SessionsResult } from "./sessions-data.ts";
@@ -51,8 +53,12 @@ export async function runUsageTui(): Promise<void> {
   const sessionsView = createSessionsView();
   let sessionsWorker: Worker | undefined;
   let sessionsLastLoad = 0;
+  let recentEstimates = new Map<string, number>();
+  let estimatesLocal = false;
+  let sessionsReloadQueued = false;
   function loadSessions(force = false) {
-    if (sessionsView.loading || (!force && Date.now() - sessionsLastLoad < 10000)) return;
+    if (sessionsView.loading) { if (force) sessionsReloadQueued = true; return; }
+    if (!force && Date.now() - sessionsLastLoad < 10000) return;
     sessionsView.loading = true;
     try {
       if (!sessionsWorker) {
@@ -60,14 +66,17 @@ export async function runUsageTui(): Promise<void> {
         sessionsWorker.onmessage = (event: MessageEvent<SessionsResult>) => {
           const selectedPath = filteredSessions(sessionsView)[sessionsView.selected]?.path;
           sessionsView.result = event.data;
+          recentEstimates = recentEstimateIndex(event.data.sessions.slice(0, 20));
           const selected = filteredSessions(sessionsView).findIndex(s => s.path === selectedPath);
           sessionsView.selected = Math.max(0, selected);
           sessionsView.loading = false;
           sessionsLastLoad = Date.now();
+          if (sessionsReloadQueued) { sessionsReloadQueued = false; loadSessions(true); }
           render();
         };
         sessionsWorker.onerror = () => {
           sessionsView.loading = false;
+          recentEstimates.clear();
           sessionsView.result = { sessions: [], more: false, error: "Session worker failed; press R to retry" };
           sessionsWorker?.terminate(); sessionsWorker = undefined; render();
         };
@@ -148,7 +157,10 @@ export async function runUsageTui(): Promise<void> {
     }
     fetching = true;
     try {
-      if (currentTab === "sessions") loadSessions();
+      try { const config = await loadConfig(); estimatesLocal = !config.daemonUrl && !config.authUrl; }
+      catch { estimatesLocal = false; }
+      // Independent of visiting Sessions; parsing stays in the bounded worker.
+      if (estimatesLocal || currentTab === "sessions") loadSessions();
       const requestedWindow = windowSelection.currentWindow;
       const running = await isDaemonRunning();
       if (!running) {
@@ -235,7 +247,7 @@ export async function runUsageTui(): Promise<void> {
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
 
-    const content = currentTab === "sessions" ? renderSessions(sessionsView, width, contentViewportHeight, naming).map(line => truncateAnsi(line, width)).join("\n") : renderTabContent(currentTab, stats!, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
+    const content = currentTab === "sessions" ? renderSessions(sessionsView, width, contentViewportHeight, naming).map(line => truncateAnsi(line, width)).join("\n") : renderTabContent(currentTab, stats ? { ...stats, entries: annotateRecent(stats.entries, recentEstimates, estimatesLocal && !sessionsView.loading) as typeof stats.entries } : stats!, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
     const visibleContent = currentTab === "sessions" && !sessionsView.detail
       ? content.split("\n").slice(0, contentViewportHeight).join("\n")
       : applyScrollToContent(content, contentViewportHeight);
@@ -287,7 +299,7 @@ export async function runUsageTui(): Promise<void> {
 
     if (key === "q" || key === "Q" || key === "\u0003") return cleanup(0);
     if (key === "r" || key === "R") {
-      if (currentTab === "sessions") loadSessions(true);
+      if (estimatesLocal || currentTab === "sessions") loadSessions(true);
       void fetchData();
       return;
     }

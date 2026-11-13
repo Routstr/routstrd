@@ -845,7 +845,13 @@ const TOKEN_BAR_COLORS = {
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
   if (stats.entries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
-  return renderRequestTable(stats.entries.slice(0, 50), width, naming, `Recent Requests (${stats.entries.length} shown)`);
+  const entries = stats.entries.slice(0, 50) as RequestTableEntry[];
+  const coverage = entries.filter(e => e.estimatedMissedTokens !== undefined).length;
+  return renderRequestTable(entries, width, naming, `Recent Requests (${stats.entries.length} shown)`) +
+    "\n" + renderBox([
+      `Pi miss estimates: ${coverage}/${entries.length} eligible exact matches (local bounded transcripts).`,
+      "Blue = uncached, no identified miss; not proven zero.",
+    ], width);
 }
 
 /** Shared request UI for Recent and session-scoped history; unknown cells stay explicit. */

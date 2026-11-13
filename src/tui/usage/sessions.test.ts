@@ -107,7 +107,7 @@ test("session requests share Recent table layout, newest first, without losing u
   expect(detail).toContain(shared);
   const recent = renderRecent({ entries } as unknown as UsageStats, width, emptyClientNaming());
   // Only box title differs: all request headers/rows/borders are identical.
-  expect(recent.split("\n").slice(1)).toEqual(shared.split("\n").slice(1));
+  expect(recent.split("\n").slice(1, shared.split("\n").length)).toEqual(shared.split("\n").slice(1));
   if (width >= 80) {
    expect(stripAnsi(shared)).toContain("— sats");
    expect(stripAnsi(shared)).toContain("1.25 sats");
@@ -162,4 +162,39 @@ test("detail header is Title/Session/Project only while list filter stays availa
  expect(detail).toContain("Recorded:"); expect(detail).not.toContain("* Pi heuristic;"); expect(detail).not.toContain("Pi tokens:");
  expect(detail).toContain("NODE × PROVIDER"); expect(detail).toContain("Session Requests");
  sessionsKey(v, "\x1b"); expect(renderSessions(v, 120)[0]).toContain("/ filter: U");
+});
+
+test("Recent transfers canonical estimates only by unique exact response ID", async () => {
+ const { recentEstimateIndex, annotateRecent } = await import("./recent-estimates.ts");
+ const one = await parseSession(fixture([assistant(0, 7000, 0, "a"), assistant(8000, 0, 0, "b")]), 0);
+ const unrelated = await parseSession(fixture([assistant(9000, 0, 0, "first-other")]), 0);
+ const index = recentEstimateIndex([one, unrelated]);
+ const entries = sessionRequestEntries(one).map(e => ({ ...e, satsCost: 1, promptTokens: e.promptTokens!, completionTokens: e.completionTokens! }));
+ // Modern SDK lifecycle request ID differs from the response ID.
+ Object.assign(entries[0]!, { requestId: "lifecycle", upstreamResponseId: "b" });
+ const annotated = annotateRecent(entries, index, true);
+ expect(annotated[0]!.estimatedMissedTokens).toBe(7000);
+ expect(annotated[1]!.estimatedMissedTokens).toBeUndefined(); // first turn
+ expect(index.has("first-other")).toBe(false); // never use another session as predecessor
+ const shared = renderRequestTable(sessionRequestEntries(one), 160, emptyClientNaming());
+ const recent = renderRequestTable(annotated, 160, emptyClientNaming());
+ const red = (s: string) => [...s.matchAll(/\x1b\[31m(█+)/g)].map(m => m[1]);
+ expect(red(recent)).toEqual(red(shared)); expect(red(recent).length).toBeGreaterThan(0);
+ expect(annotateRecent(entries, index, false)[0]!.estimatedMissedTokens).toBeUndefined();
+ expect(annotateRecent([entries[0]!, entries[0]!], index, true).every(e => e.estimatedMissedTokens === undefined)).toBe(true);
+ const duplicate = structuredClone(one); expect(recentEstimateIndex([one, duplicate]).has("b")).toBe(false);
+ const invalid = structuredClone(one); invalid.warnings.push("incomplete"); expect(recentEstimateIndex([invalid]).size).toBe(0);
+ const absent = { ...entries[0]!, requestId: "absent", upstreamResponseId: "" };
+ expect(annotateRecent([absent], index, true)[0]!.estimatedMissedTokens).toBeUndefined();
+ const refreshed = structuredClone(one); refreshed.turns[1]!.missed = 5000;
+ expect(annotateRecent(entries, recentEstimateIndex([refreshed]), true)[0]!.estimatedMissedTokens).toBe(5000);
+ const rendered = stripAnsi(renderRecent({ entries: annotated } as unknown as UsageStats, 160, emptyClientNaming()));
+ expect(rendered).toContain("Pi miss estimates: 1/2 eligible exact matches");
+ expect(rendered).toContain("not proven zero");
+});
+
+test("Recent async canonical loading and refresh are independent of Sessions visits", async () => {
+ const child = Bun.spawn(["bun", join(import.meta.dir, "recent-dispatch-smoke.ts")], { stdout: "pipe", stderr: "pipe" });
+ const err = await new Response(child.stderr).text();
+ expect(err).toContain("Recent async dispatch OK"); expect(await child.exited).toBe(0);
 });
