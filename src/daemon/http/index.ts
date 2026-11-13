@@ -2976,6 +2976,9 @@ const CONFIDENTIAL_UPSTREAM_CODES = new Set([
   // cu-2pc and the node's sidecar are of different releases.
   "twopc_version_mismatch",
   "request_refused",
+  // The node announced a larger reservation than the signed offer and the
+  // model's listing allow; nothing was sent to the provider.
+  "reservation_above_ceiling",
   "trusted_host_rejected",
   "session_protocol",
   "session_rejected",
