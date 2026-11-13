@@ -805,10 +805,19 @@ program
  * this refund. Reported separately because they never appear in the store's
  * pending token/API key counts — without this line a refund that recovered
  * them looks identical to one that had nothing to do.
+ *
+ * Discards are reported too, and loudly: an entry is only dropped when it can
+ * never be received (already spent, sub-fee dust, undecodable, expired), so the
+ * lost value has to be visible rather than silently disappearing from the list.
  */
 interface RefundRecovery {
   attempted: number;
   succeeded: number;
+  parked?: number;
+  recoveredAmount?: number;
+  batches?: number;
+  batchesRecovered?: number;
+  dropped?: Array<{ reason: string; amount: number; mint?: string }>;
   error?: string;
 }
 
@@ -818,13 +827,37 @@ function printRecoveredTokens(recovered?: RefundRecovery): void {
     console.log(`\nParked tokens: recovery failed: ${recovered.error}`);
     return;
   }
-  const stillParked = recovered.attempted - recovered.succeeded;
+  const batches = recovered.batches ?? 0;
+  const stillParked = recovered.parked ?? recovered.attempted - recovered.succeeded;
   console.log(
     `\nParked tokens: ${recovered.succeeded}/${recovered.attempted} received` +
+      (recovered.recoveredAmount ? ` (${recovered.recoveredAmount} sat)` : "") +
+      (batches > 0
+        ? `, ${recovered.batchesRecovered ?? 0}/${batches} merged batch(es) recovered`
+        : "") +
       (stillParked > 0
         ? `, ${stillParked} still parked (the daemon retries them every 42 minutes)`
         : ""),
   );
+
+  const dropped = recovered.dropped ?? [];
+  if (dropped.length > 0) {
+    const amount = dropped.reduce((sum, drop) => sum + drop.amount, 0);
+    const byReason = new Map<string, number>();
+    for (const drop of dropped) {
+      byReason.set(drop.reason, (byReason.get(drop.reason) ?? 0) + 1);
+    }
+    const summary = [...byReason]
+      .map(([reason, count]) => `${count} ${reason.replace(/-/g, " ")}`)
+      .join(", ");
+    console.log(
+      `Discarded ${dropped.length} unrecoverable parked token(s) worth ${amount} sat (${summary}).`,
+    );
+    console.log(
+      "These can never be received: the mint has already spent them, their value is" +
+        " consumed by mint input fees, or they no longer decode.",
+    );
+  }
 }
 
 program
@@ -3227,6 +3260,85 @@ walletCmd
       }
     },
   );
+
+walletCmd
+  .command("parked")
+  .description(
+    "List refund tokens the daemon parked after a failed receive (read-only)",
+  )
+  .option("--json", "Print the raw JSON from the daemon", false)
+  .action(async (options: { json: boolean }) => {
+    try {
+      await ensureDaemonRunning();
+
+      const result = await callDaemon("/wallet/parked", { method: "GET" });
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const output = result.output as
+        | {
+            count?: number;
+            amount?: number;
+            tokens?: Array<{
+              token: string;
+              amount: number;
+              unit: string;
+              mint?: string;
+              ageDays: number;
+              proofCount: number;
+              problem?: string;
+            }>;
+          }
+        | undefined;
+
+      if (options.json) {
+        console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+
+      const tokens = output?.tokens ?? [];
+      if (tokens.length === 0) {
+        console.log("No parked refund tokens.");
+        return;
+      }
+
+      console.log(
+        `Parked refund tokens: ${output?.count ?? tokens.length} (${output?.amount ?? 0} sat)`,
+      );
+      const byMint = new Map<string, { count: number; amount: number }>();
+      for (const token of tokens) {
+        const key = token.mint ?? "(undecodable)";
+        const bucket = byMint.get(key) ?? { count: 0, amount: 0 };
+        bucket.count += 1;
+        bucket.amount += token.amount;
+        byMint.set(key, bucket);
+      }
+      for (const [mint, bucket] of byMint) {
+        console.log(`  ${mint}: ${bucket.count} token(s), ${bucket.amount} sat`);
+      }
+
+      const problems = tokens.filter((token) => token.problem);
+      if (problems.length > 0) {
+        console.log(`\n  ${problems.length} entr(ies) do not decode and will be discarded on the next refund.`);
+      }
+      console.log(
+        "\n`rout refund` retries these, merges same-mint dust, and discards the ones that can never be received.",
+      );
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
 
 walletCmd
   .command("recover")
