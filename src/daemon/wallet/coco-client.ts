@@ -1,3 +1,4 @@
+import { waitForReceive } from "./receive-wait";
 import { startOnlineProofBootstrap } from "./online-proof-bootstrap";
 import { sweepOfflineSends } from "./offline-sweep";
 import { withTimeout as withRequestTimeout } from "../../utils/with-timeout";
@@ -79,6 +80,7 @@ import {
   receiveInputFingerprint,
   reconcileExecutingReceives,
   releaseReceiveToken,
+  hashReceiveToken,
   reserveReceiveToken,
   setReceiveReconcileBackup,
   updateReceiveToken,
@@ -2338,6 +2340,9 @@ export async function createCocoClient(
     },
 
     async receiveCashu(token: string): Promise<string> {
+      // Bound the foreground wait, not the monetary operation. The inner work
+      // must retain its reservation through prepare/execute and late settlement.
+      return waitForReceive(recoveryOutstanding, hashReceiveToken(token), async () => {
       const reservation = reserveReceiveToken(database, token);
       if (!reservation.acquired) {
         if (reservation.existing?.state === "succeeded") {
@@ -2463,6 +2468,7 @@ export async function createCocoClient(
         }
         throw error;
       }
+      });
     },
 
     async receiveBolt11(amount: number, mintUrl?: string) {

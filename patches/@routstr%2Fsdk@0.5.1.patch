@@ -1,0 +1,1696 @@
+diff --git a/dist/browser.js b/dist/browser.js
+index 99ccec72a4f0b27552bd37ca77bb22f9aa974520..d57f7d4450446fc82c47b855d0963453aea05281 100644
+--- a/dist/browser.js
++++ b/dist/browser.js
+@@ -2401,6 +2401,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2553,6 +2573,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2570,7 +2635,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4276,26 +4346,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10748,6 +10798,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10822,19 +10877,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10848,21 +10909,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10872,7 +10931,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11433,6 +11493,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/browser.mjs b/dist/browser.mjs
+index 3cfd4dc8b6127a141e84624a4a596274fa76f203..cfb998de309428a8a18daa8c8933fa86145dba98 100644
+--- a/dist/browser.mjs
++++ b/dist/browser.mjs
+@@ -2399,6 +2399,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2551,6 +2571,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2568,7 +2633,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4274,26 +4344,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10746,6 +10796,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10820,19 +10875,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10846,21 +10907,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10870,7 +10929,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11431,6 +11491,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/bun.js b/dist/bun.js
+index 6d662e2709c0469e7991cd4f88ffea9554b91d06..ae402d630d9951e223ea1dc703558f15d6564706 100644
+--- a/dist/bun.js
++++ b/dist/bun.js
+@@ -2401,6 +2401,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2553,6 +2573,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2570,7 +2635,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4276,26 +4346,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10806,6 +10856,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10880,19 +10935,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10906,21 +10967,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10930,7 +10989,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11491,6 +11551,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/bun.mjs b/dist/bun.mjs
+index 866c52876415593f5fcd572fd3e865ac4ad2e4f6..82a0534dcd2b1a41db993cf260f02650e7ad3abc 100644
+--- a/dist/bun.mjs
++++ b/dist/bun.mjs
+@@ -2399,6 +2399,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2551,6 +2571,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2568,7 +2633,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4274,26 +4344,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10804,6 +10854,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10878,19 +10933,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10904,21 +10965,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10928,7 +10987,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11489,6 +11549,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/index.js b/dist/index.js
+index 64b7df53fac6fef20a6badaad8dfe6a92e3bc239..dadf01731a84bde82f0392912b4175fd6de7953e 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -2401,6 +2401,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2553,6 +2573,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2570,7 +2635,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4276,26 +4346,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10748,6 +10798,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10822,19 +10877,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10848,21 +10909,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10872,7 +10931,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11433,6 +11493,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/index.mjs b/dist/index.mjs
+index ab092201113ba15bd847150e892ce971e8e7db65..92e459f9abcf0763c9a8e5f614516d8d19630d7c 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -2399,6 +2399,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2551,6 +2571,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2568,7 +2633,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4274,26 +4344,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10746,6 +10796,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10820,19 +10875,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10846,21 +10907,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10870,7 +10929,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11431,6 +11491,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/node.js b/dist/node.js
+index 852ad22689a3c6c56953c5665b88461dcb73cef2..828c9dcd0dfe644fa2ac14172eccb9eef37f4534 100644
+--- a/dist/node.js
++++ b/dist/node.js
+@@ -2401,6 +2401,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2553,6 +2573,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2570,7 +2635,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4276,26 +4346,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10806,6 +10856,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10880,19 +10935,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10906,21 +10967,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10930,7 +10989,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11491,6 +11551,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
+diff --git a/dist/node.mjs b/dist/node.mjs
+index 8bd8c586d599dd3b89f01c7f56c16c816a01fd64..2059fabddf2b19aff233c207d8e91df69a974fa0 100644
+--- a/dist/node.mjs
++++ b/dist/node.mjs
+@@ -2399,6 +2399,26 @@ var MintDiscovery = class {
+   }
+ };
+ 
++// client/abortable.ts
++async function awaitWithAbort(operation, signal) {
++  if (!signal) return operation;
++  if (signal.aborted) {
++    void operation.catch(() => {
++    });
++    throw new DOMException("Request aborted", "AbortError");
++  }
++  let onAbort;
++  const aborted = new Promise((_, reject) => {
++    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++  try {
++    return await Promise.race([operation, aborted]);
++  } finally {
++    signal.removeEventListener("abort", onAbort);
++  }
++}
++
+ // wallet/fundingCancellation.ts
+ function throwIfFundingAborted(signal) {
+   if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+@@ -2551,6 +2571,51 @@ var CashuSpender = class _CashuSpender {
+       return { success: false, amount, unit, message: errorMessage };
+     }
+   }
++  /** Bound only the foreground wait. The receive retains ownership until it settles.
++   * Cache before starting so timeout/disconnect cannot lose the recovery token.
++   */
++  async receiveTokenForRecovery(token, signal, onSuccess, timeoutMs = 1e4) {
++    this.cacheReceiveToken(token);
++    let operation = this.pendingReceives.get(token);
++    if (!operation) {
++      operation = Promise.resolve().then(async () => {
++        await this.storageAdapter.flush?.();
++        throwIfFundingAborted(signal);
++        return this.receiveToken(token);
++      }).then((result) => {
++        if (result.success || /already spent/i.test(result.message ?? "")) {
++          this.storageAdapter.setCachedReceiveTokens(
++            this.storageAdapter.getCachedReceiveTokens().filter((entry) => entry.token !== token)
++          );
++        }
++        return result;
++      }).finally(() => {
++        this.pendingReceives.delete(token);
++      });
++      this.pendingReceives.set(token, operation);
++    }
++    const settlement = operation.then((result) => {
++      if (result.success) onSuccess?.();
++      return result;
++    });
++    let timer;
++    try {
++      return await awaitWithAbort(Promise.race([
++        settlement,
++        new Promise((resolve) => {
++          timer = setTimeout(() => resolve({
++            success: false,
++            pending: true,
++            ...this._decodeTokenAmount(token),
++            message: "Payment recovery timed out; recovery remains pending"
++          }), timeoutMs);
++        })
++      ]), signal);
++    } finally {
++      if (timer !== void 0) clearTimeout(timer);
++    }
++  }
++  pendingReceives = /* @__PURE__ */ new Map();
+   /** Preserve an unrecovered token without adding duplicate entries. */
+   cacheReceiveToken(token) {
+     const cached = this.storageAdapter.getCachedReceiveTokens();
+@@ -2568,7 +2633,12 @@ var CashuSpender = class _CashuSpender {
+   async recoverCachedReceiveTokens() {
+     const results = [];
+     for (const entry of this.storageAdapter.getCachedReceiveTokens()) {
+-      const result = await this.receiveToken(entry.token);
++      if (this.pendingReceives.has(entry.token)) continue;
++      const work = this.receiveToken(entry.token).finally(() => {
++        this.pendingReceives.delete(entry.token);
++      });
++      this.pendingReceives.set(entry.token, work);
++      const result = await work;
+       if (result.success || /already spent/i.test(result.message ?? "")) {
+         this.storageAdapter.setCachedReceiveTokens(
+           this.storageAdapter.getCachedReceiveTokens().filter((t) => t.token !== entry.token)
+@@ -4274,26 +4344,6 @@ var BalanceManager = class _BalanceManager {
+   }
+ };
+ 
+-// client/abortable.ts
+-async function awaitWithAbort(operation, signal) {
+-  if (!signal) return operation;
+-  if (signal.aborted) {
+-    void operation.catch(() => {
+-    });
+-    throw new DOMException("Request aborted", "AbortError");
+-  }
+-  let onAbort;
+-  const aborted = new Promise((_, reject) => {
+-    onAbort = () => reject(new DOMException("Request aborted", "AbortError"));
+-    signal.addEventListener("abort", onAbort, { once: true });
+-  });
+-  try {
+-    return await Promise.race([operation, aborted]);
+-  } finally {
+-    signal.removeEventListener("abort", onAbort);
+-  }
+-}
+-
+ // storage/requestLifecycle/privacy.ts
+ var SAFE_CODE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+ function safeCode(value) {
+@@ -10804,6 +10854,11 @@ var RoutstrClient = class {
+    * Handle error responses with failover
+    */
+   async _handleErrorResponse(params, token, status, requestId, xCashuRefundToken, responseBody, retryCount = 0, upstream) {
++    if (params.signal?.aborted && xCashuRefundToken) {
++      this.cashuSpender.cacheReceiveToken(xCashuRefundToken);
++      await this.storageAdapter.flush?.();
++    }
++    throwIfFundingAborted(params.signal);
+     const MAX_RETRIES_PER_PROVIDER = 2;
+     const { path, method, body, selectedModel, baseUrl, mintUrl } = params;
+     let tryNextProvider = false;
+@@ -10878,19 +10933,25 @@ var RoutstrClient = class {
+       tryNextProvider = true;
+     }
+     let refundReceived = false;
++    let recoveryPending = false;
+     if (!tryNextProvider && this.mode === "xcashu" && xCashuRefundToken) {
+       this._log(
+         "DEBUG",
+         `[RoutstrClient] _handleErrorResponse: Attempting to receive xcashu refund token=${REDACTED_CREDENTIAL}`
+       );
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(xCashuRefundToken);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(xCashuRefundToken, params.signal, () => {
++        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: xcashu refund received, amount=${receiveResult.amount}`
+         );
+-        this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+         tryNextProvider = true;
+         refundReceived = true;
+         recoverySucceeded = true;
+@@ -10904,21 +10965,19 @@ var RoutstrClient = class {
+     }
+     if (!tryNextProvider && !refundReceived && params.token.startsWith("cashu") && (!xCashuRefundToken || xCashuRefundToken !== params.token)) {
+       recoveryAttempted = true;
+-      const receiveResult = await this.cashuSpender.receiveToken(params.token);
++      const receiveResult = await this.cashuSpender.receiveTokenForRecovery(params.token, params.signal, () => {
++        if (this.mode === "xcashu") this.storageAdapter.removeXcashuToken(baseUrl, params.token);
++        else if (this.storageAdapter.getApiKey(baseUrl)?.key === params.token) this.storageAdapter.removeApiKey(baseUrl);
++      });
++      if (receiveResult.pending) {
++        recoveryPending = true;
++        tryNextProvider = true;
++      }
+       if (receiveResult.success) {
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Token restored successfully, amount=${receiveResult.amount}`
+         );
+-        if (this.mode === "xcashu") {
+-          this.storageAdapter.removeXcashuToken(baseUrl, params.token);
+-        } else if (this.mode === "apikeys" && this.storageAdapter.getApiKey(baseUrl)?.key === params.token) {
+-          this._log(
+-            "DEBUG",
+-            `[RoutstrClient] _handleErrorResponse: Removing dead bootstrap API key for ${baseUrl} (token restored to wallet)`
+-          );
+-          this.storageAdapter.removeApiKey(baseUrl);
+-        }
+         tryNextProvider = true;
+         recoverySucceeded = true;
+       } else {
+@@ -10928,7 +10987,8 @@ var RoutstrClient = class {
+         );
+       }
+     }
+-    if (params.token.startsWith("cashu") && tryNextProvider && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
++    throwIfFundingAborted(params.signal);
++    if (params.token.startsWith("cashu") && tryNextProvider && !recoveryPending && shouldFailoverToAnotherMint(parsedError) && retryCount < MAX_RETRIES_PER_PROVIDER) {
+       const failedMintUrl = params.selectedMintUrl || mintUrl;
+       const excludeMints = Array.from(
+         /* @__PURE__ */ new Set([...params.excludeMints || [], failedMintUrl])
+@@ -11489,6 +11549,7 @@ var RoutstrClient = class {
+       let newModel = selectedModel;
+       let newRequiredSats = params.requiredSats;
+       while (nextProvider) {
++        throwIfFundingAborted(params.signal);
+         this._log(
+           "DEBUG",
+           `[RoutstrClient] _handleErrorResponse: Failing over to next provider: ${nextProvider}, model: ${failoverModelId}`
