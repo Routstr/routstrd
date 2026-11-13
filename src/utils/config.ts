@@ -54,6 +54,100 @@ export interface RoutstrdConfig {
    * routed request. A hand-edited file needs a daemon restart.
    */
   autoModelPath?: boolean;
+  /**
+   * Confidential upstream: requests sent with `x-routstr-verify: confidential`
+   * run with the daemon as the TLS client of the node's provider, so the node
+   * never sees the prompt or the response. Off unless `enabled`.
+   */
+  confidentialUpstream?: {
+    enabled?: boolean;
+    /** Upstream TLS hostnames trusted for the other end (exact, `*.x`, `**.x`). */
+    trusted_hosts?: string[];
+    /**
+     * Node signing keys (hex or npub) whose offers are accepted. When unset,
+     * the keys that announced the node's URL on Nostr (kind 38421) are used,
+     * for https and onion nodes only.
+     */
+    node_pubkeys?: string[];
+    /** Set false to require `node_pubkeys` (no pin from the Nostr announcement). */
+    pin_from_announcement?: boolean;
+    /** `cu-prover` binary (else CU_PROVER_BIN / CU_PROVER / PATH). */
+    prover_path?: string;
+    /**
+     * Development only: allow plain-http nodes that are neither loopback nor
+     * onion services. The node credential then travels unencrypted.
+     */
+    allow_insecure_transport?: boolean;
+    /**
+     * The framing of the connection to the provider (routstr-confidential
+     * protocol v3): `"2"` is HTTP/2, a connection that is kept and serves many
+     * requests after one two-party handshake; `"1.1"` is HTTP/1.1, a
+     * connection per request. `auto` (default) takes the first one the node's
+     * signed offer lists (the operator's preference) and falls back from
+     * `"2"` to `"1.1"` on the same node when a connection fails to open
+     * (`"2"` is then not tried on that node for 10 minutes). `"2"` or `"1.1"`
+     * uses only that framing; a node that does not offer it is not used.
+     * The local API is the same either way.
+     */
+    http?: "auto" | "2" | "1.1";
+    /**
+     * The largest connection deposit (msat) to accept from a node (default
+     * 100000 = 100 sat). The node reserves it when a connection is set up and
+     * releases it with the connection's first settled request; a connection
+     * that ends without one loses it. A node that asks for more is not used.
+     */
+    maxConnectionDepositMsat?: number;
+    /**
+     * Pre-warming: armed connections (the deposit held, the two-party
+     * preprocessing and key share done, no provider connection yet), bound to
+     * the credential only. Only keys with recent traffic keep one; an idle
+     * daemon keeps none. Framing `"1.1"`: one per key. Framing `"2"`: one per
+     * key while every open connection of the key is busy, so a burst does not
+     * wait for a handshake.
+     */
+    prewarm?: {
+      /** Default true. */
+      enabled?: boolean;
+      /** A key idle this long keeps no armed connection (default 10). */
+      activityWindowMinutes?: number;
+      /** Armed connections in total (default 4). */
+      maxTotal?: number;
+      /** Retire an armed connection this old (default 480; the node ends it at 600). */
+      maxAgeSeconds?: number;
+      /**
+       * Arm only for nodes whose connection deposit (what an armed connection
+       * that is never used costs) is at most this many msats (default 5000;
+       * 0 never pre-warms a node that takes a deposit).
+       */
+      maxDepositMsat?: number;
+    };
+    /**
+     * Framing-`"2"` connections: the pool that keeps and reuses them.
+     */
+    http2?: {
+      /**
+       * Which requests may share a connection, and so be linked to each
+       * other by the provider (which sees them on one TLS connection):
+       * `per-client` (default): the requests of one local client (its API
+       * key, or without one its address) to one node; `shared`: all requests
+       * to one node; `none`: a connection per request.
+       */
+      reuse?: "per-client" | "shared" | "none";
+      /** Open connections per node, credential and client (default 4): overlapping requests served without waiting. */
+      maxConnections?: number;
+      /** Open connections in total (default 8). */
+      maxTotal?: number;
+      /**
+       * Close a connection idle this long (default: 20 s before the node's
+       * idle timeout, which its signed offer names). Never longer than that.
+       */
+      maxIdleSeconds?: number;
+      /** Earlier place of `maxConnectionDepositMsat` (above); still read. */
+      maxConnectionDepositMsat?: number;
+      /** Close a connection after this many requests (default: the node's limit, 100). */
+      maxRequestsPerConnection?: number;
+    };
+  };
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {
     /** Enable raw request/response file logging. */

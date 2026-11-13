@@ -80,8 +80,12 @@ bun i -g routstrd
 git clone https://github.com/routstr/routstrd.git
 cd routstrd
 bun install
+bun run build   # `bun link` installs dist/index.js, so it must exist first
 bun link
 ```
+
+`bun link` puts `routstrd` in `$BUN_INSTALL/bin` (by default `~/.bun/bin`), which
+must be on your `PATH`.
 
 ### Step 2: Setup & Fund
 
@@ -486,6 +490,10 @@ setting and take precedence. Change it with
 `routstrd models auto-model-path on|off|toggle`: the daemon applies the new value
 to the next routed request, so editing the file by hand is only useful together
 with a restart.
+
+`confidentialUpstream` (off by default) lets requests sent with the
+`x-routstr-verify: confidential` header run so the node never sees the prompt
+or response. See [docs/confidential-upstream.md](docs/confidential-upstream.md).
 
 `provider` pins every request to one node (same strict behavior as the
 `x-routstr-provider` header / `?provider=` query). Leave it `null` to let the
