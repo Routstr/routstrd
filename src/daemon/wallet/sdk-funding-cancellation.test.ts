@@ -313,3 +313,34 @@ describe("funding cancellation boundaries", () => {
     await response.finalize?.();
   });
 });
+
+describe("packaged SDK recovery deadline backport", () => {
+  it("bounds a stalled receive and preserves late settlement", async () => {
+    const ctx = await setup();
+    const blocked = gate();
+    ctx.wallet.receiveToken = async () => {
+      await blocked.promise;
+      return { success: true, amount: 7, unit: "sat" };
+    };
+    const spender = ctx.client.getCashuSpender() as any;
+    const cleanup = vi.fn();
+    const result = await spender.receiveTokenForRecovery("cashu_test", undefined, cleanup, 5);
+    expect(result).toMatchObject({ success: false, pending: true });
+    expect(ctx.storage.getCachedReceiveTokens()).toHaveLength(1);
+    const settled = spender.receiveTokenForRecovery("cashu_test");
+    blocked.release();
+    expect(await settled).toMatchObject({ success: true });
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(ctx.storage.getCachedReceiveTokens()).toHaveLength(0);
+  });
+
+  it("does not start error recovery after cancellation", async () => {
+    const ctx = await setup();
+    const controller = new AbortController(); controller.abort();
+    const receive = vi.spyOn(ctx.wallet, "receiveToken");
+    await expect((ctx.client as any)._handleErrorResponse({ signal: controller.signal },
+      "cashu_test", -1)).rejects.toMatchObject({ name: "AbortError" });
+    expect(receive).not.toHaveBeenCalled();
+    expect(ctx.sendToken).not.toHaveBeenCalled();
+  });
+});
