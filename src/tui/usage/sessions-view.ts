@@ -3,7 +3,7 @@ import { renderBox, renderRequestTable, type RequestTableEntry } from "./render.
 import { emptyClientNaming, type ClientNaming } from "./data.ts";
 import { basename } from "node:path";
 import { COLORS } from "./constants.ts";
-import { cleanText, sessionTotals, type PiSession, type SessionsResult } from "./sessions-data.ts";
+import { cleanText, sessionTotals, visibleSessionTurns, ignoredFailedAttempt, type PiSession, type SessionsResult } from "./sessions-data.ts";
 export interface SessionsView { result: SessionsResult | null; selected: number; detail: boolean; filter: string; searching: boolean; loading: boolean; limit: number }
 export function createSessionsView(): SessionsView { return { result: null, selected: 0, detail: false, filter: "", searching: false, loading: false, limit: 20 }; }
 export function filteredSessions(v: SessionsView): PiSession[] {
@@ -33,11 +33,11 @@ const fit = (s: string, n: number) => s.length <= n ? s.padEnd(n) : s.slice(0, M
 const age = (t: number) => !t ? "unknown" : Math.max(0, Math.floor((Date.now() - t) / 60000)) < 60 ? `${Math.max(0, Math.floor((Date.now() - t) / 60000))}m ago` : `${Math.floor((Date.now() - t) / 3600000)}h ago`;
 
 export function sessionModels(session: PiSession): string {
-  const models = [...new Set(session.turns.map(t => t.model.trim()).filter(m => m && m !== "Unknown"))];
+  const models = [...new Set(visibleSessionTurns(session).map(t => t.model.trim()).filter(m => m && m !== "Unknown"))];
   return models.join(", ") || "—";
 }
 export function sessionRequestEntries(session: PiSession): RequestTableEntry[] {
-  return session.turns.map((t, i) => ({
+  return session.turns.map((t, i) => ({ t, i })).filter(({ t }) => !ignoredFailedAttempt(t)).map(({ t, i }) => ({
     id: `${session.id}:${i}`, requestId: t.responseId ?? "", timestamp: Date.parse(t.timestamp) || 0,
     modelId: t.model, baseUrl: t.node, provider: t.provider, client: t.client ?? "unknown",
     estimatedMissedTokens: t.missed,
@@ -74,9 +74,10 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     const start = Math.max(0, v.selected - capacity + 1);
     const shown = sessions.slice(start, start + capacity);
     shown.forEach((s, offset) => {
-      const t = sessionTotals(s.turns);
+      const turns = visibleSessionTurns(s);
+      const t = sessionTotals(turns);
       const values = [age(s.active), basename(s.cwd) || "Unknown", s.title, sessionModels(s),
-        t.sats === null ? "—" : money(t.sats) + (t.priced < s.turns.length ? "+?" : ""),
+        t.sats === null ? "—" : money(t.sats) + (t.priced < turns.length ? "+?" : ""),
         t.eligible ? count(t.misses) : "—", t.eligible ? count(t.missed) : "—"];
       const row = values.map((value, i) => {
         const text = i >= 4 ? numeric(value, widths[i]!) : fit(value, widths[i]!);
@@ -88,28 +89,31 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     lines.push(...renderBox(table, width, `Sessions (${sessions.length} shown)`).split("\n"));
     if (v.result.more) add("More sessions available: M");
   } else {
-    const totals = sessionTotals(session.turns);
+    const turns = visibleSessionTurns(session);
+    const totals = sessionTotals(turns);
     add(`${COLORS.bold}Title:${COLORS.reset} ${session.title}`);
     // Paths and identifiers are wrapped, never permanently lost to truncation.
     for (const text of [`Session: ${session.id}`, `Project: ${session.cwd}`]) {
       for (let i = 0; i < text.length; i += Math.max(1, width)) add(text.slice(i, i + Math.max(1, width)));
     }
-    add(`Recorded: ${money(totals.sats)} sats · priced ${totals.priced}/${session.turns.length} · matched ${totals.matched}/${session.turns.length}`);
+    add(`Recorded: ${money(totals.sats)} sats · priced ${totals.priced}/${turns.length} · matched ${totals.matched}/${turns.length}`);
     add(`Estimated misses*: ${totals.eligible ? totals.misses : "—"} · missed tokens*: ${totals.eligible ? count(totals.missed) : "—"} · eligible comparisons ${totals.eligible}`);
     for (const warning of session.warnings) add(`Warning: ${warning}`);
-    const issues = session.turns.filter(t => t.match !== "matched");
+    const excluded = session.turns.length - turns.length;
+    if (excluded) add(`${excluded} failed attempts excluded`);
+    const issues = turns.filter(t => t.match !== "matched");
     if (issues.length) add(`Incomplete attribution: ${issues.length} missing / ambiguous / repeated response IDs; spend not assumed zero.`);
     add("");
-    lines.push(...renderSessionBreakdown(session.turns, width).split("\n"));
+    lines.push(...renderSessionBreakdown(turns, width).split("\n"));
     add("");
     add("Requests: same table as Recent, newest first; unknown accounting is — sats.");
-    lines.push(...renderRequestTable(sessionRequestEntries(session), width, naming, `Session Requests (${session.turns.length} shown)`).split("\n"));
-    const misses = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.missed > 0);
+    lines.push(...renderRequestTable(sessionRequestEntries(session), width, naming, `Session Requests (${turns.length} shown)`).split("\n"));
+    const misses = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => !ignoredFailedAttempt(t) && t.missed > 0);
     if (misses.length) {
       add(`${COLORS.red}Estimated cache miss events (transcript positions):${COLORS.reset}`);
       for (const { t, i } of misses) add(`#${i + 1} ${t.timestamp} · ${t.missed} missed tokens · ${t.node} × ${t.provider}`);
     }
-    const unresolved = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.match !== "matched" || t.sats === null || t.prompt === null || t.output === null);
+    const unresolved = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => !ignoredFailedAttempt(t) && (t.match !== "matched" || t.sats === null || t.prompt === null || t.output === null));
     if (unresolved.length) {
       add("Accounting / usage gaps (transcript positions):");
       for (const { t, i } of unresolved) add(`#${i + 1} ${t.timestamp} · ${t.match} · ${t.responseId ?? "no response ID"}${t.sats === null ? " · price unknown" : ""}${t.prompt === null || t.output === null ? " · tokens unknown" : ""}`);

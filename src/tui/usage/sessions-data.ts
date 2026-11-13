@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 
 export interface SessionTurn {
-  responseId?: string; timestamp: string; model: string;
+  stopReason?: string; responseId?: string; timestamp: string; model: string;
   prompt: number | null; output: number | null; cacheRead: number | null;
   missed: number; eligible: boolean; node: string; provider: string;
   client?: string; sats: number | null; match: "missing" | "matched" | "ambiguous" | "duplicate";
@@ -68,7 +68,7 @@ export async function parseSession(path: string, active: number): Promise<PiSess
     const eligible = prompt !== null && prompt > 0 && !!prev && (read! + write! > 0 || prev.cached);
     const missed = eligible ? Math.min(prev!.prompt, prompt!) - read! : 0;
     if (session.turns.length >= 5000) { session.warnings.push("Session exceeds 5,000 assistant entries; results incomplete"); break; }
-    session.turns.push({ responseId: typeof m.responseId === "string" ? m.responseId : undefined, timestamp: cleanText(timestamp), model: cleanText(typeof m.model === "string" ? m.model : "Unknown"), prompt, output: number(u.output), cacheRead: read, missed: missed > 1024 ? missed : 0, eligible, node: "Unknown", provider: "Unknown", sats: null, match: "missing" });
+    session.turns.push({ stopReason: typeof m.stopReason === "string" ? m.stopReason : undefined, responseId: typeof m.responseId === "string" ? m.responseId : undefined, timestamp: cleanText(timestamp), model: cleanText(typeof m.model === "string" ? m.model : "Unknown"), prompt, output: number(u.output), cacheRead: read, missed: missed > 1024 ? missed : 0, eligible, node: "Unknown", provider: "Unknown", sats: null, match: "missing" });
     if (prompt === null) prev = undefined;
     else if (prompt > 0) prev = { prompt, cached: (prev?.cached ?? false) || read! + write! > 0 };
   }
@@ -103,6 +103,15 @@ export function attributeUsage(session: PiSession, db: Database): void {
     seen.add(turn.responseId); turn.match = "matched";
     turn.sats = number(row.sats_cost) ?? (number(row.total_msats) !== null ? row.total_msats / 1000 : null);
   }
+}
+
+/** Presentation only: unknown usage/accounting must never be treated as a free failure. */
+export function ignoredFailedAttempt(turn: SessionTurn): boolean {
+  return (turn.stopReason === "error" || turn.stopReason === "aborted") &&
+    turn.prompt === 0 && turn.output === 0 && turn.match === "missing" && turn.sats === null;
+}
+export function visibleSessionTurns(session: PiSession): SessionTurn[] {
+  return session.turns.filter(t => !ignoredFailedAttempt(t));
 }
 
 export function sessionTotals(turns: SessionTurn[]) {

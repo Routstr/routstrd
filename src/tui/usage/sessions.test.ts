@@ -238,3 +238,37 @@ test("Sessions Models lists unique actual assistant model IDs in encounter order
  s.turns.forEach(t => { t.model = "Unknown"; }); expect(sessionModels(s)).toBe("—");
  s.turns = []; expect(sessionModels(s)).toBe("—");
 });
+
+test("Sessions excludes only explicit zero-usage unaccounted failures after canonical scan", async () => {
+ const { visibleSessionTurns } = await import("./sessions-data.ts");
+ const failure = (id: string | undefined, reason = "error", input = 0) => {
+  const e = assistant(input, 0, 0, id); e.message.usage.output = 0;
+  Object.assign(e.message, { responseId: id, stopReason: reason }); return e;
+ };
+ const s = await parseSession(fixture([
+  failure(undefined), // local import error
+  failure(undefined), // upstream 502
+  failure(undefined,"aborted"),
+  failure("terminated"),
+  failure("positive", "error", 7000),
+  failure("billed"),
+  failure(undefined,"stop"), // success without ID is not a failure
+  assistant(0,7000,0,"cached"), failure("positive-miss","error",8000),
+ ]),0);
+ const db = new Database(":memory:"); db.exec("CREATE TABLE usage_tracking(request_id TEXT, sats_cost REAL); INSERT INTO usage_tracking VALUES ('billed',2)");
+ attributeUsage(s,db); db.close();
+ const visible = visibleSessionTurns(s);
+ expect(visible).toHaveLength(5);
+ expect(visible.map(t=>t.responseId)).toEqual(["positive","billed",undefined,"cached","positive-miss"]);
+ expect(s.turns[8]!.missed).toBe(7000); // positive error participated before presentation filtering
+ const v=createSessionsView(); v.result={sessions:[s],more:false};v.detail=true;
+ const detail=stripAnsi(renderSessions(v,160).join("\n"));
+ expect(detail).toContain("4 failed attempts excluded"); expect(detail).toContain("priced 1/5 · matched 1/5");
+ expect(detail).toContain("Session Requests (5 shown)"); expect(detail).not.toContain("terminated");
+ expect(detail).toContain("positive"); expect(detail).toContain("no response ID");
+ expect(sessionRequestEntries(s)).toHaveLength(5);
+ // Unknown usage or duplicate/ambiguous accounting is retained conservatively.
+ const unknown=structuredClone(s.turns[0]!); unknown.prompt=null;
+ const ambiguous=structuredClone(s.turns[0]!); ambiguous.match="ambiguous";
+ expect(visibleSessionTurns({...s,turns:[unknown,ambiguous]})).toHaveLength(2);
+});
