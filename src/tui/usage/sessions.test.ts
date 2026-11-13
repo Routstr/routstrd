@@ -198,3 +198,25 @@ test("Recent async canonical loading and refresh are independent of Sessions vis
  const err = await new Response(child.stderr).text();
  expect(err).toContain("Recent async dispatch OK"); expect(await child.exited).toBe(0);
 });
+
+test("Sessions list uses shared boxed rows with selection/filter and bounded widths", async () => {
+ const s = await parseSession(fixture([{ type: "session", id: "s", cwd: "/project" }, { type: "message", message: { role: "user", content: "A long first user prompt for the session list" } }, assistant(0, 7000), assistant(8000)]), 0);
+ s.turns[0]!.sats = 1.25;
+ const v = createSessionsView(); v.result = { sessions: Array.from({length: 30}, (_, i) => ({...s, id: `s${i}`})), more: true };
+ for (const width of [40,80,120,160]) {
+  const list = renderSessions(v,width,20);
+  const box = list.filter(l => /^[┌│└]/.test(l));
+  expect(stripAnsi(box[0]!)).toContain("Sessions (30 shown)");
+  expect(box[1]).toContain(COLORS.bold);
+  for (const line of box) expect(stripAnsi(line).length).toBe(width);
+  expect(box.filter(l => stripAnsi(l).startsWith("│ >"))).toHaveLength(1);
+  expect(list.join("\n")).toContain("More sessions available: M");
+  expect(stripAnsi(box.join("\n"))).toContain("1.25+?");
+ }
+ for (let i=0;i<25;i++) sessionsKey(v,"j");
+ const page = renderSessions(v,120,20);
+ expect(page.filter(l => stripAnsi(l).startsWith("│ >"))).toHaveLength(1);
+ expect(v.selected).toBe(25);
+ sessionsKey(v,"/"); sessionsKey(v,"z"); sessionsKey(v,"\r");
+ expect(renderSessions(v,80).join("\n")).toContain("No sessions match");
+});

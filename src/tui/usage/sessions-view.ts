@@ -1,5 +1,5 @@
 import { renderSessionBreakdown } from "./sessions-breakdown.ts";
-import { renderRequestTable, type RequestTableEntry } from "./render.ts";
+import { renderBox, renderRequestTable, type RequestTableEntry } from "./render.ts";
 import { emptyClientNaming, type ClientNaming } from "./data.ts";
 import { basename } from "node:path";
 import { COLORS } from "./constants.ts";
@@ -54,24 +54,33 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
   if (!v.detail) {
     add("↑↓ select · Enter details · / filter · R refresh · M load 20 more (up to 200)");
     add("* Estimated misses >1,024 tokens; — means no eligible comparisons / unknown spend.");
-    if (width >= 100) {
-      const titleWidth = Math.max(12, width - 76);
-      add(`  ${fit("Last active", 11)} ${fit("Project", 17)} ${fit("First user message", titleWidth)} ${fit("sats", 10)} ${fit("Misses*", 8)} Miss tokens*`);
-      const start = Math.max(0, v.selected - Math.max(0, height - 8));
-      for (const [i, s] of sessions.entries()) {
-        if (i < start) continue;
-        const t = sessionTotals(s.turns);
-        add(`${i === v.selected ? ">" : " "} ${fit(age(s.active), 11)} ${fit(basename(s.cwd) || "Unknown", 17)} ${fit(s.title, titleWidth)} ${fit(money(t.sats) + (t.priced < s.turns.length ? "+?" : ""), 10)} ${fit(t.eligible ? count(t.misses) : "—", 8)} ${t.eligible ? count(t.missed) : "—"}`);
-      }
-    } else {
-      const start = Math.max(0, v.selected - Math.max(0, Math.floor((height - 6) / 2)));
-      for (const [i, s] of sessions.entries()) {
-        if (i < start) continue;
-        const t = sessionTotals(s.turns);
-        add(`${i === v.selected ? ">" : " "} ${fit(basename(s.cwd), 15)} ${s.title}`);
-        add(`  ${age(s.active)} · ${money(t.sats)} sats${t.priced < s.turns.length ? " + unknown" : ""} · misses*: ${t.eligible ? `${t.misses} / ${count(t.missed)} tokens` : "—"}`);
-      }
-    }
+    const headers = width < 70
+      ? ["Active", "Project", "First prompt", "sats", "M*", "Tokens*"]
+      : ["Last active", "Project", "First user message", "sats", "Misses*", "Miss tokens*"];
+    // One row per session at all sizes. Reserve numeric cells before flexing title.
+    const widths = width < 70 ? [3, 3, 2, 6, 2, 6] : width < 100 ? [8, 10, 12, 9, 7, 11] : [11, 17, 18, 10, 8, 12];
+    const spare = Math.max(0, width - 4 - 2 - 5 - widths.reduce((sum, n) => sum + n, 0));
+    widths[2]! += spare;
+    const numeric = (value: string, n: number) => value.length <= n ? value.padStart(n)
+      : (value.endsWith("+?") ? fit(value.slice(0, -2), n - 2).trimEnd() + "+?" : fit(value, n));
+    const cells = (values: string[]) => values.map((v, i) => i >= 3 ? numeric(v, widths[i]!) : fit(v, widths[i]!)).join(" ");
+    const table = [`${COLORS.bold}  ${cells(headers)}${COLORS.reset}`, `${COLORS.dim}${"─".repeat(Math.max(0, width - 4))}${COLORS.reset}`];
+    const capacity = Math.max(1, height - lines.length - 4 - (v.result.more ? 1 : 0));
+    const start = Math.max(0, v.selected - capacity + 1);
+    const shown = sessions.slice(start, start + capacity);
+    shown.forEach((s, offset) => {
+      const t = sessionTotals(s.turns);
+      const values = [age(s.active), basename(s.cwd) || "Unknown", s.title,
+        t.sats === null ? "—" : money(t.sats) + (t.priced < s.turns.length ? "+?" : ""),
+        t.eligible ? count(t.misses) : "—", t.eligible ? count(t.missed) : "—"];
+      const row = values.map((value, i) => {
+        const text = i >= 3 ? numeric(value, widths[i]!) : fit(value, widths[i]!);
+        const color = i >= 4 && t.misses > 0 ? COLORS.red : i === 3 ? COLORS.cyan : i === 0 ? COLORS.dim : "";
+        return color + text + (color ? COLORS.reset : "");
+      }).join(" ");
+      table.push(`${start + offset === v.selected ? ">" : " "} ${row}`);
+    });
+    lines.push(...renderBox(table, width, `Sessions (${sessions.length} shown)`).split("\n"));
     if (v.result.more) add("More sessions available: M");
   } else {
     const totals = sessionTotals(session.turns);
