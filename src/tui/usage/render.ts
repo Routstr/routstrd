@@ -753,7 +753,7 @@ function truncateNpub(npub: string): string {
 
 /**
  * Token breakdown of a single request, split the way the TUI colours it:
- * input read from the prompt cache (green) vs input that was not (red,
+ * input read from the prompt cache (cyan) vs input that was not (blue,
  * i.e. cache writes plus uncached input), plus output tokens.
  */
 export interface TokenSegments {
@@ -839,8 +839,8 @@ export function renderStackedBar(segments: BarSegment[], trackWidth: number): st
 
 /** Colour coding for the Recent tab's cache-hit bars. */
 const TOKEN_BAR_COLORS = {
-  cacheRead: COLORS.green,
-  notCached: COLORS.red,
+  cacheRead: COLORS.cyan,
+  notCached: COLORS.blue,
 };
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
@@ -850,6 +850,8 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
 /** Shared request UI for Recent and session-scoped history; unknown cells stay explicit. */
 export type RequestTableEntry = Omit<UsageStats["entries"][number], "satsCost" | "promptTokens" | "completionTokens"> & {
+  /** Session-sequence estimate; absent when no predecessor context is available. */
+  estimatedMissedTokens?: number;
   satsCost: number | null;
   promptTokens: number | null;
   completionTokens: number | null;
@@ -947,9 +949,11 @@ export function renderRequestTable(recentEntries: RequestTableEntry[], width: nu
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
     const segments = tokenRows[i]!;
+    const missed = Math.min(segments.notCached, Math.max(0, entry.estimatedMissedTokens ?? 0));
     const bar = renderStackedBar([
       { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
-      { value: segments.notCached, color: TOKEN_BAR_COLORS.notCached },
+      { value: segments.notCached - missed, color: TOKEN_BAR_COLORS.notCached },
+      { value: missed, color: COLORS.reset + COLORS.red },
     ], entry.promptTokens === null ? 0 : barWidth);
     const cacheBar = entry.promptTokens === null ? "—".padEnd(barWidth) : bar;
     const tokens = `${cacheBar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;

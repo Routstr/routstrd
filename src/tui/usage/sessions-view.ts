@@ -36,6 +36,7 @@ export function sessionRequestEntries(session: PiSession): RequestTableEntry[] {
   return session.turns.map((t, i) => ({
     id: `${session.id}:${i}`, requestId: t.responseId ?? "", timestamp: Date.parse(t.timestamp) || 0,
     modelId: t.model, baseUrl: t.node, provider: t.provider, client: t.client ?? "unknown",
+    estimatedMissedTokens: t.missed,
     satsCost: t.sats, cost: 0, promptTokens: t.prompt, completionTokens: t.output,
     totalTokens: (t.prompt ?? 0) + (t.output ?? 0), cacheReadInputTokens: t.cacheRead ?? undefined,
   })).reverse();
@@ -91,7 +92,7 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     lines.push(...renderRequestTable(sessionRequestEntries(session), width, naming, `Session Requests (${session.turns.length} shown)`).split("\n"));
     const misses = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.missed > 0);
     if (misses.length) {
-      add("Estimated cache miss events (transcript positions):");
+      add(`${COLORS.red}Estimated cache miss events (transcript positions):${COLORS.reset}`);
       for (const { t, i } of misses) add(`#${i + 1} ${t.timestamp} · ${t.missed} missed tokens · ${t.node} × ${t.provider}`);
     }
     const unresolved = session.turns.map((t, i) => ({ t, i })).filter(({ t }) => t.match !== "matched" || t.sats === null || t.prompt === null || t.output === null);

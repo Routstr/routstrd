@@ -48,7 +48,7 @@ export function renderSessionBreakdown(turns: SessionTurn[], width: number): str
   for (const row of rows) {
     lines.push(row.map((value, i) => {
       const text = i === 0 ? nodeCell(value, widths[0]!) : value;
-      const color = i === 3 ? COLORS.green : i < 2 ? COLORS.dim : "";
+      const color = i === 3 ? COLORS.green : i < 2 ? COLORS.dim : i >= 4 && value !== "—" && value !== "0" ? COLORS.red : "";
       return color + cell(text, widths[i]!, i >= 2) + (color ? COLORS.reset : "");
     }).join(" "));
   }
