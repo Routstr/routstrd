@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { attributeUsage, parseSession, sessionTotals, SessionsLoader } from "./sessions-data.ts";
-import { createSessionsView, sessionsKey, renderSessions, sessionRequestEntries } from "./sessions-view.ts";
+import { createSessionsView, sessionsKey, renderSessions, sessionRequestEntries, sessionModels } from "./sessions-view.ts";
 import { getVisibleTabs, tabSupportsWindow } from "./constants.ts";
 const dirs: string[] = [];
 afterEach(() => { dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })); });
@@ -219,4 +219,22 @@ test("Sessions list uses shared boxed rows with selection/filter and bounded wid
  expect(v.selected).toBe(25);
  sessionsKey(v,"/"); sessionsKey(v,"z"); sessionsKey(v,"\r");
  expect(renderSessions(v,80).join("\n")).toContain("No sessions match");
+});
+
+test("Sessions Models lists unique actual assistant model IDs in encounter order", async () => {
+ const s = await parseSession(fixture([assistant(100), assistant(200), assistant(300), assistant(400)]), 0);
+ s.turns[0]!.model = "gpt-6.1-sol"; s.turns[1]!.model = "deepseek-v4.1-flash";
+ s.turns[2]!.model = "gpt-6.1-sol"; s.turns[3]!.model = "";
+ expect(sessionModels(s)).toBe("gpt-6.1-sol, deepseek-v4.1-flash");
+ const v = createSessionsView(); v.result = { sessions: [s], more: false };
+ for (const width of [40,80,120,160]) {
+  const lines = renderSessions(v,width).filter(l => /^[┌│└]/.test(l));
+  for (const l of lines) expect(stripAnsi(l).length).toBe(width);
+  expect(lines.filter(l => stripAnsi(l).startsWith("│ >"))).toHaveLength(1);
+  if (width >= 80) expect(stripAnsi(lines[1]!)).toContain("Models");
+  if (width === 160) expect(stripAnsi(lines.join("\n"))).toContain("gpt-6.1-sol, deepseek-v4.1-flash");
+  if (width === 120) expect(stripAnsi(lines.join("\n"))).toContain("gpt-6.1-sol,");
+ }
+ s.turns.forEach(t => { t.model = "Unknown"; }); expect(sessionModels(s)).toBe("—");
+ s.turns = []; expect(sessionModels(s)).toBe("—");
 });

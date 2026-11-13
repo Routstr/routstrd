@@ -32,6 +32,10 @@ const count = (n: number) => n.toLocaleString("en-US");
 const fit = (s: string, n: number) => s.length <= n ? s.padEnd(n) : s.slice(0, Math.max(0, n - 1)) + "…";
 const age = (t: number) => !t ? "unknown" : Math.max(0, Math.floor((Date.now() - t) / 60000)) < 60 ? `${Math.max(0, Math.floor((Date.now() - t) / 60000))}m ago` : `${Math.floor((Date.now() - t) / 3600000)}h ago`;
 
+export function sessionModels(session: PiSession): string {
+  const models = [...new Set(session.turns.map(t => t.model.trim()).filter(m => m && m !== "Unknown"))];
+  return models.join(", ") || "—";
+}
 export function sessionRequestEntries(session: PiSession): RequestTableEntry[] {
   return session.turns.map((t, i) => ({
     id: `${session.id}:${i}`, requestId: t.responseId ?? "", timestamp: Date.parse(t.timestamp) || 0,
@@ -55,27 +59,28 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     add("↑↓ select · Enter details · / filter · R refresh · M load 20 more (up to 200)");
     add("* Estimated misses >1,024 tokens; — means no eligible comparisons / unknown spend.");
     const headers = width < 70
-      ? ["Active", "Project", "First prompt", "sats", "M*", "Tokens*"]
-      : ["Last active", "Project", "First user message", "sats", "Misses*", "Miss tokens*"];
+      ? ["Active", "Project", "First prompt", "Models", "sats", "M*", "Tokens*"]
+      : ["Last active", "Project", "First user message", "Models", "sats", "Misses*", "Miss tokens*"];
     // One row per session at all sizes. Reserve numeric cells before flexing title.
-    const widths = width < 70 ? [3, 3, 2, 6, 2, 6] : width < 100 ? [8, 10, 12, 9, 7, 11] : [11, 17, 18, 10, 8, 12];
-    const spare = Math.max(0, width - 4 - 2 - 5 - widths.reduce((sum, n) => sum + n, 0));
-    widths[2]! += spare;
+    const widths = width < 70 ? [3, 3, 2, 3, 6, 2, 5] : width < 100 ? [8, 9, 8, 9, 9, 7, 10] : [11, 14, 16, 17, 10, 8, 12];
+    const spare = Math.max(0, width - 4 - 2 - 6 - widths.reduce((sum, n) => sum + n, 0));
+    widths[3]! += Math.floor(spare / 2);
+    widths[2]! += spare - Math.floor(spare / 2);
     const numeric = (value: string, n: number) => value.length <= n ? value.padStart(n)
       : (value.endsWith("+?") ? fit(value.slice(0, -2), n - 2).trimEnd() + "+?" : fit(value, n));
-    const cells = (values: string[]) => values.map((v, i) => i >= 3 ? numeric(v, widths[i]!) : fit(v, widths[i]!)).join(" ");
+    const cells = (values: string[]) => values.map((v, i) => i >= 4 ? numeric(v, widths[i]!) : fit(v, widths[i]!)).join(" ");
     const table = [`${COLORS.bold}  ${cells(headers)}${COLORS.reset}`, `${COLORS.dim}${"─".repeat(Math.max(0, width - 4))}${COLORS.reset}`];
     const capacity = Math.max(1, height - lines.length - 4 - (v.result.more ? 1 : 0));
     const start = Math.max(0, v.selected - capacity + 1);
     const shown = sessions.slice(start, start + capacity);
     shown.forEach((s, offset) => {
       const t = sessionTotals(s.turns);
-      const values = [age(s.active), basename(s.cwd) || "Unknown", s.title,
+      const values = [age(s.active), basename(s.cwd) || "Unknown", s.title, sessionModels(s),
         t.sats === null ? "—" : money(t.sats) + (t.priced < s.turns.length ? "+?" : ""),
         t.eligible ? count(t.misses) : "—", t.eligible ? count(t.missed) : "—"];
       const row = values.map((value, i) => {
-        const text = i >= 3 ? numeric(value, widths[i]!) : fit(value, widths[i]!);
-        const color = i >= 4 && t.misses > 0 ? COLORS.red : i === 3 ? COLORS.cyan : i === 0 ? COLORS.dim : "";
+        const text = i >= 4 ? numeric(value, widths[i]!) : fit(value, widths[i]!);
+        const color = i >= 5 && t.misses > 0 ? COLORS.red : i === 4 ? COLORS.cyan : i === 0 ? COLORS.dim : "";
         return color + text + (color ? COLORS.reset : "");
       }).join(" ");
       table.push(`${start + offset === v.selected ? ">" : " "} ${row}`);

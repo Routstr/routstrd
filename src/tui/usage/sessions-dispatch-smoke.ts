@@ -38,7 +38,7 @@ for (const key of ["/", "?"]) {
  receive("7");
  if (!output.includes("Could not fetch usage data")) throw Error("tab switch failed");
  receive("6");
- if (!output.includes("First user message") && !output.includes("misses*")) throw Error("Sessions tab did not return");
+ if (!output.includes("Sessions (1 shown)")) throw Error("Sessions tab did not return");
  receive("r");
 }
 try { receive("q"); } catch (error) { if (!quit) throw error; }
