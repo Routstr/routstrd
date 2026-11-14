@@ -153,6 +153,14 @@ Refresh models and client integrations on demand:
 routstrd clients --manual-refresh   # same as `routstrd refresh`
 ```
 
+List models. By default only the curated routstr21 list is shown; `--all`
+includes every model the enabled providers advertise:
+```sh
+routstrd models            # curated routstr21 models
+routstrd models --all      # every model the providers serve
+routstrd models -m <id>    # providers and pricing for one model
+```
+
 Turn the daemon's scheduled refresh on or off (no restart needed):
 ```sh
 routstrd clients --disable-automatic-refresh
@@ -349,6 +357,18 @@ update check (`{ version, current, latest, hasUpdate, checkedAt }`). The daemon
 refreshes that cache every 6 hours; the TUI banner and the CLI's
 "update available" notice both read it. The TUI falls back to direct checks
 every 210 minutes only when the daemon does not support this endpoint.
+
+#### Models
+```
+GET /models
+```
+
+The model catalog, as rendered by `routstrd models`: `{ output: { models } }`.
+By default this is the curated routstr21 list from Nostr. `?all=true` (the
+CLI's `--all`) returns every model the enabled providers advertise instead.
+Both catalogs come from the same cached cheapest-per-model aggregation, so a
+model listed in both has the same id, name and context length either way;
+`?refresh=true` forces a live refresh first and combines with `all`.
 
 #### Cooldowns
 ```

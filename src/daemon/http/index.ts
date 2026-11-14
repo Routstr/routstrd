@@ -83,6 +83,12 @@ type DaemonDeps = {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
+  /**
+   * Every model the enabled providers serve, curated list or not, backing
+   * `routstrd models --all`. Optional so existing callers and test doubles
+   * keep working; absent, the route falls back to the curated view.
+   */
+  getAvailableModels?: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (
     modelId: string,
     includeDisabled?: boolean,
@@ -548,6 +554,12 @@ export function createDaemonRequestHandler(deps: {
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
+  /**
+   * Every model the enabled providers serve, curated list or not, backing
+   * `routstrd models --all`. Optional so existing callers and test doubles
+   * keep working; absent, the route falls back to the curated view.
+   */
+  getAvailableModels?: (forceRefresh?: boolean) => Promise<any[]>;
   getModelProviders: (
     modelId: string,
     includeDisabled?: boolean,
@@ -1308,7 +1320,16 @@ export function createDaemonRequestHandler(deps: {
       try {
         const forceRefresh =
           url.searchParams.get("refresh")?.toLowerCase() === "true";
-        const models = await deps.getRoutstr21Models(forceRefresh);
+        // `all=true` (the CLI's `--all`) swaps the curated routstr21 list for
+        // every model the enabled providers serve. Only routstr21 ids are
+        // guaranteed routable; the rest are what the nodes advertise, which is
+        // exactly what a caller looking for an unlisted model wants to see.
+        const all = url.searchParams.get("all")?.toLowerCase() === "true";
+        const models = all
+          ? await (deps.getAvailableModels ?? deps.getRoutstr21Models)(
+              forceRefresh,
+            )
+          : await deps.getRoutstr21Models(forceRefresh);
         sendJson(res, 200, { output: { models } });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });

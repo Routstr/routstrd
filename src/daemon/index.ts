@@ -143,8 +143,14 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
   const mintDiscovery = new MintDiscovery(discoveryAdapter, {
     logger: daemonSdkLogger,
   });
-  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, getModelPaths, refreshProvidersAndModels } =
-    createModelService(modelManager, providerManager, store, mintDiscovery);
+  const {
+    ensureProvidersBootstrapped,
+    getRoutstr21Models,
+    getAvailableModels,
+    getModelProviders,
+    getModelPaths,
+    refreshProvidersAndModels,
+  } = createModelService(modelManager, providerManager, store, mintDiscovery);
 
   // The daemon may be launched directly (or by an older/global CLI), so do
   // not rely on the parent command having stopped the external wallet first.
@@ -224,6 +230,7 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
       modelManager,
       ensureProvidersBootstrapped,
       getRoutstr21Models,
+      getAvailableModels,
       getModelProviders,
       getModelPaths,
       refreshProvidersAndModels,

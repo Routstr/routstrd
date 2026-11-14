@@ -26,7 +26,7 @@ function permissions(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-type ProxyRequest = { method: string; path: string; body?: unknown };
+type ProxyRequest = { method: string; path: string; search: string; body?: unknown };
 
 /** A 64-char hex pubkey; the CLI normalizes it to an npub1... value. */
 const TEST_NPUB = "ab".repeat(32);
@@ -45,10 +45,16 @@ async function runAgainstProxy(
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (req) => {
-      const path = new URL(req.url).pathname;
+      const url = new URL(req.url);
+      const path = url.pathname;
       if (path === "/health") return Response.json({ status: "ok" });
       const raw = await req.text();
-      const request = { method: req.method, path, body: raw ? JSON.parse(raw) : undefined };
+      const request = {
+        method: req.method,
+        path,
+        search: url.search,
+        body: raw ? JSON.parse(raw) : undefined,
+      };
       requests.push(request);
       return respond(request);
     },
@@ -733,5 +739,55 @@ describe("npub shown without a remote node", () => {
       expect(result.stdout).not.toContain("Your npub");
       expect(result.stderr).not.toContain("Your npub");
     }
+  });
+});
+
+/**
+ * `routstrd models` lists the curated routstr21 list by default; `--all` asks
+ * for the daemon's whole catalog. The paths a CLI drives are a contract with
+ * the daemon routes, so they are asserted here rather than only in the HTTP
+ * tests: a flag that silently does nothing looks identical to a working one
+ * from the terminal.
+ */
+describe("models --all", () => {
+  const curated = [{ id: "deepseek-v4.1-flash-1017", name: "DeepSeek", context_length: 128000 }];
+  const catalog = [...curated, { id: "unlisted-model", name: "Unlisted", context_length: 8192 }];
+
+  function respond(request: ProxyRequest): Response {
+    const all = new URLSearchParams(request.search).get("all");
+    return Response.json({ output: { models: all === "true" ? catalog : curated } });
+  }
+
+  test("lists only the routstr21 models without the flag", async () => {
+    const result = await runAgainstProxy(["models"], respond);
+    expect(result.exitCode).toBe(0);
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.method).toBe("GET");
+    expect(result.requests[0]!.path).toBe("/models");
+    expect(result.requests[0]!.search).toBe("");
+    expect(result.stdout).toContain("Found 1 routstr21 models");
+    expect(result.stdout).toContain("deepseek-v4.1-flash-1017");
+    expect(result.stdout).not.toContain("unlisted-model");
+  });
+
+  test("asks for the full catalog with --all and labels it as such", async () => {
+    const result = await runAgainstProxy(["models", "--all"], respond);
+    expect(result.exitCode).toBe(0);
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.path).toBe("/models");
+    expect(result.stdout).toContain("Found 2 available models");    expect(result.stdout).toContain("unlisted-model");
+    // The curated list is the routable subset; the output must not imply the
+    // extra models are routable just because they were published.
+    expect(result.stdout).toContain("routstr21 list is the curated");
+  });
+
+  test("combines --all with --refresh in one request", async () => {
+    const result = await runAgainstProxy(["models", "--all", "--refresh"], respond);
+    expect(result.exitCode).toBe(0);
+    expect(result.requests).toHaveLength(1);
+    expect(result.requests[0]!.path).toBe("/models");
+    const params = new URLSearchParams(result.requests[0]!.search);
+    expect(params.get("all")).toBe("true");
+    expect(params.get("refresh")).toBe("true");
   });
 });

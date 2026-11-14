@@ -95,14 +95,25 @@ Refund pending tokens and API keys to a mint.
 
 ### `routstrd models`
 
-List available routstr21 models (discovered via Nostr).
+List available routstr21 models (discovered via Nostr). `--all` broadens the
+listing to every model the enabled providers serve.
 
 | Option | Description |
 |--------|-------------|
 | `-r, --refresh` | Force refresh models from Nostr (with `--paths`, also drop the SDK's cached model-path payloads) |
 | `-m, --model <id>` | Show the providers serving a specific model |
 | `-p, --paths` | With `--model`: list eligible automatic paths in SDK candidate order; `--all` shows inventory |
-| `-a, --all` | With `--model`: include disabled providers; with `--paths`, show full advertised inventory |
+| `-a, --all` | List every model the providers serve, not just the routstr21 list; with `--model`, include disabled providers; with `--paths`, show the full advertised route inventory |
+
+With no `--model`, the command lists the curated routstr21 model ids. `--all`
+replaces that list with the whole catalog the enabled providers advertise — the
+same cheapest-per-model aggregation, so a model that appears in both lists has
+the same name, context length and id in either. Models outside the routstr21
+list are not guaranteed routable: the curated list is the set requests are
+meant to use, and the extra rows are what the nodes publish. Both views come
+from the daemon's model cache, so `--all` costs no extra network I/O; a cold
+cache populates through the same single refresh pass. Disabled providers stay
+excluded, exactly as in the curated list.
 
 `--model` prints one table of the nodes serving that model, in the order the
 router ranks them — cheapest sats for one warm request first, the basket
@@ -137,6 +148,9 @@ routes and disabled nodes. `[pin]` marks a node's best automatic candidate, not
 a forced-provider pin. Full inventory is not a predicted request sequence.
 
 ```sh
+routstrd models                                             # curated routstr21 list
+routstrd models --all                                       # every model the providers serve
+routstrd models --all --refresh                             # same, after a live refresh
 routstrd models -m deepseek-v4.1-flash                       # enabled nodes only
 routstrd models -m deepseek-v4.1-flash --all                 # + disabled nodes, marked
 routstrd models -m deepseek-v4.1-flash -p
@@ -742,6 +756,17 @@ remain every 5 minutes).
 ### `GET /v1/models`
 
 List available models (OpenAI-compatible).
+
+### `GET /models`
+
+The model catalog, as rendered by `routstrd models`. Returns
+`{ output: { models } }`.
+
+`?all=true` (the CLI's `--all`) returns every model the enabled providers
+advertise instead of only the curated routstr21 ids. Both catalogs are derived
+from the same cached, cheapest-per-model aggregation, so a model present in
+both is described identically in each. `?refresh=true` forces a live refresh
+first and combines with `all`.
 
 ### `GET /models/:id/providers`
 
