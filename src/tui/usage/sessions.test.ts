@@ -263,7 +263,7 @@ test("Sessions excludes only explicit zero-usage unaccounted failures after cano
  expect(s.turns[8]!.missed).toBe(7000); // positive error participated before presentation filtering
  const v=createSessionsView(); v.result={sessions:[s],more:false};v.detail=true;
  const detail=stripAnsi(renderSessions(v,160).join("\n"));
- expect(detail).toContain("4 failed attempts excluded"); expect(detail).toContain("priced 1/5 · matched 1/5");
+ expect(detail).toContain("4 failed attempts; spend unknown"); expect(detail).toContain("priced 1/9 · matched 1/9");
  expect(detail).toContain("Session Requests (5 shown)"); expect(detail).not.toContain("terminated");
  expect(detail).toContain("positive"); expect(detail).toContain("no response ID");
  expect(sessionRequestEntries(s)).toHaveLength(5);
@@ -271,4 +271,36 @@ test("Sessions excludes only explicit zero-usage unaccounted failures after cano
  const unknown=structuredClone(s.turns[0]!); unknown.prompt=null;
  const ambiguous=structuredClone(s.turns[0]!); ambiguous.match="ambiguous";
  expect(visibleSessionTurns({...s,turns:[unknown,ambiguous]})).toHaveLength(2);
+});
+
+test("only narrow local module-loader failures leave coverage; transport failures keep unknown spend", async () => {
+ const { accountingSessionTurns, localPreSendFailure } = await import("./sessions-data.ts");
+ const localText = "Cannot find module '/home/user/.pi/node_modules/@earendil-works/pi-ai/dist/providers/openai-responses.js'";
+ const fail = (errorMessage: string, reason = "error") => {
+  const e = assistant(0); e.message.usage.output = 0;
+  Object.assign(e.message, { responseId: undefined, stopReason: reason, errorMessage }); return e;
+ };
+ const s = await parseSession(fixture([
+  fail(localText), fail("Request timed out"), fail("Connection reset"), fail("502 Bad Gateway"),
+  fail("Aborted", "aborted"), fail("terminated"), fail("Cannot import local openai-responses module"),
+  fail("Upstream: " + localText), fail("Cannot find module 'openai-responses'"),
+ ]),0);
+ expect(s.turns.map(localPreSendFailure)).toEqual([true,false,false,false,false,false,false,false,false]);
+ expect(accountingSessionTurns(s)).toHaveLength(8);
+ expect(sessionRequestEntries(s)).toHaveLength(0);
+ const billed = structuredClone(s.turns[0]!); billed.match="matched"; billed.sats=2;
+ expect(localPreSendFailure(billed)).toBe(false);
+ const id = structuredClone(s.turns[0]!); id.responseId="sent"; expect(localPreSendFailure(id)).toBe(false);
+ const usage = structuredClone(s.turns[0]!); usage.prompt=1; expect(localPreSendFailure(usage)).toBe(false);
+ s.turns.push(billed);
+ const v=createSessionsView(); v.result={sessions:[s],more:false};
+ expect(stripAnsi(renderSessions(v,160).join("\n"))).toContain("2.00+?");
+ v.detail=true; const detail=stripAnsi(renderSessions(v,160).join("\n"));
+ expect(detail).toContain("priced 1/9 · matched 1/9");
+ expect(detail).toContain("1 local pre-send failures excluded");
+ expect(detail).toContain("8 failed attempts; spend unknown");
+ expect(detail).toContain("Recorded: 2.00+? sats");
+ expect(detail).toContain("Session Requests (1 shown)");
+ const onlyLocal={...s,turns:[s.turns[0]!]}; v.result={sessions:[onlyLocal],more:false};
+ const local=stripAnsi(renderSessions(v,160).join("\n")); expect(local).toContain("priced 0/0"); expect(local).not.toContain("spend unknown");
 });

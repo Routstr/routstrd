@@ -78,10 +78,21 @@ are withheld while refreshing. Repeated refreshes queue one follow-up worker pas
 Remote/auth-proxy monitoring disables local transcript estimates entirely, to avoid
 mixing local Pi history with another daemon's accounting. No payload logs are used.
 
-Sessions presentation excludes an assistant attempt only if Pi explicitly records
-`stopReason: error` or `aborted`, all recorded prompt buckets and output tokens
-are zero, and the response has no matching accounting row. Unknown token usage,
-positive-usage failures, matched accounting (even zero-priced), ambiguous joins,
-and ordinary unmatched successes remain visible. A short excluded-attempt count
-appears in details. Filtering is after canonical cache scanning, so positive-usage
-errors still participate in Pi predecessor semantics; Recent is unchanged.
+Sessions hides ordinary failed-attempt rows only when Pi explicitly records
+`stopReason: error` or `aborted`, recorded prompt buckets and output are all zero,
+and no accounting row matches. Hidden does **not** mean unbilled: timeout,
+disconnect/reset, upstream 502, abort, terminated and other failures remain in
+accounting denominators, retain `+?`, and produce a concise “N failed attempts;
+spend unknown” warning. Their normal request rows/node groups stay hidden.
+
+Only a narrow local pre-send module-loader signature is excluded from coverage:
+an error with no response ID matching exactly “Cannot find module” / “Cannot import
+module” with an absolute path to `@earendil-works/pi-ai` or `@mariozechner/pi-ai`
+`dist/providers/openai-responses.js` (or src/ts), optionally with an absolute
+“imported from” path. Generic local-looking text, wrapped upstream messages and
+other import failures are **not** classified as pre-send. Unrecognized loader
+formats intentionally retain unknown-spend coverage rather than claiming certainty.
+
+Positive usage, matched accounting (even zero-priced), ambiguous joins, unknown
+usage and ordinary unmatched successes remain visible. Filtering happens after
+canonical cache scanning. Recent's accounting rows and estimate matching are unchanged.
