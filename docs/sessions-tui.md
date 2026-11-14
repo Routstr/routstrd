@@ -107,23 +107,32 @@ into your existing config; **do not replace other settings**:
 {
   "sessionSources": [
     {
-      "path": "/home/user/projects/nostr/bunkhouse/state/assistant/pi/main/sessions",
-      "kind": "bunkhouse",
-      "label": "Bunkhouse · assistant · main"
-    },
-    {
-      "path": "/home/user/projects/nostr/bunkhouse/state/assistant/pi/main-2/sessions",
-      "kind": "bunkhouse",
-      "label": "Bunkhouse · assistant · main-2"
+      "path": "/home/user/projects/nostr/bunkhouse/state",
+      "kind": "bunkhouse-state"
     }
   ]
 }
 ```
 
 These are example paths for this checkout, not built-in search locations. Use
-absolute paths (or `~/...`) to **exact flat directories** containing `.jsonl`
-files. Add each group explicitly; no home/project recursion or automatic state
-root search occurs. `kind: "pi"` supports other custom Pi transcript directories
+absolute paths (or `~/...`). `kind: "bunkhouse-state"` points to a Bunkhouse
+**state root**, not its install or workspace directory. It discovers only:
+
+```text
+<state>/<bot>/pi/<group>/sessions/*.jsonl
+```
+
+This includes scheduled groups named `<group>--throwaway-<number>`, which use the
+same depth. New bots/groups are discovered on **R**, without configuration edits.
+No arbitrary recursion occurs. Group labels are generated as
+`Bunkhouse · <bot> · <group>`; an optional root label replaces `Bunkhouse`.
+Directory symlinks below a state root and transcript-file symlinks are skipped.
+Only regular immediate JSONL files are read. The explicitly configured root may
+itself be a symlink; it is resolved once before traversing its fixed layout.
+
+For an escape hatch, `kind: "pi"` or legacy `kind: "bunkhouse"` still points to an
+**exact flat directory** containing `.jsonl` files. Existing configurations keep
+working; overlapping root and flat sources are deduplicated. `kind: "pi"` supports other custom Pi transcript directories
 without changing their first-user-message title. `kind: "bunkhouse"` extracts the
 first actual `<message ...>` body after the framing context, including multiline
 text parts; missing framing displays a placeholder instead of exposing context.
@@ -136,14 +145,19 @@ Bunkhouse uses `Bunkhouse · <group-directory>`. Filtering includes source label
 Press **R** to reload sources/config. Both Sessions and Recent's asynchronous
 cache-miss lookup use this same source set without needing to visit Sessions.
 All candidates merge before the existing 20-session initial limit (200 max).
-Overlapping/symlink directories and files are deduplicated. Duplicate session IDs
+Overlapping directories and canonical file paths are deduplicated. Duplicate session IDs
 show the newest copy once with a warning; their cache estimates are withheld from
 Recent rather than choosing ambiguous history. Missing sources warn without
 preventing other sources from loading. Remote Recent monitoring still does not
 use local transcript estimates.
 
 Discovery caps: 100 configured sources, 1,000 directories, and 50,000 directory
-entries; capped discovery warns that results are incomplete. Existing streamed
+entries; capped discovery warns that results are incomplete. Bunkhouse fixed-layout
+expansion separately permits at most 1,000 visited directories and 50,000 entries
+across configured roots, plus at most 1,000 resulting transcript directories.
+Missing or inaccessible sources warn (absent optional `pi` subdirectories are
+normal). Sources merge before the candidate limit, rather than granting each
+source its own 20-session page. Existing streamed
 transcript/turn limits, read-only accounting, and worker isolation remain intact.
 No live config is changed by installing this feature. Source config errors never
 include the config contents or credentials in the UI.

@@ -346,12 +346,50 @@ test("source config validates only typed absolute paths without exposing config 
  const old=process.env.ROUTSTRD_DIR; process.env.ROUTSTRD_DIR=root;
  try {
   const {configuredSessionSources}=await import("./sessions-data.ts");
-  writeFileSync(join(root,"config.json"),JSON.stringify({secret:"never-print",sessionSources:[{path:"relative",kind:"pi"},{path:"/chat",kind:"bunkhouse",label:"Chat"},{path:"/bad",kind:"other"}]}));
+  writeFileSync(join(root,"config.json"),JSON.stringify({secret:"never-print",sessionSources:[{path:"relative",kind:"pi"},{path:"/chat",kind:"bunkhouse",label:"Chat"},{path:"/state",kind:"bunkhouse-state"},{path:"/bad",kind:"other"}]}));
   const warnings:string[]=[];
-  expect(await configuredSessionSources(warnings)).toEqual([{path:"/chat",kind:"bunkhouse",label:"Chat"}]);
+  expect(await configuredSessionSources(warnings)).toEqual([{path:"/chat",kind:"bunkhouse",label:"Chat"},{path:"/state",kind:"bunkhouse-state",label:undefined}]);
   expect(warnings.length).toBe(2); expect(warnings.join()).not.toContain("never-print");
   writeFileSync(join(root,"config.json"),"invalid secret");
   expect(await configuredSessionSources(warnings)).toEqual([]);
   expect(warnings.join()).not.toContain("invalid secret");
  } finally { if(old===undefined) delete process.env.ROUTSTRD_DIR; else process.env.ROUTSTRD_DIR=old; }
+});
+
+test("Bunkhouse state root discovers fixed bot/group layouts and new groups on refresh", async () => {
+ const root=mkdtempSync(join(tmpdir(),"bunk-state-")); dirs.push(root);
+ const state=join(root,"state"), normal=join(root,"normal"), dbPath=join(root,"usage.db");
+ const db=new Database(dbPath); db.run("CREATE TABLE usage_tracking (request_id TEXT, sats_cost REAL)"); db.close();
+ function chat(bot:string,group:string,id:string) {
+  const path=join(state,bot,"pi",group,"sessions"); mkdirSync(path,{recursive:true});
+  writeFileSync(join(path,id+".jsonl"),[
+   {type:"session",id,cwd:"/work/"+group},
+   {type:"message",message:{role:"user",content:"<context>hidden</context><message>First chat request</message>"}},
+   assistant(100,3000,0,id+"-warm"),assistant(4000,0,0,id+"-miss")
+  ].map(e=>JSON.stringify(e)).join("\n")); return path;
+ }
+ const first=chat("assistant","main","one"); chat("helper","main-2--throwaway-1","two");
+ const source={path:state,kind:"bunkhouse-state" as const};
+ const loader=new SessionsLoader(normal,dbPath,[source,{path:first,kind:"bunkhouse"}]);
+ const initial=await loader.load(1); expect(initial.sessions).toHaveLength(1); expect(initial.more).toBe(true);
+ let page=await loader.load(); expect(page.sessions).toHaveLength(2);
+ expect(page.sessions.map(s=>s.sourceLabel).sort()).toEqual(["Bunkhouse · assistant · main","Bunkhouse · helper · main-2--throwaway-1"]);
+ expect(page.sessions.every(s=>s.title==="First chat request")).toBe(true);
+ expect(page.sessions[0]!.turns[1]!.missed).toBe(3100);
+ chat("assistant","new-room","three");
+ page=await loader.load(); expect(page.sessions).toHaveLength(3);
+ const {symlinkSync}=await import("node:fs");
+ const outside=join(root,"outside"); mkdirSync(outside); symlinkSync(outside,join(state,"linked-bot"));
+ symlinkSync(first,join(state,"assistant","pi","linked-room"));
+ symlinkSync(join(first,"one.jsonl"),join(first,"linked.jsonl"));
+ page=await loader.load(); expect(page.sessions).toHaveLength(3);
+ const missing=await new SessionsLoader(normal,dbPath,[{path:join(root,"absent"),kind:"bunkhouse-state"}]).load();
+ expect(missing.error).toContain("state root unavailable");
+ const {expandSessionSources,SOURCE_DISCOVERY_LIMITS}=await import("./sessions-data.ts");
+ const old=SOURCE_DISCOVERY_LIMITS.directories;
+ try {
+  SOURCE_DISCOVERY_LIMITS.directories=2;
+  const warnings:string[]=[]; await expandSessionSources([source],warnings);
+  expect(warnings.join()).toContain("results incomplete");
+ } finally { SOURCE_DISCOVERY_LIMITS.directories=old; }
 });

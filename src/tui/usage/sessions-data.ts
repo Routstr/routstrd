@@ -146,7 +146,7 @@ export class SessionsLoader {
       const seen = new Set<string>();
       const seenDirectories = new Set<string>();
       let inspected = 0;
-      const directories: { path: string; source?: SessionSourceConfig }[] = sources.map(source => ({ path: source.path, source }));
+      const directories = await expandSessionSources(sources, notices);
       try {
         for (const dir of await readdir(this.root, { withFileTypes: true })) {
           if (dir.isDirectory()) directories.push({ path: join(this.root, dir.name) });
@@ -160,10 +160,10 @@ export class SessionsLoader {
           for await (const entry of await opendir(canonicalDirectory)) {
             if (++inspected > 50000) break;
             const file = entry.name;
-            if (!file.endsWith(".jsonl")) continue;
+            if (!entry.isFile() || !file.endsWith(".jsonl")) continue;
             try {
               const path = await realpath(join(directory.path, file));
-              if (seen.has(path)) continue;
+              if (resolve(path, "..") !== canonicalDirectory || seen.has(path)) continue;
               const s = await stat(path);
               if (!s.isFile()) continue;
               seen.add(path);
@@ -210,6 +210,50 @@ export class SessionsLoader {
   }
 }
 
+/** Fixed Bunkhouse layout only; never follow links or recursively walk arbitrary trees. */
+export const SOURCE_DISCOVERY_LIMITS = { directories: 1000, entries: 50000 };
+export async function expandSessionSources(sources: SessionSourceConfig[], notices: string[]): Promise<{ path: string; source?: SessionSourceConfig }[]> {
+  const directories: { path: string; source?: SessionSourceConfig }[] = [];
+  let inspected = 0, visited = 0, capped = false;
+  async function children(path: string): Promise<string[]> {
+    if (++visited > SOURCE_DISCOVERY_LIMITS.directories) { capped = true; return []; }
+    const names: string[] = [];
+    try {
+      for await (const entry of await opendir(path)) {
+        if (++inspected > SOURCE_DISCOVERY_LIMITS.entries) { capped = true; break; }
+        if (entry.isDirectory()) names.push(entry.name); // symlinks are deliberately excluded
+      }
+    } catch (e: any) {
+      if (e.code !== "ENOENT") notices.push(`Bunkhouse directory unavailable: ${cleanText(path)}`);
+    }
+    return names.sort();
+  }
+  for (const source of sources) {
+    if (directories.length >= SOURCE_DISCOVERY_LIMITS.directories || capped) { capped = true; break; }
+    if (source.kind !== "bunkhouse-state") { directories.push({ path: source.path, source }); continue; }
+    let root: string;
+    try { root = await realpath(source.path); }
+    catch { notices.push(`Bunkhouse state root unavailable: ${cleanText(source.label || source.path)}`); continue; }
+    const bots = await children(root);
+    for (const bot of bots) {
+      if (capped) break;
+      // Check each fixed path component through dirents: state/<bot>/pi/<group>/sessions.
+      if (!(await children(join(root, bot))).includes("pi")) continue;
+      for (const group of await children(join(root, bot, "pi"))) {
+        if (capped) break;
+        if (!(await children(join(root, bot, "pi", group))).includes("sessions")) continue;
+        if (directories.length >= SOURCE_DISCOVERY_LIMITS.directories) { capped = true; break; }
+        const path = join(root, bot, "pi", group, "sessions");
+        // Recheck realpath containment to reject replaced directory links.
+        try { if (await realpath(path) !== path) continue; } catch { continue; }
+        directories.push({ path, source: { path, kind: "bunkhouse", label: `${source.label || "Bunkhouse"} · ${bot} · ${group}` } });
+      }
+    }
+  }
+  if (capped) notices.push("Session source expansion limited to 1,000 directories / 50,000 entries; results incomplete");
+  return directories;
+}
+
 /** Bunkhouse appends the current message after optional conversation context. */
 export function bunkhouseMessage(content: string): string {
   const contextEnd = content.indexOf("</context>");
@@ -230,7 +274,7 @@ export async function configuredSessionSources(notices: string[] = []): Promise<
     if (!Array.isArray(config.sessionSources)) throw Error();
     const sources: SessionSourceConfig[] = [];
     for (const source of config.sessionSources.slice(0, 100)) {
-      if (!source || typeof source.path !== "string" || !["pi", "bunkhouse"].includes(source.kind) || (source.label !== undefined && typeof source.label !== "string")) { notices.push("Invalid session source ignored"); continue; }
+      if (!source || typeof source.path !== "string" || !["pi", "bunkhouse", "bunkhouse-state"].includes(source.kind) || (source.label !== undefined && typeof source.label !== "string")) { notices.push("Invalid session source ignored"); continue; }
       const path = source.path.startsWith("~/") ? join(homedir(), source.path.slice(2)) : source.path;
       if (!isAbsolute(path)) { notices.push("Session source requires an absolute path"); continue; }
       sources.push({ path, kind: source.kind, label: source.label });

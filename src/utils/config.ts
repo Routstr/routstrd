@@ -43,9 +43,9 @@ export interface NwcConfig {
 }
 
 export interface SessionSourceConfig {
-  /** Exact, flat directory of persisted Pi JSONL transcripts (no recursion). */
+  /** Flat transcript directory, or Bunkhouse state root for bunkhouse-state. */
   path: string;
-  kind: "pi" | "bunkhouse";
+  kind: "pi" | "bunkhouse" | "bunkhouse-state";
   /** Optional source/group label, distinct from the recorded cwd. */
   label?: string;
 }
