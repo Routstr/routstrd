@@ -291,6 +291,179 @@ describe("createModelService.getRoutstr21Models", () => {
 });
 
 /**
+ * `getAvailableModels` backs `routstrd models --all`: the providers' whole
+ * catalog, not just the curated routstr21 list. It must stay a view over the
+ * same cache the curated list reads — a second aggregation would let the two
+ * commands disagree about a model's price or metadata — and it must not add a
+ * network pass of its own.
+ */
+describe("createModelService.getAvailableModels", () => {
+  function makeStore(disabled: string[] = []) {
+    const state: Record<string, unknown> = {
+      baseUrlsList: [],
+      setBaseUrlsList: () => {},
+      disabledProviders: disabled,
+      setDisabledProviders: () => {},
+      manuallyDisabledProviders: [],
+      manuallyEnabledProviders: [],
+    };
+    return { getState: () => state } as unknown as SdkStore;
+  }
+
+  function makeModelManager(
+    routstr21Ids: string[],
+    cached: Record<string, unknown[]>,
+    calls: { fetchModels: number; bootstrap: number } = {
+      fetchModels: 0,
+      bootstrap: 0,
+    },
+  ) {
+    return {
+      manager: {
+        fetchRoutstr21Models: async () => routstr21Ids,
+        getAllCachedModels: () => cached,
+        getBaseUrls: () => Object.keys(cached),
+        bootstrapProviders: async () => {
+          calls.bootstrap++;
+          return Object.keys(cached);
+        },
+        syncReviewedProvidersFromNostr: async () => null,
+        fetchModels: async () => {
+          calls.fetchModels++;
+          return Object.values(cached).flat();
+        },
+      } as never,
+      calls,
+    };
+  }
+
+  const curated = ["glm-5.3"].map((id) => ({
+    id,
+    name: "GLM 5.3",
+    context_length: 1310720,
+    sats_pricing: { completion: 10 },
+  }));
+  const unlisted = {
+    id: "unlisted-model",
+    name: "Unlisted",
+    context_length: 8192,
+    sats_pricing: { completion: 3 },
+  };
+
+  it("lists models no routstr21 entry covers, with full metadata", async () => {
+    const { manager } = makeModelManager(["glm-5.3"], {
+      "https://p.example/": [...curated, unlisted],
+    });
+    const service = createModelService(manager, {} as never, makeStore());
+
+    const models = await service.getAvailableModels();
+    const byId = new Map(models.map((model) => [model.id, model]));
+
+    expect([...byId.keys()].sort()).toEqual(["glm-5.3", "unlisted-model"]);
+    expect(byId.get("unlisted-model")).toMatchObject({
+      id: "unlisted-model",
+      name: "Unlisted",
+      context_length: 8192,
+    });
+  });
+
+  it("sorts by id, so the order does not depend on provider cache iteration", async () => {
+    const { manager } = makeModelManager([], {
+      "https://p.example/": [unlisted, ...curated],
+    });
+    const service = createModelService(manager, {} as never, makeStore());
+
+    const models = await service.getAvailableModels();
+
+    expect(models.map((model) => model.id)).toEqual([
+      "glm-5.3",
+      "unlisted-model",
+    ]);
+  });
+
+  it("serves a warm cache without any provider fetch", async () => {
+    const { manager, calls } = makeModelManager(["glm-5.3"], {
+      "https://p.example/": [...curated, unlisted],
+    });
+    const service = createModelService(manager, {} as never, makeStore());
+
+    await service.getAvailableModels();
+
+    expect(calls.fetchModels).toBe(0);
+    expect(calls.bootstrap).toBe(0);
+  });
+
+  it("shares the curated view's populated cache when the cache is cold", async () => {
+    // A cold catalog read must populate rather than return an empty list, and
+    // must reuse the single population pass instead of launching its own.
+    const cached: Record<string, unknown[]> = {};
+    const calls = { fetchModels: 0, bootstrap: 0 };
+    const manager = {
+      fetchRoutstr21Models: async () => ["glm-5.3"],
+      getAllCachedModels: () => cached,
+      getBaseUrls: () => ["https://p.example/"],
+      bootstrapProviders: async () => {
+        calls.bootstrap++;
+        return ["https://p.example/"];
+      },
+      syncReviewedProvidersFromNostr: async () => null,
+      fetchModels: async () => {
+        calls.fetchModels++;
+        cached["https://p.example/"] = [...curated, unlisted];
+        return [...curated, unlisted];
+      },
+    } as never;
+    const service = createModelService(manager, {} as never, makeStore());
+
+    const models = await service.getAvailableModels();
+
+    expect(models.map((model) => model.id).sort()).toEqual([
+      "glm-5.3",
+      "unlisted-model",
+    ]);
+    expect(calls.fetchModels).toBe(1);
+    expect(calls.bootstrap).toBe(1);
+  });
+
+  it("exposes a mapped variant under its canonical id, like the curated view", async () => {
+    // Both commands must spell a model the same way: a variant id would be a
+    // second name for a row the curated list already lists canonically.
+    const variant = {
+      id: "z-ai-glm-5-3-flash",
+      name: "GLM 5.3 Flash",
+      context_length: 1048576,
+      sats_pricing: { completion: 1 },
+    };
+    const { manager } = makeModelManager([], {
+      "https://p.example/": [variant],
+    });
+    const service = createModelService(manager, {} as never, makeStore());
+
+    const models = await service.getAvailableModels();
+
+    expect(models).toHaveLength(1);
+    expect(models[0]!.id).toBe("glm-5.3-flash");
+    expect(models[0]!.name).toBe("GLM 5.3 Flash");
+  });
+
+  it("keeps disabled providers out, like every other model-list read", async () => {
+    const { manager } = makeModelManager([], {
+      "https://ok.example/": curated,
+      "https://bad.example/": [unlisted],
+    });
+    const service = createModelService(
+      manager,
+      {} as never,
+      makeStore(["https://bad.example/"]),
+    );
+
+    const models = await service.getAvailableModels();
+
+    expect(models.map((model) => model.id)).toEqual(["glm-5.3"]);
+  });
+});
+
+/**
  * Finding #4: the SDK refuses to spend a mint a provider does not advertise,
  * so the daemon must actually populate the mint cache during bootstrap (and
  * refresh). `discoverMints` was previously never called, leaving
