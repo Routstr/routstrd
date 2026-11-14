@@ -8,7 +8,7 @@ export interface SessionsView { result: SessionsResult | null; selected: number;
 export function createSessionsView(): SessionsView { return { result: null, selected: 0, detail: false, filter: "", searching: false, loading: false, limit: 20 }; }
 export function filteredSessions(v: SessionsView): PiSession[] {
   const q = v.filter.toLowerCase();
-  return (v.result?.sessions ?? []).filter(s => `${s.title} ${s.cwd} ${s.id}`.toLowerCase().includes(q));
+  return (v.result?.sessions ?? []).filter(s => `${s.title} ${s.cwd} ${s.id} ${s.sourceLabel || ""}`.toLowerCase().includes(q));
 }
 /** Returns true when a key belongs to this view; tab switching and quitting remain global. */
 export function sessionsKey(v: SessionsView, key: string): boolean {
@@ -76,7 +76,7 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     shown.forEach((s, offset) => {
       const turns = accountingSessionTurns(s);
       const t = sessionTotals(turns);
-      const values = [age(s.active), basename(s.cwd) || "Unknown", s.title, sessionModels(s),
+      const values = [age(s.active), s.sourceLabel || basename(s.cwd) || "Unknown", s.title, sessionModels(s),
         t.sats === null ? (turns.length ? "—+?" : "—") : money(t.sats) + (t.priced < turns.length ? "+?" : ""),
         t.eligible ? count(t.misses) : "—", t.eligible ? count(t.missed) : "—"];
       const row = values.map((value, i) => {
@@ -96,6 +96,7 @@ export function renderSessions(v: SessionsView, width: number, height = 20, nami
     for (const text of [`Session: ${session.id}`, `Project: ${session.cwd}`]) {
       for (let i = 0; i < text.length; i += Math.max(1, width)) add(text.slice(i, i + Math.max(1, width)));
     }
+    if (session.sourceLabel) add(`Source: ${session.sourceLabel}`);
     add(`Recorded: ${money(totals.sats)}${totals.priced < turns.length ? "+?" : ""} sats · priced ${totals.priced}/${turns.length} · matched ${totals.matched}/${turns.length}`);
     add(`Estimated misses*: ${totals.eligible ? totals.misses : "—"} · missed tokens*: ${totals.eligible ? count(totals.missed) : "—"} · eligible comparisons ${totals.eligible}`);
     for (const warning of session.warnings) add(`Warning: ${warning}`);

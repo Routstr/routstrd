@@ -96,3 +96,54 @@ formats intentionally retain unknown-spend coverage rather than claiming certain
 Positive usage, matched accounting (even zero-priced), ambiguous joins, unknown
 usage and ordinary unmatched successes remain visible. Filtering happens after
 canonical cache scanning. Recent's accounting rows and estimate matching are unchanged.
+
+## Additional Pi / Bunkhouse transcript sources
+
+The monitor also reads optional `sessionSources` from
+`$ROUTSTRD_DIR/config.json` (default `~/.routstrd/config.json`). Merge this section
+into your existing config; **do not replace other settings**:
+
+```json
+{
+  "sessionSources": [
+    {
+      "path": "/home/user/projects/nostr/bunkhouse/state/assistant/pi/main/sessions",
+      "kind": "bunkhouse",
+      "label": "Bunkhouse · assistant · main"
+    },
+    {
+      "path": "/home/user/projects/nostr/bunkhouse/state/assistant/pi/main-2/sessions",
+      "kind": "bunkhouse",
+      "label": "Bunkhouse · assistant · main-2"
+    }
+  ]
+}
+```
+
+These are example paths for this checkout, not built-in search locations. Use
+absolute paths (or `~/...`) to **exact flat directories** containing `.jsonl`
+files. Add each group explicitly; no home/project recursion or automatic state
+root search occurs. `kind: "pi"` supports other custom Pi transcript directories
+without changing their first-user-message title. `kind: "bunkhouse"` extracts the
+first actual `<message ...>` body after the framing context, including multiline
+text parts; missing framing displays a placeholder instead of exposing context.
+
+The label appears in the Project column for custom sources and as a separate
+Source line in details. The recorded cwd remains unchanged and visible in
+Project details; the label is not an inferred repository name. Without a label,
+Bunkhouse uses `Bunkhouse · <group-directory>`. Filtering includes source labels.
+
+Press **R** to reload sources/config. Both Sessions and Recent's asynchronous
+cache-miss lookup use this same source set without needing to visit Sessions.
+All candidates merge before the existing 20-session initial limit (200 max).
+Overlapping/symlink directories and files are deduplicated. Duplicate session IDs
+show the newest copy once with a warning; their cache estimates are withheld from
+Recent rather than choosing ambiguous history. Missing sources warn without
+preventing other sources from loading. Remote Recent monitoring still does not
+use local transcript estimates.
+
+Discovery caps: 100 configured sources, 1,000 directories, and 50,000 directory
+entries; capped discovery warns that results are incomplete. Existing streamed
+transcript/turn limits, read-only accounting, and worker isolation remain intact.
+No live config is changed by installing this feature. Source config errors never
+include the config contents or credentials in the UI.

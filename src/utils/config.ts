@@ -42,7 +42,16 @@ export interface NwcConfig {
   autoRefill?: NwcAutoRefillConfig;
 }
 
+export interface SessionSourceConfig {
+  /** Exact, flat directory of persisted Pi JSONL transcripts (no recursion). */
+  path: string;
+  kind: "pi" | "bunkhouse";
+  /** Optional source/group label, distinct from the recorded cwd. */
+  label?: string;
+}
+
 export interface RoutstrdConfig {
+  sessionSources?: SessionSourceConfig[];
   port: number;
   host: string;
   provider: string | null;

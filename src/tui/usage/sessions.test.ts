@@ -304,3 +304,54 @@ test("only narrow local module-loader failures leave coverage; transport failure
  const onlyLocal={...s,turns:[s.turns[0]!]}; v.result={sessions:[onlyLocal],more:false};
  const local=stripAnsi(renderSessions(v,160).join("\n")); expect(local).toContain("priced 0/0"); expect(local).not.toContain("spend unknown");
 });
+
+test("explicit Bunkhouse sources merge before limits, unwrap titles and deduplicate copies", async () => {
+ const root = mkdtempSync(join(tmpdir(), "pi-sources-")); dirs.push(root);
+ const normal = join(root, "normal"), extra = join(root, "chat");
+ mkdirSync(join(normal, "project"), {recursive: true}); mkdirSync(extra);
+ const framed = '<context>private context</context>\n<conversation-context>old <message>wrong</message></conversation-context>\n<message from="sender">Actual\nchat request</message>';
+ const entries = [{type:"session",id:"chat-id",cwd:"/workspaces/main-2"}, {type:"message",message:{role:"user",content:[{type:"text",text:framed}]}}, assistant(100, 3000, 0, "warm"), assistant(4000, 0, 0, "miss")];
+ const chat = join(extra,"chat.jsonl"); writeFileSync(chat, entries.map(e=>JSON.stringify(e)).join("\n"));
+ writeFileSync(join(normal,"project","normal.jsonl"), JSON.stringify({type:"session",id:"normal",cwd:"/repo"}));
+ const { utimesSync, copyFileSync } = await import("node:fs");
+ utimesSync(join(normal,"project","normal.jsonl"), new Date(1000), new Date(1000));
+ const dbPath=join(root,"usage.db"), db=new Database(dbPath);
+ db.run("CREATE TABLE usage_tracking (request_id TEXT, upstream_response_id TEXT, sats_cost REAL, base_url TEXT, provider TEXT)");
+ db.run("INSERT INTO usage_tracking VALUES ('life','miss',2.5,'https://node/','provider')"); db.close();
+ const sources = [{path:extra,kind:"bunkhouse" as const,label:"Bunkhouse · main-2"}, {path:extra,kind:"bunkhouse" as const}, {path:join(root,"missing"),kind:"pi" as const}];
+ const loader=new SessionsLoader(normal,dbPath,sources);
+ const page=await loader.load(1);
+ expect(page.sessions).toHaveLength(1); expect(page.more).toBe(true);
+ const session=page.sessions[0]!;
+ expect(session.title).toBe("Actual chat request"); expect(session.cwd).toBe("/workspaces/main-2");
+ expect(session.sourceLabel).toBe("Bunkhouse · main-2");
+ expect(session.turns[1]!.missed).toBe(3100); expect(session.turns[1]!.sats).toBe(2.5);
+ expect(page.error).toContain("source unavailable");
+ const {recentEstimateIndex}=await import("./recent-estimates.ts");
+ expect(recentEstimateIndex([session]).size).toBeGreaterThan(0);
+ const {annotateRecent}=await import("./recent-estimates.ts");
+ const recent=annotateRecent([{requestId:"lifecycle",upstreamResponseId:"miss"} as any],recentEstimateIndex([session]),true);
+ expect(recent[0]!.estimatedMissedTokens).toBe(sessionRequestEntries(session)[0]!.estimatedMissedTokens);
+ const missingDefault=await new SessionsLoader(join(root,"absent-default"),dbPath,[sources[0]!]).load(20);
+ expect(missingDefault.sessions[0]!.title).toBe("Actual chat request");
+ const full=await loader.load(20); expect(full.sessions).toHaveLength(2);
+ copyFileSync(chat,join(extra,"copy.jsonl"));
+ expect((await loader.load(20)).sessions).toHaveLength(2);
+ const standard=await parseSession(chat,0);
+ expect(standard.title).toContain("<context>");
+});
+
+test("source config validates only typed absolute paths without exposing config contents", async () => {
+ const root=mkdtempSync(join(tmpdir(),"source-config-")); dirs.push(root);
+ const old=process.env.ROUTSTRD_DIR; process.env.ROUTSTRD_DIR=root;
+ try {
+  const {configuredSessionSources}=await import("./sessions-data.ts");
+  writeFileSync(join(root,"config.json"),JSON.stringify({secret:"never-print",sessionSources:[{path:"relative",kind:"pi"},{path:"/chat",kind:"bunkhouse",label:"Chat"},{path:"/bad",kind:"other"}]}));
+  const warnings:string[]=[];
+  expect(await configuredSessionSources(warnings)).toEqual([{path:"/chat",kind:"bunkhouse",label:"Chat"}]);
+  expect(warnings.length).toBe(2); expect(warnings.join()).not.toContain("never-print");
+  writeFileSync(join(root,"config.json"),"invalid secret");
+  expect(await configuredSessionSources(warnings)).toEqual([]);
+  expect(warnings.join()).not.toContain("invalid secret");
+ } finally { if(old===undefined) delete process.env.ROUTSTRD_DIR; else process.env.ROUTSTRD_DIR=old; }
+});

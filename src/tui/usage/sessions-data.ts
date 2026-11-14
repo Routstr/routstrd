@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { readdir, stat, realpath, readFile, opendir } from "node:fs/promises";
+import { basename, join, resolve, isAbsolute } from "node:path";
 import { homedir } from "node:os";
+
+import type { SessionSourceConfig } from "../../utils/config.ts";
 
 export interface SessionTurn {
   errorMessage?: string; stopReason?: string; responseId?: string; timestamp: string; model: string;
@@ -11,6 +13,7 @@ export interface SessionTurn {
   client?: string; sats: number | null; match: "missing" | "matched" | "ambiguous" | "duplicate";
 }
 export interface PiSession {
+  sourceLabel?: string;
   id: string; path: string; cwd: string; title: string; active: number;
   turns: SessionTurn[]; warnings: string[];
 }
@@ -39,8 +42,9 @@ export async function* transcriptLines(path: string, warnings: string[]) {
   if (pending || skipping) yield skipping ? "!invalid" : pending;
 }
 
-export async function parseSession(path: string, active: number): Promise<PiSession> {
+export async function parseSession(path: string, active: number, source?: SessionSourceConfig): Promise<PiSession> {
   const session: PiSession = { id: basename(path, ".jsonl"), path, cwd: "", title: "", active, turns: [], warnings: [] };
+  session.sourceLabel = source ? cleanText(source.label || (source.kind === "bunkhouse" ? `Bunkhouse · ${basename(resolve(source.path, ".."))}` : "")) || undefined : undefined;
   let prev: { prompt: number; cached: boolean } | undefined;
   let firstUser = false;
   for await (const line of transcriptLines(path, session.warnings)) {
@@ -57,7 +61,9 @@ export async function parseSession(path: string, active: number): Promise<PiSess
     if (e.type === "message" && m?.role === "user" && !firstUser) {
       firstUser = true;
       const content = typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === "text" && typeof c.text === "string").map((c: any) => c.text).join(" ") : "";
-      session.title = cleanText(content).slice(0, 500);
+      // Only explicitly marked Bunkhouse sources interpret framing tags.
+      const body = source?.kind === "bunkhouse" ? bunkhouseMessage(content) : content;
+      session.title = cleanText(body).slice(0, 500);
     }
     const warm = e.type === "usage" && e.kind === "cache_warm";
     if (!warm && !(e.type === "message" && m?.role === "assistant")) continue;
@@ -131,27 +137,60 @@ export function sessionTotals(turns: SessionTurn[]) {
 /** Lives in a worker; metadata discovery and transcript cache never run in the paint loop. */
 export class SessionsLoader {
   private cache = new Map<string, { signature: string; session: PiSession }>();
-  constructor(private root = join(homedir(), ".pi/agent/sessions"), private dbPath = join(process.env.ROUTSTRD_DIR || join(homedir(), ".routstrd"), "routstr.db")) {}
+  constructor(private root = join(homedir(), ".pi/agent/sessions"), private dbPath = join(process.env.ROUTSTRD_DIR || join(homedir(), ".routstrd"), "routstr.db"), private sources?: SessionSourceConfig[]) {}
   async load(limit = 20): Promise<SessionsResult> {
     try {
-      const files: { path: string; mtime: number; signature: string }[] = [];
-      for (const dir of await readdir(this.root, { withFileTypes: true })) {
-        if (!dir.isDirectory()) continue;
-        for (const file of await readdir(join(this.root, dir.name))) {
-          if (!file.endsWith(".jsonl")) continue;
-          const path = join(this.root, dir.name, file);
-          try { const s = await stat(path); if (s.isFile()) files.push({ path, mtime: s.mtimeMs, signature: `${s.mtimeMs}:${s.size}` }); } catch { /* removed during discovery */ }
+      const notices: string[] = [];
+      const sources = this.sources ?? await configuredSessionSources(notices);
+      const files: { path: string; mtime: number; signature: string; source?: SessionSourceConfig }[] = [];
+      const seen = new Set<string>();
+      const seenDirectories = new Set<string>();
+      let inspected = 0;
+      const directories: { path: string; source?: SessionSourceConfig }[] = sources.map(source => ({ path: source.path, source }));
+      try {
+        for (const dir of await readdir(this.root, { withFileTypes: true })) {
+          if (dir.isDirectory()) directories.push({ path: join(this.root, dir.name) });
         }
+      } catch (e: any) { if (e.code !== "ENOENT") notices.push("Default Pi session directory unavailable"); }
+      for (const directory of directories.slice(0, 1000)) {
+        try {
+          const canonicalDirectory = await realpath(directory.path);
+          if (seenDirectories.has(canonicalDirectory)) continue;
+          seenDirectories.add(canonicalDirectory);
+          for await (const entry of await opendir(canonicalDirectory)) {
+            if (++inspected > 50000) break;
+            const file = entry.name;
+            if (!file.endsWith(".jsonl")) continue;
+            try {
+              const path = await realpath(join(directory.path, file));
+              if (seen.has(path)) continue;
+              const s = await stat(path);
+              if (!s.isFile()) continue;
+              seen.add(path);
+              files.push({ path, mtime: s.mtimeMs, signature: `${s.mtimeMs}:${s.size}:${JSON.stringify(directory.source)}`, source: directory.source });
+            } catch { /* removed during discovery */ }
+          }
+        } catch { notices.push(`Session source unavailable: ${cleanText(directory.source?.label || directory.path)}`); }
+        if (inspected > 50000) { notices.push("Session discovery limited to 50,000 directory entries; results incomplete"); break; }
       }
+      if (directories.length > 1000) notices.push("Session discovery limited to 1,000 directories");
       files.sort((a, b) => b.mtime - a.mtime);
       const sessions: PiSession[] = [];
       let totalTurns = 0;
+      const identities = new Set<string>();
       for (const f of files.slice(0, Math.min(limit, 200))) {
         if (totalTurns >= 20000) break;
         try {
           const cached = this.cache.get(f.path);
-          const parsed = cached?.signature === f.signature ? cached.session : await parseSession(f.path, 0);
+          const parsed = cached?.signature === f.signature ? cached.session : await parseSession(f.path, 0, f.source);
           this.cache.set(f.path, { signature: f.signature, session: parsed });
+          // Copies of the same persisted session must not duplicate spend.
+          if (identities.has(parsed.id)) {
+            notices.push("Duplicate session identity omitted; newest copy shown");
+            sessions.find(s => s.id === parsed.id)?.warnings.push("Duplicate session identity; cache estimates unavailable in Recent");
+            continue;
+          }
+          identities.add(parsed.id);
           sessions.push(structuredClone(parsed));
           totalTurns += parsed.turns.length;
         } catch { /* inaccessible transcript; continue listing other sessions */ }
@@ -165,7 +204,41 @@ export class SessionsLoader {
       catch (e) { error = `Accounting unavailable: ${e instanceof Error ? e.message : String(e)}`; }
       finally { db?.close(); }
       sessions.sort((a, b) => b.active - a.active);
+      if (notices.length) error = [error, ...new Set(notices)].filter(Boolean).join("; ");
       return { sessions, more: files.length > limit && limit < 200, error };
     } catch (e) { return { sessions: [], more: false, error: e instanceof Error ? e.message : String(e) }; }
+  }
+}
+
+/** Bunkhouse appends the current message after optional conversation context. */
+export function bunkhouseMessage(content: string): string {
+  const contextEnd = content.indexOf("</context>");
+  const afterContext = contextEnd >= 0 ? content.slice(contextEnd + 10) : content;
+  const conversationEnd = afterContext.lastIndexOf("</conversation-context>");
+  const current = conversationEnd >= 0 ? afterContext.slice(conversationEnd + "</conversation-context>".length) : afterContext;
+  return /<message(?:\s[^>]*)?>([\s\S]*?)<\/message>/.exec(current)?.[1] ?? "[Bunkhouse message unavailable]";
+}
+
+/** Read only this nonsecret config section; never expose the config payload in errors. */
+export async function configuredSessionSources(notices: string[] = []): Promise<SessionSourceConfig[]> {
+  const dir = process.env.ROUTSTRD_DIR || join(homedir(), ".routstrd");
+  try {
+    const path = join(dir, "config.json");
+    if ((await stat(path)).size > 1024 * 1024) throw Error();
+    const config = JSON.parse(await readFile(path, "utf8"));
+    if (config.sessionSources === undefined) return [];
+    if (!Array.isArray(config.sessionSources)) throw Error();
+    const sources: SessionSourceConfig[] = [];
+    for (const source of config.sessionSources.slice(0, 100)) {
+      if (!source || typeof source.path !== "string" || !["pi", "bunkhouse"].includes(source.kind) || (source.label !== undefined && typeof source.label !== "string")) { notices.push("Invalid session source ignored"); continue; }
+      const path = source.path.startsWith("~/") ? join(homedir(), source.path.slice(2)) : source.path;
+      if (!isAbsolute(path)) { notices.push("Session source requires an absolute path"); continue; }
+      sources.push({ path, kind: source.kind, label: source.label });
+    }
+    if (config.sessionSources.length > 100) notices.push("Session sources limited to 100");
+    return sources;
+  } catch (e: any) {
+    if (e.code !== "ENOENT") notices.push("Session source configuration unavailable or invalid");
+    return [];
   }
 }

@@ -5,7 +5,7 @@ worker.onerror = error => { console.error(error); process.exit(1); };
 worker.onmessage = event => {
   clearTimeout(timeout);
   const result = event.data;
-  if (result.sessions?.[0]?.title !== "Isolated runtime fixture" || !result.error?.includes("Accounting unavailable")) {
+  if (!result.sessions?.some((s: {title: string}) => s.title === "Isolated runtime fixture") || !result.sessions?.some((s: {title: string; sourceLabel?: string}) => s.title === "Chat fixture title" && s.sourceLabel === "Bunkhouse test") || !result.error?.includes("Accounting unavailable")) {
     console.error(result); process.exit(1);
   }
   console.log("worker runtime OK", sessionsWorkerPath()); worker.terminate();
