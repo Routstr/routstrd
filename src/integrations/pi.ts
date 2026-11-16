@@ -193,6 +193,11 @@ export function buildPiModelEntry(
     entry.compat = previous.compat;
   }
 
+  // Model overrides win over provider compat in Pi: keep this managed policy
+  // consistent even when upgrading an existing hand-curated model entry.
+  if (entry.compat && ("sendSessionAffinityHeaders" in entry.compat || "sessionAffinityFormat" in entry.compat)) {
+    entry.compat = { ...entry.compat, sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" };
+  }
   return entry;
 }
 
@@ -200,6 +205,7 @@ type PiProviderConfig = {
   baseUrl?: string;
   api?: string;
   apiKey?: string;
+  compat?: Record<string, unknown>;
   models?: PiModelEntry[];
 };
 
@@ -287,11 +293,16 @@ export async function installPiIntegration(
       }),
     );
 
-    // Rebuild provider from scratch too; only write routstrd-managed fields.
+    // Keep unrelated compatibility settings; manage local session-affinity headers.
     piConfig.providers["routstr"] = {
       baseUrl,
       api: "openai-completions",
       apiKey,
+      compat: {
+        ...piConfig.providers["routstr"]?.compat,
+        sendSessionAffinityHeaders: true,
+        sessionAffinityFormat: "openrouter",
+      },
       models: providerModels,
     };
 

@@ -475,3 +475,16 @@ describe("buildPiModelEntry", () => {
     expect("baseUrl" in entry).toBe(false);
   });
 });
+
+it("generates provider session policy and upgrades conflicting model overrides idempotently", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-session-policy-"));
+  const path = join(dir, "models.json");
+  const { writeFileSync } = await import("fs");
+  writeFileSync(path, JSON.stringify({ providers: { routstr: { compat: { supportsStrictMode: false, sendSessionAffinityHeaders: false }, models: [{ id: "glm-5.3", compat: { supportsDeveloperRole: true, sendSessionAffinityHeaders: false, sessionAffinityFormat: "openai" } }] } } }));
+  await installPiIntegration(CONFIG, "key", makeIntegration(path), MOCK_DEPS);
+  const first = JSON.parse(readFileSync(path, "utf8"));
+  expect(first.providers.routstr.compat).toEqual({ supportsStrictMode: false, sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" });
+  expect(first.providers.routstr.models.find((m: any) => m.id === "glm-5.3").compat).toEqual({ supportsDeveloperRole: true, sendSessionAffinityHeaders: true, sessionAffinityFormat: "openrouter" });
+  await installPiIntegration(CONFIG, "key", makeIntegration(path), MOCK_DEPS);
+  expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(first);
+});

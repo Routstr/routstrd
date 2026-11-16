@@ -344,3 +344,25 @@ describe("real SDK routed responses", () => {
     } finally { await closeUpstream(); }
   });
 });
+
+it.each(["/v1/chat/completions", "/v1/responses", "/v1/messages"])("keeps session identity local on %s", async (path) => {
+  const usage = createMemoryUsageTrackingDriver();
+  const { call } = await fixture({
+    usageTrackingDriver: usage,
+    ensureProvidersBootstrapped: async () => {},
+    routeRequests: async (options: any) => {
+      for (const name of ["x-session-id", "session-id", "session_id", "x-client-request-id", "x-session-affinity", "x-opencode-session"]) {
+        expect(options.headers[name]).toBeUndefined();
+      }
+      expect(options.headers["x-unrelated"]).toBe("preserved");
+      expect(options.requestBody.prompt_cache_key).toBeUndefined();
+      expect(options.requestBody.session_id).toBeUndefined();
+      expect(options.requestBody.metadata).toEqual({ purpose: "test" });
+      await options.usageTrackingDriver.append({ id: path, timestamp: Date.now(), modelId: "test", baseUrl: "https://node", promptTokens: 1, completionTokens: 1, totalTokens: 2, cost: 0, satsCost: 1 });
+      return new Response(JSON.stringify({ id: "response" }), { headers: { "content-type": "application/json" } });
+    },
+  });
+  const response = await call(path, { method: "POST", headers: { "x-session-id": "local-session", "session-id": "alias", session_id: "alias", "x-client-request-id": "alias", "x-session-affinity": "alias", "x-opencode-session": "alias", "x-unrelated": "preserved" }, body: JSON.stringify({ model: "test", messages: [], session_id: "body-session", prompt_cache_key: "body-cache", metadata: { sessionId: "metadata-session", purpose: "test" } }) });
+  expect(response.status).toBe(200);
+  expect((await usage.list())[0]?.sessionId).toBe("local-session");
+});

@@ -1,3 +1,4 @@
+import { consumeSessionIdentity, withSessionIdentity } from "./session-identity";
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
@@ -2649,6 +2650,8 @@ export function createDaemonRequestHandler(deps: {
       }
     }
 
+    const sessionId = consumeSessionIdentity(incomingHeaders, bodyObj);
+
     try {
       // Discovery is shared: cancel this waiter, not the shared bootstrap.
       await new Promise<void>((resolve, reject) => {
@@ -2690,7 +2693,7 @@ export function createDaemonRequestHandler(deps: {
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
         mode: deps.mode,
-        usageTrackingDriver: deps.usageTrackingDriver,
+        usageTrackingDriver: withSessionIdentity(deps.usageTrackingDriver, sessionId),
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,
