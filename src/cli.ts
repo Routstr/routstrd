@@ -1226,7 +1226,7 @@ lightningPayments.command("recover <baseUrl> <bolt11>").description("Recover a p
   });
 lightningPayments.command("invoices").description("List saved provider invoices (contains sensitive recovery credentials)")
   .action(async () => { await handleDaemonCommand("/payments/lightning/invoices", { method: "POST", body: {} }); });
-lightningPayments.command("refund <baseUrl> <lightningAddress>").description("Refund all available provider balance to a Lightning address; retain key for recovery")
+lightningPayments.command("refund <baseUrl> <lightningAddress>").description("Refund the provider balance to a Lightning address (minus the provider's fee reserve); retain key for recovery")
   .action(async (baseUrl: string, lightningAddress: string) => {
     await handleDaemonCommand("/payments/lightning/refund", { method: "POST", body: { baseUrl, lightningAddress } });
   });
@@ -1244,7 +1244,12 @@ program
     "--mint-url <url>",
     "Mint URL to refund the deleted API key balance to (defaults to active wallet mint)",
   )
-  .action(async (options: { apiKeys: boolean; deleteApiKeys?: string; mintUrl?: string }) => {
+  .option(
+    "--force",
+    "With --delete-api-keys, remove the key even if the refund fails (forfeits its balance)",
+    false,
+  )
+  .action(async (options: { apiKeys: boolean; deleteApiKeys?: string; mintUrl?: string; force: boolean }) => {
     await ensureDaemonRunning();
 
     if (options.deleteApiKeys) {
@@ -1252,6 +1257,9 @@ program
       const queryParts = [`baseUrl=${encodeURIComponent(baseUrl)}`];
       if (options.mintUrl) {
         queryParts.push(`mintUrl=${encodeURIComponent(options.mintUrl)}`);
+      }
+      if (options.force) {
+        queryParts.push("force=1");
       }
       const result = await callDaemon(
         `/keys/api/delete?${queryParts.join("&")}`,

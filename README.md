@@ -687,16 +687,20 @@ supporting `/v2/lightning`; a provider 404 is surfaced without retry/fallback.
 A timeout is not proof that an invoice or refund failed remotely. Recheck invoice
 status or recover by BOLT11 rather than paying another invoice blindly.
 
-Lightning refunds pay the entire available balance to the explicit address;
-they do not deposit Cashu into the local wallet. Their returned amount describes
-the gross balance, not necessarily the net payout after Lightning fees. The key
-is retained even after success so provider claim results can be recovered. An
-unresolved refund stays recoverable; it must not trigger key deletion. The
-existing delete-key command now also retains credentials when refund fails.
+Lightning refunds pay the available balance to the explicit address, minus a
+Lightning fee reserve the provider keeps on the key; they do not deposit Cashu
+into the local wallet. The output reports `sats` paid, `fee_msats`, and, when a
+reserve was kept, `remaining_sats` with a note. Repeating the refund replays the
+same claim (same `refund_id`) instead of paying the reserve, so sweep it with a
+Cashu refund: `routstrd balance --delete-api-keys <provider>`. The key is
+retained after a Lightning refund so provider claim results can be recovered.
+An unresolved refund stays recoverable; it must not trigger key deletion.
+
+`status`/`recover` store the provider key and only echo a masked form of it.
+
+`balance --delete-api-keys` keeps the key when its Cashu refund fails, so the
+balance stays recoverable. Add `--force` to remove it anyway (for a provider
+that is gone for good); this forfeits the remaining balance.
+
 Do not run refunds while requests/top-ups are active; the provider rejects active
 reservations and owns refund reconciliation.
-
-For these paired development worktrees, the SDK dependency points to
-`../../../routstr-sdk/.worktrees/lightning-payments`. Build that SDK first
-(`bun run build`), then build this daemon (`bun run build`). Restore the normal
-SDK dependency path/version when preparing a release from a standard checkout.

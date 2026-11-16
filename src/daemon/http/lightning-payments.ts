@@ -33,9 +33,48 @@ export class LightningInvoiceJournal {
   }
 }
 
+/** A malformed or out-of-state request; answered with 4xx instead of 500. */
+export class LightningRequestError extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "LightningRequestError";
+  }
+}
+
 function stringField(body: Record<string, unknown>, field: string): string {
-  if (typeof body[field] !== "string" || !body[field].trim()) throw new Error(`${field} is required`);
-  return body[field];
+  const value = body[field];
+  if (typeof value !== "string" || !value.trim()) throw new LightningRequestError(`${field} is required`);
+  return value;
+}
+
+function parseProviderUrl(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new LightningRequestError("Invalid provider URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new LightningRequestError("Invalid provider URL");
+  }
+  return `${url.href.replace(/\/$/, "")}/`;
+}
+
+/**
+ * Invoice status responses carry the spend-capable provider key. The daemon
+ * stores it; callers only need to know a key was imported, so never echo it.
+ */
+function redactInvoiceStatus<T extends { api_key?: unknown }>(status: T): T {
+  if (typeof status.api_key !== "string" || !status.api_key) return status;
+  const key = status.api_key;
+  return { ...status, api_key: `${key.slice(0, 6)}…${key.slice(-4)}`, api_key_stored: true };
+}
+
+/** Whole sats still on the key after a paid Lightning refund (the provider's fee reserve). */
+function remainingSats(refund: unknown): number {
+  const raw = (refund as { remaining_msats?: unknown }).remaining_msats;
+  const msats = typeof raw === "string" || typeof raw === "number" ? Number(raw) : NaN;
+  return Number.isFinite(msats) && msats > 0 ? Math.floor(msats / 1000) : 0;
 }
 
 export async function executeLightningOperation(
@@ -46,13 +85,11 @@ export async function executeLightningOperation(
   journal = new LightningInvoiceJournal(),
 ): Promise<unknown> {
   if (action === "invoices") return journal.list();
-  const url = new URL(stringField(body, "baseUrl"));
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Invalid provider URL");
-  const baseUrl = `${url.href.replace(/\/$/, "")}/`;
+  const baseUrl = parseProviderUrl(stringField(body, "baseUrl"));
   if (action === "create" || action === "topup") {
-    if (action === "create" && storage.getApiKey(baseUrl)) throw new Error("Provider already has a stored key; use topup");
+    if (action === "create" && storage.getApiKey(baseUrl)) throw new LightningRequestError("Provider already has a stored key; use topup", 409);
     const key = action === "topup" ? storage.getApiKey(baseUrl)?.key : undefined;
-    if (action === "topup" && !key) throw new Error("No stored provider key");
+    if (action === "topup" && !key) throw new LightningRequestError("No stored provider key", 404);
     const invoice = await payments.createInvoice({ baseUrl, purpose: action, amountSats: body.amountSats as number, apiKey: key });
     try {
       journal.save(baseUrl, action, invoice);
@@ -67,12 +104,13 @@ export async function executeLightningOperation(
       ? await payments.getInvoiceStatus(baseUrl, stringField(body, "invoiceId"))
       : await payments.recoverInvoice(baseUrl, stringField(body, "bolt11"));
     if (status.status === "paid") await payments.acceptPaidInvoice(baseUrl, status, storage);
-    return status;
+    return redactInvoiceStatus(status);
   }
   if (action === "refund") {
     const key = storage.getApiKey(baseUrl)?.key;
-    if (!key) throw new Error("No stored provider key");
-    const refund = await payments.refundToLightning(baseUrl, key, stringField(body, "lightningAddress"));
+    const lightningAddress = stringField(body, "lightningAddress");
+    if (!key) throw new LightningRequestError("No stored provider key", 404);
+    const refund = await payments.refundToLightning(baseUrl, key, lightningAddress);
     // A concurrent top-up may have added balance since the refund began. Do not blindly zero it.
     if (refund.status === "paid" && storage.getApiKey(baseUrl)?.key === key) {
       try {
@@ -83,7 +121,17 @@ export async function executeLightningOperation(
       }
     }
     // Keep the key even on success so repeated requests can recover the provider's refund claim.
+    // The provider holds back a Lightning fee reserve; a repeat refund replays the same claim
+    // rather than paying it out, so point the operator at the Cashu sweep.
+    const leftover = refund.status === "paid" ? remainingSats(refund) : 0;
+    if (leftover > 0) {
+      return {
+        ...refund,
+        remaining_sats: leftover,
+        note: `Provider kept ${leftover} sat(s) as a fee reserve on the key. Sweep it to the local wallet with: routstrd balance --delete-api-keys ${baseUrl}`,
+      };
+    }
     return refund;
   }
-  throw new Error("Unknown Lightning operation");
+  throw new LightningRequestError("Unknown Lightning operation", 404);
 }

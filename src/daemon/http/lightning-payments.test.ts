@@ -44,7 +44,7 @@ describe("paired SDK/provider Lightning lifecycle", () => {
       if (path === "/v1/wallet/refund") {
         expect((await req.json() as any).lightning_address).toBe("alice@example.com");
         providerBalance = 5000; // A concurrent top-up: the client must refresh, not blindly zero balance.
-        return Response.json({ refund_id: "refund-1", status: "paid", recipient: "alice@example.com", sats: "100" });
+        return Response.json({ refund_id: "refund-1", status: "paid", recipient: "alice@example.com", sats: "100", fee_msats: "0", remaining_msats: "2000" });
       }
       return new Response(null, { status: 404 });
     } });
@@ -60,15 +60,20 @@ describe("paired SDK/provider Lightning lifecycle", () => {
     await run("status", { invoiceId: "create" });
     expect(storage.getApiKey(baseUrl)).toBeNull();
     paid = true;
-    await run("status", { invoiceId: "create" });
+    const paidStatus = await run("status", { invoiceId: "create" }) as any;
     expect(storage.getApiKey(baseUrl)?.key).toBe("sk-test");
+    // The stored key is spend-capable; the response only confirms it was stored.
+    expect(paidStatus.api_key).not.toBe("sk-test");
+    expect(paidStatus.api_key_stored).toBe(true);
     expect(storage.getApiKey(baseUrl)?.balance).toBe(100);
     await expect(run("create", { amountSats: 100 })).rejects.toThrow("already");
     await run("topup", { amountSats: 100 });
     providerBalance = 200000;
     await run("recover", { bolt11: "lnbc-topup" });
     expect(storage.getApiKey(baseUrl)?.balance).toBe(200);
-    await run("refund", { lightningAddress: "alice@example.com" });
+    const refund = await run("refund", { lightningAddress: "alice@example.com" }) as any;
+    expect(refund.remaining_sats).toBe(2);
+    expect(refund.note).toContain("--delete-api-keys");
     expect(storage.getApiKey(baseUrl)?.key).toBe("sk-test");
     expect(storage.getApiKey(baseUrl)?.balance).toBe(5);
     expect(new LightningInvoiceJournal(join(dir, "invoices")).list()).toHaveLength(2);
@@ -87,7 +92,64 @@ describe("paired SDK/provider Lightning lifecycle", () => {
 });
 
 
+async function callHandler(deps: any, method: string, url: string, body?: unknown, contentType = "application/json") {
+  const handler = createDaemonRequestHandler(deps);
+  const req = new EventEmitter() as any;
+  req.method = method;
+  req.url = url;
+  req.headers = { host: "localhost", ...(body !== undefined ? { "content-type": contentType } : {}) };
+  let status = 0;
+  let text = "";
+  const res = { setHeader: () => {}, writeHead: (code: number) => { status = code; }, end: (chunk: string) => { text = chunk; } } as any;
+  const request = handler(req, res);
+  if (body !== undefined) {
+    req.emit("data", typeof body === "string" ? body : JSON.stringify(body));
+    req.emit("end");
+  }
+  await request;
+  return { status, body: text ? JSON.parse(text) : undefined };
+}
+
+describe("HTTP error handling", () => {
+  it("answers a generic error with 500 instead of throwing from the error handler", async () => {
+    const storageAdapter = { getApiKey: () => { throw new Error("storage exploded"); } };
+    const result = await callHandler({ storageAdapter }, "POST", "/payments/lightning/refund", { baseUrl: "https://provider.example/", lightningAddress: "alice@example.com" });
+    expect(result.status).toBe(500);
+    expect(result.body.error).toContain("storage exploded");
+  });
+
+  it("answers malformed Lightning requests with 4xx", async () => {
+    const storageAdapter = { getApiKey: () => null };
+    const badUrl = await callHandler({ storageAdapter }, "POST", "/payments/lightning/refund", { baseUrl: "not a url", lightningAddress: "alice@example.com" });
+    expect(badUrl.status).toBe(400);
+    const noKey = await callHandler({ storageAdapter }, "POST", "/payments/lightning/refund", { baseUrl: "https://provider.example/", lightningAddress: "alice@example.com" });
+    expect(noKey.status).toBe(404);
+    const noAddress = await callHandler({ storageAdapter }, "POST", "/payments/lightning/refund", { baseUrl: "https://provider.example/" });
+    expect(noAddress.status).toBe(400);
+  });
+
+  it("refuses cross-site simple POSTs to the money-moving routes", async () => {
+    let looked = false;
+    const storageAdapter = { getApiKey: () => { looked = true; return { key: "sk-test" }; } };
+    const result = await callHandler({ storageAdapter }, "POST", "/payments/lightning/refund", JSON.stringify({ baseUrl: "https://provider.example/", lightningAddress: "mallory@example.com" }), "text/plain");
+    expect(result.status).toBe(415);
+    expect(looked).toBe(false);
+  });
+});
+
 describe("HTTP refund recovery", () => {
+  it("removes the key with force when the delete-key refund fails", async () => {
+    let removed = false;
+    const result = await callHandler({
+      storageAdapter: { getApiKey: () => ({ baseUrl: "https://provider.example/", key: "sk-test" }), removeApiKey: () => { removed = true; } },
+      refundClient: { getBalanceManager: () => ({ refundApiKey: async () => ({ success: false, message: "Provider gone" }) }) },
+    }, "DELETE", "/keys/api/delete?baseUrl=https%3A%2F%2Fprovider.example%2F&mintUrl=https%3A%2F%2Fmint.example&force=1");
+    expect(result.status).toBe(200);
+    expect(removed).toBe(true);
+    expect(result.body.output).toMatchObject({ removed: true, refunded: false });
+    expect(result.body.output.message).toContain("refund failed: Provider gone");
+  });
+
   it("retains credentials when delete-key refund fails", async () => {
     let removed = false;
     const handler = createDaemonRequestHandler({
@@ -112,7 +174,7 @@ describe("HTTP refund recovery", () => {
     const req = new EventEmitter() as any;
     req.method = "POST";
     req.url = "/payments/lightning/invoices";
-    req.headers = { host: "localhost" };
+    req.headers = { host: "localhost", "content-type": "application/json" };
     let status = 0;
     let body = "";
     const res = { writeHead: (code: number) => { status = code; }, end: (chunk: string) => { body = chunk; } } as any;
