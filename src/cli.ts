@@ -2366,9 +2366,15 @@ npubsCmd
 
 npubsCmd
   .command("register")
-  .description("Register yourself as the first admin (only when no admins exist)")
+  .description("Register yourself as the first admin (only when no npubs exist)")
   .option("-n, --name <name>", "Display name for this npub (required; prompted when omitted)")
-  .action(async (options: { name?: string }) => {
+  .option("--bootstrap-token <token>", "One-time token from the auth proxy log (or ROUTSTRD_AUTH_BOOTSTRAP_TOKEN)")
+  .action(async (options: { name?: string; bootstrapToken?: string }) => {
+    const bootstrapToken = options.bootstrapToken ?? process.env.ROUTSTRD_AUTH_BOOTSTRAP_TOKEN;
+    if (bootstrapToken !== undefined && !bootstrapToken.trim()) {
+      console.error("Bootstrap token must not be empty.");
+      process.exit(1);
+    }
     await ensureDaemonRunning();
     const config = await loadConfig();
     const userNpub = getUserNpub(config);
@@ -2378,19 +2384,8 @@ npubsCmd
       );
       process.exit(1);
     }
-    const result = await callAuth("/npubs");
-    if (result.error) {
-      console.log(result.error);
-      process.exit(1);
-    }
-    const data = (result.output as { npubs?: NpubEntry[] } | undefined)?.npubs
-      ? result.output
-      : result;
-    const npubs = (data as { npubs?: NpubEntry[] } | undefined)?.npubs ?? [];
-    if (npubs.length > 0) {
-      console.log(`Admin npubs already configured (${npubs.length}). Ask your admin to add your npub. \n Your npub: ${userNpub}`);
-      return;
-    }
+    // GET /npubs requires a registered identity, so it cannot preflight bootstrap.
+    // Let POST enforce the empty-table/token gate (and normal admin auth later).
     const normalized = normalizeNostrPubkey(userNpub);
     if (!normalized) {
       console.error("Failed to normalize user npub.");
@@ -2408,6 +2403,9 @@ npubsCmd
     const addResult = await callAuth("/npubs", {
       method: "POST",
       body,
+      headers: bootstrapToken === undefined ? undefined : {
+        "x-routstr-bootstrap-token": bootstrapToken.trim(),
+      },
     });
     if (addResult.error) {
       console.log(addResult.error);
