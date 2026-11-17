@@ -38,6 +38,7 @@ async function post(
   deps: Record<string, unknown>,
   path: string,
   verify: string = "confidential",
+  extraHeaders: Record<string, string> = {},
 ): Promise<{ status: number; body: string }> {
   const server = createServer(createDaemonRequestHandler(deps as never));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -48,6 +49,7 @@ async function post(
       headers: {
         "Content-Type": "application/json",
         "x-routstr-verify": verify,
+        ...extraHeaders,
       },
       body: JSON.stringify({
         model: "m",
@@ -168,6 +170,62 @@ for (const deps of [stubDeps, enabled]) {
     "/v1/chat/completions",
   ).catch((e: unknown) => ({ status: -1, body: String(e) }));
   assert(r.status === -1, `stream failed after its first byte ended cleanly: status ${r.status}, body ${JSON.stringify(r.body)}`);
+}
+
+// No node serves the model confidentially (routed or pinned): the caller's
+// error, 400 no_confidential_provider with the SDK's message.
+for (const message of [
+  "No provider offers model m confidentially",
+  "Provider http://127.0.0.1:9/ does not offer model m confidentially",
+]) {
+  const r = await post(
+    {
+      ...enabled,
+      routeRequests: async () => {
+        throw Object.assign(new Error(message), { name: "ConfidentialError", code: "no_confidential_provider" });
+      },
+    },
+    "/v1/chat/completions",
+  );
+  assert(r.status === 400, `no confidential provider: status ${r.status}, body ${r.body}`);
+  const body = JSON.parse(r.body) as { error?: string; error_type?: string };
+  assert(body.error_type === "no_confidential_provider", `no confidential provider: body ${r.body}`);
+  assert(body.error === message, `no confidential provider: body ${r.body}`);
+}
+
+// The same through the SDK's own routing: a node lists the model, but not
+// confidentially (routed, and pinned with x-routstr-provider).
+{
+  const NODE = "http://127.0.0.1:9/";
+  const model = { id: "m", name: "m", sats_pricing: { prompt: 1, completion: 1, max_cost: 10 } };
+  const sdkDeps = {
+    ...enabled,
+    walletAdapter: { getBalances: async () => ({}) },
+    discoveryAdapter: {
+      getModelPathWhitelist: () => ({}),
+      getModelIdMappings: () => null,
+      getDisabledProviders: () => [],
+      getCachedMints: () => ({}),
+    },
+    modelManager: {
+      getBaseUrls: () => [NODE],
+      getAllCachedModels: () => ({ [NODE]: [model] }),
+    },
+    providerManager: {
+      getProviderPriceRankingForModel: () => [{ baseUrl: NODE, model }],
+      getModelPathProviderRanking: async () => [],
+    },
+  };
+  for (const [pin, message] of [
+    [undefined, "No provider offers model m confidentially"],
+    [NODE, `Provider ${NODE} does not offer model m confidentially`],
+  ] as const) {
+    const r = await post(sdkDeps, "/v1/chat/completions", "confidential", pin ? { "x-routstr-provider": pin } : {});
+    assert(r.status === 400, `SDK, pin ${pin}: status ${r.status}, body ${r.body}`);
+    const body = JSON.parse(r.body) as { error?: string; error_type?: string };
+    assert(body.error_type === "no_confidential_provider", `SDK, pin ${pin}: body ${r.body}`);
+    assert(body.error === message, `SDK, pin ${pin}: body ${r.body}`);
+  }
 }
 
 console.log("SCENARIO-OK");

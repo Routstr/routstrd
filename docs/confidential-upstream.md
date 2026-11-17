@@ -38,9 +38,12 @@ They are
 routed only to nodes that advertise confidential mode for the model, and fail
 rather than silently downgrade: with the header, routstrd answers 400 when
 `confidentialUpstream` is not enabled or the endpoint is not
-`POST /v1/chat/completions` or one of the image paths below, and a
-failed proof, receipt or cost check fails the request (or ends the stream
-with an error). Streaming responses stream as they decrypt, except the final
+`POST /v1/chat/completions` or one of the image paths below, and when no
+node offers the model confidentially, or the provider pinned with
+`x-routstr-provider` does not (`error_type: no_confidential_provider`; nothing
+is sent to a node). A
+failed proof, receipt or cost check fails the request with 502 (or, once
+the stream has started, ends it with an error). Streaming responses stream as they decrypt, except the final
 `data: [DONE]` line: it is sent only once the settlement checks (usage proof,
 signed receipt and attestation, cost) have passed. If one fails, the
 connection is closed without `[DONE]` and without a clean end of the chunked

@@ -29,6 +29,10 @@ describe("confidentialErrorStatus", () => {
     });
     expect(confidentialErrorStatus(new ConfidentialError("offer_no_images", "no"))?.status).toBe(400);
     expect(confidentialErrorStatus(new ConfidentialError("pinned_parameter", "no"))?.status).toBe(400);
+    expect(confidentialErrorStatus(new ConfidentialError("no_confidential_provider", "no"))).toEqual({
+      status: 400,
+      code: "no_confidential_provider",
+    });
   });
   test("the SDK's typed subclasses map by code", () => {
     expect(confidentialErrorStatus(new ReceiptVerificationError("bad"))).toEqual({ status: 502, code: "receipt_verification" });

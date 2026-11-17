@@ -3012,6 +3012,8 @@ const CONFIDENTIAL_CALLER_CODES = new Set([
   "offer_no_images",
   "not_configured",
   "pinned_parameter",
+  // No node offers the model confidentially (or the pinned one does not).
+  "no_confidential_provider",
 ]);
 /** The node's offer, connection, proofs or receipt failed (the SDK's other codes). */
 const CONFIDENTIAL_UPSTREAM_CODES = new Set([
