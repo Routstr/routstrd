@@ -52,3 +52,25 @@ describe("confidentialErrorStatus", () => {
     expect(confidentialErrorStatus(null)).toBeUndefined();
   });
 });
+
+describe("a node refusal keeps the node's status", () => {
+  class RequestRefusedError extends ConfidentialError {
+    constructor(readonly status: number, reason: string) {
+      super("request_refused", `node refused the request: ${reason} (status ${status})`);
+      this.name = "RequestRefusedError";
+    }
+  }
+  test("401, 402, 403 and 429 are answered as the node gave them", () => {
+    for (const status of [401, 402, 403, 429]) {
+      expect(confidentialErrorStatus(new RequestRefusedError(status, "no"))).toEqual({ status, code: "request_refused" });
+    }
+  });
+  test("any other status, or none, stays 502", () => {
+    for (const status of [400, 404, 409, 500, 503]) {
+      expect(confidentialErrorStatus(new RequestRefusedError(status, "no"))).toEqual({ status: 502, code: "request_refused" });
+    }
+    expect(confidentialErrorStatus(new ConfidentialError("request_refused", "no"))).toEqual({ status: 502, code: "request_refused" });
+    // Only a refusal carries the node's status through.
+    expect(confidentialErrorStatus(Object.assign(new ConfidentialError("session_rejected", "no"), { status: 402 }))?.status).toBe(502);
+  });
+});

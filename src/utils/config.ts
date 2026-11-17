@@ -112,6 +112,14 @@ export interface RoutstrdConfig {
      */
     maxConnectionDepositMsat?: number;
     /**
+     * Pad each confidential request body to the next multiple of this many
+     * bytes (an integer of at least 16), or to the next power of two with
+     * `"pow2"`. Off by default. It hides the exact body size from observers
+     * of the connections and from the provider; the node still learns the
+     * prompt's token count.
+     */
+    padBucket?: number | "pow2";
+    /**
      * Pre-warming: armed connections (the deposit held, the two-party
      * preprocessing and key share done, no provider connection yet), bound to
      * the credential only. Only keys with recent traffic keep one; an idle

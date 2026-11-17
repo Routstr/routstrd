@@ -1,6 +1,6 @@
 // Scenario runner for confidential-gate.test.ts (isolated bun process with
 // ROUTSTRD_DIR set before module evaluation, like auto-refresh.scenario.ts).
-import { createServer } from "http";
+import { createServer, request } from "http";
 import type { AddressInfo } from "net";
 
 const { createDaemonRequestHandler } = await import("../../src/daemon/http/index");
@@ -126,6 +126,96 @@ for (const deps of [stubDeps, enabled]) {
     const confidential = seen.at(-1)?.confidential as { trustedHosts?: string[] } | undefined;
     assert(confidential?.trustedHosts?.[0] === "api.venice.ai", `${path}: routed without the confidential option`);
   }
+}
+
+// A reuse scope that is repeated, empty or over 256 bytes is refused before
+// routing: running it in the client's wider scope would join conversations
+// the caller meant to keep apart.
+{
+  let routedCount = 0;
+  const routed = {
+    ...enabled,
+    routeRequests: async () => {
+      routedCount += 1;
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  for (const scope of ["", "a".repeat(257)]) {
+    const r = await post(routed, "/v1/chat/completions", "confidential", { "x-routstr-reuse-scope": scope });
+    assert(r.status === 400, `reuse scope of ${scope.length} bytes: status ${r.status}, body ${r.body}`);
+    assert(r.body.includes("x-routstr-reuse-scope"), `reuse scope of ${scope.length} bytes: body ${r.body}`);
+  }
+  // Two header lines (fetch would join them into one): raw HTTP.
+  const server = createServer(createDaemonRequestHandler(routed as never));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const repeated = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const body = JSON.stringify({ model: "m", messages: [{ role: "user", content: "SENTINEL-PROMPT" }] });
+    const rq = request(
+      {
+        host: "127.0.0.1",
+        port: (server.address() as AddressInfo).port,
+        method: "POST",
+        path: "/v1/chat/completions",
+        headers: {
+          "Content-Type": "application/json",
+          "x-routstr-verify": "confidential",
+          "x-routstr-reuse-scope": ["conv-1", "conv-2"],
+        },
+      },
+      (res) => {
+        let b = "";
+        res.on("data", (c) => (b += c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, body: b }));
+      },
+    );
+    rq.on("error", reject);
+    rq.end(body);
+  });
+  server.close();
+  assert(repeated.status === 400, `repeated reuse scope: status ${repeated.status}, body ${repeated.body}`);
+  assert(repeated.body.includes("x-routstr-reuse-scope"), `repeated reuse scope: body ${repeated.body}`);
+  assert(routedCount === 0, `a bad reuse scope was routed (${routedCount})`);
+  // One value up to 256 bytes runs.
+  const ok = await post(routed, "/v1/chat/completions", "confidential", { "x-routstr-reuse-scope": "a".repeat(256) });
+  assert(ok.status === 200 && routedCount === 1, `reuse scope of 256 bytes: status ${ok.status}, body ${ok.body}`);
+}
+
+// padBucket reaches the SDK option, and the SDK's warnings have a sink.
+{
+  let confidential: Record<string, unknown> | undefined;
+  const r = await post(
+    {
+      ...enabled,
+      confidentialUpstream: { ...enabled.confidentialUpstream, padBucket: 4096 },
+      routeRequests: async (options: Record<string, unknown>) => {
+        confidential = options.confidential as Record<string, unknown>;
+        return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+      },
+    },
+    "/v1/chat/completions",
+  );
+  assert(r.status === 200, `padBucket: status ${r.status}`);
+  assert(confidential?.padBucket === 4096, `padBucket not passed: ${String(confidential?.padBucket)}`);
+  assert(typeof confidential?.onWarning === "function", "onWarning not passed");
+}
+
+// A node refusal with the node's status 402 keeps it.
+{
+  const r = await post(
+    {
+      ...enabled,
+      routeRequests: async () => {
+        throw Object.assign(new Error("node refused the request: balance (status 402)"), {
+          name: "RequestRefusedError",
+          code: "request_refused",
+          status: 402,
+        });
+      },
+    },
+    "/v1/chat/completions",
+  );
+  assert(r.status === 402, `refused with 402: status ${r.status}, body ${r.body}`);
+  assert((JSON.parse(r.body) as { error_type?: string }).error_type === "request_refused", `refused with 402: body ${r.body}`);
 }
 
 // A stream that fails before its first byte is an error, not an empty 200.

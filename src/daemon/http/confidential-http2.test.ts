@@ -4,9 +4,12 @@ import {
   confidentialFraming,
   confidentialHttp2Options,
   confidentialMaxDeposit,
+  confidentialPadBucket,
   confidentialReuseScope,
+  confidentialWarningSink,
   noteOutdatedNode,
 } from "./index";
+import { parseConfidentialReuseScope } from "./confidential-opt-in";
 
 describe("confidentialUpstream.http → the SDK's framing choice", () => {
   test("auto unless a framing is named", () => {
@@ -132,5 +135,56 @@ describe("node_protocol_outdated", () => {
     for (const code of ["upgrade_required", "twopc_version_mismatch"]) {
       expect(confidentialErrorStatus(Object.assign(new Error(code), { code }))).toEqual({ status: 502, code });
     }
+  });
+});
+
+describe("x-routstr-reuse-scope is one value of 1 to 256 bytes", () => {
+  const req = (headers: Record<string, string | string[]>, rawHeaders?: string[]) => ({ headers, rawHeaders });
+
+  test("absent, or one value: accepted", () => {
+    expect(parseConfidentialReuseScope(req({}, []))).toEqual({ kind: "absent" });
+    expect(parseConfidentialReuseScope(req({ "x-routstr-reuse-scope": "conv-1" }, ["X-Routstr-Reuse-Scope", "conv-1"]))).toEqual({
+      kind: "scope",
+      value: "conv-1",
+    });
+    const max = "a".repeat(256);
+    expect(parseConfidentialReuseScope(req({ "x-routstr-reuse-scope": max }, ["x-routstr-reuse-scope", max])).kind).toBe("scope");
+  });
+
+  test("a repeated header, an empty value or one over 256 bytes is refused, never ignored", () => {
+    // Node joins a repeated header with ", ": only the raw lines tell.
+    const repeated = req({ "x-routstr-reuse-scope": "a, b" }, ["x-routstr-reuse-scope", "a", "X-Routstr-Reuse-Scope", "b"]);
+    const long = "a".repeat(257);
+    const longBytes = "é".repeat(129); // 258 bytes in 129 characters
+    for (const r of [
+      repeated,
+      req({ "x-routstr-reuse-scope": ["a", "b"] }),
+      req({ "x-routstr-reuse-scope": "" }, ["x-routstr-reuse-scope", ""]),
+      req({ "x-routstr-reuse-scope": long }, ["x-routstr-reuse-scope", long]),
+      req({ "x-routstr-reuse-scope": longBytes }, ["x-routstr-reuse-scope", longBytes]),
+    ]) {
+      const p = parseConfidentialReuseScope(r);
+      expect(p.kind).toBe("invalid");
+      if (p.kind === "invalid") expect(p.error).toContain("x-routstr-reuse-scope");
+    }
+  });
+});
+
+describe("confidentialUpstream.padBucket and the warning sink", () => {
+  test("padBucket: an integer of at least 16 bytes or pow2; anything else leaves padding off", () => {
+    expect(confidentialPadBucket({})).toBeUndefined();
+    expect(confidentialPadBucket({ padBucket: 4096 })).toBe(4096);
+    expect(confidentialPadBucket({ padBucket: 16 })).toBe(16);
+    expect(confidentialPadBucket({ padBucket: "pow2" } as never)).toBe("pow2");
+    for (const bad of [0, 15, -1, 1.5, "4096", null, true]) {
+      expect(confidentialPadBucket({ padBucket: bad as never })).toBeUndefined();
+    }
+  });
+
+  test("an SDK warning is one line at warn level", () => {
+    const lines: unknown[][] = [];
+    const sink = confidentialWarningSink((...args: unknown[]) => lines.push(args));
+    sink("deposit outcome disagrees\nwith the offer\r\n");
+    expect(lines).toEqual([["[confidential] deposit outcome disagrees with the offer"]]);
   });
 });

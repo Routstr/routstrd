@@ -33,7 +33,12 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
-import { CONFIDENTIAL_OPT_IN_HEADER, isConfidentialPath, parseConfidentialOptIn } from "./confidential-opt-in";
+import {
+  CONFIDENTIAL_OPT_IN_HEADER,
+  isConfidentialPath,
+  parseConfidentialOptIn,
+  parseConfidentialReuseScope,
+} from "./confidential-opt-in";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -2682,6 +2687,13 @@ export function createDaemonRequestHandler(deps: {
         });
         return;
       }
+      // A reuse scope that cannot be used as given is refused, never
+      // dropped: dropping it would widen the scope the caller asked for.
+      const scope = parseConfidentialReuseScope(req);
+      if (scope.kind === "invalid") {
+        sendJson(res, 400, { error: scope.error });
+        return;
+      }
     }
 
     // Only the final provider-proxy POST branch is eligible. Metadata/admin
@@ -2781,7 +2793,9 @@ export function createDaemonRequestHandler(deps: {
             http2: confidentialHttp2Options(confidentialConfig.http2),
             // Which requests may share a connection to the provider (per request).
             reuseScope: confidentialReuseScope(confidentialConfig.http2?.reuse, req),
+            padBucket: confidentialPadBucket(confidentialConfig),
             onNodeProtocolOutdated: noteOutdatedNode,
+            onWarning: confidentialWarningSink(),
           }
         : undefined;
 
@@ -3002,10 +3016,18 @@ export function confidentialErrorStatus(error: unknown): { status: number; code:
   const e = error as { code?: unknown } | null;
   if (!e || !(error instanceof Error) || typeof e.code !== "string") return undefined;
   if (CONFIDENTIAL_CALLER_CODES.has(e.code)) return { status: 400, code: e.code };
+  // A node refusal for the credential's balance, authorization or rate
+  // keeps the node's status, so a caller can tell it from a failed node.
+  if (e.code === "request_refused") {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && REFUSAL_STATUSES_KEPT.has(status)) return { status, code: e.code };
+  }
   if (CONFIDENTIAL_UPSTREAM_CODES.has(e.code)) return { status: 502, code: e.code };
   return undefined;
 }
 
+/** Node statuses of a `request_refused` answered as they are (the rest: 502). */
+const REFUSAL_STATUSES_KEPT = new Set([401, 402, 403, 429]);
 /** A request the confidential path cannot take. */
 const CONFIDENTIAL_CALLER_CODES = new Set([
   "unsupported_endpoint",
@@ -3055,6 +3077,26 @@ export function confidentialMaxDeposit(
 ): number | undefined {
   const v = cfg.maxConnectionDepositMsat;
   return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined;
+}
+
+/**
+ * `confidentialUpstream.padBucket` → the SDK's body-size bucket: an integer of
+ * at least 16 bytes, or `"pow2"`. Off when unset; any other value also leaves
+ * it off (the SDK would refuse every request with it).
+ */
+export function confidentialPadBucket(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
+): number | "pow2" | undefined {
+  const v = cfg.padBucket as unknown;
+  if (v === "pow2") return v;
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 16 ? v : undefined;
+}
+
+/** Where the SDK's connection warnings go: one line at warn level. */
+export function confidentialWarningSink(
+  warn: (...args: unknown[]) => void = (...args) => logger.warn(...args)
+): (message: string) => void {
+  return (message) => warn(`[confidential] ${String(message).replace(/\s*[\r\n]+\s*/g, " ").trim()}`);
 }
 
 /**
