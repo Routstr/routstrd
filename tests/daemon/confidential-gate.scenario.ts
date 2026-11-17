@@ -83,7 +83,10 @@ for (const deps of [stubDeps, { ...stubDeps, confidentialUpstream: { enabled: fa
 for (const path of ["/v1/responses", "/v1/embeddings", "/v1/completions"]) {
   const r = await post(enabled, path);
   assert(r.status === 400, `${path}: status ${r.status}`);
-  assert(r.body.includes("only POST /v1/chat/completions"), `${path}: body ${r.body}`);
+  assert(
+    r.body.includes("only POST /v1/chat/completions, /v1/images/generations and /v1/image/generate."),
+    `${path}: body ${r.body}`,
+  );
 }
 
 // Case and surrounding whitespace do not matter for the accepted value: it is

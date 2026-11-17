@@ -2678,7 +2678,7 @@ export function createDaemonRequestHandler(deps: {
       if (!isConfidentialPath(url.pathname)) {
         sendJson(res, 400, {
           error:
-            "Confidential requests support only POST /v1/chat/completions and /v1/images/generations.",
+            "Confidential requests support only POST /v1/chat/completions, /v1/images/generations and /v1/image/generate.",
         });
         return;
       }
