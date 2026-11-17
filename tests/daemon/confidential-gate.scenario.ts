@@ -102,4 +102,51 @@ for (const deps of [stubDeps, enabled]) {
   }
 }
 
+// A stream that fails before its first byte is an error, not an empty 200.
+{
+  const r = await post(
+    {
+      ...enabled,
+      routeRequests: async () =>
+        new Response(new ReadableStream({ pull(c) { c.error(new Error("reset before the first chunk")); } }), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    },
+    "/v1/chat/completions",
+  ).catch((e: unknown) => ({ status: -1, body: String(e) }));
+  assert(r.status === 502, `stream failed before its first byte: status ${r.status}, body ${JSON.stringify(r.body)}`);
+  assert(r.body.includes("upstream_unavailable"), `stream failed before its first byte: body ${r.body}`);
+}
+
+// A stream that fails after its first byte (a settlement check that failed
+// after the text) ends the client's connection without a clean end, so a
+// client never reads it as a complete answer.
+{
+  const r = await post(
+    {
+      ...enabled,
+      routeRequests: async () => {
+        let sent = false;
+        return new Response(
+          new ReadableStream({
+            async pull(c) {
+              if (!sent) {
+                sent = true;
+                c.enqueue(new TextEncoder().encode('data: {"choices":[]}\n\n'));
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              c.error(new Error("receipt check failed"));
+            },
+          }),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    },
+    "/v1/chat/completions",
+  ).catch((e: unknown) => ({ status: -1, body: String(e) }));
+  assert(r.status === -1, `stream failed after its first byte ended cleanly: status ${r.status}, body ${JSON.stringify(r.body)}`);
+}
+
 console.log("SCENARIO-OK");

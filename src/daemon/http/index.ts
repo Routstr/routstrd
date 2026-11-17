@@ -2903,14 +2903,12 @@ export function createDaemonRequestHandler(deps: {
         res.once("finish", finish);
         res.once("close", () => { nodeReadable.destroy(); finish(); });
         res.once("error", fail);
-        // `pipe` does not end the destination on a source error. A stream
-        // the SDK aborts after the body (a confidential settlement check
-        // that failed: proof, receipt, usage or cost) must end the client's
-        // connection with an error instead of leaving it open.
-        nodeReadable.once("error", (err) => {
-          res.destroy(err instanceof Error ? err : new Error(String(err)));
-          fail(err);
-        });
+        // A body error rejects; the catch below answers with an error status
+        // when nothing was written yet, and otherwise destroys the response,
+        // so a stream the SDK aborts after its first byte (a confidential
+        // settlement check that failed: proof, receipt, usage or cost) never
+        // ends cleanly.
+        nodeReadable.once("error", fail);
         nodeReadable.pipe(res);
       });
 
@@ -2930,13 +2928,6 @@ export function createDaemonRequestHandler(deps: {
       reqLogger.error(`Error: ${message}`);
       if (!handedToSdk) await finishLocal(error instanceof InsufficientBalanceError ? 402 : 500, "Local inference preparation failed.");
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
-
-      // The response head is already on the wire (a stream that failed after
-      // it started): nothing more can be written, make sure it is closed.
-      if (res.headersSent) {
-        if (!res.destroyed) res.destroy();
-        return;
-      }
 
       if (error instanceof InsufficientBalanceError) {
         const balanceError = error as {
