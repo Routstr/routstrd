@@ -102,6 +102,27 @@ for (const deps of [stubDeps, enabled]) {
   }
 }
 
+// Accepted: the request reaches routing with the confidential option set.
+// Without it the SDK would send the prompt on the plain path.
+{
+  const seen: Array<Record<string, unknown>> = [];
+  const routed = {
+    ...enabled,
+    routeRequests: async (options: Record<string, unknown>) => {
+      seen.push(options);
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    },
+  };
+  for (const path of ["/v1/chat/completions", "/v1/images/generations", "/v1/image/generate"]) {
+    const before = seen.length;
+    const r = await post(routed, path);
+    assert(r.status === 200, `${path} accepted: status ${r.status}, body ${r.body}`);
+    assert(seen.length === before + 1, `${path}: not routed`);
+    const confidential = seen.at(-1)?.confidential as { trustedHosts?: string[] } | undefined;
+    assert(confidential?.trustedHosts?.[0] === "api.venice.ai", `${path}: routed without the confidential option`);
+  }
+}
+
 // A stream that fails before its first byte is an error, not an empty 200.
 {
   const r = await post(
