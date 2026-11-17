@@ -155,10 +155,17 @@ export function getAuthBaseUrl(config: RoutstrdConfig): string {
   return getDaemonBaseUrl(config);
 }
 
+/** Extra headers apply only to the requested operation, never health probes. */
+export type DaemonRequestOptions = {
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  body?: object;
+  headers?: Record<string, string>;
+};
+
 export async function callDaemonUrl(
   baseUrl: string,
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  options: DaemonRequestOptions,
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
   const { method = "GET", body } = options;
@@ -180,7 +187,7 @@ export async function callDaemonUrl(
     );
   }
 
-  const headers = new Headers();
+  const headers = new Headers(options.headers);
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString || method === "POST") headers.set("Content-Type", "application/json");
 
@@ -232,7 +239,7 @@ export async function callDaemonUrl(
 async function callDaemonCandidates(
   candidates: string[],
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  options: DaemonRequestOptions,
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
   const isRead = (options.method ?? "GET") === "GET";
@@ -268,7 +275,7 @@ async function callDaemonCandidates(
 
 async function callLocalDaemon(
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  options: DaemonRequestOptions,
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
   return callDaemonCandidates(localDaemonBaseUrls(config), path, options, config);
@@ -277,7 +284,7 @@ async function callLocalDaemon(
 async function callRemoteDaemon(
   baseUrl: string,
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  options: DaemonRequestOptions,
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
   return callDaemonCandidates(baseUrlCandidates(baseUrl), path, options, config);
@@ -285,7 +292,7 @@ async function callRemoteDaemon(
 
 export async function callDaemon(
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+  options: DaemonRequestOptions = {},
 ): Promise<CommandResponse> {
   const config = await loadConfig();
   if (config.daemonUrl) {
@@ -298,7 +305,7 @@ export async function callDaemon(
  *  Falls back to the daemon URL if no authUrl is configured. */
 export async function callAuth(
   path: string,
-  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object } = {},
+  options: DaemonRequestOptions = {},
 ): Promise<CommandResponse> {
   const config = await loadConfig();
   if (!config.authUrl && !config.daemonUrl) {
