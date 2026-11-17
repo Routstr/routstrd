@@ -136,6 +136,7 @@ not change either way.
 |---|---|---|
 | `http` | `auto` | `auto`: the first framing the node's signed offer lists (the operator's preference); when a framing-`"2"` connection fails before the request's body was sent (handshake, ALPN, the provider closing, the node's `h2_withdrawn`), the request is served on `"1.1"` on the same node and `"2"` is not tried there for 10 minutes (`framing "2" marked bad` in the log). `"2"` or `"1.1"`: only that framing; a node that does not offer it is not used |
 | `maxConnectionDepositMsat` | 100000 | the largest connection deposit accepted (below). A node asking for more is not used |
+| `padBucket` | off | pad each request body with JSON whitespace to the next multiple of this many bytes (an integer of at least 16), or to the next power of two with `"pow2"`. It hides the exact body size from anyone watching the connections, and from the provider, at the cost of upload bytes; the node still learns the prompt's token count. Any other value leaves padding off |
 | `http2.reuse` | `per-client` | which requests may share a framing-`"2"` connection. `per-client`: the requests of one local client, i.e. one API key in the `Authorization` (or `x-api-key`) header, or without one the caller's address; `shared`: every request of the daemon to that node; `none`: a connection per request |
 | `http2.maxConnections` | 4 | open connections per node, credential and client: overlapping requests are served on separate connections without waiting up to this many |
 | `http2.maxTotal` | 8 | open connections in total |
@@ -153,7 +154,9 @@ shared daemon) apart. Narrower choices:
 - a request header `x-routstr-reuse-scope: <any string up to 256 bytes>`
   (one per conversation, say) puts the request in its own partition within
   its client's (under `shared`: within the daemon's) connections; it can only
-  narrow, never widen, what is shared;
+  narrow, never widen, what is shared. Send it once: a repeated header, an
+  empty value or one over 256 bytes is refused with 400 before anything is
+  routed, never run in the wider scope;
 - `http2.reuse: "none"` gives every request its own connection;
 - `http: "1.1"` (framing "1.1", one request per connection) turns HTTP/2 off
   for confidential requests altogether.
@@ -171,7 +174,20 @@ connection, with its first request.
 **Refused requests.** When the node refuses a request (402 for the balance,
 a model it does not serve, an expired offer), the caller gets the node's
 error and the connection stays open: nothing was held for the request, and
-the next one runs on the same connection.
+the next one runs on the same connection. A refusal the SDK cannot answer
+with the node's response reaches the caller as an error with
+`error_type: "request_refused"`: with the node's status when it is 401, 402,
+403 or 429, otherwise 502.
+
+**A stream the provider refused** (framing `"2"`: the provider resets it as
+unprocessed, or closes the connection below it) is proven to the node and
+settled like a 429: at most the session fee if still due, nothing for the
+request, which then runs again on a new connection.
+
+**Warnings.** When a node does something its signed offer does not allow (a
+deposit outcome that disagrees with it, say), the SDK's warning goes to the
+daemon's log as one `[confidential] …` line at warn level, without content or
+credentials.
 
 Responses carry `x-routstr-confidential-http` (the framing) and
 `x-routstr-confidential-connection` (`new`, `armed` or `reused`, and the
