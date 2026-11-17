@@ -135,7 +135,7 @@ not change either way.
 | Key | Default | Meaning |
 |---|---|---|
 | `http` | `auto` | `auto`: the first framing the node's signed offer lists (the operator's preference); when a framing-`"2"` connection fails before the request's body was sent (handshake, ALPN, the provider closing, the node's `h2_withdrawn`), the request is served on `"1.1"` on the same node and `"2"` is not tried there for 10 minutes (`framing "2" marked bad` in the log). `"2"` or `"1.1"`: only that framing; a node that does not offer it is not used |
-| `maxConnectionDepositMsat` | 100000 | the largest connection deposit accepted (below). A node asking for more is not used (`http2.maxConnectionDepositMsat`, its earlier place, is still read) |
+| `maxConnectionDepositMsat` | 100000 | the largest connection deposit accepted (below). A node asking for more is not used |
 | `http2.reuse` | `per-client` | which requests may share a framing-`"2"` connection. `per-client`: the requests of one local client, i.e. one API key in the `Authorization` (or `x-api-key`) header, or without one the caller's address; `shared`: every request of the daemon to that node; `none`: a connection per request |
 | `http2.maxConnections` | 4 | open connections per node, credential and client: overlapping requests are served on separate connections without waiting up to this many |
 | `http2.maxTotal` | 8 | open connections in total |

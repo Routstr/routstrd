@@ -3049,14 +3049,12 @@ export function confidentialFraming(value: unknown): "auto" | "2" | "1.1" {
   return value === "2" || value === "1.1" ? value : "auto";
 }
 
-/** The largest connection deposit accepted (msat), from either place of the setting; 0 is a value. */
+/** The largest connection deposit accepted (msat); 0 is a value. */
 export function confidentialMaxDeposit(
   cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
 ): number | undefined {
-  const ok = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
-  if (ok(cfg.maxConnectionDepositMsat)) return cfg.maxConnectionDepositMsat;
-  if (ok(cfg.http2?.maxConnectionDepositMsat)) return cfg.http2!.maxConnectionDepositMsat;
-  return undefined;
+  const v = cfg.maxConnectionDepositMsat;
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined;
 }
 
 /**

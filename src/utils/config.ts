@@ -156,8 +156,6 @@ export interface RoutstrdConfig {
        * idle timeout, which its signed offer names). Never longer than that.
        */
       maxIdleSeconds?: number;
-      /** Earlier place of `maxConnectionDepositMsat` (above); still read. */
-      maxConnectionDepositMsat?: number;
       /** Close a connection after this many requests (default: the node's limit, 100). */
       maxRequestsPerConnection?: number;
     };

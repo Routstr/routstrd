@@ -61,11 +61,11 @@ describe("confidentialUpstream.http2 → SDK http2 options", () => {
 });
 
 describe("the connection deposit maximum", () => {
-  test("is read from either place; 0 is a value; anything else leaves the SDK's default", () => {
+  test("is read from the top level only; 0 is a value; anything else leaves the SDK's default", () => {
     expect(confidentialMaxDeposit({})).toBeUndefined();
     expect(confidentialMaxDeposit({ maxConnectionDepositMsat: 5000 })).toBe(5000);
-    expect(confidentialMaxDeposit({ http2: { maxConnectionDepositMsat: 4000 } })).toBe(4000);
-    expect(confidentialMaxDeposit({ maxConnectionDepositMsat: 5000, http2: { maxConnectionDepositMsat: 4000 } })).toBe(5000);
+    // The unreleased http2 place of the setting is not read.
+    expect(confidentialMaxDeposit({ http2: { maxConnectionDepositMsat: 4000 } } as never)).toBeUndefined();
     // 0 accepts no deposit: only nodes that take none are used.
     expect(confidentialMaxDeposit({ maxConnectionDepositMsat: 0 })).toBe(0);
     for (const bad of [-1, 1.5, "5000", null]) {
