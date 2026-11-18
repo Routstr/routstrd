@@ -1,5 +1,5 @@
 export function parseArgs(argv: string[]): {
-  port: number;
+  port: number | null;
   host: string | null;
   provider: string | null;
 } {
@@ -9,10 +9,9 @@ export function parseArgs(argv: string[]): {
     (arg) => arg === "--provider" || arg === "-p",
   );
 
-  const port =
-    portFlagIndex !== -1
-      ? Number.parseInt(argv[portFlagIndex + 1] || "8008", 10)
-      : 8008;
+  const portValue = portFlagIndex !== -1 ? argv[portFlagIndex + 1] : undefined;
+  const parsedPort = portValue ? Number.parseInt(portValue, 10) : Number.NaN;
+  const port = Number.isInteger(parsedPort) ? parsedPort : null;
 
   const hostValue =
     hostFlagIndex !== -1 ? argv[hostFlagIndex + 1] : undefined;

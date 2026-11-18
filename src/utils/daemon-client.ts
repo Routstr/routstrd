@@ -49,6 +49,48 @@ function localDaemonBaseUrls(config: RoutstrdConfig): string[] {
   );
 }
 
+/**
+ * Normalize a user-supplied daemon/auth URL.
+ *
+ * `new URL("localhost:8008")` does not throw -- it parses `localhost:` as the
+ * scheme -- so a scheme-less value silently becomes an unusable base URL.
+ * Add `http://` when no scheme is present and strip trailing slashes.
+ */
+export function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  return trimmed;
+}
+
+/**
+ * Candidate base URLs for a configured remote endpoint.
+ *
+ * When the host is `localhost`, prefer the other loopback family as well:
+ * some environments (notably rootless podman) accept a connection on one
+ * family and immediately reset it, so a single `localhost` URL can fail even
+ * though the server is reachable on `127.0.0.1` or `[::1]`.
+ */
+export function baseUrlCandidates(baseUrl: string): string[] {
+  const normalized = normalizeBaseUrl(baseUrl);
+  let url: URL;
+  try {
+    url = new URL(normalized);
+  } catch {
+    return [normalized];
+  }
+  if (url.hostname !== "localhost") return [normalized];
+
+  const candidates: string[] = [];
+  for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+    const candidate = new URL(normalized);
+    candidate.hostname = host;
+    candidates.push(candidate.toString().replace(/\/+$/, ""));
+  }
+  return [...new Set(candidates)];
+}
+
 class DaemonConnectionError extends Error {
   constructor(cause: unknown) {
     super("Failed to connect to daemon", { cause });
@@ -56,21 +98,64 @@ class DaemonConnectionError extends Error {
   }
 }
 
+/**
+ * A reached daemon answered with a non-2xx status.
+ *
+ * The HTTP status is carried separately so callers can branch on it (e.g. "this
+ * build has no such route yet") instead of matching the human-readable message,
+ * which mirrors the body's `error` field and is free to change.
+ */
+export class DaemonHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DaemonHttpError";
+  }
+}
+
+/**
+ * Upper bound for a single daemon request, including response-body
+ * consumption. The daemon bounds its own NWC operations, so this only guards
+ * against a wedged server; without it a hung request would block the CLI
+ * forever.
+ */
+export const DAEMON_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * Upper bound for value-moving wallet routes. A cashu melt/swap can
+ * legitimately run longer than {@link DAEMON_REQUEST_TIMEOUT_MS} (the mint has
+ * no request timeout in routstrd), so these get a more generous bound that
+ * still prevents an indefinite CLI hang.
+ */
+export const DAEMON_LONG_REQUEST_TIMEOUT_MS = 600_000;
+
+/** Routes that may legitimately outlive the default request timeout. */
+const LONG_RUNNING_ROUTES = ["/wallet/send/", "/wallet/receive/", "/wallet/sweep-offline", "/wallet/cleanup"];
+
+function requestTimeoutMs(path: string): number {
+  const pathname = path.split("?")[0] ?? path;
+  return LONG_RUNNING_ROUTES.some((route) => pathname.startsWith(route))
+    ? DAEMON_LONG_REQUEST_TIMEOUT_MS
+    : DAEMON_REQUEST_TIMEOUT_MS;
+}
+
 export function getDaemonBaseUrl(config: RoutstrdConfig): string {
   if (config.daemonUrl) {
-    return config.daemonUrl.replace(/\/$/, "");
+    return normalizeBaseUrl(config.daemonUrl);
   }
   return `http://${urlHost(config.host)}:${config.port}`;
 }
 
 export function getAuthBaseUrl(config: RoutstrdConfig): string {
   if (config.authUrl) {
-    return config.authUrl.replace(/\/$/, "");
+    return normalizeBaseUrl(config.authUrl);
   }
   return getDaemonBaseUrl(config);
 }
 
-async function _callUrl(
+export async function callDaemonUrl(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
@@ -97,7 +182,18 @@ async function _callUrl(
 
   const headers = new Headers();
   if (authorization) headers.set("Authorization", authorization);
-  if (bodyString) headers.set("Content-Type", "application/json");
+  if (bodyString || method === "POST") headers.set("Content-Type", "application/json");
+
+  const timeoutMs = requestTimeoutMs(path);
+  const timeoutError = () =>
+    new Error(
+      `Daemon request timed out after ${timeoutMs / 1000}s; ` +
+        "any payment outcome is unknown — check before retrying",
+    );
+  // The signal stays armed while the body is read, so a daemon that sends
+  // headers and then stalls the body cannot hang the CLI either. Aborting
+  // here never cancels the daemon's operation — see timeoutError's warning.
+  const signal = AbortSignal.timeout(timeoutMs);
 
   let response: Response;
   try {
@@ -105,17 +201,69 @@ async function _callUrl(
       method,
       headers,
       body: bodyString,
+      signal,
     });
   } catch (error) {
+    if (signal.aborted) throw timeoutError();
+    // Only connection failures qualify for alternate-host retries.
     throw new DaemonConnectionError(error);
   }
 
-  if (!response.ok) {
-    const errorData = (await response.json()) as { error?: string };
-    throw new Error(errorData.error || `HTTP ${response.status}`);
+  try {
+    if (!response.ok) {
+      // A non-JSON error body (an HTML page from a proxy, an empty 405) must not
+      // surface as a JSON parse failure; fall back to the status text.
+      const errorData = (await response
+        .json()
+        .catch(() => ({}))) as { error?: string };
+      throw new DaemonHttpError(
+        response.status,
+        errorData.error || `HTTP ${response.status}`,
+      );
+    }
+    return (await response.json()) as CommandResponse;
+  } catch (error) {
+    if (signal.aborted) throw timeoutError();
+    throw error;
   }
+}
 
-  return response.json() as Promise<CommandResponse>;
+/** Resolve loopback addresses with safe reads, never by replaying a write. */
+async function callDaemonCandidates(
+  candidates: string[],
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
+): Promise<CommandResponse> {
+  const isRead = (options.method ?? "GET") === "GET";
+  let connectionError: DaemonConnectionError | undefined;
+  for (const baseUrl of candidates) {
+    if (!isRead && candidates.length > 1) {
+      try {
+        // Select an address before dispatching a potentially money-moving
+        // request. An HTTP error is authoritative, not a reason to fall back.
+        await callDaemonUrl(baseUrl, "/health", { method: "GET" }, config);
+      } catch (error) {
+        if (!(error instanceof DaemonConnectionError)) throw error;
+        connectionError = error;
+        continue;
+      }
+    }
+    try {
+      return await callDaemonUrl(baseUrl, path, options, config);
+    } catch (error) {
+      if (!(error instanceof DaemonConnectionError)) throw error;
+      if (!isRead) {
+        // fetch can reject after the server has committed the operation.
+        throw new Error(
+          "Connection lost; operation outcome is unknown — check its status before retrying",
+          { cause: error },
+        );
+      }
+      connectionError = error;
+    }
+  }
+  throw connectionError ?? new Error("No daemon host candidates available");
 }
 
 async function callLocalDaemon(
@@ -123,17 +271,16 @@ async function callLocalDaemon(
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
   config: RoutstrdConfig,
 ): Promise<CommandResponse> {
-  // Retry only connection failures; HTTP errors prove that a server answered.
-  let connectionError: DaemonConnectionError | undefined;
-  for (const baseUrl of localDaemonBaseUrls(config)) {
-    try {
-      return await _callUrl(baseUrl, path, options, config);
-    } catch (error) {
-      if (!(error instanceof DaemonConnectionError)) throw error;
-      connectionError = error;
-    }
-  }
-  throw connectionError ?? new Error("No daemon host candidates available");
+  return callDaemonCandidates(localDaemonBaseUrls(config), path, options, config);
+}
+
+async function callRemoteDaemon(
+  baseUrl: string,
+  path: string,
+  options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
+  config: RoutstrdConfig,
+): Promise<CommandResponse> {
+  return callDaemonCandidates(baseUrlCandidates(baseUrl), path, options, config);
 }
 
 export async function callDaemon(
@@ -142,7 +289,7 @@ export async function callDaemon(
 ): Promise<CommandResponse> {
   const config = await loadConfig();
   if (config.daemonUrl) {
-    return _callUrl(getDaemonBaseUrl(config), path, options, config);
+    return callRemoteDaemon(getDaemonBaseUrl(config), path, options, config);
   }
   return callLocalDaemon(path, options, config);
 }
@@ -157,7 +304,7 @@ export async function callAuth(
   if (!config.authUrl && !config.daemonUrl) {
     return callLocalDaemon(path, options, config);
   }
-  return _callUrl(getAuthBaseUrl(config), path, options, config);
+  return callRemoteDaemon(getAuthBaseUrl(config), path, options, config);
 }
 
 export async function isDaemonRunning(): Promise<boolean> {
@@ -165,21 +312,23 @@ export async function isDaemonRunning(): Promise<boolean> {
     const config = await loadConfig();
 
     if (config.daemonUrl) {
-      const baseUrl = config.daemonUrl.replace(/\/$/, "");
-      const url = `${baseUrl}/health`;
-      let authorization: string | undefined;
-      if (config.nsec) {
-        const secretKey = parseSecretKey(config.nsec);
-        authorization = await createNIP98Authorization(secretKey, url, "GET");
+      for (const baseUrl of baseUrlCandidates(config.daemonUrl)) {
+        const url = `${baseUrl}/health`;
+        let authorization: string | undefined;
+        if (config.nsec) {
+          const secretKey = parseSecretKey(config.nsec);
+          authorization = await createNIP98Authorization(secretKey, url, "GET");
+        }
+        try {
+          const response = await fetch(url, {
+            headers: authorization ? { Authorization: authorization } : {},
+          });
+          return response.ok;
+        } catch {
+          // Try the next candidate host.
+        }
       }
-      try {
-        const response = await fetch(url, {
-          headers: authorization ? { Authorization: authorization } : {},
-        });
-        return response.ok;
-      } catch {
-        return false;
-      }
+      return false;
     }
 
     // A wildcard bind may be listening on either loopback family.
@@ -190,7 +339,7 @@ export async function isDaemonRunning(): Promise<boolean> {
         const response = await fetch(`${baseUrl}/health`, {
           signal: controller.signal,
         });
-        if (response.ok) return true;
+        return response.ok;
       } catch {
         // Try the next candidate host.
       } finally {
@@ -211,12 +360,6 @@ export function getUserNpub(config: RoutstrdConfig): string | null {
   } catch {
     return null;
   }
-}
-
-export function getNpubSuffix(config: RoutstrdConfig): string | null {
-  const npub = getUserNpub(config);
-  if (!npub) return null;
-  return npub.slice(-7);
 }
 
 export async function startDaemonProcess(): Promise<void> {

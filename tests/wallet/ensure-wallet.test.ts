@@ -5,6 +5,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 import { validateMnemonic } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { WalletMigrationConflictError } from "../../src/daemon/wallet/diagnostics";
 import { ensureLocalWallet } from "../../src/daemon/wallet/ensure-wallet";
 import { readWalletMnemonic } from "../../src/daemon/wallet/wallet-config";
 import { nsecFromMnemonic } from "../../src/utils/nip98";
@@ -111,7 +112,7 @@ describe("ensureLocalWallet", () => {
     writeLegacyWallet(LEGACY_MNEMONIC);
 
     await expect(ensureLocalWallet(silent)).rejects.toThrow(
-      /Refusing to choose/,
+      WalletMigrationConflictError,
     );
 
     // The pre-existing canonical wallet is left untouched.

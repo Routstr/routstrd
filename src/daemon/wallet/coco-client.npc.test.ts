@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { Manager, MintApi, SendOpsApi } from "@cashu/coco-core";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -12,6 +13,10 @@ const npcState = {
     | { success: false; pr: { amount: number; mints: string[] } },
   setUsernameCalls: [] as Array<{ username: string; attemptPayment?: boolean }>,
   syncCalls: 0,
+  pluginOptions: [] as Array<{
+    useWebsocket?: boolean;
+    syncIntervalMs?: number;
+  }>,
 };
 
 class MockNPCPlugin {
@@ -28,6 +33,17 @@ class MockNPCPlugin {
     },
   };
 
+  constructor(
+    _baseUrl: string,
+    _signer: unknown,
+    options?: { useWebsocket?: boolean; syncIntervalMs?: number },
+  ) {
+    npcState.pluginOptions.push({
+      useWebsocket: options?.useWebsocket,
+      syncIntervalMs: options?.syncIntervalMs,
+    });
+  }
+
   onInit(ctx: { registerExtension: (key: string, api: unknown) => void }) {
     ctx.registerExtension("npc", this.api);
     return () => {};
@@ -39,7 +55,6 @@ mock.module("coco-cashu-plugin-npc", () => ({
 }));
 
 const { createCocoClient } = await import("./coco-client");
-const { createCocodClient, CocodHttpError } = await import("./cocod-client");
 
 const TEST_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -71,9 +86,36 @@ function resetNpcState(): void {
   npcState.usernameResult = { success: true };
   npcState.setUsernameCalls = [];
   npcState.syncCalls = 0;
+  npcState.pluginOptions = [];
 }
 
+// The daemon fires a catch-up sync in the background once wallet recovery
+// completes, so tests that assert on sync() calls must first wait for it.
+async function waitForNpcSyncs(count: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (npcState.syncCalls < count) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `timed out waiting for ${count} NPC sync calls (saw ${npcState.syncCalls})`,
+      );
+    }
+    await Bun.sleep(5);
+  }
+}
+
+// NPC integration does not exercise mint discovery. Stub only that API so
+// constructing an empty wallet never depends on public mint availability.
+let mintDiscovery: ReturnType<typeof spyOn<typeof MintApi.prototype, "addMint">>;
+beforeEach(() => {
+  mintDiscovery = spyOn(MintApi.prototype, "addMint").mockImplementation(async (mintUrl) => ({
+    mint: { mintUrl, name: "Test mint", trusted: true, createdAt: 0, updatedAt: 0,
+      mintInfo: {} as Awaited<ReturnType<MintApi["getMintInfo"]>> },
+    keysets: [],
+  }));
+});
+
 afterEach(() => {
+  mintDiscovery.mockRestore();
   resetNpcState();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -81,9 +123,104 @@ afterEach(() => {
 });
 
 describe("in-process coco client NPC integration", () => {
-  it("registers the plugin and exposes the wallet's NPC lightning address", async () => {
+  it("stops subscriptions before disposing plugins on actual client shutdown", async () => {
+    const events: string[] = [];
+    const pause = Manager.prototype.pauseSubscriptions;
+    const dispose = Manager.prototype.dispose;
+    const paused = spyOn(Manager.prototype, "pauseSubscriptions").mockImplementation(async function (this: Manager) {
+      await pause.call(this); events.push("paused");
+    });
+    const disposed = spyOn(Manager.prototype, "dispose").mockImplementation(async function (this: Manager) {
+      events.push("plugins"); await dispose.call(this);
+    });
+    try {
+      const client = await createCocoClient(testClientOptions());
+      await client.dispose?.();
+      expect(events).toEqual(["paused", "plugins"]);
+    } finally {
+      paused.mockRestore(); disposed.mockRestore();
+    }
+  });
+
+  it("stops the actual watcher when initialization fails after enabling it", async () => {
+    let watcher: { isRunning(): boolean } | undefined;
+    const fail = spyOn(Manager.prototype, "enableMintOperationProcessor").mockImplementationOnce(async function (this: Manager) {
+      watcher = (this as unknown as { proofStateWatcher: typeof watcher }).proofStateWatcher;
+      throw new Error("processor initialization failed");
+    });
+    try {
+      await expect(createCocoClient(testClientOptions())).rejects.toThrow("processor initialization failed");
+      expect(watcher?.isRunning()).toBe(false);
+    } finally { fail.mockRestore(); }
+  });
+
+  for (const startupFailure of [false, true]) {
+    it(`closes sockets reopened by watcher unsubscribe on ${startupFailure ? "startup failure" : "shutdown"}`, async () => {
+      const sockets: ControlledSocket[] = [];
+      class ControlledSocket extends EventTarget {
+        readyState = 0;
+        constructor(_url: string | URL) {
+          super(); sockets.push(this);
+          queueMicrotask(() => {
+            if (this.readyState !== 0) return;
+            this.readyState = 1;
+            this.dispatchEvent(new Event("open"));
+          });
+        }
+        send(_payload: string) {}
+        close() {
+          if (this.readyState === 3) return;
+          this.readyState = 3;
+          this.dispatchEvent(new Event("close"));
+        }
+      }
+      const originalWebSocket = globalThis.WebSocket;
+      globalThis.WebSocket = ControlledSocket as unknown as typeof WebSocket;
+      const enable = Manager.prototype.enableMintOperationProcessor;
+      const initialize = spyOn(Manager.prototype, "enableMintOperationProcessor").mockImplementationOnce(async function (this: Manager) {
+        const internals = this as unknown as {
+          mintService: { isTrustedMint(mint: string): Promise<boolean> };
+          proofStateWatcher: { watchProof(mint: string, secrets: string[]): Promise<void> };
+        };
+        const isTrusted = internals.mintService.isTrustedMint;
+        internals.mintService.isTrustedMint = async () => true;
+        try {
+          // Keep the real SubscriptionManager/HybridTransport/WsConnectionManager:
+          // replacing subscribe() would hide unsubscribe reopening the socket.
+          await internals.proofStateWatcher.watchProof("https://mint.example", ["socket-proof"]);
+        } finally { internals.mintService.isTrustedMint = isTrusted; }
+        if (startupFailure) throw new Error("processor initialization failed with live socket");
+        return enable.call(this);
+      });
+      let client: Awaited<ReturnType<typeof createCocoClient>> | undefined;
+      try {
+        if (startupFailure) {
+          await expect(createCocoClient(testClientOptions())).rejects.toThrow("processor initialization failed with live socket");
+        } else {
+          client = await createCocoClient(testClientOptions());
+          await client.dispose?.();
+        }
+        await Bun.sleep(0);
+        // pause closes the original socket; unsubscribe then creates another.
+        expect(sockets.length).toBeGreaterThanOrEqual(2);
+        expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+        await Bun.sleep(0);
+        expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+      } finally {
+        await client?.dispose?.();
+        for (const socket of sockets) socket.close();
+        initialize.mockRestore();
+        globalThis.WebSocket = originalWebSocket;
+      }
+    });
+  }
+
+  it("registers the plugin with the interval fallback and exposes the NPC address", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
+      expect(npcState.pluginOptions).toEqual([
+        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
+      ]);
       const info = await client.getNpcAddress();
       expect(info).toEqual({
         address: "alice@npubx.cash",
@@ -142,11 +279,44 @@ describe("in-process coco client NPC integration", () => {
     }
   });
 
+  it("does not fire the catch-up sync when disposal starts during recovery", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const original = SendOpsApi.prototype.listInFlight;
+    const recovery = spyOn(SendOpsApi.prototype, "listInFlight").mockImplementationOnce(async function (this: SendOpsApi) {
+      entered();
+      await held;
+      return original.call(this);
+    });
+    let client: Awaited<ReturnType<typeof createCocoClient>> | undefined;
+    try {
+      client = await createCocoClient(testClientOptions());
+      await started;
+      expect(npcState.syncCalls).toBe(0);
+      // dispose quiesces synchronously, but must wait for held recovery.
+      const disposal = client.dispose!();
+      release();
+      await disposal;
+      expect(npcState.syncCalls).toBe(0);
+    } finally {
+      release();
+      recovery.mockRestore();
+      await client?.dispose?.();
+    }
+  });
+
   it("triggers a manual quote sync", async () => {
     const client = await createCocoClient(testClientOptions());
     try {
-      await client.syncNpc();
+      // Recovery fires exactly one automatic catch-up, so this test only
+      // measures the explicit syncNpc() call on top of it.
+      await waitForNpcSyncs(1);
       expect(npcState.syncCalls).toBe(1);
+      const baseline = npcState.syncCalls;
+      await client.syncNpc();
+      expect(npcState.syncCalls).toBe(baseline + 1);
     } finally {
       await client.dispose?.();
     }
@@ -164,89 +334,11 @@ describe("in-process coco client NPC integration", () => {
       await expect(client.syncNpc()).rejects.toThrow(
         "NPC plugin is not enabled",
       );
+      // No plugin means no interval fallback and no automatic catch-up sync.
+      expect(npcState.pluginOptions).toEqual([]);
+      expect(npcState.syncCalls).toBe(0);
     } finally {
       await client.dispose?.();
     }
-  });
-});
-
-describe("legacy cocod client NPC passthroughs", () => {
-  type FetchImpl = (
-    input: string | URL | Request,
-    init?: RequestInit & { unix: string },
-  ) => Promise<Response>;
-
-  function legacyClient(handler: (path: string, body?: unknown) => Response) {
-    const requests: Array<{ path: string; body?: unknown }> = [];
-    const fetchImpl: FetchImpl = async (input, init) => {
-      const path = String(input).replace("http://localhost", "");
-      const body =
-        typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-      if (path !== "/ping") requests.push({ path, body });
-      if (path === "/ping") {
-        return new Response(JSON.stringify({ output: "pong" }));
-      }
-      return handler(path, body);
-    };
-    const client = createCocodClient({
-      socketPath: "/tmp/routstrd-test-legacy-npc/cocod.sock",
-      fetchImpl,
-    });
-    return { client, requests };
-  }
-
-  it("fetches and parses a username NPC address", async () => {
-    const { client, requests } = legacyClient(
-      () => new Response(JSON.stringify({ output: "alice@npubx.cash" })),
-    );
-    const info = await client.getNpcAddress();
-    expect(info).toEqual({ address: "alice@npubx.cash", name: "alice" });
-    expect(requests[0]?.path).toBe("/npc/address");
-  });
-
-  it("omits the name for npub fallback addresses", async () => {
-    const { client } = legacyClient(
-      () =>
-        new Response(JSON.stringify({ output: "npub1abc123@npubx.cash" })),
-    );
-    const info = await client.getNpcAddress();
-    expect(info).toEqual({ address: "npub1abc123@npubx.cash" });
-  });
-
-  it("posts username claims with the confirm flag", async () => {
-    const { client, requests } = legacyClient(
-      () => new Response(JSON.stringify({ output: { success: true } })),
-    );
-    const result = await client.setNpcUsername("bob", true);
-    expect(result).toEqual({ success: true });
-    expect(requests[0]).toEqual({
-      path: "/npc/username",
-      body: { username: "bob", confirm: true },
-    });
-  });
-
-  it("preserves the 402 payment-required error from cocod", async () => {
-    const { client } = legacyClient(
-      () =>
-        new Response(
-          JSON.stringify({ error: "Payment required to set username" }),
-          { status: 402 },
-        ),
-    );
-    try {
-      await client.setNpcUsername("bob");
-      expect.unreachable("should have thrown");
-    } catch (error) {
-      expect(error).toBeInstanceOf(CocodHttpError);
-      expect((error as InstanceType<typeof CocodHttpError>).status).toBe(402);
-      expect((error as Error).message).toContain("Payment required");
-    }
-  });
-
-  it("reports manual sync as unsupported", async () => {
-    const { client } = legacyClient(
-      () => new Response(JSON.stringify({ output: {} })),
-    );
-    await expect(client.syncNpc()).rejects.toThrow("not supported");
   });
 });

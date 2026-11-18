@@ -1,25 +1,44 @@
+import { CORS_ROUTES, corsHeadersFor } from "./cors";
+import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
 import {
   routeRequests,
+  beginRequestLifecycle,
+  shouldTrackRequestLifecycle,
   InsufficientBalanceError,
   ProviderManager,
 } from "@routstr/sdk";
-import type { UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RequestLifecycleDriver, UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
-import { loadDaemonConfig, saveDaemonConfig } from "../config-store";
+import { VERSION } from "../../version";
+import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
+import { loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "../config-store";
 import {
-  CocodHttpError,
-  type CocodClient,
-  type CocodState,
-} from "../wallet/cocod-client";
+  WalletHttpError,
+  type WalletClient,
+  type WalletRuntimeState,
+  type WalletRecoveryProgress,
+} from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
+import { recoverParkedTokens } from "../wallet/parked-tokens";
 import { getClientsFromStore } from "../../utils/clients";
-import { getUsageSummary } from "./usage-summary";
+import { getUsageSummary, parseTimeWindow } from "./usage-summary";
+import { applyDefaultOutputTokenLimit } from "./request-body";
+import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
+import {
+  buildCooldownsOutput,
+  type StoredCooldownEntry,
+  type StoredFailureStreak,
+} from "../../utils/cooldowns";
+import {
+  assessProviderReachability,
+  orderProvidersForDisplay,
+} from "../../utils/provider-reachability";
 
 // Hop-by-hop headers describe the *upstream* connection, not this one, and must
 // never be copied onto our response. In particular, copying the upstream's
@@ -30,6 +49,8 @@ import { getUsageSummary } from "./usage-summary";
 // bodies and Transfer-Encoding: chunked for streams itself.
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
+  "content-encoding",
+  "content-length",
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
@@ -43,8 +64,8 @@ type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
   daemon: "running";
-  wallet: "connected" | "error";
-  walletState: CocodState;
+  wallet: "connected" | "recovering" | "error";
+  walletState: WalletRuntimeState;
   balances?: Record<string, number>;
   mode: ClientMode;
   error?: string;
@@ -55,18 +76,31 @@ type DaemonDeps = {
   server: { close(cb?: () => void): void };
   shutdown?: () => void;
   store: any;
-  walletClient: CocodClient;
+  walletClient: WalletClient;
   walletAdapter: any;
   storageAdapter: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
-  getModelProviders: (modelId: string) => Promise<any>;
+  getModelProviders: (
+    modelId: string,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
+  /** Advertised model paths for one model, ranked like the router. */
+  getModelPaths: (
+    modelId: string,
+    refresh?: boolean,
+    includeDisabled?: boolean,
+    autoModelPath?: boolean,
+    candidatesOnly?: boolean,
+  ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: ClientMode;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
@@ -81,16 +115,8 @@ function getClientIdFromRequest(
   store: { getState(): any },
 ): string | undefined {
   const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return undefined;
-  }
-
-  const apiKey = authHeader.slice(7); // Remove "Bearer " prefix
-
-  if (!apiKey.startsWith("sk-")) {
-    return undefined;
-  }
+  const apiKey = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1] ?? req.headers["x-api-key"];
+  if (typeof apiKey !== "string") return undefined;
 
   const clients = getClientsFromStore(store);
   const matchingClient = clients.find((c) => c.apiKey === apiKey);
@@ -105,11 +131,21 @@ function generateApiKey(): string {
 async function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (chunk) => {
-      data += chunk.toString();
-    });
-    req.on("end", () => resolve(data));
-    req.on("error", reject);
+    const cleanup = () => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("error", onError);
+      req.removeListener("aborted", onAborted);
+    };
+    const onData = (chunk: Buffer | string) => { data += chunk.toString(); };
+    const onEnd = () => { cleanup(); resolve(data); };
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onAborted = () => onError(new Error("Request aborted."));
+    if (req.aborted) { onAborted(); return; }
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("error", onError);
+    req.once("aborted", onAborted);
   });
 }
 
@@ -124,7 +160,7 @@ async function readJsonBody(
   try {
     return JSON.parse(bodyText) as Record<string, unknown>;
   } catch {
-    throw new CocodHttpError(400, "Invalid JSON body.");
+    throw new WalletHttpError(400, "Invalid JSON body.");
   }
 }
 
@@ -134,6 +170,23 @@ function parseLimit(value: string | null, fallback = 10): number {
     ? Math.min(requested, 100000) // Cap at 100k entries
     : fallback;
 }
+
+/** Normalize a provider URL for matching (add https:// and a trailing slash). */
+function normalizeProviderBaseUrl(url: string): string {
+  if (!url.startsWith("http")) {
+    url = `https://${url}`;
+  }
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+/** Read a tag value by name from a Nostr event's tag array. */
+function tagValue(tags: string[][], name: string): string | null {
+  for (const tag of tags) {
+    if (tag[0] === name && typeof tag[1] === "string" && tag[1]) return tag[1];
+  }
+  return null;
+}
+
 
 function sendJson(
   res: ServerResponse,
@@ -148,12 +201,14 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function getWalletStateMessage(state: CocodState): string {
+function getWalletStateMessage(state: WalletRuntimeState): string {
   switch (state) {
     case "LOCKED":
       return "Wallet is locked. Unlock it before performing wallet operations.";
     case "UNINITIALIZED":
       return "Wallet is not initialized. Run 'routstrd onboard' first.";
+    case "RECOVERING":
+      return "Wallet is recovering from a previous run. Balance and send/receive operations will be available once recovery completes.";
     case "ERROR":
       return "Wallet is in an error state.";
     default:
@@ -166,7 +221,7 @@ function respondWithError(
   error: unknown,
   fallbackStatus = 500,
 ): void {
-  if (error instanceof CocodHttpError) {
+  if (error instanceof WalletHttpError) {
     sendJson(res, error.status, { error: error.message });
     return;
   }
@@ -199,7 +254,7 @@ function getRequiredStringField(
 ): string {
   const value = requireStringField(body, field);
   if (!value) {
-    throw new CocodHttpError(400, `Missing required '${field}' field.`);
+    throw new WalletHttpError(400, `Missing required '${field}' field.`);
   }
   return value;
 }
@@ -218,7 +273,7 @@ function getRequiredPositiveNumberField(
       return parsed;
     }
   }
-  throw new CocodHttpError(400, `Missing required '${field}' field.`);
+  throw new WalletHttpError(400, `Missing required '${field}' field.`);
 }
 
 function optionalStringField(
@@ -229,9 +284,129 @@ function optionalStringField(
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function optionalStringArrayField(
+  body: Record<string, unknown>,
+  field: string,
+): string[] | undefined {
+  const value = body[field];
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== "string" || !item.trim())
+  ) {
+    throw new WalletHttpError(400, `'${field}' must be an array of non-empty strings.`);
+  }
+  return value.map((item: string) => item.trim());
+}
+
 function getCurrentMode(deps: DaemonDeps): ClientMode {
   const stateMode = deps.store.getState()?.mode;
   return stateMode || deps.mode || "apikeys";
+}
+
+/** One provider as `/providers` renders it, numbered from 1. */
+type ProviderRow = {
+  /** 1-based position in this list: the number the user types back. */
+  index: number;
+  baseUrl: string;
+  disabled: boolean;
+  manuallyDisabled: boolean;
+  manuallyEnabled: boolean;
+  reachable: boolean;
+  lastModelFetchAt: number | null;
+  modelCount: number;
+  unreachableReason?: string;
+};
+
+/**
+ * Every discovered provider, in the order and with the numbering `providers
+ * list` prints.
+ *
+ * `index` is the row's position in *this* list, so a numeric target in
+ * `providers enable|disable|nostr-sync` resolves to the node the user just
+ * read. Rows are numbered over the full discovered set — reachable first,
+ * unreachable last (see `orderProvidersForDisplay`) — so hiding unreachable
+ * nodes never renumbers the ones still listed, and `list` and `list --all`
+ * agree on every number they both show.
+ *
+ * Every reader of a provider number must resolve it through this helper: a
+ * second ordering somewhere else is exactly how a number starts pointing at
+ * the wrong node.
+ */
+function buildProviderRows(deps: DaemonDeps): ProviderRow[] {
+  const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+  // Read disable/override state from the discovery adapter (the same source
+  // the router/ProviderManager uses), not the mirror in the SdkStore, which
+  // can lag behind the scheduled kind-38425 review sync — that updates the
+  // adapter without touching the store.
+  const manuallyEnabled = new Set<string>(
+    (deps.discoveryAdapter.getManuallyEnabledProviders?.() || []) as string[],
+  );
+  const manuallyDisabled = new Set<string>(
+    (deps.discoveryAdapter.getManuallyDisabledProviders?.() || []) as string[],
+  );
+  const disabledProviders = new Set<string>(
+    [
+      ...((deps.discoveryAdapter.getDisabledProviders() || []) as string[]),
+      ...manuallyDisabled,
+    ].filter((url) => !manuallyEnabled.has(url)),
+  );
+  // Adapter URLs are normalized (trailing slash); the store list may not be.
+  const inSet = (set: Set<string>, baseUrl: string) =>
+    set.has(baseUrl) || set.has(normalizeProviderBaseUrl(baseUrl));
+
+  // ModelManager writes to the sharded discovery adapter, not the SdkStore
+  // mirror. Read the same live cache the refresh pass updates; see
+  // utils/provider-reachability.
+  const reachability = assessProviderReachability(baseUrlsList, {
+    lastModelsUpdate: Object.fromEntries(
+      baseUrlsList.map((baseUrl) => [
+        baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`,
+        deps.discoveryAdapter.getProviderLastUpdate(baseUrl) ?? 0,
+      ]),
+    ),
+    modelsFromAllProviders: deps.discoveryAdapter.getCachedModels(),
+  });
+
+  const rows = baseUrlsList.map((baseUrl, discoveryIndex) => {
+    const verdict = reachability[discoveryIndex];
+    return {
+      baseUrl,
+      disabled: inSet(disabledProviders, baseUrl),
+      manuallyDisabled: inSet(manuallyDisabled, baseUrl),
+      manuallyEnabled: inSet(manuallyEnabled, baseUrl),
+      // One verdict per URL is guaranteed; defaulting to reachable keeps a
+      // future helper change from hiding a working node.
+      reachable: verdict?.reachable ?? true,
+      lastModelFetchAt: verdict?.lastModelFetchAt ?? null,
+      modelCount: verdict?.modelCount ?? 0,
+      ...(verdict?.reason ? { unreachableReason: verdict.reason } : {}),
+    };
+  });
+
+  return orderProvidersForDisplay(rows).map((row, position) => ({
+    ...row,
+    index: position + 1,
+  }));
+}
+
+/**
+ * Resolve a user-facing provider number (1-based, see `buildProviderRows`) to
+ * its URL. Anything else — 0, a fraction, a string, a number past the end —
+ * resolves to nothing so the caller can report it as skipped instead of
+ * silently acting on a neighbour.
+ */
+function providerIndexToBaseUrl(
+  rows: ProviderRow[],
+  index: unknown,
+): string | undefined {
+  if (typeof index !== "number" || !Number.isInteger(index)) return undefined;
+  return rows[index - 1]?.baseUrl;
+}
+
+/** The range a provider number may take, for error messages. */
+function providerIndexRange(rows: ProviderRow[]): string {
+  return rows.length === 0 ? "none — no providers discovered" : `1-${rows.length}`;
 }
 
 async function buildStatusOutput(
@@ -241,6 +416,15 @@ async function buildStatusOutput(
 
   try {
     const walletState = await deps.walletClient.getStatus();
+    if (walletState === "RECOVERING") {
+      return {
+        daemon: "running",
+        wallet: "recovering",
+        walletState,
+        mode,
+        error: getWalletStateMessage(walletState),
+      };
+    }
     if (walletState !== "UNLOCKED") {
       return {
         daemon: "running",
@@ -271,16 +455,18 @@ async function buildStatusOutput(
 }
 
 async function buildWalletDetails(deps: DaemonDeps): Promise<{
-  state: CocodState;
+  state: WalletRuntimeState;
   ready: boolean;
   balances?: Record<string, number>;
   unit?: "sat";
   activeMint?: string | null;
   defaultMint?: string | null;
+  recovery?: WalletRecoveryProgress;
 }> {
   const state = await deps.walletClient.getStatus();
+  const recovery = await deps.walletClient.getRecoveryProgress?.();
   if (state !== "UNLOCKED") {
-    return { state, ready: false };
+    return { state, ready: false, ...(recovery ? { recovery } : {}) };
   }
 
   const [balances, defaultMint] = await Promise.all([
@@ -294,49 +480,170 @@ async function buildWalletDetails(deps: DaemonDeps): Promise<{
     unit: "sat",
     activeMint: deps.walletAdapter.getActiveMintUrl(),
     defaultMint,
+    ...(recovery ? { recovery } : {}),
   };
 }
 
-function makeSdkLogger(prefix?: string): SdkLogger {
-  const tag = prefix ? `[${prefix}]` : undefined;
+function makeSdkLogger(...parts: string[]): SdkLogger {
+  const tag = parts.length ? parts.map((p) => `[${p}]`).join(" ") : undefined;
   const fmt = (...args: unknown[]) => (tag ? [tag, ...args] : args);
   return {
     log: (...args: unknown[]) => logger.log(...fmt(...args)),
     warn: (...args: unknown[]) => logger.warn(...fmt(...args)),
     error: (...args: unknown[]) => logger.error(...fmt(...args)),
     debug: (...args: unknown[]) => logger.debug(...fmt(...args)),
-    child: (p: string) => makeSdkLogger(prefix ? `${prefix}:${p}` : p),
+    child: (p: string) => makeSdkLogger(...parts, p),
   };
 }
-const sdkLogger: SdkLogger = makeSdkLogger();
+
+/**
+ * Parse a `type` query parameter into a list of normalized transaction types.
+ * Accepts comma-separated values and is case-insensitive.
+ */
+export function parseHistoryTypes(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+}
+
+/** Page size used when scanning history to apply a type filter. */
+const HISTORY_TYPE_SCAN_PAGE_SIZE = 200;
+
+/**
+ * Return history entries matching `types`, with offset/limit applied after
+ * filtering. The coco history repository only paginates by raw position, so we
+ * scan pages until enough matches accumulate (or history is exhausted).
+ */
+export async function getHistoryByTypes(
+  client: Pick<WalletClient, "getHistory">,
+  types: string[],
+  offset: number,
+  limit: number,
+): Promise<HistoryEntry[]> {
+  const wanted = new Set(types);
+  const matched: HistoryEntry[] = [];
+  let scanOffset = 0;
+  while (matched.length < offset + limit) {
+    const page = await client.getHistory(scanOffset, HISTORY_TYPE_SCAN_PAGE_SIZE);
+    for (const entry of page) {
+      if (wanted.has(entry.type)) matched.push(entry);
+    }
+    if (page.length < HISTORY_TYPE_SCAN_PAGE_SIZE) break;
+    scanOffset += HISTORY_TYPE_SCAN_PAGE_SIZE;
+  }
+  return matched.slice(offset, offset + limit);
+}
 
 export function createDaemonRequestHandler(deps: {
   provider: string | null;
   server: { close(cb?: () => void): void };
   shutdown?: () => void;
   store: any;
-  walletClient: CocodClient;
+  walletClient: WalletClient;
   walletAdapter: any;
   storageAdapter: any;
   discoveryAdapter: any;
   modelManager: any;
   ensureProvidersBootstrapped: () => Promise<void>;
   getRoutstr21Models: (forceRefresh?: boolean) => Promise<any[]>;
-  getModelProviders: (modelId: string) => Promise<any>;
+  getModelProviders: (
+    modelId: string,
+    includeDisabled?: boolean,
+  ) => Promise<any>;
+  /** Advertised model paths for one model, ranked like the router. */
+  getModelPaths: (
+    modelId: string,
+    refresh?: boolean,
+    includeDisabled?: boolean,
+    autoModelPath?: boolean,
+    candidatesOnly?: boolean,
+  ) => Promise<any>;
   refreshProvidersAndModels: () => Promise<void>;
   mode?: "xcashu" | "apikeys";
-  /** Default max_tokens/max_output_tokens to inject when the client omits one. */
+  /**
+   * Default max_completion_tokens (chat/completions) / max_output_tokens
+   * (responses) to inject when the client omits one.
+   */
   maxTokens: number;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /**
+   * SDK automatic DeepSeek V4.1 Flash model-path selection, as of daemon
+   * startup. The running value lives in the handler's `settings` holder, so
+   * `POST /settings/auto-model-path` applies without a restart.
+   */
+  autoModelPath?: boolean;
+  /**
+   * Routing implementation. Injectable so tests can observe the arguments the
+   * handler passes (e.g. the live `autoModelPath` value) without mocking the
+   * SDK module.
+   */
+  routeRequests?: typeof routeRequests;
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   usageTrackingDriver: UsageTrackingDriver;
+  requestLifecycleDriver?: RequestLifecycleDriver;
+  lifecycleOwnerInstanceId?: string;
   providerManager: ProviderManager;
   refundClient: any;
   requestResponseLogSink?: RequestResponseLogSink;
+  /** Reads the cached update state for GET /version; defaults to the on-disk cache. */
+  loadUpdateState?: () => UpdateState | null;
+  updateChecksEnabled?: () => boolean;
 }) {
+  // Settings the daemon can change while it runs live in a mutable holder shared
+  // with the /settings routes. `autoModelPath` is read per routed request (see
+  // routeRequests below), so persisting a new value applies it to the next
+  // request — unlike `mode`, which stays startup-only in `deps`.
+  const settings = { autoModelPath: deps.autoModelPath === true };
+
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
+
+    // The node canonicalizes exactly ONE optional "v1/" segment (routstr-core
+    // `_canonical_api_path`). A client whose base URL already ends in /v1 while
+    // its transport appends /v1 itself — the Anthropic SDKs do, the OpenAI ones
+    // do not — would otherwise get a paid upstream 404 from every provider in
+    // the pool. Collapse the duplicate before any routing or payment decision.
+    const canonicalPath = collapseDuplicatedV1(url.pathname);
+    if (canonicalPath !== url.pathname) {
+      logger.warn(
+        `[daemon] Collapsing duplicated '/v1' in request path: ${url.pathname} -> ${canonicalPath}`,
+      );
+      url.pathname = canonicalPath;
+    }
+
+    // CORS is an allowlist of routes, not a global switch: `corsHeadersFor`
+    // returns null for every other path, so wallet, settings, token and client
+    // routes answer no preflight and carry no `access-control-allow-origin`.
+    // Vary even for denied or absent origins, so caches cannot reuse that
+    // variant for an allowed origin. Keep other routes' headers unchanged.
+    if (CORS_ROUTES.has(url.pathname)) res.setHeader("vary", "origin");
+    const cors = corsHeadersFor(req.method || "GET", url.pathname, req.headers.origin);
+    if (cors) {
+      for (const [key, value] of Object.entries(cors)) res.setHeader(key, value);
+    }
+    if (req.method === "OPTIONS") {
+      if (cors) {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Only POST is supported." }));
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json"
+    ) {
+      sendJson(res, 415, { error: "Content-Type must be application/json." });
+      return;
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       sendJson(res, 200, { ok: true });
@@ -351,6 +658,25 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/status") {
       const output = await buildStatusOutput(deps);
       sendJson(res, 200, { output });
+      return;
+    }
+
+    // Version of the running daemon plus the cached result of its last
+    // background update check. Read-only and cheap: the daemon refreshes the
+    // cache on its own schedule, so CLI/TUI clients just read it.
+    if (req.method === "GET" && url.pathname === "/version") {
+      const state = (deps.loadUpdateState ?? readUpdateState)();
+      const enabled = (deps.updateChecksEnabled ??
+        (() => loadDaemonConfigSync().updateCheck !== false))();
+      sendJson(res, 200, {
+        output: {
+          version: VERSION,
+          current: VERSION,
+          latest: state?.latest ?? null,
+          hasUpdate: enabled && !!state && isUpdateStateApplicable(state, VERSION),
+          checkedAt: state?.checkedAt ?? null,
+        },
+      });
       return;
     }
 
@@ -387,6 +713,147 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/wallet/sweep-offline") {
+      await respond(res, async () => {
+        if (!deps.walletClient.sweepOfflineSends) {
+          throw new WalletHttpError(501, "Offline sweeps are not supported by this wallet client.");
+        }
+        const body = await readJsonBody(req);
+        if (body.minAgeMs !== undefined &&
+            (typeof body.minAgeMs !== "number" || !Number.isSafeInteger(body.minAgeMs) || body.minAgeMs < 0)) {
+          throw new WalletHttpError(400, "'minAgeMs' must be a non-negative safe integer.");
+        }
+        for (const field of ["dryRun", "confirmed"]) {
+          if (body[field] !== undefined && typeof body[field] !== "boolean") {
+            throw new WalletHttpError(400, `'${field}' must be a boolean.`);
+          }
+        }
+        if (body.dryRun !== true && body.confirmed !== true) {
+          throw new WalletHttpError(400, "Confirm the offline sweep: unclaimed tokens will be invalidated.");
+        }
+        let mintUrl: string | undefined;
+        if (Object.hasOwn(body, "mintUrl")) {
+          try { mintUrl = normalizeOfflineSweepMintUrl(body.mintUrl); }
+          catch (error) { throw new WalletHttpError(400, error instanceof Error ? error.message : String(error)); }
+        }
+        return { output: await deps.walletClient.sweepOfflineSends({
+          mintUrl,
+          minAgeMs: body.minAgeMs as number | undefined,
+          dryRun: body.dryRun === true,
+          confirmed: body.confirmed === true,
+        }) };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/cleanup") {
+      await respond(res, async () => {
+        if (!deps.walletClient.cleanupStuckOperations) {
+          throw new WalletHttpError(
+            501,
+            "Wallet cleanup is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        if (Object.hasOwn(body, "includeOffline")) {
+          throw new WalletHttpError(400, "Cleanup never reclaims offline sends; use /wallet/sweep-offline with explicit confirmation.");
+        }
+        const result = await deps.walletClient.cleanupStuckOperations({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          minAgeMs:
+            typeof body.minAgeMs === "number" && Number.isFinite(body.minAgeMs)
+              ? body.minAgeMs
+              : undefined,
+          dryRun: body.dryRun === true,
+          force: body.force === true,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/check-proofs") {
+      await respond(res, async () => {
+        if (!deps.walletClient.checkProofs) {
+          throw new WalletHttpError(
+            501,
+            "Proof state checks are not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) ||
+            body.timeoutMs <= 0)
+        ) {
+          throw new WalletHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
+        const result = await deps.walletClient.checkProofs({
+          mintUrl: optionalStringField(body, "mintUrl"),
+          dryRun: body.dryRun === true,
+          timeoutMs: body.timeoutMs as number | undefined,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverMintQuotes) {
+          throw new WalletHttpError(
+            501,
+            "Mint quote recovery is not supported by this wallet client.",
+          );
+        }
+
+        const body = await readJsonBody(req);
+        const operationIds = optionalStringArrayField(body, "operationIds");
+        if (body.includeFailed === true && !operationIds?.length) {
+          throw new WalletHttpError(
+            400,
+            "'includeFailed' requires non-empty 'operationIds'.",
+          );
+        }
+        if (
+          body.timeoutMs !== undefined &&
+          (typeof body.timeoutMs !== "number" ||
+            !Number.isFinite(body.timeoutMs) || body.timeoutMs <= 0)
+        ) {
+          throw new WalletHttpError(
+            400,
+            "'timeoutMs' must be a positive finite number.",
+          );
+        }
+        const result = await deps.walletClient.recoverMintQuotes({
+          operationIds,
+          includeFailed: body.includeFailed === true,
+          timeoutMs: body.timeoutMs as number | undefined,
+        });
+        return { output: result };
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/wallet/recover/operations") {
+      await respond(res, async () => {
+        if (!deps.walletClient.recoverStuckOperations) {
+          throw new WalletHttpError(
+            501,
+            "Stuck operation recovery is not supported by this wallet client.",
+          );
+        }
+        return { output: await deps.walletClient.recoverStuckOperations() };
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/wallet/receive/cashu") {
       await respond(res, async () => {
         const body = await readJsonBody(req);
@@ -403,8 +870,22 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const amount = getRequiredPositiveNumberField(body, "amount");
         const mintUrl = optionalStringField(body, "mintUrl");
-        const invoice = await deps.walletClient.receiveBolt11(amount, mintUrl);
-        return { output: { invoice, amount, mintUrl } };
+        const { invoice, operationId } = await deps.walletClient.receiveBolt11(
+          amount,
+          mintUrl,
+        );
+        return { output: { invoice, operationId, amount, mintUrl } };
+      });
+      return;
+    }
+
+    const mintQuoteMatch = url.pathname.match(/^\/wallet\/receive\/bolt11\/([^/]+)$/);
+    if (req.method === "GET" && mintQuoteMatch?.[1]) {
+      const operationId = decodeURIComponent(mintQuoteMatch[1]);
+      await respond(res, async () => {
+        const quote = await deps.walletClient.getMintQuote?.(operationId);
+        if (!quote) throw new WalletHttpError(404, "Mint quote not found");
+        return { output: quote };
       });
       return;
     }
@@ -414,9 +895,48 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const amount = getRequiredPositiveNumberField(body, "amount");
         const mintUrl = optionalStringField(body, "mintUrl");
+        if (body.offline !== undefined && typeof body.offline !== "boolean") {
+          throw new WalletHttpError(400, "'offline' must be a boolean.");
+        }
+        const overpayCap = body.overpayCap;
+        if (
+          overpayCap !== undefined &&
+          (typeof overpayCap !== "number" ||
+            !Number.isFinite(overpayCap) ||
+            overpayCap < 1)
+        ) {
+          throw new WalletHttpError(
+            400,
+            "'overpayCap' must be a finite number >= 1.",
+          );
+        }
+        if (body.offline === true) {
+          return {
+            output: await deps.walletClient.sendCashuOffline(
+              amount,
+              mintUrl,
+              overpayCap === undefined ? undefined : { overpayCap },
+            ),
+          };
+        }
+        if (overpayCap !== undefined) {
+          throw new WalletHttpError(400, "'overpayCap' requires 'offline: true'.");
+        }
         const token = await deps.walletClient.sendCashu(amount, mintUrl);
         return { output: { token, amount, mintUrl } };
       });
+      return;
+    }
+
+    const markSendSpentMatch = url.pathname.match(
+      /^\/wallet\/send\/cashu\/([^/]+)\/mark-spent$/,
+    );
+    if (req.method === "POST" && markSendSpentMatch?.[1]) {
+      await respond(res, async () => ({
+        output: await deps.walletClient.markSendSpent(
+          decodeURIComponent(markSendSpentMatch[1]!),
+        ),
+      }));
       return;
     }
 
@@ -490,9 +1010,25 @@ export function createDaemonRequestHandler(deps: {
       await respond(res, async () => {
         const offsetParam = url.searchParams.get("offset");
         const limitParam = url.searchParams.get("limit");
+        const idParam = url.searchParams.get("id")?.trim() || "";
+        const types = parseHistoryTypes(url.searchParams.get("type"));
         const offset = offsetParam ? parseInt(offsetParam, 10) || 0 : 0;
         const limit = limitParam ? parseInt(limitParam, 10) || 50 : 50;
-        const entries = await deps.walletClient.getHistory(offset, limit);
+
+        let entries: HistoryEntry[];
+        if (idParam) {
+          const entry = await deps.walletClient.getHistoryEntryById(idParam);
+          entries = entry ? [entry] : [];
+        } else if (types.length > 0) {
+          entries = await getHistoryByTypes(
+            deps.walletClient,
+            types,
+            offset,
+            limit,
+          );
+        } else {
+          entries = await deps.walletClient.getHistory(offset, limit);
+        }
 
         const encoded = entries.map((entry: HistoryEntry) => {
           const base = { ...entry } as Record<string, unknown>;
@@ -531,12 +1067,12 @@ export function createDaemonRequestHandler(deps: {
           const amount = typeof pr.amount === "number" ? pr.amount : 0;
           const mints = Array.isArray(pr.mints) ? pr.mints.join(", ") : "";
           if (confirm) {
-            throw new CocodHttpError(
+            throw new WalletHttpError(
               402,
               `Failed to set username. Required amount: ${amount} SATS. Required mints: ${mints}`,
             );
           }
-          throw new CocodHttpError(
+          throw new WalletHttpError(
             402,
             `Payment required to set username: ${amount} SATS. ` +
               `Use 'routstrd wallet npc username ${username} --confirm' to proceed`,
@@ -700,6 +1236,74 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Scheduled refresh job (Nostr events, models, client integrations).
+    // The job re-reads this on every tick, so no daemon restart is needed.
+    if (req.method === "POST" && url.pathname === "/settings/auto-refresh") {
+      await respond(res, async () => {
+        const body = await readJsonBody(req);
+        const enabled = body.enabled === true || body.enabled === "true";
+
+        const config = await loadDaemonConfig();
+        config.autoRefresh = { ...config.autoRefresh, enabled };
+        saveDaemonConfig(config);
+
+        return {
+          output: {
+            message: `Automatic refresh ${enabled ? "enabled" : "disabled"}.`,
+            autoRefresh: config.autoRefresh,
+          },
+        };
+      });
+      return;
+    }
+
+    // SDK automatic model-path selection. Routing reads this per request, so a
+    // persisted change applies immediately; GET reports the live value next to
+    // the one on disk, which differ only when config.json was hand-edited (that
+    // still needs a restart).
+    if (url.pathname === "/settings/auto-model-path") {
+      if (req.method === "GET") {
+        await respond(res, async () => {
+          const config = await loadDaemonConfig();
+
+          return {
+            output: {
+              autoModelPath: settings.autoModelPath,
+              configured: config.autoModelPath === true,
+            },
+          };
+        });
+        return;
+      }
+
+      if (req.method === "POST") {
+        await respond(res, async () => {
+          const body = await readJsonBody(req);
+          const enabled = body.enabled;
+          // An explicit setting must not be guessable: a typo'd payload would
+          // otherwise silently disable routing behaviour and answer 200.
+          if (typeof enabled !== "boolean") {
+            throw new WalletHttpError(400, "'enabled' must be a boolean.");
+          }
+
+          const config = await loadDaemonConfig();
+          config.autoModelPath = enabled;
+          // Persist first: a write that throws must not change how we route.
+          saveDaemonConfig(config);
+          settings.autoModelPath = enabled;
+
+          return {
+            output: {
+              message: `Auto model path ${enabled ? "enabled" : "disabled"}.`,
+              autoModelPath: settings.autoModelPath,
+              configured: enabled,
+            },
+          };
+        });
+        return;
+      }
+    }
+
     if (req.method === "GET" && url.pathname === "/models") {
       try {
         const forceRefresh =
@@ -717,7 +1321,15 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && modelProvidersMatch && modelProvidersMatch[1]) {
       try {
         const modelId = decodeURIComponent(modelProvidersMatch[1]);
-        const modelWithProviders = await deps.getModelProviders(modelId);
+        // `includeDisabled=true` reports the nodes routing currently excludes
+        // too (marked `disabled`). They are hidden by default: a disabled
+        // node's price is not one a request can get.
+        const includeDisabled =
+          url.searchParams.get("includeDisabled")?.toLowerCase() === "true";
+        const modelWithProviders = await deps.getModelProviders(
+          modelId,
+          includeDisabled,
+        );
         if (!modelWithProviders) {
           sendJson(res, 404, { error: `Model '${modelId}' not found` });
           return;
@@ -729,7 +1341,43 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/v1/models") {
+    // Get the model-path inventory for a specific model
+    const modelPathsMatch = url.pathname.match(/^\/models\/([^\/]+)\/paths$/);
+    if (req.method === "GET" && modelPathsMatch && modelPathsMatch[1]) {
+      try {
+        const modelId = decodeURIComponent(modelPathsMatch[1]);
+        const view = url.searchParams.get("view");
+        if (view !== null && view !== "candidates") {
+          sendJson(res, 400, { error: "Unsupported view; omit view for inventory or use view=candidates." });
+          return;
+        }
+        // `refresh=true` drops the SDK's cached path payloads so the inventory
+        // is live; routing refetches on its next request as a result.
+        const refresh =
+          url.searchParams.get("refresh")?.toLowerCase() === "true";
+        // `includeDisabled=true` lists the nodes routing currently excludes,
+        // flagged `disabled`; hidden by default like the provider table.
+        const includeDisabled =
+          url.searchParams.get("includeDisabled")?.toLowerCase() === "true";
+        const modelPaths = await deps.getModelPaths(
+          modelId,
+          refresh,
+          includeDisabled,
+          settings.autoModelPath,
+          view === "candidates",
+        );
+        if (!modelPaths) {
+          sendJson(res, 404, { error: `Model '${modelId}' not found` });
+          return;
+        }
+        sendJson(res, 200, { output: modelPaths });
+      } catch (error) {
+        sendJson(res, 500, { error: toErrorMessage(error) });
+      }
+      return;
+    }
+
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/v1/models") {
       try {
         const forceRefresh =
           url.searchParams.get("refresh")?.toLowerCase() === "true";
@@ -761,30 +1409,23 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const mintUrl = getRequiredStringField(body, "mintUrl");
 
-        const state = deps.store.getState();
-        const pendingDistribution = (state.cachedTokens || []).map(
-          (t: { baseUrl: string; balance?: number }) => ({
-            baseUrl: t.baseUrl,
-            amount: t.balance || 0,
-          }),
-        );
-        const apiKeysStored = (state.apiKeys || []).map(
-          (k: { baseUrl: string; balance?: number }) => ({
-            baseUrl: k.baseUrl,
-            amount: k.balance || 0,
-          }),
-        );
+        // Parked refund tokens are not in the store's pending buckets, so
+        // retry them before deciding there is nothing to refund — otherwise a
+        // forced refund reports "nothing pending" while funds stay unredeemed.
+        const recovered = await recoverParkedTokens(deps.refundClient);
 
-        if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+        const apiKeys = (deps.store.getState().apiKeys || []).length;
+
+        if (apiKeys === 0) {
           sendJson(res, 200, {
-            output: { message: "No pending tokens to refund", results: [] },
+            output: {
+              message: "No pending tokens to refund",
+              results: [],
+              recovered,
+            },
           });
           return;
         }
-
-        const refundBaseUrls = pendingDistribution
-          .map((p: { baseUrl: string }) => p.baseUrl)
-          .concat(apiKeysStored.map((p: { baseUrl: string }) => p.baseUrl));
 
         const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundProviders(mintUrl, true);
@@ -792,8 +1433,9 @@ export function createDaemonRequestHandler(deps: {
         sendJson(res, 200, {
           output: {
             message: `Refunded to ${mintUrl}`,
-            pendingTokens: pendingDistribution.length,
-            apiKeys: apiKeysStored.length,
+            pendingTokens: 0,
+            apiKeys,
+            recovered,
             results: results.map(
               (r: { baseUrl: string; success: boolean }) => ({
                 baseUrl: r.baseUrl,
@@ -814,12 +1456,17 @@ export function createDaemonRequestHandler(deps: {
         const body = await readJsonBody(req);
         const mintUrl = getRequiredStringField(body, "mintUrl");
 
+        // Same reasoning as POST /refund: parked refund tokens are not xcashu
+        // tokens, so this route must recover them too.
+        const recovered = await recoverParkedTokens(deps.refundClient);
+
         const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundXcashuTokens(mintUrl);
 
         sendJson(res, 200, {
           output: {
             message: `Refunded xcashu tokens to ${mintUrl}`,
+            recovered,
             results: results.map(
               (r: { baseUrl: string; token: string; success: boolean; error?: string }) => ({
                 baseUrl: r.baseUrl,
@@ -861,14 +1508,7 @@ export function createDaemonRequestHandler(deps: {
           0,
         );
 
-        const state = deps.store.getState();
-        const cachedTokens = state.cachedTokens || [];
-        const totalCached = cachedTokens.reduce(
-          (sum: number, t: { balance?: number }) => sum + (t.balance || 0),
-          0,
-        );
-
-        const apiKeys = state.apiKeys || [];
+        const apiKeys = deps.store.getState().apiKeys || [];
         const totalApiKeys = apiKeys.reduce(
           (sum: number, k: { balance?: number }) => sum + (k.balance || 0),
           0,
@@ -876,11 +1516,6 @@ export function createDaemonRequestHandler(deps: {
 
         const keys: Array<{ id: string; name: string; balance: number }> = [
           { id: "wallet", name: "Wallet", balance: totalWallet },
-          ...cachedTokens.map((t: { baseUrl: string; balance?: number }) => ({
-            id: `cached:${t.baseUrl}`,
-            name: `Cached: ${t.baseUrl}`,
-            balance: t.balance || 0,
-          })),
           ...apiKeys.map((k: { baseUrl: string; balance?: number }) => ({
             id: `apikey:${k.baseUrl}`,
             name: `API Key: ${k.baseUrl}`,
@@ -891,7 +1526,7 @@ export function createDaemonRequestHandler(deps: {
         sendJson(res, 200, {
           output: {
             keys,
-            total: totalWallet + totalCached + totalApiKeys,
+            total: totalWallet + totalApiKeys,
             unit: "sat",
             apikeysCalled: apiKeys.length,
           },
@@ -967,12 +1602,9 @@ export function createDaemonRequestHandler(deps: {
 
         if (!mintUrl) {
           try {
-            const walletBalances =
-              await deps.walletAdapter.getBalances();
-            const mintUrls = Object.keys(walletBalances);
-            if (mintUrls.length > 0) {
-              mintUrl = mintUrls[0];
-            }
+            mintUrl =
+              deps.walletAdapter.getActiveMintUrl() ??
+              Object.keys(await deps.walletAdapter.getBalances())[0];
           } catch {
             // ignore
           }
@@ -1035,47 +1667,136 @@ export function createDaemonRequestHandler(deps: {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
         const indices = body.indices as number[] | undefined;
+        const labels = (body.labels as string[] | undefined)
+          ?.map((label) => String(label).trim())
+          .filter((label) => label.length > 0);
 
-        if (!Array.isArray(indices)) {
+        const hasIndices = Array.isArray(indices);
+        const hasLabels = Array.isArray(labels) && labels.length > 0;
+        if (!hasIndices && !hasLabels) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              error: "Missing or invalid 'indices' field (expected number[]).",
+              error:
+                "Missing or invalid target field (expected 'indices': number[] and/or 'labels': string[]).",
             }),
           );
           return;
         }
 
+        const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+        // Label matching can await relay evidence. Resolve it before reading
+        // manual overrides so concurrent index edits cannot be overwritten.
+        const labelMatch = hasLabels
+          ? await deps.modelManager.matchProviderUrlsByLabels(labels, baseUrlsList)
+          : null;
         const state = deps.store.getState();
-        const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
+        // User-driven disables belong in the *manual* disabled list. The
+        // review-based list (setDisabledProviders) is owned by the Nostr
+        // kind-38425 review sync, which overwrites it and would otherwise
+        // silently re-enable manually-disabled providers. Disabling also
+        // clears any manual-enable override for that provider.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
         ];
 
         const toDisable: string[] = [];
-        for (const idx of indices) {
-          if (
-            typeof idx === "number" &&
-            idx >= 0 &&
-            idx < baseUrlsList.length
-          ) {
-            const baseUrl = baseUrlsList[idx]!;
-            if (!disabledProviders.includes(baseUrl)) {
-              disabledProviders.push(baseUrl);
-              toDisable.push(baseUrl);
-            }
+        const skippedIndices: unknown[] = [];
+        // 1) Explicit provider numbers, resolved through the same ordering and
+        // numbering `providers list` prints.
+        const rows = buildProviderRows(deps);
+        for (const idx of indices ?? []) {
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
+            skippedIndices.push(idx);
+            continue;
+          }
+          if (!manuallyDisabledProviders.includes(baseUrl)) {
+            manuallyDisabledProviders.push(baseUrl);
+          }
+          const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+          if (enabledPos !== -1) {
+            manuallyEnabledProviders.splice(enabledPos, 1);
+          }
+          if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
+        }
+
+        // Numbers that resolve to nothing are reported, never guessed at: a
+        // bare "0 targeted provider(s)" reads like the disable worked.
+        if (hasIndices && !hasLabels && toDisable.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
+              skipped: skippedIndices,
+            }),
+          );
+          return;
+        }
+
+        // 2) Review labels: remove user opt-ins. Default labels, other enabled
+        // labels and manual overrides can keep matching providers enabled.
+        let matchedLabels: string[] = [];
+        let unmatchedLabels: string[] = [];
+        if (hasLabels && labelMatch) {
+          const match = labelMatch;
+          matchedLabels = match.matchedLabels;
+          unmatchedLabels = match.unmatchedLabels;
+          for (const label of labels) {
+            deps.modelManager.removeUserEnabledReviewLabel(label);
+          }
+          for (const baseUrl of match.matchedUrls) {
+            if (!toDisable.includes(baseUrl)) toDisable.push(baseUrl);
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        // Label policy never changes per-provider manual overrides. Keep index
+        // mutations and their replacement writes synchronous after matching.
+        if (hasIndices && indices.length > 0) {
+          deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+          deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        }
+
+        // Recompute the review verdict so a label-based disable takes effect now.
+        const reviewed =
+          await deps.modelManager.syncReviewedProvidersFromNostr(baseUrlsList);
+        if (reviewed !== null) {
+          deps.store.getState().setDisabledProviders(reviewed);
+        }
+
+        // Label matches are targets, not proof of an effective policy change.
+        // Report current state after sync, including preserved manual overrides.
+        const effectiveDisabled = new Set<string>(deps.discoveryAdapter.getDisabledProviders());
+        const disabled = toDisable.filter((url) => effectiveDisabled.has(url));
+        const remainingEnabled = toDisable.filter((url) => !effectiveDisabled.has(url));
+        const parts = [`${disabled.length} targeted provider(s) currently disabled.`];
+        if (hasLabels) {
+          parts.push(`Review-label opt-out requested: ${labels.join(", ")}. Manual overrides and default labels are preserved.`);
+        }
+        if (remainingEnabled.length > 0) {
+          parts.push(`${remainingEnabled.length} targeted provider(s) remain enabled under the effective policy.`);
+        }
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
-              message: `Disabled ${toDisable.length} provider(s)`,
-              disabled: toDisable,
+              message: parts.join(" "),
+              disabled,
+              remainingEnabled,
+              skipped: skippedIndices,
+              matchedUrls: labelMatch?.matchedUrls ?? [],
+              enabledLabels:
+                deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              enabledReviewLabels:
+                deps.modelManager.getEnabledReviewLabels?.() ?? [],
+              ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
+              ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
             },
           }),
         );
@@ -1087,6 +1808,162 @@ export function createDaemonRequestHandler(deps: {
     }
 
     if (req.method === "POST" && url.pathname === "/providers/enable") {
+      try {
+        const bodyText = await readBody(req);
+        const body = bodyText ? JSON.parse(bodyText) : {};
+        const indices = body.indices as number[] | undefined;
+        // Numeric targets are provider indices; everything else is a kind-38425
+        // review label (e.g. `sandbox`). Labels are normalised by the SDK.
+        const labels = (body.labels as string[] | undefined)
+          ?.map((label) => String(label).trim())
+          .filter((label) => label.length > 0);
+
+        const hasIndices = Array.isArray(indices);
+        const hasLabels = Array.isArray(labels) && labels.length > 0;
+        if (!hasIndices && !hasLabels) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error:
+                "Missing or invalid target field (expected 'indices': number[] and/or 'labels': string[]).",
+            }),
+          );
+          return;
+        }
+
+        const baseUrlsList: string[] = deps.store.getState().baseUrlsList || [];
+        // Label matching can await relay evidence. Resolve it before reading
+        // manual overrides so concurrent index edits cannot be overwritten.
+        const labelMatch = hasLabels
+          ? await deps.modelManager.matchProviderUrlsByLabels(labels, baseUrlsList)
+          : null;
+        const state = deps.store.getState();
+        // Re-enabling by index clears the manual disable and records a
+        // manual-enable override so the review sync (which disables providers
+        // without an lgtm review) does not silently re-disable it.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
+        ];
+
+        const toEnable: string[] = [];
+        const enableProvider = (baseUrl: string) => {
+          const pos = manuallyDisabledProviders.indexOf(baseUrl);
+          if (pos !== -1) {
+            manuallyDisabledProviders.splice(pos, 1);
+          }
+          if (!manuallyEnabledProviders.includes(baseUrl)) {
+            manuallyEnabledProviders.push(baseUrl);
+          }
+          if (!toEnable.includes(baseUrl)) {
+            toEnable.push(baseUrl);
+          }
+        };
+
+        // 1) Explicit provider numbers (e.g. `routstrd providers enable 1 3 6`),
+        // resolved through the same ordering and numbering `providers list`
+        // prints.
+        const rows = buildProviderRows(deps);
+        const skippedIndices: unknown[] = [];
+        for (const idx of indices ?? []) {
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
+            skippedIndices.push(idx);
+            continue;
+          }
+          enableProvider(baseUrl);
+        }
+
+        // Numbers that resolve to nothing are reported, never guessed at: a
+        // bare "0 targeted provider(s)" reads like the enable worked.
+        if (hasIndices && !hasLabels && toEnable.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
+              skipped: skippedIndices,
+            }),
+          );
+          return;
+        }
+
+        // 2) Review labels (e.g. `routstrd providers enable sandbox`). This is
+        // the SDK's label policy, not a per-URL override: the label joins the
+        // enabled set, so the review sync keeps every provider whose latest
+        // kind-38425 review carries it enabled — including providers discovered
+        // later. `sandbox` is off until a user opts it in here.
+        let matchedLabels: string[] = [];
+        let unmatchedLabels: string[] = [];
+        if (hasLabels && labelMatch) {
+          const match = labelMatch;
+          matchedLabels = match.matchedLabels;
+          unmatchedLabels = match.unmatchedLabels;
+          for (const label of labels) {
+            deps.modelManager.addUserEnabledReviewLabel(label);
+          }
+          for (const baseUrl of match.matchedUrls) {
+            if (!toEnable.includes(baseUrl)) toEnable.push(baseUrl);
+          }
+        }
+
+        // Label policy never changes per-provider manual overrides. Keep index
+        // mutations and their replacement writes synchronous after matching.
+        if (hasIndices && indices.length > 0) {
+          deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+          deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+          deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+        }
+
+        // Recompute the review verdict so a label-based enable takes effect
+        // now rather than on the next scheduled review pass.
+        const reviewed =
+          await deps.modelManager.syncReviewedProvidersFromNostr(baseUrlsList);
+        if (reviewed !== null) {
+          deps.store.getState().setDisabledProviders(reviewed);
+        }
+
+        // Label matches are targets, not proof of an effective policy change.
+        // Report current state after sync, including preserved manual overrides.
+        const effectiveDisabled = new Set<string>(deps.discoveryAdapter.getDisabledProviders());
+        const enabled = toEnable.filter((url) => !effectiveDisabled.has(url));
+        const remainingDisabled = toEnable.filter((url) => effectiveDisabled.has(url));
+        const parts = [`${enabled.length} targeted provider(s) currently enabled.`];
+        if (hasLabels) {
+          parts.push(`Review-label opt-in requested: ${labels.join(", ")}. Manual overrides and default labels are preserved.`);
+        }
+        if (remainingDisabled.length > 0) {
+          parts.push(`${remainingDisabled.length} targeted provider(s) remain disabled under the effective policy.`);
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              message: parts.join(" "),
+              enabled,
+              remainingDisabled,
+              skipped: skippedIndices,
+              matchedUrls: labelMatch?.matchedUrls ?? [],
+              enabledLabels:
+                deps.modelManager.getUserEnabledReviewLabels?.() ?? [],
+              enabledReviewLabels:
+                deps.modelManager.getEnabledReviewLabels?.() ?? [],
+              ...(matchedLabels.length > 0 ? { matchedLabels } : {}),
+              ...(unmatchedLabels.length > 0 ? { unmatchedLabels } : {}),
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/providers/nostr-sync") {
       try {
         const bodyText = await readBody(req);
         const body = bodyText ? JSON.parse(bodyText) : {};
@@ -1104,35 +1981,94 @@ export function createDaemonRequestHandler(deps: {
 
         const state = deps.store.getState();
         const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = [
-          ...(state.disabledProviders || []),
-        ];
 
-        const toEnable: string[] = [];
+        // Provider numbers are resolved through the same ordering and
+        // numbering `providers list` prints.
+        const rows = buildProviderRows(deps);
+        const syncedUrls: string[] = [];
+        const skippedIndices: unknown[] = [];
         for (const idx of indices) {
-          if (
-            typeof idx === "number" &&
-            idx >= 0 &&
-            idx < baseUrlsList.length
-          ) {
-            const baseUrl = baseUrlsList[idx]!;
-            const pos = disabledProviders.indexOf(baseUrl);
-            if (pos !== -1) {
-              disabledProviders.splice(pos, 1);
-              toEnable.push(baseUrl);
-            }
+          const baseUrl = providerIndexToBaseUrl(rows, idx);
+          if (baseUrl === undefined) {
+            skippedIndices.push(idx);
+          } else if (!syncedUrls.includes(baseUrl)) {
+            syncedUrls.push(baseUrl);
           }
         }
 
-        deps.store.getState().setDisabledProviders(disabledProviders);
-        deps.discoveryAdapter.setDisabledProviders(disabledProviders);
+        if (syncedUrls.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: `No valid indices provided (valid range: ${providerIndexRange(rows)}).`,
+              skipped: skippedIndices,
+            }),
+          );
+          return;
+        }
+
+        // Clearing both manual lists returns the provider to the
+        // review-based state: the effective disabled set is the union of
+        // disabledProviders (kind-38425 review sync) and the manual lists,
+        // so with no manual entries the Nostr review verdict applies again.
+        const manuallyDisabledProviders: string[] = [
+          ...(state.manuallyDisabledProviders || []),
+        ];
+        const manuallyEnabledProviders: string[] = [
+          ...(state.manuallyEnabledProviders || []),
+        ];
+
+        const synced: string[] = [];
+        for (const baseUrl of syncedUrls) {
+          const disabledPos = manuallyDisabledProviders.indexOf(baseUrl);
+          if (disabledPos !== -1) {
+            manuallyDisabledProviders.splice(disabledPos, 1);
+          }
+          const enabledPos = manuallyEnabledProviders.indexOf(baseUrl);
+          if (enabledPos !== -1) {
+            manuallyEnabledProviders.splice(enabledPos, 1);
+          }
+          synced.push(baseUrl);
+        }
+
+        deps.store.getState().setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.discoveryAdapter.setManuallyDisabledProviders(manuallyDisabledProviders);
+        deps.store.getState().setManuallyEnabledProviders(manuallyEnabledProviders);
+        deps.discoveryAdapter.setManuallyEnabledProviders(manuallyEnabledProviders);
+
+        // Recompute the review verdict now that the manual overrides are
+        // gone. This is load-bearing, not just cosmetic: the SDK's review
+        // sync skips manually-enabled providers when it rebuilds the
+        // review-disabled set, so a provider that was manually enabled
+        // across a review refresh is absent from that set — reading the
+        // stale set here would fail OPEN for a review-rejected provider.
+        const reviewed =
+          await deps.modelManager.syncReviewedProvidersFromNostr(baseUrlsList);
+        if (reviewed !== null) {
+          deps.store.getState().setDisabledProviders(reviewed);
+        }
+
+        // Report each synced provider's resulting state from the discovery
+        // adapter (the source the router uses). With both manual lists
+        // cleared for these URLs, membership in the adapter's disabled set
+        // is exactly the review verdict.
+        const reviewDisabled = new Set(
+          deps.discoveryAdapter.getDisabledProviders() || [],
+        );
+        const resulting = synced.map((baseUrl) => ({
+          baseUrl,
+          disabled:
+            reviewDisabled.has(baseUrl) ||
+            reviewDisabled.has(normalizeProviderBaseUrl(baseUrl)),
+        }));
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             output: {
-              message: `Enabled ${toEnable.length} provider(s)`,
-              enabled: toEnable,
+              message: `Reverted ${synced.length} provider(s) to Nostr review-based state`,
+              providers: resulting,
+              ...(skippedIndices.length > 0 ? { skipped: skippedIndices } : {}),
             },
           }),
         );
@@ -1342,19 +2278,28 @@ export function createDaemonRequestHandler(deps: {
           await deps.refreshProvidersAndModels();
         }
 
-        const state = deps.store.getState();
-        const baseUrlsList: string[] = state.baseUrlsList || [];
-        const disabledProviders: string[] = state.disabledProviders || [];
-
-        const providers = baseUrlsList.map((baseUrl, index) => ({
-          index,
-          baseUrl,
-          disabled: disabledProviders.includes(baseUrl),
-        }));
+        // Unreachable nodes are hidden unless the caller asks for the whole
+        // discovered set (`--all`): discovery keeps announcing dead nodes for
+        // months, and a node that cannot be reached cannot be routed to
+        // either.
+        const includeUnreachable = ["1", "true"].includes(
+          (url.searchParams.get("all") ?? "").toLowerCase(),
+        );
+        // Numbered rows, reachable first: the same list (and the same
+        // numbers) every write handler resolves indices against.
+        const rows = buildProviderRows(deps);
 
         // Only count disabled providers that are actually in the current list
         // (filter out stale entries from previously disabled providers that are no longer present)
-        const activeDisabledCount = providers.filter((p) => p.disabled).length;
+        const activeDisabledCount = rows.filter((p) => p.disabled).length;
+        // A manually enabled node stays listed even while it is unreachable:
+        // the user asked for it explicitly, so hiding it would silently undo
+        // that decision instead of reporting that it is down.
+        const providers = includeUnreachable
+          ? rows
+          : rows.filter(
+              (provider) => provider.reachable || provider.manuallyEnabled,
+            );
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
@@ -1362,7 +2307,157 @@ export function createDaemonRequestHandler(deps: {
             output: {
               providers,
               disabledCount: activeDisabledCount,
+              totalCount: rows.length,
+              reachableCount: rows.filter((p) => p.reachable).length,
+              unreachableCount: rows.filter((p) => !p.reachable).length,
+              // Nodes the filter dropped; zero when `all=true`.
+              hiddenCount: rows.length - providers.length,
+              includeUnreachable,
+            },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+      return;
+    }
+
+    // Providers/models the router is currently skipping. Cooldown state lives
+    // in the SdkStore (written by the SDK's ProviderManager); entries that have
+    // already expired are filtered out by buildCooldownsOutput.
+    if (req.method === "GET" && url.pathname === "/cooldowns") {
+      await respond(res, async () => {
+        const state = deps.store.getState();
+        const stored: StoredCooldownEntry[] = state.providersOnCooldown || [];
+        // Failure streaks only exist on SDKs with exponential cooldowns;
+        // feature-detect so older stores simply omit the section.
+        const streaks = (state as { modelFailureStreaks?: StoredFailureStreak[] })
+          .modelFailureStreaks;
+        return {
+          output: buildCooldownsOutput(
+            stored,
+            deps.providerManager.getCooldownDurationMs(),
+            Date.now(),
+            streaks,
+          ),
+        };
+      });
+      return;
+    }
+
+    // Clear every active cooldown so the router retries all providers now.
+    // Also drops the failure strikes (`lastFailed`) and the failed-provider
+    // set: those are what turn the next failure into an instant cooldown, so
+    // a reset without them would barely change routing behavior.
+    if (req.method === "POST" && url.pathname === "/cooldowns/reset") {
+      await respond(res, async () => {
+        const state = deps.store.getState();
+        const stored: StoredCooldownEntry[] = state.providersOnCooldown || [];
+        const before = buildCooldownsOutput(
+          stored,
+          deps.providerManager.getCooldownDurationMs(),
+        );
+        const providers = [
+          ...new Set(before.cooldowns.map((entry) => entry.baseUrl)),
+        ].sort();
+
+        deps.providerManager.clearCooldowns();
+        deps.providerManager.clearFailureHistory();
+        deps.providerManager.resetFailedProviders();
+
+        const message =
+          before.count === 0
+            ? "No active cooldowns to reset."
+            : `Reset ${before.count} cooldown${
+                before.count === 1 ? "" : "s"
+              } across ${providers.length} provider${
+                providers.length === 1 ? "" : "s"
+              }`;
+
+        return { output: { message, cleared: before.count, providers } };
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/providers/reviews") {
+      try {
+        const state = deps.store.getState();
+        const baseUrlsList: string[] = state.baseUrlsList || [];
+
+        // Same rows and numbering as `providers list`: `providers reviews`
+        // prints these numbers, and a user copies them into `providers
+        // enable|disable|nostr-sync`. Reachable nodes first, unreachable last.
+        const rows = buildProviderRows(deps);
+
+        // Provider/review index lives in the SDK (same evidence and trust gates
+        // as the review sync), so the daemon only maps it for display.
+        const { providerNodes, reviewEvents, latestLabelByNode } =
+          await deps.modelManager.getProviderReviewIndex();
+        const enabledLabels: string[] =
+          deps.modelManager.getEnabledReviewLabels?.() ?? [];
+
+        const mapReview = (rv: any) => ({
+          eventId: rv.id,
+          createdAt: rv.created_at,
+          authorPubkey: rv.pubkey,
+          nodePubkey: tagValue(rv.tags, "node"),
+          label: tagValue(rv.tags, "t") ?? "",
+          tags: rv.tags,
+        });
+
+        const providers = rows.map((row) => {
+          const baseUrl = row.baseUrl;
+          const normalized = normalizeProviderBaseUrl(baseUrl);
+          const nodePubkeys = Array.from(
+            providerNodes.get(normalized) || new Set<string>(),
+          );
+          const reviews = reviewEvents
+            .filter((rv: any) => {
+              const node = tagValue(rv.tags, "node");
+              return node ? nodePubkeys.includes(node) : false;
+            })
+            .sort((a: any, b: any) => b.created_at - a.created_at)
+            .map(mapReview);
+          // Latest label of each advertising node, and which of those the
+          // current policy actually enables (defaults ∪ user opt-ins).
+          const labels = nodePubkeys
+            .map((pk) => latestLabelByNode.get(pk))
+            .filter((label): label is string => Boolean(label));
+          return {
+            index: row.index,
+            baseUrl,
+            disabled: row.disabled,
+            nodePubkeys,
+            labels,
+            reviewCount: reviews.length,
+            reviews,
+          };
+        });
+
+        // Review events that reference a node pubkey we could not map back to
+        // any currently-known provider URL (kept for completeness).
+        const knownNodePubkeys = new Set<string>();
+        for (const set of providerNodes.values()) {
+          for (const pk of set) knownNodePubkeys.add(pk);
+        }
+        const unmatchedReviews = reviewEvents
+          .filter((rv: any) => {
+            const node = tagValue(rv.tags, "node");
+            return node ? !knownNodePubkeys.has(node) : false;
+          })
+          .sort((a: any, b: any) => b.created_at - a.created_at)
+          .map(mapReview);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            output: {
+              providers,
+              unmatchedReviews,
+              enabledLabels,
               totalCount: baseUrlsList.length,
+              reviewEventCount: reviewEvents.length,
             },
           }),
         );
@@ -1382,10 +2477,13 @@ export function createDaemonRequestHandler(deps: {
               .filter((c) => c.ownerNpub === npubFilter)
               .map((c) => c.clientId)
           : undefined;
-        const output = await deps.usageTrackingDriver.list({
-          limit: parseLimit(url.searchParams.get("limit")),
-          ...(clientFilter ? { clients: clientFilter } : {}),
-        });
+        // An unmatched owner is an empty selection, not an unfiltered query.
+        const output = clientFilter?.length === 0
+          ? []
+          : await deps.usageTrackingDriver.list({
+              limit: parseLimit(url.searchParams.get("limit")),
+              ...(clientFilter ? { clients: clientFilter } : {}),
+            });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
       } catch (error) {
@@ -1397,6 +2495,19 @@ export function createDaemonRequestHandler(deps: {
     if (req.method === "GET" && url.pathname === "/usage/summary") {
       try {
         const tz = Number.parseInt(url.searchParams.get("tz") || "0", 10) || 0;
+        const window = parseTimeWindow(url.searchParams.get("window"));
+        const requestedTimeZone = url.searchParams.get("timezone")?.trim();
+        let timeZone: string | undefined;
+        if (requestedTimeZone) {
+          try {
+            timeZone = new Intl.DateTimeFormat("en-US", {
+              timeZone: requestedTimeZone,
+            }).resolvedOptions().timeZone;
+          } catch {
+            sendJson(res, 400, { error: "Invalid 'timezone': expected an IANA timezone." });
+            return;
+          }
+        }
         const npubFilter = url.searchParams.get("npub")?.trim();
         const clients = getClientsFromStore(deps.store);
         const clientFilter = npubFilter
@@ -1404,7 +2515,7 @@ export function createDaemonRequestHandler(deps: {
               .filter((c) => c.ownerNpub === npubFilter)
               .map((c) => c.clientId)
           : undefined;
-        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter);
+        const summary = await getUsageSummary(deps.usageTrackingDriver, clients, tz, clientFilter, window, timeZone);
         sendJson(res, 200, { output: summary });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
@@ -1412,50 +2523,33 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/usagePi") {
+    if (req.method === "GET" && (url.pathname === "/requests" || url.pathname.startsWith("/requests/"))) {
       try {
-        const timestamp = (url.searchParams.get("timestamp") || "").trim();
-        if (!timestamp) {
-          sendJson(res, 400, {
-            error: "Missing required 'timestamp' query parameter.",
+        const driver = deps.requestLifecycleDriver;
+        if (!driver) { sendJson(res, 503, { error: "Lifecycle storage unavailable." }); return; }
+        if (url.pathname === "/requests") {
+          const time = (key: string) => {
+            const raw = url.searchParams.get(key);
+            if (raw === null) return undefined;
+            const value = Number(raw);
+            if (!Number.isFinite(value)) throw new Error(`Invalid ${key} timestamp.`);
+            return value;
+          };
+          const outcome = url.searchParams.get("outcome") || undefined;
+          if (outcome && !["in_progress", "succeeded", "failed", "aborted", "interrupted"].includes(outcome)) {
+            sendJson(res, 400, { error: "Invalid outcome." }); return;
+          }
+          const entries = await driver.list({
+            limit: parseLimit(url.searchParams.get("limit")), before: time("before"), after: time("after"),
+            outcome: outcome as any, modelId: url.searchParams.get("modelId") || undefined,
+            baseUrl: url.searchParams.get("baseUrl") || undefined, clientId: url.searchParams.get("clientId") || undefined,
           });
-          return;
+          sendJson(res, 200, { output: entries });
+        } else {
+          const trace = await driver.getTrace(decodeURIComponent(url.pathname.slice("/requests/".length)));
+          sendJson(res, trace ? 200 : 404, trace ? { request: trace.request, attempts: trace.attempts, events: trace.events } : { error: "Request not found." });
         }
-
-        const usageDriver = deps.usageTrackingDriver;
-        const limit = parseLimit(url.searchParams.get("limit"));
-        const allMatching = await usageDriver.list();
-        const requestIdPrefix = `gen-${timestamp}-`;
-        const filtered = allMatching.filter((entry) =>
-          entry.requestId.startsWith(requestIdPrefix),
-        );
-        const entries = filtered.slice(0, limit);
-        const totalEntries = filtered.length;
-        const totalSatsCost = filtered.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-        const recentSatsCost = entries.reduce(
-          (sum, entry) => sum + (entry.satsCost || 0),
-          0,
-        );
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            output: {
-              entries,
-              totalEntries,
-              totalSatsCost,
-              recentSatsCost,
-              limit,
-              timestamp,
-            },
-          }),
-        );
-      } catch (error) {
-        sendJson(res, 500, { error: toErrorMessage(error) });
-      }
+      } catch (error) { sendJson(res, 400, { error: toErrorMessage(error) }); }
       return;
     }
 
@@ -1469,10 +2563,46 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    if (!shouldTrackRequestLifecycle(req.method || "GET", url.pathname) || /^\/(?:v1\/)?(?:status|version|clients|cooldowns|settings|nwc|stop)(?:\/|$)/.test(url.pathname)) {
+      sendJson(res, 404, { error: "Unknown endpoint." });
+      return;
+    }
+
+    // Only the final provider-proxy POST branch is eligible. Metadata/admin
+    // routes above never allocate a lifecycle (including their validation errors).
+    const abortController = new AbortController();
+    const onAbort = () => abortController.abort();
+    const onClose = () => { if (!res.writableFinished) onAbort(); };
+    req.once("aborted", onAbort);
+    res.once("close", onClose);
+    const cleanup = () => {
+      req.removeListener("aborted", onAbort);
+      res.removeListener("close", onClose);
+    };
+    res.once("finish", cleanup);
+    res.once("close", cleanup);
+    const lifecycle = await beginRequestLifecycle({
+      driver: deps.requestLifecycleDriver,
+      ownerInstanceId: deps.lifecycleOwnerInstanceId,
+      method: req.method || "POST", path: url.pathname,
+      clientId: getClientIdFromRequest(req, deps.store) || "unknown",
+      callerRequestId: typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : undefined,
+      mode: deps.mode, logger: makeSdkLogger("lifecycle"),
+    });
+    res.setHeader("x-routstr-sdk-request-id", lifecycle.requestId);
+    const reqLogger = makeSdkLogger(`req:${lifecycle.requestId}`);
+    let handedToSdk = false;
+    const finishLocal = async (httpStatus: number, errorMessage: string) => {
+      const aborted = abortController.signal.aborted;
+      await lifecycle.finish({ outcome: aborted ? "aborted" : "failed", httpStatus: aborted ? undefined : httpStatus, errorMessage: aborted ? "Request aborted." : errorMessage });
+    };
+
     let requestBody: unknown = {};
     try {
       requestBody = await readJsonBody(req);
     } catch (error) {
+      await finishLocal(400, "Invalid JSON body.");
+      if (res.destroyed) return;
       sendJson(res, 400, {
         error: "Invalid JSON body.",
         details: toErrorMessage(error),
@@ -1480,29 +2610,28 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    const bodyObj = requestBody as Record<string, unknown>;
+    const bodyObj = requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)
+      ? requestBody as Record<string, unknown> : {};
     const modelId = typeof bodyObj.model === "string" ? bodyObj.model : "";
 
     if (!modelId) {
+      await finishLocal(400, "Missing required model field.");
       sendJson(res, 400, { error: "Missing required 'model' field." });
       return;
     }
 
+    await lifecycle.updateRequest({ modelId, stream: bodyObj.stream === true });
+
     // Cap the completion budget when the client does not set an output token
     // limit. Without this, the SDK prices at the provider's worst-case
     // max_completion_cost, which varies widely across providers (2.3× for
-    // kimi-k3) and balloons during provider failover. Chat/completions use
-    // max_tokens; the OpenAI Responses API uses max_output_tokens.
-    if (deps.maxTokens > 0) {
-      const isResponsesPath = url.pathname.includes("/responses");
-      if (isResponsesPath) {
-        if (typeof bodyObj.max_output_tokens !== "number") {
-          bodyObj.max_output_tokens = deps.maxTokens;
-        }
-      } else if (typeof bodyObj.max_tokens !== "number") {
-        bodyObj.max_tokens = deps.maxTokens;
-      }
-    }
+    // kimi-k3) and balloons during provider failover. Chat/completions get
+    // max_completion_tokens (the OpenAI-standard field; reasoning models
+    // reject the legacy max_tokens); the OpenAI Responses API uses
+    // max_output_tokens. Endpoints that do not define those fields (e.g.
+    // /v1/systemone) are forwarded verbatim — injecting one makes a strict
+    // upstream answer 400.
+    applyDefaultOutputTokenLimit(url.pathname, bodyObj, deps.maxTokens);
 
     const forcedProvider: string | undefined =
       url.searchParams.get("provider") ||
@@ -1521,16 +2650,39 @@ export function createDaemonRequestHandler(deps: {
     }
 
     try {
-      await deps.ensureProvidersBootstrapped();
-      const reqId = randomBytes(4).toString("hex");
-      const reqLogger = sdkLogger.child(`req:${reqId}`);
-      logger.log(`[req:${reqId}] Routing request with path: `, url.pathname);
+      // Discovery is shared: cancel this waiter, not the shared bootstrap.
+      await new Promise<void>((resolve, reject) => {
+        const signal = abortController.signal;
+        const aborted = () => { signal.removeEventListener("abort", aborted); reject(new Error("Request aborted.")); };
+        if (signal.aborted) { aborted(); return; }
+        signal.addEventListener("abort", aborted, { once: true });
+        deps.ensureProvidersBootstrapped().then(
+          () => { signal.removeEventListener("abort", aborted); resolve(); },
+          (error) => { signal.removeEventListener("abort", aborted); reject(error); },
+        );
+      });
 
-      const response = await routeRequests({
+      // Provider nodes accept an endpoint with or without a leading `/v1`, but
+      // they forward the caller's spelling to their own upstream, and some
+      // upstreams serve only the versioned route. Normalize at the last hop
+      // routstrd controls, so every client spelling reaches the same upstream
+      // URL. `url.pathname` stays untouched: the ingress matches its own
+      // routes against it.
+      const forwardedPath = ensureV1Prefix(url.pathname);
+      reqLogger.log(
+        forwardedPath === url.pathname
+          ? `Routing request with path: ${url.pathname}`
+          : `Routing request with path: ${url.pathname} (forwarding as ${forwardedPath})`,
+      );
+
+      handedToSdk = true;
+      const response = await (deps.routeRequests ?? routeRequests)({
+        lifecycle, requestLifecycleDriver: deps.requestLifecycleDriver, signal: abortController.signal,
         modelId,
         requestBody,
-        path: url.pathname,
+        path: forwardedPath,
         forcedProvider,
+        autoModelPath: settings.autoModelPath,
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
@@ -1546,7 +2698,17 @@ export function createDaemonRequestHandler(deps: {
           ? { requestResponseLogSink: deps.requestResponseLogSink }
           : {}),
         ...(deps.routstrPubkey ? { routstrPubkey: deps.routstrPubkey } : {}),
+        ...(deps.routstrModelsPubkey
+          ? { routstrModelsPubkey: deps.routstrModelsPubkey }
+          : {}),
       });
+
+      if (abortController.signal.aborted || res.destroyed) {
+        await response.body?.cancel().catch(() => {});
+        const finalize = (response as any).finalize;
+        if (finalize) await finalize();
+        return;
+      }
 
       // Bridge the Web `Response` to the Node `ServerResponse`: status +
       // headers + pipe(body → res). Hop-by-hop headers are dropped (see
@@ -1568,13 +2730,15 @@ export function createDaemonRequestHandler(deps: {
           try {
             await finalize();
           } catch (err) {
-            logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+            reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
           }
         }
         return;
       }
 
       const nodeReadable = Readable.fromWeb(response.body as any);
+      const cancelBody = () => nodeReadable.destroy();
+      abortController.signal.addEventListener("abort", cancelBody, { once: true });
       await new Promise<void>((resolve, reject) => {
         let settled = false;
         const finish = () => {
@@ -1588,23 +2752,28 @@ export function createDaemonRequestHandler(deps: {
           reject(err);
         };
         res.once("finish", finish);
-        res.once("close", finish);
+        res.once("close", () => { nodeReadable.destroy(); finish(); });
         res.once("error", fail);
         nodeReadable.once("error", fail);
         nodeReadable.pipe(res);
       });
 
+      abortController.signal.removeEventListener("abort", cancelBody);
       if (finalize) {
         try {
           await finalize();
         } catch (err) {
-          logger.error(`[daemon] finalize error: ${toErrorMessage(err)}`);
+          reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
         }
       }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.error(`[daemon] Error: ${message}`);
+      const nodeRequestId = (error as { nodeRequestId?: unknown })?.nodeRequestId;
+      if (!res.headersSent && typeof nodeRequestId === "string") res.setHeader("x-routstr-request-id", nodeRequestId);
+      reqLogger.error(`Error: ${message}`);
+      if (!handedToSdk) await finishLocal(error instanceof InsufficientBalanceError ? 402 : 500, "Local inference preparation failed.");
+      if (res.headersSent || res.destroyed) { res.destroy(); return; }
 
       if (error instanceof InsufficientBalanceError) {
         const balanceError = error as {
@@ -1627,8 +2796,34 @@ export function createDaemonRequestHandler(deps: {
         return;
       }
 
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: message }));
+      // Anything reaching here is unstructured: an unclassified transport or
+      // runtime failure, not a provider envelope. Never hand those to a client
+      // verbatim — `message` is whatever the runtime's fetch threw, e.g.
+      //   ECONNRESET: The socket connection was closed unexpectedly. For more
+      //   information, pass `verbose: true` in the second argument to fetch()
+      // which leaks internals, reads like an OpenAI-compatible error but is
+      // not one, and (worse) made a transient upstream socket reset look like
+      // a caller bug. The raw text stays in the daemon log under `req:<id>`;
+      // the client gets a stable, machine-readable contract plus the request id
+      // needed to find the detail:
+      //   - 502 upstream_unavailable: the request was handed to the SDK, i.e. a
+      //     provider was involved. Retryable; the SDK already exhausts its own
+      //     retries/failover before throwing this.
+      //   - 500 local_preparation_failed: it failed before any provider was
+      //     involved (discovery bootstrap, provider selection, etc.).
+      const upstreamFailure = handedToSdk;
+      res.writeHead(upstreamFailure ? 502 : 500, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: upstreamFailure
+            ? "Upstream provider request failed."
+            : "Local inference preparation failed.",
+          error_type: upstreamFailure
+            ? "upstream_unavailable"
+            : "local_preparation_failed",
+          request_id: lifecycle.requestId,
+        }),
+      );
     }
   };
 }

@@ -11,7 +11,6 @@ function config(host: string): RoutstrdConfig {
     port: 8008,
     host,
     provider: null,
-    cocodPath: null,
   };
 }
 

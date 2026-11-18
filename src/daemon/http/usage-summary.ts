@@ -3,6 +3,7 @@ import type {
   UsageTrackingDriver,
   UsageTrackingEntry,
 } from "@routstr/sdk/storage";
+import { createUsageCalendar } from "./usage-calendar";
 import type { ClientEntry } from "../../utils/clients";
 
 // ─── Public shape ────────────────────────────────────────────────────────────
@@ -54,6 +55,82 @@ export interface SizeBucket {
   cost: number; // summed satsCost
 }
 
+export interface SizeBuckets {
+  tiny: SizeBucket;
+  small: SizeBucket;
+  medium: SizeBucket;
+  large: SizeBucket;
+  huge: SizeBucket;
+}
+
+/**
+ * Bucket size used to render the usage history chart. Chosen from the selected
+ * {@link TimeWindow}: hours for the last 24h and 7d, days for 30d, and weeks
+ * for the unbounded `all` view.
+ */
+export type TimelineBucket = "hour" | "day" | "week";
+
+/** One bar in the history chart: one hour, day or week of usage. */
+export interface TimelinePoint {
+  /**
+   * Bucket key: `HH` (24h hour), `MM-DD HH` (7d hour), `YYYY-MM-DD` (day or
+   * week start).
+   */
+  key: string;
+  /** Bucket start, UTC ms. Week points are anchored to their Monday midnight. */
+  timestamp: number;
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/**
+ * Zero-filled usage series for the history chart. Every bucket between the
+ * range start and `now` is present (even empty ones) so the chart's x-axis is
+ * evenly spaced; gaps are only possible for a window with no data at all.
+ */
+export interface Timeline {
+  bucket: TimelineBucket;
+  points: TimelinePoint[];
+}
+
+/**
+ * Selectable time range for the usage monitor. `today` is the last 24
+ * hours (hour-aligned), `7d`/`30d` cover that many whole local days ending
+ * today, `all` is unbounded. Windowed aggregates and the History timeline
+ * share the same range, so tab totals match the sum of the chart bars.
+ */
+export type TimeWindow = "all" | "today" | "7d" | "30d";
+
+export const TIME_WINDOWS: readonly TimeWindow[] = ["all", "today", "7d", "30d"];
+
+/** Coerce a query parameter to a known window, defaulting to `all`. */
+export function parseTimeWindow(raw: string | null | undefined): TimeWindow {
+  const value = typeof raw === "string" ? raw.trim() : "";
+  return (TIME_WINDOWS as readonly string[]).includes(value)
+    ? (value as TimeWindow)
+    : "all";
+}
+
+/**
+ * Aggregates scoped to a single {@link TimeWindow}. The all-time equivalent
+ * lives on the top level of {@link UsageSummary} so the Overview/Recent tabs
+ * stay unaffected no matter which window is selected.
+ */
+export interface WindowedStats {
+  window: TimeWindow;
+  totals: StatRow;
+  models: ModelSummary[];
+  providers: ProviderSummary[];
+  clients: ClientSummary[];
+  npubs: NpubSummary[];
+  sizeBuckets: SizeBuckets;
+  /** Zero-filled series for the History tab chart. */
+  timeline: Timeline;
+}
+
 export interface UsageSummary {
   generatedAt: number;
   totals: StatRow;
@@ -63,14 +140,10 @@ export interface UsageSummary {
   npubs: NpubSummary[];
   days: DaySummary[];
   hoursToday: HourSummary[];
-  sizeBuckets: {
-    tiny: SizeBucket;
-    small: SizeBucket;
-    medium: SizeBucket;
-    large: SizeBucket;
-    huge: SizeBucket;
-  };
+  sizeBuckets: SizeBuckets;
   recent: UsageTrackingEntry[];
+  /** Aggregates for the requested window. Always set by the server. */
+  window?: WindowedStats;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -83,6 +156,17 @@ function rowToStat(r: UsageAggregateRow): StatRow {
     totalTokens: r.totalTokens,
     cost: r.cost,
     satsCost: r.satsCost,
+  };
+}
+
+function zeroStatRow(): StatRow {
+  return {
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    cost: 0,
+    satsCost: 0,
   };
 }
 
@@ -99,6 +183,16 @@ function emptyBucket(): SizeBucket {
   return { count: 0, cost: 0 };
 }
 
+function emptySizeBuckets(): SizeBuckets {
+  return {
+    tiny: emptyBucket(),
+    small: emptyBucket(),
+    medium: emptyBucket(),
+    large: emptyBucket(),
+    huge: emptyBucket(),
+  };
+}
+
 /** [minInclusive, maxExclusive) token bounds for each size bucket. */
 const SIZE_BUCKET_BOUNDS = {
   tiny: [0, 1000],
@@ -110,14 +204,8 @@ const SIZE_BUCKET_BOUNDS = {
 
 function computeSizeBuckets(
   entries: UsageTrackingEntry[],
-): UsageSummary["sizeBuckets"] {
-  const buckets = {
-    tiny: emptyBucket(),
-    small: emptyBucket(),
-    medium: emptyBucket(),
-    large: emptyBucket(),
-    huge: emptyBucket(),
-  };
+): SizeBuckets {
+  const buckets = emptySizeBuckets();
   for (const entry of entries) {
     for (const [name, [min, max]] of Object.entries(SIZE_BUCKET_BOUNDS)) {
       if (entry.totalTokens >= min && entry.totalTokens < max) {
@@ -139,6 +227,419 @@ function startOfLocalDayUtc(now: number, tzOffsetMinutes: number): number {
   );
 }
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+/**
+ * Start (UTC ms) of the oldest bucket the History chart draws for a window,
+ * or `undefined` for the unbounded `all` window. The windowed aggregates use
+ * the same boundary, so a tab's totals always match the sum of its bars:
+ *
+ * - `today` → the current local hour minus 23h (24 whole hour buckets).
+ * - `7d` / `30d` → start of the local day 6 / 29 days ago (whole days).
+ */
+function windowRangeStartUtc(
+  window: TimeWindow,
+  now: number,
+  tzOffsetMinutes: number,
+): number | undefined {
+  if (window === "all") return undefined;
+  const bucketMs = window === "today" ? HOUR_MS : DAY_MS;
+  const slotCount = window === "today" ? 24 : window === "7d" ? 7 : 30;
+  const shiftedNow = now - tzOffsetMinutes * 60_000;
+  const newestShifted = Math.floor(shiftedNow / bucketMs) * bucketMs;
+  const oldestShifted = newestShifted - (slotCount - 1) * bucketMs;
+  return oldestShifted + tzOffsetMinutes * 60_000;
+}
+
+/** Filter shared by every aggregate/list/count call. */
+interface UsageFilter {
+  clients?: string[];
+  after?: number;
+}
+
+// ─── History timeline ────────────────────────────────────────────────────────
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/** Empty series used by the zero-data short-circuit. */
+function emptyTimeline(window: TimeWindow): Timeline {
+  return { bucket: bucketForWindow(window), points: [] };
+}
+
+/** Which bucket the chart uses for a window: hours, days or weeks. */
+function bucketForWindow(window: TimeWindow): TimelineBucket {
+  if (window === "today" || window === "7d") return "hour";
+  if (window === "all") return "week";
+  return "day";
+}
+
+/**
+ * `YYYY-MM-DD` for a timestamp that is already shifted into local wall-clock
+ * time (i.e. `timestamp - tzOffsetMinutes * 60000`), matching the SDK's
+ * `groupBy: "day"` keys.
+ */
+function shiftedDayKey(shiftedMs: number): string {
+  const d = new Date(shiftedMs);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+interface TimelineAccumulator {
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}
+
+function zeroAccumulator(): TimelineAccumulator {
+  return { requests: 0, satsCost: 0, totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+}
+
+function accumulatorFromRow(row: {
+  requests: number;
+  satsCost: number;
+  totalTokens: number;
+  promptTokens: number;
+  completionTokens: number;
+}): TimelineAccumulator {
+  return {
+    requests: row.requests,
+    satsCost: row.satsCost,
+    totalTokens: row.totalTokens,
+    promptTokens: row.promptTokens,
+    completionTokens: row.completionTokens,
+  };
+}
+
+/** Sum consecutive points into `groupSize`-wide buckets (e.g. 6 hours). */
+function foldTimelinePoints(points: TimelinePoint[], groupSize: number): TimelinePoint[] {
+  const folded: TimelinePoint[] = [];
+  for (let i = 0; i < points.length; i += groupSize) {
+    const chunk = points.slice(i, i + groupSize);
+    const first = chunk[0]!;
+    folded.push({
+      key: first.key,
+      timestamp: first.timestamp,
+      requests: chunk.reduce((sum, p) => sum + p.requests, 0),
+      satsCost: chunk.reduce((sum, p) => sum + p.satsCost, 0),
+      totalTokens: chunk.reduce((sum, p) => sum + p.totalTokens, 0),
+      promptTokens: chunk.reduce((sum, p) => sum + p.promptTokens, 0),
+      completionTokens: chunk.reduce((sum, p) => sum + p.completionTokens, 0),
+    });
+  }
+  return folded;
+}
+
+/**
+ * Build the zero-filled history series for a window.
+ *
+ * - `today` (24h) → 24 hourly buckets, aligned to the local hour.
+ * - `7d` → 6-hour buckets (7 × 4), built from hourly aggregates per local day
+ *   and then folded. The SDK's `hour` key carries no date, so each day is
+ *   aggregated over its own range.
+ * - `30d` → 30 daily buckets.
+ * - `all` → one bucket per ISO week (Monday start) since the first week with
+ *   usage. The SDK has no `week` grouping, so all days are aggregated and
+ *   folded here.
+ */
+async function buildTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  window: TimeWindow,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  if (window === "all") {
+    return buildWeeklyTimeline(driver, baseFilter, now, tzOffsetMinutes);
+  }
+  if (window === "7d") {
+    return buildHourlyWeekTimeline(driver, baseFilter, now, tzOffsetMinutes);
+  }
+
+  const isHourly = window === "today";
+  const bucket = isHourly ? "hour" : "day";
+  const bucketMs = isHourly ? HOUR_MS : DAY_MS;
+  const slotCount = isHourly ? 24 : 30;
+
+  // Same boundary the windowed aggregates use, so the chart bars sum to the
+  // tab's totals. Aligning the newest slot to the current local hour/day also
+  // keeps each hour-of-day unique (the SDK's `hour` keys carry no date).
+  const oldestUtc = windowRangeStartUtc(window, now, tzOffsetMinutes)!;
+  const oldestShifted = oldestUtc - tzOffsetMinutes * 60_000;
+
+  const rows = await driver.aggregate({
+    ...baseFilter,
+    groupBy: bucket,
+    tzOffsetMinutes,
+    after: oldestUtc - 1, // strict `>`, so include entries at the bucket start
+  });
+  const byKey = new Map(rows.map((row) => [row.group ?? "", row]));
+
+  const points: TimelinePoint[] = [];
+  for (let i = 0; i < slotCount; i++) {
+    const slotShifted = oldestShifted + i * bucketMs;
+    const key = isHourly ? pad2(new Date(slotShifted).getUTCHours()) : shiftedDayKey(slotShifted);
+    const row = byKey.get(key);
+    points.push({
+      key,
+      timestamp: slotShifted + tzOffsetMinutes * 60_000,
+      ...(row ? accumulatorFromRow(row) : zeroAccumulator()),
+    });
+  }
+
+  return { bucket, points };
+}
+
+/**
+ * 7 days of hourly aggregates (7 × 24), oldest first, folded into 6-hour
+ * buckets (7 × 4). The SDK's `hour` grouping keys on hour-of-day only (no
+ * date), so each local day is aggregated over its own `[start, end)` range.
+ */
+async function buildHourlyWeekTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  const DAYS = 7;
+  const shiftedNow = now - tzOffsetMinutes * 60_000;
+  const todayStartShifted = Math.floor(shiftedNow / DAY_MS) * DAY_MS;
+
+  const points: TimelinePoint[] = [];
+  for (let d = DAYS - 1; d >= 0; d--) {
+    const dayStartShifted = todayStartShifted - d * DAY_MS;
+    const dayStartUtc = dayStartShifted + tzOffsetMinutes * 60_000;
+    const dayEndUtc = dayStartUtc + DAY_MS;
+
+    const rows = await driver.aggregate({
+      ...baseFilter,
+      groupBy: "hour",
+      tzOffsetMinutes,
+      after: dayStartUtc - 1, // strict `>`, inclusive of the day's first ms
+      before: dayEndUtc, // strict `<`, exclusive of the next day
+    });
+    const byHour = new Map(rows.map((row) => [row.group ?? "", row]));
+    const dateLabel = shiftedDayKey(dayStartShifted).slice(5); // MM-DD
+
+    for (let h = 0; h < 24; h++) {
+      const slotShifted = dayStartShifted + h * HOUR_MS;
+      const row = byHour.get(pad2(h));
+      points.push({
+        key: dateLabel + " " + pad2(h),
+        timestamp: slotShifted + tzOffsetMinutes * 60_000,
+        ...(row ? accumulatorFromRow(row) : zeroAccumulator()),
+      });
+    }
+  }
+
+  return { bucket: "hour", points: foldTimelinePoints(points, 6) };
+}
+
+/** Shifted-local Monday midnight of the week containing `shiftedMs`. */
+function startOfWeekShifted(shiftedMs: number): number {
+  const day = new Date(shiftedMs).getUTCDay(); // 0 = Sunday
+  const daysSinceMonday = (day + 6) % 7;
+  return Math.floor(shiftedMs / DAY_MS) * DAY_MS - daysSinceMonday * DAY_MS;
+}
+
+/** Shifted-local ms for a `YYYY-MM-DD` key (`Date.UTC` == shifted-local). */
+function dayKeyToShifted(key: string): number {
+  const [y, m, d] = key.split("-").map(Number) as [number, number, number];
+  return Date.UTC(y, m - 1, d);
+}
+
+/** Fold all-time daily aggregates into ISO weeks (Monday), zero-filling gaps. */
+async function buildWeeklyTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  now: number,
+  tzOffsetMinutes: number,
+): Promise<Timeline> {
+  const rows = await driver.aggregate({
+    ...baseFilter,
+    groupBy: "day",
+    tzOffsetMinutes,
+  });
+
+  const byWeek = new Map<string, TimelineAccumulator>();
+  for (const row of rows) {
+    const dayKey = row.group ?? "";
+    if (dayKey.length !== 10) continue;
+    const weekKey = shiftedDayKey(startOfWeekShifted(dayKeyToShifted(dayKey)));
+    const acc = byWeek.get(weekKey) ?? zeroAccumulator();
+    const add = accumulatorFromRow(row);
+    acc.requests += add.requests;
+    acc.satsCost += add.satsCost;
+    acc.totalTokens += add.totalTokens;
+    acc.promptTokens += add.promptTokens;
+    acc.completionTokens += add.completionTokens;
+    byWeek.set(weekKey, acc);
+  }
+
+  const weeks = [...byWeek.keys()].sort();
+  if (weeks.length === 0) return { bucket: "week", points: [] };
+
+  const lastShifted = startOfWeekShifted(now - tzOffsetMinutes * 60_000);
+  const points: TimelinePoint[] = [];
+  for (let cur = dayKeyToShifted(weeks[0]!); cur <= lastShifted; cur += 7 * DAY_MS) {
+    const key = shiftedDayKey(cur);
+    points.push({
+      key,
+      timestamp: cur + tzOffsetMinutes * 60_000,
+      ...(byWeek.get(key) ?? zeroAccumulator()),
+    });
+  }
+
+  return { bucket: "week", points };
+}
+
+type UsageCalendar = ReturnType<typeof createUsageCalendar>;
+
+function addStat(target: StatRow, row: UsageAggregateRow): void {
+  target.requests += row.requests;
+  target.cost += row.cost;
+  target.satsCost += row.satsCost;
+  target.totalTokens += row.totalTokens;
+  target.promptTokens += row.promptTokens;
+  target.completionTokens += row.completionTokens;
+}
+
+/**
+ * `day`/`hour` aggregates on IANA local time, pushed down to the driver.
+ *
+ * The SDK groups with a single fixed UTC offset, which is exact as long as the
+ * zone keeps one offset. So the range is split at every offset transition
+ * (roughly two a year) and each piece is aggregated in SQL with its own offset;
+ * keys that span a transition (the DST day itself, a repeated hour) are summed.
+ * Memory scales with the number of buckets, never with the number of rows.
+ *
+ * `start` is inclusive, `end` exclusive; omit `start` for all history.
+ */
+async function aggregateLocal(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  calendar: UsageCalendar,
+  groupBy: "day" | "hour",
+  now: number,
+  start?: number,
+  end?: number,
+): Promise<Map<string, StatRow>> {
+  const rows = new Map<string, StatRow>();
+  let from = start;
+  if (from === undefined) {
+    // Oldest usage day (UTC) bounds the transition scan; one cheap SQL query.
+    const days = await driver.aggregate({ ...baseFilter, groupBy: "day", tzOffsetMinutes: 0 });
+    const oldest = days.find((row) => row.group !== null)?.group;
+    if (!oldest) return rows;
+    from = dayKeyToShifted(oldest) - DAY_MS; // margin for any local offset
+  }
+  const scanEnd = Math.max(from, Math.min(end ?? now, now));
+  for (const segment of calendar.segments(from, scanEnd)) {
+    const lo = Math.max(segment.start, from);
+    const hi = Math.min(segment.end ?? Infinity, end ?? Infinity);
+    if (lo >= hi) continue;
+    const segmentRows = await driver.aggregate({
+      ...baseFilter,
+      groupBy,
+      tzOffsetMinutes: segment.offsetMinutes,
+      after: lo - 1, // strict `>`; inclusive of `lo`
+      ...(hi === Infinity ? {} : { before: hi }), // strict `<`
+    });
+    for (const row of segmentRows) {
+      if (row.group === null) continue;
+      const acc = rows.get(row.group) ?? zeroStatRow();
+      addStat(acc, row);
+      rows.set(row.group, acc);
+    }
+  }
+  return rows;
+}
+
+async function buildCalendarTimeline(
+  driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
+  window: TimeWindow,
+  now: number,
+  calendar: UsageCalendar,
+  start: number | undefined,
+): Promise<Timeline> {
+  const points: TimelinePoint[] = [];
+  if (window === "today") {
+    // 24 elapsed hours from `start`, which is aligned to the current local
+    // hour. Grouping with the current offset gives each elapsed hour a
+    // distinct key, so both occurrences of a repeated DST hour stay separate.
+    const offset = calendar.offsetMinutes(now);
+    const rows = await driver.aggregate({
+      ...baseFilter, groupBy: "hour", tzOffsetMinutes: offset, after: start! - 1,
+    });
+    const byHour = new Map(rows.map((row) => [row.group ?? "", row]));
+    for (let i = 0; i < 24; i++) {
+      const timestamp = start! + i * HOUR_MS;
+      const row = byHour.get(pad2(new Date(timestamp - offset * 60_000).getUTCHours()));
+      points.push({ key: pad2(new Date(calendar.wallTime(timestamp)).getUTCHours()), timestamp,
+        ...(row ? accumulatorFromRow(row) : zeroAccumulator()) });
+    }
+    return { bucket: "hour", points };
+  }
+
+  if (window === "7d") {
+    // The SDK's hour key has no date, so aggregate each local day separately
+    // and fold its hours into 6-hour buckets.
+    const firstDay = calendar.dayStart(now) - 6 * DAY_MS;
+    for (let d = 0; d < 7; d++) {
+      const dayWall = firstDay + d * DAY_MS;
+      const hours = await aggregateLocal(driver, baseFilter, calendar, "hour", now,
+        calendar.toUtc(dayWall), calendar.toUtc(dayWall + DAY_MS));
+      const label = shiftedDayKey(dayWall).slice(5);
+      for (let h = 0; h < 24; h += 6) {
+        const acc = zeroAccumulator();
+        for (let k = h; k < h + 6; k++) {
+          const row = hours.get(pad2(k));
+          if (!row) continue;
+          acc.requests += row.requests;
+          acc.satsCost += row.satsCost;
+          acc.totalTokens += row.totalTokens;
+          acc.promptTokens += row.promptTokens;
+          acc.completionTokens += row.completionTokens;
+        }
+        points.push({ key: `${label} ${pad2(h)}`, timestamp: calendar.toUtc(dayWall + h * HOUR_MS), ...acc });
+      }
+    }
+    return { bucket: "hour", points };
+  }
+
+  const days = await aggregateLocal(driver, baseFilter, calendar, "day", now, start);
+  if (window === "all") {
+    const byWeek = new Map<string, TimelineAccumulator>();
+    for (const [day, row] of days) {
+      const week = shiftedDayKey(startOfWeekShifted(dayKeyToShifted(day)));
+      const acc = byWeek.get(week) ?? zeroAccumulator();
+      acc.requests += row.requests;
+      acc.satsCost += row.satsCost;
+      acc.totalTokens += row.totalTokens;
+      acc.promptTokens += row.promptTokens;
+      acc.completionTokens += row.completionTokens;
+      byWeek.set(week, acc);
+    }
+    if (byWeek.size === 0) return emptyTimeline(window);
+    const last = startOfWeekShifted(calendar.wallTime(now));
+    for (let week = dayKeyToShifted([...byWeek.keys()].sort()[0]!); week <= last; week += 7 * DAY_MS) {
+      const key = shiftedDayKey(week);
+      points.push({ key, timestamp: calendar.toUtc(week), ...(byWeek.get(key) ?? zeroAccumulator()) });
+    }
+    return { bucket: "week", points };
+  }
+
+  const last = calendar.dayStart(now);
+  for (let day = last - 29 * DAY_MS; day <= last; day += DAY_MS) {
+    const key = shiftedDayKey(day);
+    const row = days.get(key);
+    points.push({ key, timestamp: calendar.toUtc(day), ...(row ? accumulatorFromRow(row) : zeroAccumulator()) });
+  }
+  return { bucket: "day", points };
+}
+
 // ─── Module-level memo cache ─────────────────────────────────────────────────
 
 interface CacheEntry {
@@ -154,99 +655,69 @@ export function __resetUsageSummaryCacheForTest(): void {
   _cache = null;
 }
 
-// ─── Main builder ─────────────────────────────────────────────────────────────
+// ─── Aggregation ─────────────────────────────────────────────────────────────
 
-export async function getUsageSummary(
+function emptyAggregates(): Omit<WindowedStats, "window" | "timeline"> {
+  return {
+    totals: zeroStatRow(),
+    models: [],
+    providers: [],
+    clients: [],
+    npubs: [],
+    sizeBuckets: emptySizeBuckets(),
+  };
+}
+
+/**
+ * Build one set of aggregates (totals, per-model/provider/client/npub, size
+ * buckets). `after` scopes every query to a time window; omit it for all-time.
+ * The same function produces both the all-time block and the windowed block so
+ * they can never drift apart.
+ */
+async function buildAggregates(
   driver: UsageTrackingDriver,
+  baseFilter: UsageFilter,
   clients: ClientEntry[],
   tzOffsetMinutes: number,
-  /** If set, only include usage for these client IDs (e.g. from `?npub=` filtering). */
-  clientFilter?: string[],
-): Promise<UsageSummary> {
-  // Cache key: total row count + per-client identity + filter + tz.
-  const count = await driver.count(clientFilter ? { clients: clientFilter } : {});
-  const clientIdentity = clients.map((c) => `${c.clientId}:${c.ownerNpub ?? ""}`).join(",");
-  const filterKey = clientFilter ? `:f:${clientFilter.sort().join(",")}` : "";
-  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}${filterKey}`;
-  const now = Date.now();
-
-  if (
-    _cache !== null &&
-    _cache.key === cacheKey &&
-    now - _cache.summary.generatedAt <= CACHE_TTL_MS
-  ) {
-    return _cache.summary;
-  }
-
-  // Base filter applied to every aggregate/list/count call
-  const baseFilter = clientFilter ? { clients: clientFilter } as const : {};
-
-  // Short-circuit: if the filter yields no rows, return zeroed summary
-  if (count === 0) {
-    const zeroStat: StatRow = {
-      requests: 0, promptTokens: 0, completionTokens: 0,
-      totalTokens: 0, cost: 0, satsCost: 0,
-    };
-    const zeroSummary: UsageSummary = {
-      generatedAt: now,
-      totals: zeroStat,
-      models: [],
-      providers: [],
-      clients: [],
-      npubs: [],
-      days: [],
-      hoursToday: [],
-      sizeBuckets: {
-        tiny: emptyBucket(), small: emptyBucket(), medium: emptyBucket(),
-        large: emptyBucket(), huge: emptyBucket(),
-      },
-      recent: [],
-    };
-    _cache = { key: cacheKey, summary: zeroSummary };
-    return zeroSummary;
-  }
+  after?: number,
+): Promise<Omit<WindowedStats, "window" | "timeline">> {
+  const filter: UsageFilter = after === undefined ? { ...baseFilter } : { ...baseFilter, after };
 
   // ── Totals ─────────────────────────────────────────────────────────────────
-  const [totalsRow] = await driver.aggregate({ ...baseFilter });
-  const totals: StatRow = totalsRow ? rowToStat(totalsRow) : {
-    requests: 0, promptTokens: 0, completionTokens: 0,
-    totalTokens: 0, cost: 0, satsCost: 0,
-  };
+  const [totalsRow] = await driver.aggregate({ ...filter });
+  const totals: StatRow = totalsRow ? rowToStat(totalsRow) : zeroStatRow();
 
   // ── Models ─────────────────────────────────────────────────────────────────
-  const modelRows = await driver.aggregate({ ...baseFilter, groupBy: "modelId" });
+  const modelRows = await driver.aggregate({ ...filter, groupBy: "modelId" });
   const models: ModelSummary[] = modelRows.map((r) => ({
     modelId: r.group ?? "unknown",
     ...rowToStat(r),
   }));
 
   // ── Providers ──────────────────────────────────────────────────────────────
-  const providerRows = await driver.aggregate({ ...baseFilter, groupBy: "baseUrl" });
+  const providerRows = await driver.aggregate({ ...filter, groupBy: "baseUrl" });
   const providers: ProviderSummary[] = providerRows.map((r) => ({
     baseUrl: r.group ?? "unknown",
     ...rowToStat(r),
   }));
 
   // ── Clients ────────────────────────────────────────────────────────────────
-  const clientRows = await driver.aggregate({ ...baseFilter, groupBy: "client" });
+  const clientRows = await driver.aggregate({ ...filter, groupBy: "client" });
   const clientSummaries: ClientSummary[] = clientRows.map((r) => ({
     client: r.group ?? "unknown",
     ...rowToStat(r),
     topModels: [],
   }));
 
-  // Fill topModels for the top 3 non-null client rows
-  const topClientRows = clientRows
-    .filter((r) => r.group !== null)
-    .slice(0, 3);
-  for (let i = 0; i < topClientRows.length; i++) {
-    const clientId = topClientRows[i]!.group!;
+  // Fill topModels for the top 3 non-null client rows.
+  const topClientRows = clientRows.filter((r) => r.group !== null).slice(0, 3);
+  for (const row of topClientRows) {
+    const clientId = row.group!;
     const topModelRows = await driver.aggregate({
-      ...baseFilter,
+      ...filter,
       groupBy: "modelId",
       client: clientId,
     });
-    // Find matching ClientSummary and set topModels
     const summary = clientSummaries.find((c) => c.client === clientId);
     if (summary) {
       summary.topModels = topModelRows.slice(0, 5).map(rowToTopModel);
@@ -254,7 +725,7 @@ export async function getUsageSummary(
   }
 
   // ── Npubs ──────────────────────────────────────────────────────────────────
-  // Build clientId → ownerNpub lookup (only clients with ownerNpub)
+  // Build clientId → ownerNpub lookup (only clients with ownerNpub).
   const clientToNpub = new Map<string, string>();
   for (const c of clients) {
     if (c.ownerNpub) {
@@ -262,7 +733,7 @@ export async function getUsageSummary(
     }
   }
 
-  // Fold client rows into per-npub sums
+  // Fold client rows into per-npub sums.
   const npubStats = new Map<string, StatRow>();
   const npubClientIds = new Map<string, string[]>();
   for (const r of clientRows) {
@@ -285,7 +756,7 @@ export async function getUsageSummary(
     npubClientIds.set(npub, ids);
   }
 
-  // Sort npubs desc by satsCost
+  // Sort npubs desc by satsCost.
   const sortedNpubs = [...npubStats.entries()].sort(
     (a, b) => b[1].satsCost - a[1].satsCost,
   );
@@ -296,12 +767,13 @@ export async function getUsageSummary(
     topModels: [],
   }));
 
-  // Fill topModels for top 5 npubs
+  // Fill topModels for top 5 npubs.
   for (let i = 0; i < Math.min(5, npubs.length); i++) {
     const npubSummary = npubs[i]!;
     const ids = npubClientIds.get(npubSummary.npub) ?? [];
     if (ids.length > 0) {
       const topModelRows = await driver.aggregate({
+        ...filter,
         groupBy: "modelId",
         clients: ids,
       });
@@ -309,51 +781,125 @@ export async function getUsageSummary(
     }
   }
 
-  // ── Days (last 30, most-recent-first) ─────────────────────────────────────
-  const dayRows = await driver.aggregate({
-    ...baseFilter,
-    groupBy: "day",
-    tzOffsetMinutes,
-    after: now - 30 * 86400000,
-  });
-  const days: DaySummary[] = dayRows
-    .map((r) => ({ date: r.group!, ...rowToStat(r) }))
-    .reverse(); // aggregate returns ascending; we want most-recent-first
-
-  // ── Hours today ────────────────────────────────────────────────────────────
-  const todayStartUtc = startOfLocalDayUtc(now, tzOffsetMinutes);
-  const hourRows = await driver.aggregate({
-    ...baseFilter,
-    groupBy: "hour",
-    tzOffsetMinutes,
-    after: todayStartUtc - 1,
-  });
-  const hoursToday: HourSummary[] = hourRows.map((r) => ({
-    hour: Number(r.group),
-    ...rowToStat(r),
-  }));
-
   // ── Size buckets ───────────────────────────────────────────────────────────
   // The SDK's aggregate() no longer supports token-range filters
   // (minTotalTokens/maxTotalTokens were removed in SDK pr-8), so bucket in
   // JS from a single list() call instead of five aggregate() queries.
-  const allEntries = await driver.list(baseFilter);
+  const allEntries = await driver.list(filter);
   const sizeBuckets = computeSizeBuckets(allEntries);
+
+  return { totals, models, providers, clients: clientSummaries, npubs, sizeBuckets };
+}
+
+// ─── Main builder ─────────────────────────────────────────────────────────────
+
+export async function getUsageSummary(
+  driver: UsageTrackingDriver,
+  clients: ClientEntry[],
+  tzOffsetMinutes: number,
+  /** If set, only include usage for these client IDs (e.g. from `?npub=` filtering). */
+  clientFilter?: string[],
+  /** Time window for the `summary.window` block. Defaults to `all`. */
+  window: TimeWindow = "all",
+  /** IANA timezone for historical calendar boundaries; omitted uses fixed-offset days. */
+  timeZone?: string,
+): Promise<UsageSummary> {
+  // Cache key: total row count + per-client identity + filter + tz + window.
+  // The SDK interprets clients: [] as unfiltered; an explicitly empty owner
+  // selection must instead match nothing, without touching its query path.
+  const count = clientFilter?.length === 0
+    ? 0
+    : await driver.count(clientFilter ? { clients: clientFilter } : {});
+  const clientIdentity = clients.map((c) => `${c.clientId}:${c.ownerNpub ?? ""}`).join(",");
+  const filterKey = clientFilter ? `:f:${[...clientFilter].sort().join(",")}` : "";
+  const cacheKey = `${count}:${clientIdentity}:${tzOffsetMinutes}${filterKey}:${window}:${timeZone ?? "fixed"}`;
+  const now = Date.now();
+  const calendar = timeZone ? createUsageCalendar(timeZone) : undefined;
+  // Align elapsed-hour windows using the actual current offset, not an
+  // ambiguous wall-hour conversion during the autumn repeat.
+  const rangeStart = calendar && window !== "all"
+    ? window === "today"
+      ? now - (calendar.wallTime(now) % HOUR_MS) - (now % 1000) - 23 * HOUR_MS
+      : calendar.toUtc(calendar.dayStart(now) - (window === "7d" ? 6 : 29) * DAY_MS)
+    : windowRangeStartUtc(window, now, tzOffsetMinutes);
+
+  if (
+    _cache !== null &&
+    _cache.key === cacheKey &&
+    now - _cache.summary.generatedAt <= CACHE_TTL_MS
+  ) {
+    return _cache.summary;
+  }
+
+  // Base filter applied to every aggregate/list/count call.
+  const baseFilter: UsageFilter = clientFilter ? { clients: clientFilter } : {};
+
+  // Short-circuit: if the filter yields no rows, return a zeroed summary.
+  if (count === 0) {
+    const aggregates = emptyAggregates();
+    const zeroSummary: UsageSummary = {
+      generatedAt: now,
+      ...aggregates,
+      days: [],
+      hoursToday: [],
+      recent: [],
+      window: { window, ...aggregates, timeline: emptyTimeline(window) },
+    };
+    _cache = { key: cacheKey, summary: zeroSummary };
+    return zeroSummary;
+  }
+
+  // All-time aggregates — drive Overview and remain window-independent.
+  const allTime = await buildAggregates(driver, baseFilter, clients, tzOffsetMinutes);
+
+  // History chart series — bucketed per the selected window (hours/days/months).
+  const timeline = calendar
+    ? await buildCalendarTimeline(driver, baseFilter, window, now, calendar, rangeStart)
+    : await buildTimeline(driver, baseFilter, window, now, tzOffsetMinutes);
+
+  // Windowed aggregates — drive Models/Providers/Tokens/Clients/Npubs.
+  // For `all` we reuse the all-time block, so the default view pays no extra cost.
+  const windowStats: WindowedStats = window === "all"
+    ? { window, ...allTime, timeline }
+    : {
+        window,
+        ...(await buildAggregates(
+          driver,
+          baseFilter,
+          clients,
+          tzOffsetMinutes,
+          rangeStart === undefined ? undefined : rangeStart - 1,
+        )),
+        timeline,
+      };
+
+  // ── Days (last 30, most-recent-first) ─────────────────────────────────────
+  let days: DaySummary[];
+  let hoursToday: HourSummary[];
+  if (calendar) {
+    const todayStartUtc = calendar.toUtc(calendar.dayStart(now));
+    const dayRows = await aggregateLocal(driver, baseFilter, calendar, "day", now, now - 30 * DAY_MS + 1);
+    days = [...dayRows].sort(([a], [b]) => b.localeCompare(a)).map(([date, row]) => ({ date, ...row }));
+    const hourRows = await aggregateLocal(driver, baseFilter, calendar, "hour", now, todayStartUtc);
+    hoursToday = [...hourRows].sort(([a], [b]) => a.localeCompare(b)).map(([hour, row]) => ({ hour: Number(hour), ...row }));
+  } else {
+    const dayRows = await driver.aggregate({ ...baseFilter, groupBy: "day", tzOffsetMinutes, after: now - 30 * DAY_MS });
+    days = dayRows.map((r) => ({ date: r.group!, ...rowToStat(r) })).reverse();
+    const hourRows = await driver.aggregate({ ...baseFilter, groupBy: "hour", tzOffsetMinutes,
+      after: startOfLocalDayUtc(now, tzOffsetMinutes) - 1 });
+    hoursToday = hourRows.map((r) => ({ hour: Number(r.group), ...rowToStat(r) }));
+  }
 
   // ── Recent entries ─────────────────────────────────────────────────────────
   const recent = await driver.list({ ...baseFilter, limit: 50 });
 
   const summary: UsageSummary = {
     generatedAt: now,
-    totals,
-    models,
-    providers,
-    clients: clientSummaries,
-    npubs,
+    ...allTime,
     days,
     hoursToday,
-    sizeBuckets,
     recent,
+    window: windowStats,
   };
 
   _cache = { key: cacheKey, summary };

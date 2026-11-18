@@ -1,5 +1,6 @@
 import { join } from "path";
 import type { RoutstrdConfig } from "../utils/config";
+import { logger } from "../utils/logger";
 import { installOpencodeIntegration } from "./opencode";
 import { installPiIntegration } from "./pi";
 import { installOpenClawIntegration } from "./openclaw";
@@ -14,10 +15,33 @@ export interface IntegrationConfig {
   configPath: string;
 }
 
+/**
+ * Per-model reasoning metadata as published by routstr-core (OpenRouter shape).
+ * Models with no reasoning support omit the whole object, and models whose
+ * upstream publishes no effort allowlist carry only `mandatory`.
+ */
+export type RoutstrReasoning = {
+  mandatory?: boolean | null;
+  default_enabled?: boolean | null;
+  supported_efforts?: string[] | null;
+  default_effort?: string | null;
+  supports_max_tokens?: boolean | null;
+};
+
 export type RoutstrModel = {
   id: string;
   name?: string;
   context_length?: number;
+  architecture?: {
+    modality?: string;
+    input_modalities?: string[];
+    output_modalities?: string[];
+  };
+  top_provider?: {
+    context_length?: number;
+    max_completion_tokens?: number;
+  };
+  reasoning?: RoutstrReasoning | null;
 };
 
 export type IntegrationFn = (
@@ -25,6 +49,14 @@ export type IntegrationFn = (
   apiKey: string,
   integrationConfig: IntegrationConfig,
 ) => Promise<void>;
+
+/** Outcome of rewriting every registered client integration. */
+export interface IntegrationRunResult {
+  /** Integrations successfully installed or already up to date. */
+  refreshed: number;
+  /** Integrations that threw; each failure is logged as it happens. */
+  failed: number;
+}
 
 export const CLIENT_CONFIGS: Record<string, IntegrationConfig> = {
   opencode: {
@@ -65,16 +97,21 @@ export const CLIENT_INTEGRATIONS: Record<string, IntegrationFn> = {
 export async function runIntegrationsForClients(
   clientIds: Array<{ clientId: string; apiKey?: string }>,
   config: RoutstrdConfig,
-): Promise<void> {
+): Promise<IntegrationRunResult> {
+  let refreshed = 0;
+  let failed = 0;
   for (const client of clientIds) {
     const integrationFn = CLIENT_INTEGRATIONS[client.clientId];
     const integrationConfig = CLIENT_CONFIGS[client.clientId];
     if (integrationFn && integrationConfig && client.apiKey) {
       try {
         await integrationFn(config, client.apiKey, integrationConfig);
+        refreshed++;
       } catch (error) {
-        console.error(`Integration failed for ${client.clientId}:`, error);
+        failed++;
+        logger.error(`Integration failed for ${client.clientId}:`, error);
       }
     }
   }
+  return { refreshed, failed };
 }

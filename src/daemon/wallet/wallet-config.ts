@@ -36,9 +36,9 @@ export function readWalletMnemonic(walletDir = defaultWalletDir()): string | nul
     return null;
   }
 
-  if (config.encrypted) return null;
+  if (!config || config.encrypted) return null;
   return typeof config.mnemonic === "string" && config.mnemonic.trim()
-    ? config.mnemonic.trim()
+    ? config.mnemonic
     : null;
 }
 

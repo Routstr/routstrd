@@ -4,7 +4,7 @@
 //
 // Uses applesauce-wallet-connect (same approach as nwc_integration/pay_invoice.mts).
 
-import type { CocodClient } from "./cocod-client";
+import type { WalletClient } from "./wallet-client";
 import type { WalletConnect } from "applesauce-wallet-connect";
 import { logger } from "../../utils/logger";
 
@@ -26,17 +26,53 @@ const FATAL_ERROR_PATTERNS = [
   /forbidden/i,
   /unauthorized/i,
   /invoice.*expired/i,
+  // An NWC wallet answers a pay_invoice it cannot complete with a NIP-47
+  // error reply (code INSUFFICIENT_BALANCE, PAYMENT_FAILED, …). applesauce
+  // surfaces that as a generic "Unexpected response type: error" instead of a
+  // typed WalletBaseError, so without this pattern the loop treated a failed
+  // payment as transient and created a brand-new mint quote on every backoff
+  // attempt. Cooldown instead, so a broken funding wallet cannot churn quotes.
+  /unexpected response type/i,
 ];
+
+/**
+ * How long to stop retrying after a fatal error or an underfunded NWC wallet.
+ * The loop keeps running so a funded wallet recovers without a daemon restart.
+ */
+const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * Extra sats the NWC funding wallet must hold beyond the invoice amount to
+ * cover Lightning routing fees. Without this buffer a wallet holding exactly
+ * `amount` fails every payment, and each attempt leaves behind a fresh mint
+ * quote created by `receiveBolt11`.
+ */
+const NWC_FEE_BUFFER_SATS = 500;
 
 function isFatalError(message: string): boolean {
   return FATAL_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
 
 export function startAutoRefillLoop(
-  cocod: CocodClient,
+  walletClient: WalletClient,
   getWallet: () => WalletConnect | undefined,
   getConfig: () => AutoRefillConfig | undefined,
   intervalMs: number = 5000,
+  payInvoice: (
+    invoice: string,
+  ) => Promise<{ preimage?: string; fees_paid?: number }> = (invoice) => {
+    const wallet = getWallet();
+    if (!wallet?.service) {
+      return Promise.reject(new Error("NWC not connected"));
+    }
+    return wallet.payInvoice(invoice);
+  },
+  /**
+   * Reads the funding (NWC) wallet balance in sats, or returns undefined when
+   * the wallet does not expose it. Used as a pre-flight check so we never
+   * create a BOLT-11 invoice the funding wallet cannot pay.
+   */
+  getNwcBalance?: () => Promise<number | undefined>,
 ): () => void {
   let lastRefillAt = 0;
   let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
@@ -44,6 +80,9 @@ export function startAutoRefillLoop(
   let timeout: ReturnType<typeof setInterval> | null = null;
   let checkInProgress = false;
   let consecutiveFailures = 0;
+  // Mint operation of a refill whose NWC payment timed out. Its invoice may
+  // still be paid, so no fresh invoice until the wallet settles it either way.
+  let unsettledRefill: string | undefined;
 
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
@@ -66,8 +105,6 @@ export function startAutoRefillLoop(
       return;
     }
 
-    checkInProgress = true;
-
     // If we've been failing too much, back off rather than retrying at full speed.
     // This prevents tight loops on transient errors.
     const backoffInterval = Math.min(
@@ -78,8 +115,23 @@ export function startAutoRefillLoop(
       return;
     }
 
+    checkInProgress = true;
+    let operationId: string | undefined;
+
     try {
-      const balances = await cocod.getBalances();
+      if (unsettledRefill) {
+        const quote = await walletClient.getMintQuote?.(unsettledRefill);
+        // Fail closed: only a final state proves the invoice can't still be paid.
+        if (quote?.state !== "finalized" && quote?.state !== "failed") return;
+        unsettledRefill = undefined;
+        if (quote.state === "finalized") {
+          logger.log("[auto-refill] Timed-out payment landed; counting it as the refill.");
+          lastRefillAt = now;
+          return;
+        }
+      }
+
+      const balances = await walletClient.getBalances();
       const totalBalance = Object.values(balances).reduce<number>(
         (sum, b) => sum + (typeof b === "number" ? b : 0),
         0,
@@ -94,19 +146,53 @@ export function startAutoRefillLoop(
         `[auto-refill] Balance ${totalBalance} sats < threshold ${config.threshold}. Refilling ${config.amount} sats...`,
       );
 
-      // Get active mint
-      const mints = await cocod.listMints();
-      const mintUrl = mints[0];
+      // Pre-flight: confirm the funding (NWC) wallet can pay before we ask the
+      // mint for an invoice. `receiveBolt11` creates a new pending mint quote
+      // as a side effect, so requesting one the NWC wallet cannot cover leaves
+      // a stuck quote behind and guarantees a failed payment.
+      if (getNwcBalance) {
+        let nwcBalance: number | undefined;
+        try {
+          nwcBalance = await getNwcBalance();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logger.warn(
+            `[auto-refill] Could not read NWC balance (${message}); proceeding without pre-check`,
+          );
+        }
+
+        if (nwcBalance !== undefined) {
+          const needed = config.amount + NWC_FEE_BUFFER_SATS;
+          if (nwcBalance < needed) {
+            logger.error(
+              `[auto-refill] NWC funding wallet has ${nwcBalance} sats but needs ${needed} ` +
+                `(${config.amount} + ${NWC_FEE_BUFFER_SATS} fee buffer); skipping refill ` +
+                `(no invoice created). Fund the NWC wallet and auto-refill will retry automatically.`,
+            );
+            // Push the cooldown into the future so every time-gate blocks until
+            // the funding wallet is topped up.
+            lastRefillAt = now + FATAL_COOLDOWN_MS;
+            return;
+          }
+        }
+      }
+
+      const mintUrl = await walletClient.getDefaultMint();
       if (!mintUrl) {
-        logger.error("[auto-refill] No active mint configured");
+        logger.error("[auto-refill] No default mint configured");
         return;
       }
 
-      // Step 1: Create a BOLT-11 invoice via cocod to fund the Cashu wallet
+      // Step 1: Create a BOLT-11 invoice via the wallet to fund the Cashu wallet
       logger.log(
         `[auto-refill] Creating BOLT-11 invoice for ${config.amount} sats via ${mintUrl}...`,
       );
-      const invoice = await cocod.receiveBolt11(config.amount, mintUrl);
+      const created = await walletClient.receiveBolt11(
+        config.amount,
+        mintUrl,
+      );
+      const invoice = created.invoice;
+      operationId = created.operationId;
 
       // Step 2: Pay the invoice via NWC (applesauce)
       logger.log(`[auto-refill] Paying invoice via NWC...`);
@@ -115,10 +201,10 @@ export function startAutoRefillLoop(
         logger.log("[auto-refill] Wallet disconnected during refill check");
         return;
       }
-      const payment = await currentWallet.payInvoice(invoice);
+      const payment = await payInvoice(invoice);
 
       // Step 3: The Cashu mint should automatically detect the paid invoice
-      // and issue tokens. We don't need to explicitly mint here; cocod
+      // and issue tokens. We don't need to explicitly mint here; the wallet
       // handles this on its end when the mint sees the payment.
       const preimage = payment.preimage;
       if (preimage) {
@@ -141,11 +227,20 @@ export function startAutoRefillLoop(
       lastAttemptAt = now; // track for backoff regardless of success/failure
       consecutiveFailures++;
 
+      // Set only once the invoice exists, so this timeout came from paying it.
+      if (operationId && /timed out|^timeout$/i.test(message)) {
+        logger.error(
+          `[auto-refill] ${message}; the payment may still complete. Waiting for the invoice to settle before refilling again.`,
+        );
+        unsettledRefill = operationId;
+        consecutiveFailures = 0;
+        return;
+      }
+
       if (isFatalError(message)) {
         // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
         // We don't stop permanently so it auto-recovers without a restart.
         // Set lastRefillAt into the future so all time-gate checks block.
-        const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
         logger.error(
           `[auto-refill] FATAL: ${message}. The funding wallet (NWC) cannot pay. ` +
             `Cooling down for ${FATAL_COOLDOWN_MS / 60000} minutes. ` +

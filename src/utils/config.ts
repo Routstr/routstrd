@@ -20,6 +20,18 @@ export interface NwcAutoRefillConfig {
   cooldownMs: number;
 }
 
+/**
+ * Scheduled background refresh job (Nostr events, routstr21 models, and client
+ * integrations). Missing values mean "enabled" with the default interval, so
+ * older config files keep working unchanged.
+ */
+export interface AutoRefreshConfig {
+  /** Run the recurring refresh job. Defaults to true. */
+  enabled?: boolean;
+  /** Milliseconds between refreshes. Defaults to 21 minutes. */
+  intervalMs?: number;
+}
+
 /** NWC configuration section */
 export interface NwcConfig {
   /** NWC mode: "funding_source" = NWC funds the cocod Cashu wallet */
@@ -34,8 +46,14 @@ export interface RoutstrdConfig {
   port: number;
   host: string;
   provider: string | null;
-  cocodPath: string | null;
   mode?: "xcashu" | "apikeys";
+  /**
+   * Opt into SDK automatic model-path selection for DeepSeek V4.1 Flash.
+   * Disabled by default. Change it through `routstrd models auto-model-path`
+   * (`POST /settings/auto-model-path`): the daemon applies it to the next
+   * routed request. A hand-edited file needs a daemon restart.
+   */
+  autoModelPath?: boolean;
   /** Raw upstream request/response logging. Disabled by default because logs can contain sensitive prompts, outputs, and auth/payment headers. */
   requestResponseLogging?: {
     /** Enable raw request/response file logging. */
@@ -48,28 +66,36 @@ export interface RoutstrdConfig {
    * Defaults to daemonUrl or localhost:{port} if not set. */
   authUrl?: string;
   nsec?: string;
-  /** Nostr hex pubkey for routstr review/model events (kind 38425/38423). */
+  /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
+  /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
+  routstrModelsPubkey?: string;
   /** Nostr relay URLs for provider/model discovery (kinds 38421/38423/38425).
    * When unset, each method uses its own built-in defaults. */
   relays?: string[];
   /** NWC integration configuration */
   nwc?: NwcConfig;
+  /** Scheduled refresh job settings (see AutoRefreshConfig). */
+  autoRefresh?: AutoRefreshConfig;
   /**
-   * Default max_tokens (chat/completions) and max_output_tokens (responses)
-   * injected into proxied requests when the client does not supply one.
-   * Caps the completion budget the SDK prices against (completion × maxTokens)
-   * instead of the provider's worst-case max_completion_cost. Set to 0 to
-   * disable injection and always forward the client's value as-is.
+   * Default max_completion_tokens (chat/completions) and max_output_tokens
+   * (responses) injected into proxied requests when the client does not
+   * supply one. Caps the completion budget the SDK prices against
+   * (completion × maxTokens) instead of the provider's worst-case
+   * max_completion_cost. Set to 0 to disable injection and always forward the
+   * client's value as-is.
    */
   maxTokens?: number;
+  /** Automatic update checks, startup prompts and notices. Defaults to true. */
+  updateCheck?: boolean;
 }
 
 export const DEFAULT_CONFIG: RoutstrdConfig = {
   port: 8008,
   host: "127.0.0.1",
   provider: null,
-  cocodPath: null,
   mode: "apikeys",
+  autoModelPath: false,
+  updateCheck: true,
   maxTokens: 64000,
 };

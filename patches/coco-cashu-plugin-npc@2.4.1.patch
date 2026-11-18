@@ -1,0 +1,84 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 634b1697b22c3aa6c141543db1a6f421fae61f19..26e2aa5c10cb9cbbe9a4aaa77fffadd84fab07bc 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -238,6 +238,7 @@ const WEBSOCKET_DEFAULTS = {
+ */
+ var NPCPlugin = class {
+ 	name = "npc";
++ requestController = new AbortController();
+ 	required = requiredServices;
+ 	npcClient;
+ 	sinceStore;
+@@ -272,7 +273,7 @@ var NPCPlugin = class {
+ 		this.intervalMs = syncIntervalMs;
+ 		this.useWebsocket = !!useWebsocket;
+ 		const npcLogger = createChildLogger(logger, { module: "npc-client" });
+-		this.npcClient = new npubcash_sdk.NPCClient(baseUrl, new npubcash_sdk.JWTAuthProvider(baseUrl, signer, npcLogger));
++		this.npcClient = new npubcash_sdk.NPCClient(baseUrl, new npubcash_sdk.JWTAuthProvider(baseUrl, signer, npcLogger, { signal: this.requestController.signal, requestTimeoutMs: options?.requestTimeoutMs }), { signal: this.requestController.signal, requestTimeoutMs: options?.requestTimeoutMs });
+ 	}
+ 	/**
+ 	* Returns the current status of the plugin.
+@@ -323,6 +324,7 @@ var NPCPlugin = class {
+ 	*/
+ 	async shutdown() {
+ 		this.isShuttingDown = true;
++ this.requestController.abort();
+ 		this.resolveReadyWaiters();
+ 		this.teardown();
+ 		if (this.runPromise) try {
+diff --git a/dist/index.d.cts b/dist/index.d.cts
+index b6521eaafe11248fb98c0b80e730e9748383e0ab..607f47203852cdd2c38d3005aae6c34e194f2532 100644
+--- a/dist/index.d.cts
++++ b/dist/index.d.cts
+@@ -150,6 +150,8 @@ declare const requiredServices: readonly ["mintOperationService", "mintService",
+  * Configuration options for NPCPlugin
+  */
+ interface NPCPluginOptions {
++  /** HTTP deadline including response bodies; defaults to 10 seconds. */
++  requestTimeoutMs?: number;
+   /**
+    * Interval in milliseconds between sync operations.
+    * If not provided, interval-based syncing is disabled.
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index 30a430affae6fb060e5dc67c0cbe06c23d9c0f63..4d5f88ca722bd5be71394e899f4d9fe37f9bd2df 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -150,6 +150,8 @@ declare const requiredServices: readonly ["mintOperationService", "mintService",
+  * Configuration options for NPCPlugin
+  */
+ interface NPCPluginOptions {
++  /** HTTP deadline including response bodies; defaults to 10 seconds. */
++  requestTimeoutMs?: number;
+   /**
+    * Interval in milliseconds between sync operations.
+    * If not provided, interval-based syncing is disabled.
+diff --git a/dist/index.js b/dist/index.js
+index 093482062b285489683ea8caf3ae9260ab7690e9..059ad73c8dbd4d3e53c9fe203d4d973dde0b969e 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -213,6 +213,7 @@ const WEBSOCKET_DEFAULTS = {
+ */
+ var NPCPlugin = class {
+ 	name = "npc";
++ requestController = new AbortController();
+ 	required = requiredServices;
+ 	npcClient;
+ 	sinceStore;
+@@ -247,7 +248,7 @@ var NPCPlugin = class {
+ 		this.intervalMs = syncIntervalMs;
+ 		this.useWebsocket = !!useWebsocket;
+ 		const npcLogger = createChildLogger(logger, { module: "npc-client" });
+-		this.npcClient = new NPCClient(baseUrl, new JWTAuthProvider(baseUrl, signer, npcLogger));
++		this.npcClient = new NPCClient(baseUrl, new JWTAuthProvider(baseUrl, signer, npcLogger, { signal: this.requestController.signal, requestTimeoutMs: options?.requestTimeoutMs }), { signal: this.requestController.signal, requestTimeoutMs: options?.requestTimeoutMs });
+ 	}
+ 	/**
+ 	* Returns the current status of the plugin.
+@@ -298,6 +299,7 @@ var NPCPlugin = class {
+ 	*/
+ 	async shutdown() {
+ 		this.isShuttingDown = true;
++ this.requestController.abort();
+ 		this.resolveReadyWaiters();
+ 		this.teardown();
+ 		if (this.runPromise) try {

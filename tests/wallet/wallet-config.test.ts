@@ -30,7 +30,8 @@ afterEach(() => {
   }
 });
 
-describe("readWalletMnemonic", () => {  test("returns the mnemonic from a valid config", () => {
+describe("readWalletMnemonic", () => {
+  test("returns the mnemonic from a valid config", () => {
     const dir = makeWalletDir();
     writeConfig(dir, { version: 1, mnemonic: MNEMONIC, encrypted: false });
 
@@ -64,7 +65,7 @@ describe("readWalletMnemonic", () => {  test("returns the mnemonic from a valid 
     expect(readWalletMnemonic(dir)).toBeNull();
   });
 
-  test("trims surrounding whitespace from the mnemonic", () => {
+  test("preserves the exact mnemonic used by the NPC signer", () => {
     const dir = makeWalletDir();
     writeConfig(dir, {
       version: 1,
@@ -72,7 +73,7 @@ describe("readWalletMnemonic", () => {  test("returns the mnemonic from a valid 
       encrypted: false,
     });
 
-    expect(readWalletMnemonic(dir)).toBe(MNEMONIC);
+    expect(readWalletMnemonic(dir)).toBe(`  ${MNEMONIC}  `);
   });
 });
 

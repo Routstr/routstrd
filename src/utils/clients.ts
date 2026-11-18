@@ -2,10 +2,15 @@ import {
   callDaemon,
   loadConfig,
   getDaemonBaseUrl,
+  getUserNpub,
   ensureDaemonRunning,
 } from "./daemon-client";
 import { logger } from "./logger";
-import { CLIENT_INTEGRATIONS, CLIENT_CONFIGS } from "../integrations/registry";
+import {
+  CLIENT_INTEGRATIONS,
+  CLIENT_CONFIGS,
+  runIntegrationsForClients,
+} from "../integrations/registry";
 
 export interface ClientEntry {
   clientId: string;
@@ -124,6 +129,84 @@ export async function addDaemonClient(
   return { message: output.message, client: output.client, created: true };
 }
 
+/**
+ * Refresh routstr21 models from Nostr, then re-run every registered client
+ * integration so local client configs pick up new models and API keys.
+ *
+ * Shared by `routstrd refresh` and `routstrd clients --manual-refresh` — the
+ * same work the daemon performs on its scheduled refresh.
+ */
+export async function refreshModelsAndClientsAction(): Promise<void> {
+  const config = await loadConfig();
+
+  console.log("Refreshing routstr21 models...");
+  const result = await callDaemon("/v1/models?refresh=true");
+  if (result.error) {
+    console.log(`Model refresh failed: ${result.error}`);
+    process.exit(1);
+  }
+  console.log("Models refreshed.");
+
+  const clients = await getClientsList();
+  if (clients.length === 0) {
+    console.log("No clients to refresh.");
+    return;
+  }
+
+  console.log(`Refreshing ${clients.length} client integration(s)...`);
+  const run = await runIntegrationsForClients(clients, config);
+  if (run.failed > 0) {
+    // The failure detail (with a stack) is logged to the daemon log. That is
+    // not where a terminal operator is looking, so say it here as well instead
+    // of printing the success line below.
+    console.error(
+      `${run.failed} client integration(s) failed to refresh. See the daemon log for details.`,
+    );
+    process.exit(1);
+  }
+  console.log("Client integrations refreshed.");
+}
+
+/**
+ * Toggle the daemon's scheduled refresh job. Routed through the daemon so it
+ * also works against a remote daemon, where the config lives on the host.
+ */
+export async function setAutomaticRefreshAction(
+  enabled: boolean,
+): Promise<void> {
+  await ensureDaemonRunning();
+
+  const result = await callDaemon("/settings/auto-refresh", {
+    method: "POST",
+    body: { enabled },
+  });
+
+  if (result.error) {
+    console.log(result.error);
+    process.exit(1);
+  }
+
+  const output = result.output as { message?: string } | undefined;
+  console.log(
+    output?.message ?? `Automatic refresh ${enabled ? "enabled" : "disabled"}.`,
+  );
+
+  if (enabled) {
+    console.log(
+      "The daemon will keep refreshing models and client integrations on a schedule.",
+    );
+    return;
+  }
+
+  console.log(
+    "The daemon will stop the scheduled refresh of models and client integrations.",
+  );
+  console.log("Run 'routstrd clients --manual-refresh' to refresh on demand.");
+  console.log(
+    "Run 'routstrd clients --enable-automatic-refresh' to turn it back on.",
+  );
+}
+
 export async function listClientsAction(): Promise<void> {
   await ensureDaemonRunning();
 
@@ -202,6 +285,7 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
   if (options.hermes) integrationKeys.push("hermes");
 
   if (integrationKeys.length > 0) {
+    let hadFailure = false;
     for (const key of integrationKeys) {
       const integrationFn = CLIENT_INTEGRATIONS[key];
       const integrationConfig = CLIENT_CONFIGS[key];
@@ -214,7 +298,10 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         if (created) {
           logger.log(`Created new API key for ${integrationConfig.name}`);
         } else {
-          logger.log(`Using existing API key for ${integrationConfig.name}`);
+          // Reusing an existing key is the steady state for a client that is
+          // already set up (e.g. the `*/5 * * * * routstrd clients add
+          // --pi-agent` cron), so it is not worth a line per run.
+          logger.debug(`Using existing API key for ${integrationConfig.name}`);
         }
         await integrationFn(config, client.apiKey, integrationConfig);
 
@@ -222,15 +309,34 @@ export async function addClientAction(options: AddClientOptions): Promise<void> 
         console.log(`    Client ID: ${client.id}`);
         console.log(`    API Key:   ${client.apiKey}`);
       } catch (error) {
+        const message = (error as Error)?.message ?? String(error);
         logger.error(
           `Failed to set up ${integrationConfig.name} integration:`,
           error,
         );
+        console.error(
+          `\n  Error: failed to set up ${integrationConfig.name} integration.`,
+        );
+        console.error(`  ${message}`);
+        if (/NIP-98|registered npub\/pubkey|registered/i.test(message)) {
+          const npub = getUserNpub(config);
+          console.error(
+            `  The daemon at ${getDaemonBaseUrl(config)} rejected this account.`,
+          );
+          if (npub) {
+            console.error(
+              `  Register/authorize this npub on the remote daemon first:`,
+            );
+            console.error(`    ${npub}`);
+          }
+        }
+        hadFailure = true;
         continue;
       }
     }
 
     console.log(`\n  Access Routstr at: ${getDaemonBaseUrl(config)}/v1`);
+    if (hadFailure) process.exit(1);
     return;
   }
 

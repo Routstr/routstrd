@@ -1,0 +1,189 @@
+import { describe, expect, it } from "bun:test";
+import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
+
+const NOW_MS = 1_800_000_000_000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function mint(overrides: Record<string, unknown>) {
+  return {
+    id: "mint-1",
+    state: "pending",
+    expiry: NOW_MS / 1000 - 1000, // expired
+    updatedAt: NOW_MS - 2 * DAY_MS,
+    lastObservedRemoteState: undefined,
+    ...overrides,
+  };
+}
+
+function send(overrides: Record<string, unknown>) {
+  return {
+    id: "send-1",
+    state: "pending",
+    updatedAt: NOW_MS - 2 * DAY_MS,
+    ...overrides,
+  };
+}
+
+function melt(overrides: Record<string, unknown>) {
+  return {
+    id: "melt-1",
+    state: "prepared",
+    updatedAt: NOW_MS - 2 * DAY_MS,
+    ...overrides,
+  };
+}
+
+describe("selectCleanupOperations", () => {
+  it("selects expired pending mint quotes that are old enough", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a" })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail.map((op) => op.id)).toEqual(["a"]);
+  });
+
+  it("ignores mint quotes that have not expired", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", expiry: NOW_MS / 1000 + 1000 })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("ignores expired mint quotes already observed as PAID", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", lastObservedRemoteState: "PAID" })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("ignores expired mint quotes already observed as ISSUED", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", lastObservedRemoteState: "ISSUED" })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("ignores mint quotes without an expiry", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", expiry: 0 })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail).toEqual([]);
+  });
+
+  it("selects expired mint quotes even when the watcher recently touched them", () => {
+    const result = selectCleanupOperations({
+      mints: [mint({ id: "a", updatedAt: NOW_MS - 60_000 })],
+      sends: [],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.mintsToFail.map((op) => op.id)).toEqual(["a"]);
+  });
+
+  it("selects stale pending sends for reclaim", () => {
+    const result = selectCleanupOperations({
+      mints: [],
+      sends: [send({ id: "s" })],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.sendsToReclaim.map((op) => op.id)).toEqual(["s"]);
+  });
+
+  it("ignores recent pending sends", () => {
+    const result = selectCleanupOperations({
+      mints: [],
+      sends: [send({ id: "s", updatedAt: NOW_MS - 60_000 })],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.sendsToReclaim).toEqual([]);
+  });
+
+  it("ignores non-pending sends even when old", () => {
+    const result = selectCleanupOperations({
+      mints: [],
+      sends: [send({ id: "s", state: "executing" })],
+      melts: [],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.sendsToReclaim).toEqual([]);
+  });
+
+  it("selects stale prepared melts for cancellation", () => {
+    const result = selectCleanupOperations({
+      mints: [],
+      sends: [],
+      melts: [melt({ id: "m" })],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.meltsToCancel.map((op) => op.id)).toEqual(["m"]);
+  });
+
+  it("ignores non-prepared melts", () => {
+    const result = selectCleanupOperations({
+      mints: [],
+      sends: [],
+      melts: [melt({ id: "m", state: "pending" })],
+      nowMs: NOW_MS,
+      minAgeMs: DAY_MS,
+    });
+
+    expect(result.meltsToCancel).toEqual([]);
+  });
+});
+
+describe("mint cleanup reporting", () => {
+  it("reports dry-run candidates, not confirmed failures", () => {
+    expect(summarizeMintCleanup({ dryRun: true, candidates: 3, failed: 0, leftForRecovery: 0 }))
+      .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 0, leftForRecovery: 0 });
+  });
+  it("reports only actual failures in a real run", () => {
+    expect(summarizeMintCleanup({ dryRun: false, candidates: 3, failed: 1, leftForRecovery: 2 }))
+      .toEqual({ mintQuoteCandidates: 3, failedMintQuotes: 1, leftForRecovery: 2 });
+  });
+});
+
+describe("offline cleanup safety", () => {
+  it("never reclaims offline sends, even with a legacy includeOffline option", () => {
+    const options = {
+      mints: [], melts: [], nowMs: NOW_MS, minAgeMs: DAY_MS, includeOffline: true,
+      sends: [{ ...send({ id: "offline" }), method: "offline" }, { ...send({ id: "online" }), method: "default" }],
+    };
+    expect(selectCleanupOperations(options).sendsToReclaim.map((op) => op.id)).toEqual(["online"]);
+  });
+});

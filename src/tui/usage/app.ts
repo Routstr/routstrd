@@ -1,6 +1,6 @@
 import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
-import { fetchBalance, fetchClients, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type StatusInfo } from "./data.ts";
+import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchMonthlyQuota, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type MonthlyQuota, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
   exitSearchMode,
@@ -27,9 +27,10 @@ import {
   showCursor,
 } from "./terminal.ts";
 import { COLORS } from "./constants.ts";
-import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs } from "./render.ts";
+import { renderHeader, renderSearchBar, renderSeparator, renderTabContent, renderTabs, renderWindowBar } from "./render.ts";
 import type { TabId, UpdateInfo, UsageStats } from "./types.ts";
-import { checkForUpdates } from "../../utils/update-checker.ts";
+import { createUpdatePoller } from "./update-poller.ts";
+import { createWindowSelection } from "./window-selection.ts";
 
 export async function runUsageTui(): Promise<void> {
   const running = await isDaemonRunning();
@@ -48,44 +49,29 @@ export async function runUsageTui(): Promise<void> {
   let balance: BalanceInfo | null = null;
   let status: StatusInfo | null = null;
   let clients: ClientInfo[] = [];
+  let npubs: NpubEntry[] = [];
+  let naming: ClientNaming = emptyClientNaming();
+  // Monthly cap for the signed-in npub; only the Overview tab renders it.
+  let quota: MonthlyQuota | null = null;
   let visibleTabs: Tab[] = getVisibleTabs(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   let autoRefresh = true;
   let cleanedUp = false;
   let fetching = false;
 
-  // Update-check state — re-checked at most every 210 minutes to avoid
-  // spamming the npm registry. The first check happens shortly after
-  // startup so the TUI doesn't block on a network call.
-  const UPDATE_CHECK_INTERVAL_MS = 210 * 60 * 1000;
+  // Selected time window and a per-window cache so switching is instant and
+  // the 2s auto-refresh only recomputes the active window.
+  const windowSelection = createWindowSelection();
+  let fetchQueued = false;
+
   const UPDATE_CHECK_DELAY_MS = 3000;
   let updateInfo: UpdateInfo | null = null;
-  let lastUpdateCheck = 0;
-  let updateCheckInProgress = false;
-
-  async function maybeCheckForUpdates(): Promise<void> {
-    if (updateCheckInProgress) return;
-    const now = Date.now();
-    if (updateInfo && now - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return;
-
-    updateCheckInProgress = true;
-    lastUpdateCheck = now;
-    try {
-      const result = await checkForUpdates();
-      const outdated = result.packages.filter((p) => p.hasUpdate);
-      updateInfo = {
-        hasUpdate: result.hasUpdate,
-        text: outdated.length > 0
-          ? `Update available: ${outdated.map((p) => p.label).join(", ")} ${outdated.map((p) => p.latest).join(", ")}`
-          : "",
-      };
+  const maybeCheckForUpdates = createUpdatePoller({
+    publish: (info) => {
+      updateInfo = info;
       render();
-    } catch {
-      // Silently ignore — update checks are best-effort
-    } finally {
-      updateCheckInProgress = false;
-    }
-  }
+    },
+  });
 
   if (isInteractive) {
     stdout.write(enterAlternateScreen() + hideCursor());
@@ -119,24 +105,42 @@ export async function runUsageTui(): Promise<void> {
    * are skipped via the `fetching` guard so we don't race stale results.
    */
   async function fetchData(): Promise<void> {
-    if (fetching) return;
+    if (fetching) {
+      // A fetch is already in flight; run once more afterwards so a window
+      // switch (or refresh) that arrives mid-flight is never dropped.
+      fetchQueued = true;
+      return;
+    }
     fetching = true;
     try {
+      const requestedWindow = windowSelection.currentWindow;
       const running = await isDaemonRunning();
       if (!running) {
         stats = null;
+        // No daemon reachable means no trustworthy cap either.
+        quota = null;
       } else {
-        // Fire all 4 fetches concurrently — cuts the blocked window significantly.
-        const [newStats, newBalance, newStatus, newClients] = await Promise.all([
-          fetchUsageSummary(),
+        // The monthly cap belongs to the signed-in npub and is a calendar-month
+        // figure, so it is only fetched while its only consumer (Overview) is
+        // active. Any other tab clears it: a stale cap must never outlive an
+        // identity or config change.
+        const wantsQuota = currentTab === "overview";
+        // Fire all fetches concurrently — cuts the blocked window significantly.
+        const [newStats, newBalance, newStatus, newClients, newQuota] = await Promise.all([
+          fetchUsageSummary(requestedWindow),
           fetchBalance(),
           fetchStatus(),
           fetchClients(),
+          wantsQuota ? fetchMonthlyQuota() : Promise.resolve(null),
         ]);
-        if (newStats) stats = newStats;
+        if (newStats) {
+          const accepted = windowSelection.accept(requestedWindow, newStats);
+          if (accepted) stats = accepted;
+        }
         if (newBalance) balance = newBalance;
         if (newStatus) status = newStatus;
         if (newClients && newClients.length > 0) clients = newClients;
+        quota = newQuota;
 
         const npubsVisible = hasAnyNpubs(clients);
         visibleTabs = getVisibleTabs(npubsVisible);
@@ -144,10 +148,26 @@ export async function runUsageTui(): Promise<void> {
           currentTab = "clients";
           vimState.scrollPos = 0;
         }
+
+        // Names/roles live on the auth proxy, not the usage summary. Only
+        // fetch them when the Npubs tab is actually reachable, and keep the
+        // last good list if the endpoint is temporarily unreachable.
+        if (npubsVisible) {
+          const newNpubs = await fetchNpubs();
+          if (newNpubs.length > 0) npubs = newNpubs;
+        }
+
+        // Owner info (for "Name (client-id)" labels in the Recent tab) comes
+        // from /clients + /npubs; both are empty in local mode.
+        naming = buildClientNaming(clients, npubs);
       }
       render();
     } finally {
       fetching = false;
+      if (fetchQueued) {
+        fetchQueued = false;
+        void fetchData();
+      }
     }
   }
 
@@ -170,15 +190,20 @@ export async function runUsageTui(): Promise<void> {
       return;
     }
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, clients);
-    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderSeparator(width) + renderSearchBar();
+    const windowHelp = windowSelection.supportsWindows ? "[W] window" : windowSelection.notice;
+    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, ${windowHelp}, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
+    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(windowSelection.currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
+
+    const content = renderTabContent(currentTab, stats, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
     const visibleContent = applyScrollToContent(content, contentViewportHeight);
-    const footerBlock = (visibleContent ? "\n" : "") + footerSeparator + footer;
+    const visibleLines = visibleContent === "" ? 0 : visibleContent.split("\n").length;
+    // Pin the footer to the bottom even when a tab's content is short.
+    const padLines = Math.max(0, contentViewportHeight - visibleLines);
+    const footerBlock = (visibleContent ? "\n" : "") + "\n".repeat(padLines) + footerSeparator + footer;
 
     stdout.write(moveCursor(1, 1) + eraseDown() + chrome + visibleContent + footerBlock);
   }
@@ -223,6 +248,21 @@ export async function runUsageTui(): Promise<void> {
     if (key === "a" || key === "A") {
       autoRefresh = !autoRefresh;
       render();
+      return;
+    }
+
+    if (key === "w" || key === "W") {
+      // Legacy daemons have no filtered summaries. Keep the all-time selector
+      // and upgrade notice rather than repainting all-time data as filtered.
+      if (!windowSelection.supportsWindows) {
+        render();
+        return;
+      }
+      const cached = windowSelection.cycle(key === "W" ? -1 : 1);
+      if (cached) stats = cached;
+      vimState.scrollPos = 0;
+      render();
+      void fetchData();
       return;
     }
 

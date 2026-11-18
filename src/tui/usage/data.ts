@@ -1,6 +1,13 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import { callDaemon, isDaemonRunning } from "../../utils/daemon-client.ts";
-import type { UsageStats, UsageSummary } from "./types.ts";
+import {
+  callAuth,
+  callDaemon,
+  getDaemonBaseUrl,
+  getUserNpub,
+  isDaemonRunning,
+  loadConfig,
+} from "../../utils/daemon-client.ts";
+import type { UsageStats, UsageSummary, TimeWindow, WindowedStats } from "./types.ts";
 
 export { isDaemonRunning };
 
@@ -21,12 +28,17 @@ export interface StatusInfo {
   daemon: string;
   wallet: string;
   mode: "xcashu" | "apikeys";
+  /** URL the TUI is connected through (local bind or remote daemonUrl). */
+  url?: string;
   error?: string;
 }
 
 export async function fetchStatus(): Promise<StatusInfo | null> {
   try {
-    const result = await callDaemon("/status");
+    const [result, config] = await Promise.all([
+      callDaemon("/status"),
+      loadConfig(),
+    ]);
     if (result.error) return null;
 
     const output = result.output as {
@@ -40,7 +52,51 @@ export async function fetchStatus(): Promise<StatusInfo | null> {
       daemon: output?.daemon || "unknown",
       wallet: output?.wallet || "unknown",
       mode: output?.mode || "apikeys",
+      url: getDaemonBaseUrl(config),
       error: output?.error,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export interface VersionInfo {
+  /** Version of the daemon that served this response. */
+  version: string;
+  current: string;
+  latest: string | null;
+  hasUpdate: boolean;
+  checkedAt: string | null;
+}
+
+/**
+ * Read the daemon's cached update state from GET /version. The daemon keeps it
+ * fresh on a low-frequency background schedule, so this is a cheap local read
+ * rather than a registry/GitHub call. Returns null when the endpoint is
+ * unavailable (e.g. an older daemon), letting callers fall back.
+ */
+export async function fetchVersionInfo(): Promise<VersionInfo | null> {
+  try {
+    const result = await callDaemon("/version");
+    if (result.error) return null;
+
+    const output = result.output as
+      | {
+          version?: string;
+          current?: string;
+          latest?: string | null;
+          hasUpdate?: boolean;
+          checkedAt?: string | null;
+        }
+      | undefined;
+    if (!output?.version) return null;
+
+    return {
+      version: output.version,
+      current: output.current ?? output.version,
+      latest: output.latest ?? null,
+      hasUpdate: output.hasUpdate === true,
+      checkedAt: output.checkedAt ?? null,
     };
   } catch {
     return null;
@@ -70,10 +126,15 @@ export async function fetchBalance(): Promise<BalanceInfo | null> {
   }
 }
 
-export async function fetchUsageSummary(): Promise<UsageStats | null> {
+export async function fetchUsageSummary(
+  windowId: TimeWindow = "all",
+  request: typeof callDaemon = callDaemon,
+): Promise<UsageStats | null> {
   try {
     const tz = new Date().getTimezoneOffset();
-    const result = await callDaemon(`/usage/summary?tz=${tz}`);
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const timezoneQuery = timeZone ? `&timezone=${encodeURIComponent(timeZone)}` : "";
+    const result = await request(`/usage/summary?tz=${tz}&window=${windowId}${timezoneQuery}`);
     if (result.error) return null;
 
     const summary = result.output as UsageSummary | undefined;
@@ -86,10 +147,30 @@ export async function fetchUsageSummary(): Promise<UsageStats | null> {
       recentSatsCost: summary.totals.satsCost,
       limit: 50,
       summary,
+      supportsWindows: Boolean(summary.window),
+      window: summary.window ?? windowFromAllTime(summary),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Older daemons don't return a `window` block; fall back to the all-time
+ * aggregates so the TUI still renders (just without window switching).
+ */
+function windowFromAllTime(summary: UsageSummary): WindowedStats {
+  return {
+    window: "all",
+    totals: summary.totals,
+    models: summary.models,
+    providers: summary.providers,
+    clients: summary.clients,
+    npubs: summary.npubs,
+    sizeBuckets: summary.sizeBuckets,
+    // No timeline on old daemons; the History tab falls back to an empty chart.
+    timeline: { bucket: "day", points: [] },
+  };
 }
 
 export function formatTime(timestamp: number): string {
@@ -133,4 +214,187 @@ export async function fetchClients(): Promise<ClientInfo[]> {
 
 export function hasAnyNpubs(clients: ClientInfo[]): boolean {
   return clients.some((c) => !!c.ownerNpub);
+}
+
+/** A configured npub as returned by the auth proxy (`/npubs`). */
+export interface NpubEntry {
+  npub: string;
+  name: string | null;
+  role: string;
+}
+
+/**
+ * Fetch the configured npubs (with their display names and roles) from the
+ * auth proxy. Returns an empty list when the endpoint is unavailable — e.g. a
+ * local daemon that doesn't route `/npubs` — so the TUI degrades gracefully.
+ */
+export async function fetchNpubs(): Promise<NpubEntry[]> {
+  try {
+    const result = await callAuth("/npubs");
+    if (result.error) return [];
+
+    // Handle both wrapped { output: { npubs } } and direct { npubs } responses.
+    const direct = (result as { npubs?: NpubEntry[] }).npubs;
+    const wrapped = (result.output as { npubs?: NpubEntry[] } | undefined)?.npubs;
+    return direct ?? wrapped ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Number of trailing npub characters the auth proxy folds into a client id. */
+export const NPUB_SUFFIX_LENGTH = 7;
+
+/**
+ * Lookup tables for turning a raw usage `client` id (e.g.
+ * `claude-code-a1b2c3d`) back into a human label (e.g. `Alice (claude-code)`).
+ *
+ * All maps are empty in local mode, so {@link resolveClientLabel} falls back to
+ * the raw id with no behaviour change there.
+ */
+export interface ClientNaming {
+  /** Configured npubs (names + roles) from the auth proxy. */
+  npubs: NpubEntry[];
+  /** bare clientId -> owner npub, from `GET /clients`. */
+  ownersByClientId: Map<string, string>;
+  /** npub -> display name (null when unset). */
+  npubNames: Map<string, string | null>;
+  /** trailing npub suffix -> npub. */
+  npubsBySuffix: Map<string, string>;
+}
+
+export function buildClientNaming(clients: ClientInfo[], npubs: NpubEntry[]): ClientNaming {
+  const ownersByClientId = new Map<string, string>();
+  for (const c of clients) {
+    if (c.ownerNpub) ownersByClientId.set(c.clientId, c.ownerNpub);
+  }
+
+  const npubNames = new Map<string, string | null>();
+  const npubsBySuffix = new Map<string, string>();
+  const remember = (npub: string) => npubsBySuffix.set(npub.slice(-NPUB_SUFFIX_LENGTH), npub);
+
+  for (const n of npubs) {
+    npubNames.set(n.npub, n.name ?? null);
+    remember(n.npub);
+  }
+  // `GET /clients` also carries owner npubs, which covers entries whose owner
+  // isn't present in the (possibly filtered) `/npubs` response.
+  for (const owner of ownersByClientId.values()) remember(owner);
+
+  return { npubs, ownersByClientId, npubNames, npubsBySuffix };
+}
+
+/** Configured display name for an npub, or null when unset/blank. */
+function npubDisplayName(naming: ClientNaming, npub: string): string | null {
+  const name = naming.npubNames.get(npub)?.trim();
+  return name && name.length > 0 ? name : null;
+}
+
+/** `Alice (claude-code)` when the owner has a name, else the bare client id. */
+function formatClientLabel(naming: ClientNaming, bareId: string, ownerNpub: string): string {
+  const name = npubDisplayName(naming, ownerNpub);
+  return name ? `${name} (${bareId})` : bareId;
+}
+
+/**
+ * Render a usage entry's `client` value as `Name (client-id)`, where `Name` is
+ * the owner npub's display name and the `-<npub tail>` suffix is stripped.
+ * Falls back to the raw id when no owner/name can be resolved (local mode).
+ */
+export function resolveClientLabel(clientId: string | undefined, naming: ClientNaming): string {
+  const raw = clientId && clientId.length > 0 ? clientId : "unknown";
+
+  // Exact match: the raw id is a known bare clientId or its suffixed form.
+  for (const [bareId, ownerNpub] of naming.ownersByClientId) {
+    const suffixed = `${bareId}-${ownerNpub.slice(-NPUB_SUFFIX_LENGTH)}`;
+    if (raw !== bareId && raw !== suffixed) continue;
+    return formatClientLabel(naming, bareId, ownerNpub);
+  }
+
+  // Fallback: strip a trailing `-<npub tail>` that matches a known npub.
+  for (const [suffix, npub] of naming.npubsBySuffix) {
+    const marker = `-${suffix}`;
+    if (raw.length <= marker.length || !raw.endsWith(marker)) continue;
+    return formatClientLabel(naming, raw.slice(0, -marker.length), npub);
+  }
+
+  return raw;
+}
+
+export function emptyClientNaming(): ClientNaming {
+  return buildClientNaming([], []);
+}
+
+// ─── Monthly quota for the signed-in npub ─────────────────────────────
+
+/** Monthly spend cap for the signed-in npub, as reported by the auth proxy. */
+export interface MonthlyQuota {
+  /** Confirmed cap in sats; 0 is a real cap that blocks every paid request. */
+  limitSats: number;
+  /** Current-month spend, or null when the proxy did not report it. */
+  usedSats: number | null;
+}
+
+/** The subset of a `GET /npubs` entry the quota view needs. */
+type NpubQuotaEntry = {
+  npub?: string;
+  monthlyLimitSats?: number | null;
+  monthlyUsedSats?: number;
+};
+
+/**
+ * Pick the signed-in npub's cap out of a `GET /npubs` response.
+ *
+ * Returns null unless this exact npub reports a numeric cap: `null` means
+ * unlimited and an absent field means the auth proxy does not report caps (an
+ * older proxy), so both hide the figure. Never falls back to another entry —
+ * spend is private, so an admin's row would show someone else's numbers.
+ */
+export function monthlyQuotaForNpub(
+  response: unknown,
+  userNpub: string | null,
+): MonthlyQuota | null {
+  if (!userNpub) return null;
+  const raw = response as
+    | { npubs?: NpubQuotaEntry[]; output?: { npubs?: NpubQuotaEntry[] } }
+    | undefined;
+  const npubs = raw?.npubs ?? raw?.output?.npubs ?? [];
+  const entry = npubs.find((n) => n?.npub === userNpub);
+  if (!entry || typeof entry.monthlyLimitSats !== "number") return null;
+  return {
+    limitSats: entry.monthlyLimitSats,
+    usedSats: typeof entry.monthlyUsedSats === "number" ? entry.monthlyUsedSats : null,
+  };
+}
+
+/**
+ * Read the signed-in npub's monthly cap from the auth proxy.
+ *
+ * Returns null in local mode (no auth proxy to ask), when no Nostr identity is
+ * configured, when the response cannot be read, and when the proxy reports no
+ * cap for this npub — callers hide the figure in every one of those cases
+ * rather than inventing a budget. A failure is never answered from a previous
+ * value, so an identity or config change cannot leave a stale cap on screen.
+ */
+export async function fetchMonthlyQuota(
+  deps: {
+    loadConfig?: typeof loadConfig;
+    callAuth?: typeof callAuth;
+  } = {},
+): Promise<MonthlyQuota | null> {
+  const load = deps.loadConfig ?? loadConfig;
+  const auth = deps.callAuth ?? callAuth;
+  try {
+    const config = await load();
+    // Local mode: `callAuth` would fall back to the daemon, which does not
+    // route /npubs, and there is no proxy-side cap to report.
+    if (!config.authUrl && !config.daemonUrl) return null;
+    const userNpub = getUserNpub(config);
+    if (!userNpub) return null;
+    const result = await auth("/npubs");
+    if (result.error) return null;
+    return monthlyQuotaForNpub(result, userNpub);
+  } catch {
+    return null;
+  }
 }

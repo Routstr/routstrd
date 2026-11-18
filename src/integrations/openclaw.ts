@@ -69,7 +69,7 @@ export async function installOpenClawIntegration(
     }
   } catch (error) {
     console.error(`Failed to read or parse ${configPath}; leaving it unchanged:`, error);
-    return;
+    throw error;
   }
 
   if (!openclawConfig.models) {
@@ -89,11 +89,11 @@ export async function installOpenClawIntegration(
     mkdirSync(dirname(configPath), { recursive: true });
 
     const data = await callDaemon("/models");
+    if (data.error) throw new Error(`Failed to fetch models: ${data.error}`);
     const models = (data.output as { models: RoutstrModel[] } | undefined)?.models || [];
 
     if (models.length === 0) {
-      console.log("No models found from routstr daemon.");
-      return;
+      throw new Error("No models found from routstr daemon; integration was not refreshed.");
     }
 
     const providerModels: OpenClawModelEntry[] = models.map((model) => ({
@@ -137,5 +137,6 @@ export async function installOpenClawIntegration(
     console.log(`Added "${OPENCLAW_PROVIDER_ID}" provider with ${models.length} models to openclaw.json`);
   } catch (error) {
     console.error("Failed to install models in openclaw.json:", error);
+    throw error;
   }
 }

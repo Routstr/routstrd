@@ -8,7 +8,7 @@ import {
   createWalletAdapter,
   decodeCashuTokenAmount,
 } from "../../src/daemon/wallet";
-import type { CocodClient } from "../../src/daemon/wallet/cocod-client";
+import type { WalletClient } from "../../src/daemon/wallet/wallet-client";
 
 // A full modern keyset ID with the same format as Minibits' post-migration
 // active keyset. getEncodedToken stores only its first eight bytes in TokenV4.
@@ -38,11 +38,11 @@ function makeToken({
 }
 
 function makeWalletClient(
-  receiveCashu: CocodClient["receiveCashu"],
-): CocodClient {
+  receiveCashu: WalletClient["receiveCashu"],
+): WalletClient {
   // createWalletAdapter is intentionally lazy; this receive-path test only
   // needs the one capability exercised by receiveToken.
-  return { receiveCashu } as CocodClient;
+  return { receiveCashu } as WalletClient;
 }
 
 describe("short keyset TokenV4 compatibility", () => {

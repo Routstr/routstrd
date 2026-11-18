@@ -31,7 +31,7 @@ export interface EnsureLocalWalletOptions {
  *    wallet aborts the migration loudly instead of shadowing funds.
  * 3. Otherwise create a fresh wallet with a new BIP-39 mnemonic.
  *
- * Both `init` and `remote` run this before deriving the operator Nostr
+ * Both `onboard` and `remote` run this before deriving the operator Nostr
  * identity, so the nsec is recoverable from the wallet backup regardless of
  * which command ran first.
  */
@@ -43,27 +43,19 @@ export async function ensureLocalWallet(
 
   await stopLegacyCocod();
 
-  let migrationLockOwner: number | undefined;
   const migration = await migrateLegacyWallet({
     assertLegacyStopped: () =>
       assertLegacyCocodNotRunning({
         socketPath: legacyCocodSocketPath(),
-        pidFilePath: legacyCocodPidPath(),
-        ignorePid: migrationLockOwner,
       }),
     acquireLegacyLock: () => {
       mkdirSync(dirname(legacyCocodPidPath()), {
         recursive: true,
         mode: 0o700,
       });
-      const release = claimLegacyCocodPidFile({
+      return claimLegacyCocodPidFile({
         pidFilePath: legacyCocodPidPath(),
       });
-      migrationLockOwner = process.pid;
-      return () => {
-        migrationLockOwner = undefined;
-        release();
-      };
     },
   });
   if (migration.status === "migrated") {

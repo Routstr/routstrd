@@ -1,28 +1,108 @@
-import { ModelManager, ProviderManager, type SdkStore } from "@routstr/sdk";
+import {
+  canonicalIdForModel,
+  canonicalizeModelId,
+  canonicalModelPath,
+  clearModelPathsCache,
+  findModelForId,
+  getNodeModelPathsForModel,
+  ModelManager,
+  MODEL_PATH_RANKING_BUDGET_MS,
+  ProviderManager,
+  modelPathPolicyFor,
+  type MintDiscovery,
+  type Model,
+  type ModelProviderPrice,
+  type ModelSatsPricing,
+  WARM_COST_BASKET,
+  type NodeModelPaths,
+  type SdkStore,
+} from "@routstr/sdk";
 import type { ExposedModel } from "./types";
 import { logger } from "../utils/logger";
+import {
+  decodeModelPathSelector,
+  rankModelPathNodes,
+  type ModelPathNode,
+  type ModelPathPricingSource,
+  type ModelPathRoute,
+  type ModelPathSkipped,
+  type ModelPathsOutput,
+  warmCost,
+} from "../utils/model-paths";
+import type { ModelProviderInfo } from "../utils/model-providers";
 
-export type ModelProviderInfo = {
-  baseUrl: string;
-  disabled: boolean;
-  pricing: {
-    prompt: number;
-    completion: number;
-    request: number;
-    max_cost: number;
-  };
-};
+export type { ModelProviderInfo } from "../utils/model-providers";
 
 export type ModelWithProviders = ExposedModel & {
   providers: ModelProviderInfo[];
+  /** Disabled nodes kept out of `providers`; the CLI's `--all` shows them. */
+  hiddenProviders: number;
 };
+
+/** Per-model path lookup, injectable so tests never touch the network. */
+export type NodeModelPathsFetcher = typeof getNodeModelPathsForModel;
+
+/**
+ * Sentinel for a node whose model-path lookup outlived the ranking budget.
+ * The SDK bounds its own routing ranking the same way: one slow node must not
+ * hold up the whole inventory. The lookup itself keeps running and fills the
+ * SDK's cache for the next caller.
+ */
+const PATHS_BUDGET_EXCEEDED = Symbol("model-paths-budget-exceeded");
+
+function withBudget<T>(
+  work: Promise<T>,
+  budgetMs: number,
+): Promise<T | typeof PATHS_BUDGET_EXCEEDED> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(PATHS_BUDGET_EXCEEDED), budgetMs);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(PATHS_BUDGET_EXCEEDED);
+      },
+    );
+  });
+}
+
+/**
+ * Why a node that serves the model is missing from the path inventory. Kept
+ * as stable strings: they are rendered verbatim by the CLI.
+ */
+const SKIP_ON_COOLDOWN = "on cooldown";
+const SKIP_NO_PATHS = "no model paths advertised";
+const SKIP_LOOKUP_TIMEOUT = "model-path lookup timed out";
+const SKIP_LOOKUP_FAILED = "model-path lookup failed";
 
 export function createModelService(
   modelManager: ModelManager,
   providerManager: ProviderManager,
   store: SdkStore,
+  mintDiscovery?: MintDiscovery,
+  deps: { fetchNodeModelPaths?: NodeModelPathsFetcher } = {},
 ) {
+  const fetchNodeModelPaths =
+    deps.fetchNodeModelPaths ?? getNodeModelPathsForModel;
   let providerBootstrapPromise: Promise<void> | null = null;
+  let mintDiscoveryPromise: Promise<void> | null = null;
+  let modelPopulationPromise: Promise<ExposedModel[]> | null = null;
+  let modelPopulationStartedCold = false;
+
+  const scheduleMintDiscovery = (providers: string[]): void => {
+    if (!mintDiscovery || mintDiscoveryPromise) return;
+    const discovery = mintDiscovery;
+    mintDiscoveryPromise = Promise.resolve()
+      .then(async () => {
+        await discovery.discoverMints(providers);
+        logger.log(`Discovered mints for ${providers.length} provider(s)`);
+      })
+      .catch((error) => logger.error("Mint discovery failed:", error))
+      .finally(() => { mintDiscoveryPromise = null; });
+  };
 
   const normalizeBaseUrl = (url: string): string =>
     url.endsWith("/") ? url : `${url}/`;
@@ -31,18 +111,32 @@ export function createModelService(
    * Build the same cheapest-per-model view as ModelManager.fetchModels, but
    * exclusively from the persisted cache. Model-list reads must not wait for
    * unavailable providers; explicit and scheduled refreshes own network I/O.
+   *
+   * "Cheapest" is the warm basket (`warmCost`), the key routing ranks on, so
+   * the catalog entry that describes a model is the one whose node routes
+   * would pick — not the node with the lowest completion rate, which a warm
+   * session never pays in full.
    */
   const getCachedModels = (): ExposedModel[] => {
     type PricedModel = ExposedModel & {
-      sats_pricing?: { completion?: number };
+      sats_pricing?: ModelSatsPricing;
     };
 
     const cachedByProvider = modelManager.getAllCachedModels();
     const currentProviders = new Set(
       modelManager.getBaseUrls().map(normalizeBaseUrl),
     );
+    const s = store.getState();
+    const manuallyEnabled = new Set(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
     const disabledProviders = new Set(
-      (store.getState().disabledProviders || []).map(normalizeBaseUrl),
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
     );
     const bestById = new Map<string, PricedModel>();
 
@@ -57,13 +151,16 @@ export function createModelService(
 
       for (const model of models as PricedModel[]) {
         if (!model.sats_pricing) continue;
-        const existing = bestById.get(model.id);
-        if (
-          !existing ||
-          (model.sats_pricing.completion ?? 0) <
-            (existing.sats_pricing?.completion ?? 0)
-        ) {
-          bestById.set(model.id, model);
+        // Group by canonical id so providers serving the same model under a
+        // mapped variant id or alias fold into one aggregate entry.
+        const canonicalId = canonicalIdForModel(model as Model);
+        const existing = bestById.get(canonicalId);
+        const cost = warmCost(model.sats_pricing) ?? Number.POSITIVE_INFINITY;
+        const existingCost = existing
+          ? warmCost(existing.sats_pricing) ?? Number.POSITIVE_INFINITY
+          : Number.POSITIVE_INFINITY;
+        if (!existing || cost < existingCost) {
+          bestById.set(canonicalId, model);
         }
       }
     }
@@ -74,26 +171,55 @@ export function createModelService(
   const ensureProvidersBootstrapped = (): Promise<void> => {
     if (!providerBootstrapPromise) {
       providerBootstrapPromise = (async () => {
+        const startedAt = Date.now();
         logger.log("Bootstrapping providers...");
         const providers = await modelManager.bootstrapProviders(false);
         logger.log(`Bootstrapped ${providers.length} providers`);
 
-        // Sync discovered providers into the store so `providers list` reflects
-        // the same set that the model manager knows about.
-        const { baseUrlsList, setBaseUrlsList } = store.getState();
-        const existing = new Set(baseUrlsList);
-        const merged = [
-          ...baseUrlsList,
-          ...providers.filter((url) => !existing.has(url)),
-        ];
-        if (merged.length !== baseUrlsList.length) {
-          setBaseUrlsList(merged);
+        // Mirror discovery into the store so `providers list` reports the same
+        // set that the model manager polls and routes to. The list is
+        // *replaced*, not merged: an add-only merge keeps URLs discovery no
+        // longer reports (e.g. after a bootstrap regression or a provider
+        // unpublishing) visible to the CLI and to per-model views while
+        // routing silently ignores them.
+        const {
+          baseUrlsList,
+          setBaseUrlsList,
+          setDisabledProviders,
+        } = store.getState();
+        const known = new Set(baseUrlsList);
+        const inSync =
+          known.size === providers.length &&
+          providers.every((url) => known.has(url));
+        if (!inSync) {
+          setBaseUrlsList(providers);
           logger.log(
-            `Synced ${merged.length - baseUrlsList.length} new provider(s) into store`,
+            `Synced ${providers.length} discovered provider(s) into store (was ${baseUrlsList.length})`,
           );
         }
 
-        logger.log("Provider bootstrap complete.");
+        // Mirror the review-disabled set (kind 38425) into the store. The SDK
+        // applies review disables to the discovery adapter during bootstrap,
+        // but `providers list` and the per-model provider views read the store,
+        // so without this a fresh install reports "0 disabled" while routing
+        // silently excludes the review-disabled providers.
+        const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
+          providers,
+        );
+        if (reviewedDisabled !== null) {
+          setDisabledProviders(reviewedDisabled);
+        }
+
+        logger.log(
+          `Provider bootstrap complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
+        );
+
+        // Populate the mint cache for every enabled provider. The SDK refuses
+        // to spend a mint a provider does not advertise, so without this the
+        // routing layer spends the wallet's largest mint and gets rejected
+        // (finding #4). MintDiscovery owns its own 21-minute TTL, so repeated
+        // calls within that window are cache hits and never refetch.
+        scheduleMintDiscovery(providers);
       })().catch((error) => {
         providerBootstrapPromise = null;
         logger.error("Provider bootstrap failed:", error);
@@ -103,83 +229,491 @@ export function createModelService(
     return providerBootstrapPromise;
   };
 
-  const getRoutstr21Models = async (
-    forceRefresh = false,
-  ): Promise<ExposedModel[]> => {
-    const routstr21ModelIds = Array.from(
-      new Set(await modelManager.fetchRoutstr21Models(forceRefresh)),
-    ).slice(0, 21);
-
-    let discoveredModels: ExposedModel[];
-    if (!forceRefresh) {
-      discoveredModels = getCachedModels();
-    } else {
-      discoveredModels = [];
-    }
-
-    // Warm reads are cache-only. A cold start and explicit refresh still
-    // populate models from the provider network.
-    if (forceRefresh || discoveredModels.length === 0) {
-      await ensureProvidersBootstrapped();
-      discoveredModels = await modelManager.fetchModels(
-        modelManager.getBaseUrls(),
-        forceRefresh,
-      );
-    }
-
-    const modelsById = new Map(discoveredModels.map((model) => [model.id, model]));
-
-    return routstr21ModelIds.map((modelId) => {
-      const model = modelsById.get(modelId);
-      return model || { id: modelId, name: modelId };
+  const exposeModels = (
+    routstr21ModelIds: string[],
+    discoveredModels: ExposedModel[],
+  ): ExposedModel[] => {
+    // Resolve each routstr21 id against the aggregated provider models. The
+    // aggregation folds providers' mapped variant ids/aliases into one entry
+    // per canonical id, but the surviving entry is the provider's raw model,
+    // whose `.id` may be the variant (e.g. z-ai-glm-5-3-flash) — while still
+    // carrying the full metadata (context_length, architecture, reasoning).
+    // A plain id map would miss and degrade the entry to a bare stub, so
+    // resolve through the SDK's model mappings (exact native id wins, same as
+    // getModelProviders) and always expose the requested canonical id.
+    return [...new Set(routstr21ModelIds)].map((modelId) => {
+      const model = findModelForId(discoveredModels as Model[], modelId);
+      return model
+        ? { ...model, id: modelId }
+        : { id: modelId, name: modelId };
     });
   };
 
+  const getRoutstr21Models = async (
+    forceRefresh = false,
+    refreshExpired = false,
+  ): Promise<ExposedModel[]> => {
+    // Incremental SDK writes are not a complete warm cache. A pass which
+    // started genuinely cold must finish before any reader exposes its models.
+    if (modelPopulationPromise && modelPopulationStartedCold) {
+      return modelPopulationPromise;
+    }
+    const cachedModels = getCachedModels();
+    // Regular warm reads stay independent of forced/startup refreshes. Startup
+    // opts into SDK TTL checks without forcing every cached provider to refetch.
+    if (!forceRefresh && !refreshExpired && cachedModels.length > 0) {
+      return exposeModels(
+        await modelManager.fetchRoutstr21Models(false),
+        cachedModels,
+      );
+    }
+
+    // Cold readers and startup/explicit refreshes share one population pass.
+    // A force request joins an existing pass rather than launching another.
+    if (!modelPopulationPromise) {
+      modelPopulationStartedCold = cachedModels.length === 0;
+      modelPopulationPromise = (async () => {
+        const startedAt = Date.now();
+        // Bootstrap establishes mappings and review policy before aggregation.
+        // Its curated-list prefetch also avoids a duplicate cold relay query.
+        await ensureProvidersBootstrapped();
+        const ids = await modelManager.fetchRoutstr21Models(forceRefresh);
+        const models = await modelManager.fetchModels(
+          modelManager.getBaseUrls(),
+          forceRefresh,
+        );
+        logger.debug(
+          `Model population complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
+        );
+        return exposeModels(ids, models);
+      })().finally(() => {
+        modelPopulationPromise = null;
+        modelPopulationStartedCold = false;
+      });
+    }
+    return modelPopulationPromise;
+  };
+
+  /**
+   * The nodes serving one model, cheapest warm request first.
+   *
+   * Disabled nodes are hidden unless `includeDisabled` (the CLI's `--all`)
+   * asks for them: routing excludes them, so their price is not one a request
+   * can get. The SDK ranking is still computed with `includeDisabled: true`,
+   * because the disabled flag, the count of hidden nodes, and the model
+   * metadata all come from entries a filtered ranking would not contain.
+   */
   const getModelProviders = async (
     modelId: string,
+    includeDisabled = false,
   ): Promise<ModelWithProviders | null> => {
     await ensureProvidersBootstrapped();
 
-    const disabledSet = new Set<string>(store.getState().disabledProviders || []);
+    const s = store.getState();
+    const manuallyEnabled = new Set<string>(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledSet = new Set<string>(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ].filter((url) => !manuallyEnabled.has(normalizeBaseUrl(url))),
+    );
 
-    // Use the SDK ranking (sorted by prompt+completion per million tokens)
-    // so the display order matches real routing. includeDisabled keeps
-    // disabled providers visible so we can annotate them.
-    const ranking = providerManager.getProviderPriceRankingForModel(modelId, {
-      includeDisabled: true,
-    });
+    // Use the SDK ranking so the display order matches real routing, with the
+    // same basket routing prices (`WARM_COST_BASKET` in the SDK's
+    // resolveRequestContext); the SDK's default basket is the cold
+    // prompt+completion sum, which ranks differently once cache rates differ
+    // between nodes. includeDisabled keeps disabled providers in the ranking
+    // so they can be counted (and shown on request); whether they reach the
+    // table is decided below.
+    const ranking: ModelProviderPrice[] =
+      providerManager.getProviderPriceRankingForModel(modelId, {
+        includeDisabled: true,
+        basket: WARM_COST_BASKET,
+      });
 
-    const providers: ModelProviderInfo[] = ranking.map((entry: any) => ({
+    const ranked: ModelProviderInfo[] = ranking.map((entry) => ({
       baseUrl: entry.baseUrl,
       disabled: disabledSet.has(entry.baseUrl),
       pricing: {
-        prompt: entry.promptPerMillion / 1_000_000,
-        completion: entry.completionPerMillion / 1_000_000,
-        request: entry.model.sats_pricing?.request ?? 0,
+        // Per-token rates: the SDK resolved them from the sats_pricing the
+        // node publishes, including the prompt-rate fallback it applies to a
+        // cache rate that was not announced. Reading them off the entry (not
+        // off a per-million field, which no longer exists) is what keeps this
+        // mapping from silently rendering NaN.
+        prompt: entry.rates.prompt,
+        completion: entry.rates.completion,
+        request: entry.rates.request,
         max_cost: entry.model.sats_pricing?.max_cost ?? 0,
+        // The cache rates carry the SDK's provenance: a rate it filled in
+        // from the prompt rate is not a price the node offered, and callers
+        // must not present it as one.
+        cache: {
+          read: entry.rates.cacheRead,
+          write: entry.rates.cacheWrite,
+          readAdvertised: entry.rates.cacheReadSource === "advertised",
+          writeAdvertised: entry.rates.cacheWriteSource === "advertised",
+        },
       },
     }));
 
-    if (providers.length === 0) {
+    // Nothing serves the model at all: that is the only case that is really
+    // "not found". A ranking holding nothing but disabled nodes resolves to a
+    // model with an empty provider list, so the CLI can say the model exists
+    // but only disabled nodes serve it.
+    if (ranked.length === 0) {
       return null;
     }
 
-    // Get model metadata from first (cheapest) provider
-    const cheapest = providers[0]!;
+    const hiddenProviders = includeDisabled
+      ? 0
+      : ranked.filter((provider) => provider.disabled).length;
+    const providers = includeDisabled
+      ? ranked
+      : ranked.filter((provider) => !provider.disabled);
+
+    // Get model metadata. Prefer a provider that serves the requested
+    // canonical id natively (nicest name/description); fall back to the
+    // cheapest provider matched through the SDK's model mappings, since it
+    // may only know the model under a mapped variant id or alias. Metadata
+    // resolves off the full ranking: a model served only by disabled nodes
+    // must still describe itself.
+    const cheapest = ranked[0]!;
     const allModels = modelManager.getAllCachedModels();
-    const firstProvider = allModels[cheapest.baseUrl];
-    const modelInfo = firstProvider?.find((m: { id: string }) => m.id === modelId);
+    let modelInfo: Model | undefined;
+    for (const p of ranked) {
+      const exact = (allModels[p.baseUrl] as Model[] | undefined)?.find(
+        (m) => m.id === modelId,
+      );
+      if (exact) {
+        modelInfo = exact;
+        break;
+      }
+    }
+    if (!modelInfo) {
+      const firstProvider = allModels[cheapest.baseUrl];
+      modelInfo = firstProvider
+        ? findModelForId(firstProvider as Model[], modelId)
+        : undefined;
+    }
 
     if (!modelInfo) {
       return null;
     }
 
     return {
-      id: modelInfo.id,
+      id: modelId,
       name: modelInfo.name,
       description: modelInfo.description,
       context_length: modelInfo.context_length,
       providers,
+      hiddenProviders,
+    };
+  };
+
+  /**
+   * One node's advertised model paths for a model, decoded and priced.
+   *
+   * Routes are gathered across every spelling the node files the model under
+   * (the fetcher probes the canonical id, its mapping variants, and the
+   * node's own id/alias_ids), then deduplicated by the selector's canonical
+   * identity — two selectors naming the same upstream route must not be
+   * listed twice, while a route with a different upstream model-id spelling
+   * stays distinct, because pinning it also changes the request body.
+   *
+   * Pricing is the route's own `sats_pricing`; a node that advertises no
+   * per-route metadata falls back to its model-level catalog price, which is
+   * what the inventory prices such a node on too. Pins are applied separately
+   * from the SDK's live policy ranking, never inferred from inventory order.
+   */
+  const buildModelPathRoutes = (
+    baseUrl: string,
+    nodePaths: NodeModelPaths,
+    model: Model,
+    requestedId: string,
+  ): ModelPathRoute[] => {
+    type StagedRoute = ModelPathRoute & { identity: string };
+
+    const byIdentity = new Map<string, StagedRoute>();
+    const modelPricing = model.sats_pricing;
+    for (const entry of nodePaths.data) {
+      for (const { path, model: pathMeta } of entry.paths) {
+        if (!path) continue;
+        const identity = canonicalModelPath(path) ?? path;
+        if (byIdentity.has(identity)) continue;
+        const decoded = decodeModelPathSelector(path);
+        const pathPricing = pathMeta?.sats_pricing ?? null;
+        const pricing = pathPricing ?? modelPricing ?? null;
+        const pricingSource: ModelPathPricingSource = pathPricing
+          ? "path"
+          : modelPricing
+            ? "model"
+            : "none";
+        byIdentity.set(identity, {
+          identity,
+          path,
+          upstream: decoded?.upstream ?? path,
+          endpoint: decoded?.endpoint ?? null,
+          modelId: decoded?.modelId ?? null,
+          pricing: pricing
+            ? {
+                prompt: pricing.prompt ?? 0,
+                completion: pricing.completion ?? 0,
+                request: pricing.request ?? 0,
+                max_cost: pricing.max_cost ?? 0,
+                // Cache rates as advertised per route: 0 when the node
+                // announces none, which the table renders as "-" (such
+                // tokens bill at the prompt rate, they are not free).
+                input_cache_read: pricing.input_cache_read ?? 0,
+                input_cache_write: pricing.input_cache_write ?? 0,
+              }
+            : null,
+          pricingSource,
+          contextLength:
+            pathMeta?.context_length ?? model.context_length ?? null,
+          maxCompletionTokens: pathMeta?.max_completion_tokens ?? null,
+          onCooldown: providerManager.isOnCooldown(
+            baseUrl,
+            requestedId,
+            identity,
+          ),
+          pinned: false,
+        });
+      }
+    }
+
+    return [...byIdentity.values()].map(({ identity: _identity, ...route }) => route);
+  };
+
+  /**
+   * The advertised model-path inventory of one model, across every enabled
+   * node that serves it.
+   *
+   * Automatic candidates come first in SDK policy-ranking order. All other
+   * advertised inventory is retained, sorted by cheapest warm cost; those rows
+   * are not a claim about unpinned provider routing or forced-provider pins.
+   *
+   * Nodes on model/provider cooldown, nodes that advertise no paths for the
+   * model (an older node without the model-paths endpoint, or one filing the
+   * model elsewhere), and lookups that fail or outlive the SDK's ranking
+   * budget are reported in `skipped` instead of being silently dropped.
+   * Returns null only when no node serves the model at all.
+   *
+   * Disabled nodes are skipped before any I/O unless `includeDisabled` (the
+   * CLI's `--all`) asks for them: routing excludes them, so probing them
+   * would spend a request on data no request would use. When included they
+   * carry `disabled: true` so the renderer can flag them, and they are
+   * ranked and priced like every other node — the same inventory, one flag.
+   *
+   * `refresh` drops the SDK's cached model-path payloads first, so
+   * `models -m <id> --paths --refresh` shows live data; routing refetches on
+   * its next request as a result.
+   */
+  const getModelPaths = async (
+    modelId: string,
+    refresh = false,
+    includeDisabled = false,
+    autoModelPath = false,
+    candidatesOnly = false,
+  ): Promise<ModelPathsOutput | null> => {
+    await ensureProvidersBootstrapped();
+    if (refresh) {
+      clearModelPathsCache();
+      if (candidatesOnly) await modelManager.fetchModelPathWhitelist(true);
+    }
+
+    const s = store.getState();
+    const manuallyEnabled = new Set<string>(
+      (s.manuallyEnabledProviders || []).map(normalizeBaseUrl),
+    );
+    const disabledSet = new Set<string>(
+      [
+        ...(s.disabledProviders || []),
+        ...(s.manuallyDisabledProviders || []),
+      ]
+        .map(normalizeBaseUrl)
+        .filter((url) => !manuallyEnabled.has(url)),
+    );
+
+    const mappings = modelManager.getModelIdMappings();
+    const allModels = modelManager.getAllCachedModels();
+    const policy = autoModelPath
+      ? modelPathPolicyFor(modelId, modelManager.getModelPathWhitelist(), mappings)
+      : undefined;
+    // Use the installed router's ranking, including policy node eligibility,
+    // route pricing, cooldowns and tie breaks. Inventory remains independent so
+    // --all and non-policy rows do not disappear from the display.
+    const ranking = policy
+      ? await providerManager.getModelPathProviderRanking(modelId)
+      : [];
+    if (candidatesOnly) {
+      const modelInfo = Object.values(allModels).flatMap(models => models as Model[])
+        .map(model => findModelForId([model], modelId, mappings)).find(Boolean);
+      if (!modelInfo) return null;
+      // Preserve every SDK-ranked (node, selector) alternative globally. Node
+      // grouping would reorder interleaved route-scoped failover candidates.
+      const pathLookups = new Map<string, Promise<NodeModelPaths | null>>();
+      const canonicalId = canonicalizeModelId(modelId, mappings).toLowerCase();
+      const candidates = await Promise.all(ranking.filter(candidate => !disabledSet.has(normalizeBaseUrl(candidate.baseUrl)))
+        .map(async candidate => {
+          let lookup = pathLookups.get(candidate.baseUrl);
+          if (!lookup) {
+            lookup = withBudget(fetchNodeModelPaths(candidate.baseUrl, modelId, {
+              mappings, extraSpellings: [candidate.model.id, ...(candidate.model.alias_ids ?? [])],
+            }), MODEL_PATH_RANKING_BUDGET_MS).then(value => value === PATHS_BUDGET_EXCEEDED ? null : value);
+            pathLookups.set(candidate.baseUrl, lookup);
+          }
+          const nodePaths = await lookup;
+          // Match the SDK resolver: canonical requested spelling wins a
+          // contested selector, then payload order. Keep its route limits but
+          // always use the SDK candidate's selected pricing, never alias price.
+          const entries = (nodePaths?.data ?? []).filter(entry =>
+            [entry.id, ...(entry.alias_ids ?? [])].some(spelling =>
+              canonicalizeModelId(spelling, mappings).toLowerCase() === canonicalId));
+          const ordered = [
+            ...entries.filter(entry => entry.id.toLowerCase() === canonicalId),
+            ...entries.filter(entry => entry.id.toLowerCase() !== canonicalId),
+          ];
+          const identity = canonicalModelPath(candidate.selector) ?? candidate.selector;
+          const metadata = ordered.flatMap(entry => entry.paths).find(entry =>
+            (canonicalModelPath(entry.path) ?? entry.path) === identity)?.model;
+          const routes = buildModelPathRoutes(candidate.baseUrl, { data: [{
+            id: candidate.model.id, alias_ids: [], paths: [{ path: candidate.selector,
+              model: { ...metadata, sats_pricing: candidate.satsPricing ?? undefined } }],
+          }], updatedAt: null }, candidate.model, modelId);
+          const route = routes[0]!;
+          return { baseUrl: candidate.baseUrl, route: { ...route, cost: candidate.cost } };
+        }));
+      return {
+        id: modelId, name: modelInfo.name, description: modelInfo.description,
+        contextLength: modelInfo.context_length, nodes: [], skipped: [], candidates,
+        candidateStatus: !autoModelPath ? "off" : !policy ? "no-policy" :
+          candidates.length ? "ranked" : "no-eligible-routes",
+      };
+    }
+    const nodes: ModelPathNode[] = [];
+    const skipped: ModelPathSkipped[] = [];
+
+    // Deterministic input order: the inventory must not depend on the cached
+    // model map's insertion order (nor may the model metadata it reports).
+    const baseUrls = Object.keys(allModels).sort();
+    const providersInOrder = baseUrls.map(
+      (baseUrl) => (allModels[baseUrl] ?? []) as Model[],
+    );
+
+    await Promise.all(
+      baseUrls.map(async (baseUrl) => {
+        const disabled = disabledSet.has(normalizeBaseUrl(baseUrl));
+        if (disabled && !includeDisabled) return;
+        const models = (allModels[baseUrl] ?? []) as Model[];
+        const model = findModelForId(models, modelId, mappings);
+        if (!model) return;
+
+        if (providerManager.isOnCooldown(baseUrl, modelId)) {
+          skipped.push({ baseUrl, reason: SKIP_ON_COOLDOWN });
+          return;
+        }
+
+        const nodePaths = await withBudget(
+          fetchNodeModelPaths(baseUrl, modelId, {
+            mappings,
+            extraSpellings: [model.id, ...(model.alias_ids ?? [])],
+          }),
+          MODEL_PATH_RANKING_BUDGET_MS,
+        );
+        if (nodePaths === PATHS_BUDGET_EXCEEDED) {
+          skipped.push({ baseUrl, reason: SKIP_LOOKUP_TIMEOUT });
+          return;
+        }
+        if (!nodePaths) {
+          skipped.push({ baseUrl, reason: SKIP_LOOKUP_FAILED });
+          return;
+        }
+
+        const routes = buildModelPathRoutes(
+          baseUrl,
+          nodePaths,
+          model,
+          modelId,
+        );
+        if (routes.length === 0) {
+          skipped.push({ baseUrl, reason: SKIP_NO_PATHS });
+          return;
+        }
+
+        nodes.push({
+          baseUrl,
+          routes,
+          rankCost: null,
+          rankedOnPin: false,
+          // Only set when the node is here because of `includeDisabled`;
+          // an enabled node's payload stays as it was.
+          ...(disabled ? { disabled: true } : {}),
+        });
+      }),
+    );
+
+    // Model metadata: prefer a node that serves the requested id natively
+    // (nicest name/description), then any node matched through the SDK's
+    // mappings, which may only know a variant spelling.
+    let modelInfo: Model | undefined;
+    for (const models of providersInOrder) {
+      const exact = models.find((m) => m.id === modelId);
+      if (exact) {
+        modelInfo = exact;
+        break;
+      }
+    }
+    if (!modelInfo) {
+      for (const models of providersInOrder) {
+        modelInfo = findModelForId(models, modelId, mappings);
+        if (modelInfo) break;
+      }
+    }
+    if (!modelInfo) return null;
+
+    const nodeOrder = new Map<string, number>();
+    for (const candidate of ranking) {
+      const baseUrl = normalizeBaseUrl(candidate.baseUrl);
+      if (nodeOrder.has(baseUrl) || disabledSet.has(baseUrl)) continue;
+      const node = nodes.find((entry) => normalizeBaseUrl(entry.baseUrl) === baseUrl);
+      const identity = canonicalModelPath(candidate.selector) ?? candidate.selector;
+      const route = node?.routes.find((entry) =>
+        (canonicalModelPath(entry.path) ?? entry.path) === identity && !entry.onCooldown);
+      if (!route) continue;
+      // The same selector can appear under alias and canonical entries with
+      // conflicting metadata. The SDK's selected entry, not inventory payload
+      // order, owns the price used for both this pin and its displayed cost.
+      if (candidate.satsPricing) {
+        route.pricing = {
+          prompt: candidate.satsPricing.prompt ?? 0,
+          completion: candidate.satsPricing.completion ?? 0,
+          request: candidate.satsPricing.request ?? 0,
+          max_cost: candidate.satsPricing.max_cost ?? 0,
+          input_cache_read: candidate.satsPricing.input_cache_read ?? 0,
+          input_cache_write: candidate.satsPricing.input_cache_write ?? 0,
+        };
+        route.pricingSource = "path";
+      }
+      route.pinned = true;
+      nodeOrder.set(baseUrl, nodeOrder.size);
+    }
+    const rankedNodes = rankModelPathNodes(nodes).sort((a, b) => {
+      const left = nodeOrder.get(normalizeBaseUrl(a.baseUrl));
+      const right = nodeOrder.get(normalizeBaseUrl(b.baseUrl));
+      // Stable sort preserves warm-cost inventory order outside the ranking.
+      if (left === undefined) return right === undefined ? 0 : 1;
+      return right === undefined ? -1 : left - right;
+    });
+
+    return {
+      id: modelId,
+      name: modelInfo.name,
+      description: modelInfo.description,
+      contextLength: modelInfo.context_length,
+      nodes: rankedNodes,
+      skipped: skipped.sort((a, b) => a.baseUrl.localeCompare(b.baseUrl)),
     };
   };
 
@@ -206,34 +740,37 @@ export function createModelService(
     const models = await modelManager.fetchModels(providers, true);
     console.log(`Fetched ${models.length} models from ${providers.length} providers`);
 
+    // Refresh each provider's advertised mint list alongside its models so
+    // routing always has current mint data (TTL-gated by MintDiscovery).
+    scheduleMintDiscovery(providers);
+
     // Sync review events from Nostr (kind 38425) and apply disabled status
     const reviewedDisabled = await modelManager.syncReviewedProvidersFromNostr(
       providers,
       undefined,
       true,
     );
-    if (reviewedDisabled.length > 0) {
+    if (reviewedDisabled && reviewedDisabled.length > 0) {
       console.log(
         `Review sync disabled ${reviewedDisabled.length} provider(s): ${reviewedDisabled.join(", ")}`,
       );
     }
 
     // Sync discovered providers into the store
-    const { baseUrlsList, setBaseUrlsList, disabledProviders, setDisabledProviders } =
-      store.getState() as any;
+    const { setBaseUrlsList, setDisabledProviders } = store.getState() as any;
 
     // Replace baseUrlsList with the fresh provider list
     setBaseUrlsList(providers);
 
-    // Merge review-disabled providers into the store's disabled list
-    const existingDisabled = new Set(disabledProviders || []);
-    for (const url of reviewedDisabled) {
-      existingDisabled.add(url);
+    // Mirror the review-disabled set into the store's auto-disabled list.
+    // `null` means the review sync left the adapter unchanged (e.g. no lgtm
+    // reviews found), so we must not clobber the store list with an empty array.
+    if (reviewedDisabled !== null) {
+      setDisabledProviders(reviewedDisabled);
     }
-    setDisabledProviders([...existingDisabled]);
 
     console.log(
-      `Provider refresh complete: ${providers.length} total, ${existingDisabled.size} disabled`,
+      `Provider refresh complete: ${providers.length} total, ${reviewedDisabled?.length ?? store.getState().disabledProviders?.length ?? 0} review-disabled`,
     );
   };
 
@@ -241,6 +778,7 @@ export function createModelService(
     ensureProvidersBootstrapped,
     getRoutstr21Models,
     getModelProviders,
+    getModelPaths,
     refreshProvidersAndModels,
   };
 }

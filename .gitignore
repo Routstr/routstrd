@@ -35,5 +35,13 @@ temp/
 # Graphify output
 graphify-out/
 
-# Standalone prototype scripts
-index.ts
+# Findings
+findings/
+routstrd-findings.zip
+
+# Standalone prototype scripts (root-level only)
+/index.ts
+
+# npm artifacts (repo uses bun/bun.lock)
+package-lock.json
+npm-shrinkwrap.json

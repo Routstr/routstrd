@@ -1,8 +1,14 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import type { UsageSummary } from "../../daemon/http/usage-summary.ts";
-import type { UpdateCheckResult } from "../../utils/update-checker.ts";
+import type {
+  TimeWindow,
+  UsageSummary,
+  WindowedStats,
+  Timeline,
+  TimelineBucket,
+  TimelinePoint,
+} from "../../daemon/http/usage-summary.ts";
 
-export type { UsageSummary };
+export type { UsageSummary, TimeWindow, WindowedStats, Timeline, TimelineBucket, TimelinePoint };
 
 export interface UpdateInfo {
   hasUpdate: boolean;
@@ -16,9 +22,13 @@ export interface UsageStats {
   recentSatsCost: number;
   limit: number;
   summary: UsageSummary;
+  /** False when connected to a daemon without selectable-window summaries. */
+  supportsWindows?: boolean;
+  /** Aggregates for the currently selected time window. */
+  window: WindowedStats;
 }
 
-export type TabId = "overview" | "today" | "models" | "providers" | "tokens" | "clients" | "npubs" | "recent";
+export type TabId = "overview" | "history" | "models" | "providers" | "clients" | "npubs" | "recent";
 
 export interface Tab {
   id: TabId;

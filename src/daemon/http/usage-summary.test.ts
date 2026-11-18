@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, spyOn } from "bun:test";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
 import type { UsageTrackingEntry } from "@routstr/sdk/storage";
 import type { ClientEntry } from "../../utils/clients";
-import { getUsageSummary, __resetUsageSummaryCacheForTest } from "./usage-summary";
+import { getUsageSummary, parseTimeWindow, __resetUsageSummaryCacheForTest } from "./usage-summary";
 
 // ─── Test fixtures ────────────────────────────────────────────────────────────
 //
@@ -268,5 +268,353 @@ describe("getUsageSummary", () => {
     const summary2 = await getUsageSummary(driver, CLIENTS, TZ);
     // Same object reference means it was served from cache
     expect(summary1).toBe(summary2);
+  });
+});
+
+describe("parseTimeWindow", () => {
+  it("accepts every known window", () => {
+    expect(parseTimeWindow("all")).toBe("all");
+    expect(parseTimeWindow("today")).toBe("today");
+    expect(parseTimeWindow("7d")).toBe("7d");
+    expect(parseTimeWindow("30d")).toBe("30d");
+    expect(parseTimeWindow(" 7d ")).toBe("7d");
+  });
+
+  it("falls back to all for unknown/missing values", () => {
+    expect(parseTimeWindow("bogus")).toBe("all");
+    expect(parseTimeWindow("")).toBe("all");
+    expect(parseTimeWindow(null)).toBe("all");
+    expect(parseTimeWindow(undefined)).toBe("all");
+  });
+});
+
+describe("getUsageSummary time windows", () => {
+  let driver: ReturnType<typeof createMemoryUsageTrackingDriver>;
+
+  // tz = 0 (UTC) keeps the assertions independent of the host timezone.
+  const TZ0 = 0;
+  const NOW = Date.now();
+  const RECENT = NOW; // today
+  const THREE_DAYS_AGO = NOW - 3 * 86_400_000;
+  const TEN_DAYS_AGO = NOW - 10 * 86_400_000;
+
+  const windowEntry = (
+    id: string,
+    timestamp: number,
+    modelId: string,
+    totalTokens: number,
+    satsCost: number,
+  ): UsageTrackingEntry => ({
+    id,
+    timestamp,
+    modelId,
+    baseUrl: "https://api.openai.com/",
+    requestId: `req-${id}`,
+    cost: satsCost / 1000,
+    satsCost,
+    promptTokens: Math.floor(totalTokens / 2),
+    completionTokens: Math.floor(totalTokens / 2),
+    totalTokens,
+  });
+
+  beforeEach(() => {
+    __resetUsageSummaryCacheForTest();
+    driver = createMemoryUsageTrackingDriver([
+      windowEntry("w-recent", RECENT, "model-recent", 500, 5), // today, tiny
+      windowEntry("w-mid", THREE_DAYS_AGO, "model-mid", 2000, 7), // 3d ago, small
+      windowEntry("w-old", TEN_DAYS_AGO, "model-old", 50_000, 11), // 10d ago, large
+    ]);
+  });
+
+  it("defaults to the all window when omitted", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0);
+    expect(summary.window!.window).toBe("all");
+    expect(summary.window!.totals.requests).toBe(3);
+  });
+
+  it("scopes the window block without touching the all-time fields", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+
+    // Window block: only the recent + 3-day-old entries.
+    expect(summary.window!.window).toBe("7d");
+    expect(summary.window!.totals.requests).toBe(2);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7);
+    expect(summary.window!.models.map((m) => m.modelId).sort()).toEqual(["model-mid", "model-recent"]);
+
+    // All-time fields are unaffected by the requested window.
+    expect(summary.totals.requests).toBe(3);
+    expect(summary.models).toHaveLength(3);
+  });
+
+  it("30d includes everything observed within 30 days", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "30d");
+    expect(summary.window!.totals.requests).toBe(3);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7 + 11);
+  });
+
+  it("today covers the last 24 hours, not just the calendar day", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "today");
+    expect(summary.window!.totals.requests).toBe(1);
+    expect(summary.window!.models).toHaveLength(1);
+    expect(summary.window!.models[0]!.modelId).toBe("model-recent");
+  });
+
+  it("today includes yesterday's hours but drops entries older than 24h", async () => {
+    __resetUsageSummaryCacheForTest();
+    const boundaryDriver = createMemoryUsageTrackingDriver([
+      windowEntry("b-recent", NOW, "model-recent", 500, 5),
+      windowEntry("b-yesterday", NOW - 20 * 3_600_000, "model-yesterday", 600, 7),
+      windowEntry("b-outside", NOW - 25 * 3_600_000, "model-outside", 700, 11),
+    ]);
+    const summary = await getUsageSummary(boundaryDriver, [], TZ0, undefined, "today");
+
+    expect(summary.window!.totals.requests).toBe(2);
+    expect(summary.window!.totals.satsCost).toBe(5 + 7);
+    expect(summary.window!.models.map((m) => m.modelId).sort()).toEqual([
+      "model-recent",
+      "model-yesterday",
+    ]);
+  });
+
+  it("scopes the windowed size buckets", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    // w-recent (500) → tiny, w-mid (2000) → small, w-old excluded.
+    expect(summary.window!.sizeBuckets.tiny.count).toBe(1);
+    expect(summary.window!.sizeBuckets.small.count).toBe(1);
+    expect(summary.window!.sizeBuckets.large.count).toBe(0);
+
+    // All-time buckets still include the large entry.
+    expect(summary.sizeBuckets.large.count).toBe(1);
+  });
+
+  it("mirrors the all-time aggregates for the all window", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    expect(summary.window!.totals).toEqual(summary.totals);
+    expect(summary.window!.models).toEqual(summary.models);
+    expect(summary.window!.sizeBuckets).toEqual(summary.sizeBuckets);
+  });
+
+  it("caches per window rather than sharing one entry", async () => {
+    const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    const week = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    // Different windows must not be served the same cached summary.
+    expect(week).not.toBe(all);
+    expect(week.window!.window).toBe("7d");
+  });
+
+  it("builds a zero-filled hourly timeline for the today window", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "today");
+    const { bucket, points } = summary.window!.timeline;
+
+    expect(bucket).toBe("hour");
+    expect(points).toHaveLength(24);
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(5);
+    for (const p of points) expect(p.key).toMatch(/^[0-2][0-9]$/);
+
+    // The recent entry lands in the bucket for its local (UTC) hour.
+    const currentHour = String(new Date(RECENT).getUTCHours()).padStart(2, "0");
+    expect(points.find((p) => p.key === currentHour)!.satsCost).toBe(5);
+
+    // The chart covers exactly the windowed range: bars sum to the totals.
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);
+    expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
+  });
+
+  it("builds 7 days of 6-hour buckets ending now", async () => {
+    const summary = await getUsageSummary(driver, [], TZ0, undefined, "7d");
+    const { bucket, points } = summary.window!.timeline;
+
+    expect(bucket).toBe("hour");
+    expect(points).toHaveLength(7 * 4);
+    for (const p of points) expect(p.key).toMatch(/^\d{2}-\d{2} (00|06|12|18)$/);
+
+    // Oldest bucket is 6 days ago at local midnight; newest is today 18:00.
+    const todayStart = Math.floor(RECENT / 86_400_000) * 86_400_000;
+    expect(points[0]!.timestamp).toBe(todayStart - 6 * 86_400_000);
+    expect(points[points.length - 1]!.timestamp).toBe(todayStart + 18 * 3_600_000);
+
+    // The recent entry lands in today's 6-hour bucket.
+    const currentHour = new Date(RECENT).getUTCHours();
+    expect(points[6 * 4 + Math.floor(currentHour / 6)]!.satsCost).toBe(5);
+
+    // Bars sum to the windowed totals (whole local days, not `now - 7*24h`).
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(summary.window!.totals.satsCost);
+    expect(points.reduce((sum, p) => sum + p.requests, 0)).toBe(summary.window!.totals.requests);
+  });
+
+  it("builds a 30-day timeline and folds the all window into weeks", async () => {
+    const month = await getUsageSummary(driver, [], TZ0, undefined, "30d");
+    expect(month.window!.timeline.bucket).toBe("day");
+    expect(month.window!.timeline.points).toHaveLength(30);
+    expect(month.window!.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
+    expect(month.window!.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(
+      month.window!.totals.satsCost,
+    );
+
+    const all = await getUsageSummary(driver, [], TZ0, undefined, "all");
+    const { bucket, points } = all.window!.timeline;
+    expect(bucket).toBe("week");
+    // Entries span ~10 days, so at most three contiguous Monday weeks.
+    expect(points.length).toBeGreaterThanOrEqual(1);
+    expect(points.length).toBeLessThanOrEqual(3);
+    expect(points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(23);
+    for (const p of points) expect(p.key).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Weeks are 7 days apart.
+    for (let i = 1; i < points.length; i++) {
+      expect(points[i]!.timestamp - points[i - 1]!.timestamp).toBe(7 * 86_400_000);
+    }
+  });
+});
+
+
+describe("IANA calendar windows", () => {
+  const zone = "America/New_York";
+  function entriesAt(timestamps: string[]) {
+    return createMemoryUsageTrackingDriver(timestamps.map((timestamp, i) => makeEntry(String(i), {
+      id: String(i), timestamp: Date.parse(timestamp), modelId: "dst", totalTokens: 150,
+    })));
+  }
+
+  for (const scenario of [
+    { name: "spring", now: "2026-03-09T16:00:00Z", offset: 240,
+      weekStart: "2026-03-03T05:00:00Z", monthStart: "2026-02-08T05:00:00Z",
+      transition: ["2026-03-08T06:59:59Z", "2026-03-08T07:00:00Z"],
+      firstSixHours: 5 },
+    { name: "fall", now: "2026-11-03T17:00:00Z", offset: 300,
+      weekStart: "2026-10-28T04:00:00Z", monthStart: "2026-10-05T04:00:00Z",
+      transition: ["2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z"],
+      firstSixHours: 7 },
+  ]) {
+    for (const window of ["7d", "30d"] as const) {
+      it(`${scenario.name} ${window} uses historical midnight and preserves chart totals`, async () => {
+        const clock = spyOn(Date, "now").mockReturnValue(Date.parse(scenario.now));
+        try {
+          __resetUsageSummaryCacheForTest();
+          const start = Date.parse(window === "7d" ? scenario.weekStart : scenario.monthStart);
+          const driver = entriesAt([
+            new Date(start - 1).toISOString(), new Date(start).toISOString(), new Date(start + 1).toISOString(),
+            ...scenario.transition,
+          ]);
+          const summary = await getUsageSummary(driver, [], scenario.offset, undefined, window, zone);
+          const stats = summary.window!;
+          expect(stats.totals.requests).toBe(4);
+          expect(stats.timeline.points[0]!.timestamp).toBe(start);
+          expect(stats.timeline.points).toHaveLength(window === "7d" ? 28 : 30);
+          expect(stats.timeline.points.reduce((sum, p) => sum + p.requests, 0)).toBe(stats.totals.requests);
+          expect(stats.timeline.points.reduce((sum, p) => sum + p.satsCost, 0)).toBe(stats.totals.satsCost);
+          expect(stats.timeline.points.reduce((sum, p) => sum + p.totalTokens, 0)).toBe(stats.totals.totalTokens);
+          if (window === "7d") {
+            const key = scenario.name === "spring" ? "03-08 00" : "11-01 00";
+            const index = stats.timeline.points.findIndex((p) => p.key === key);
+            expect(stats.timeline.points[index]!.requests).toBe(2);
+            expect(stats.timeline.points[index + 1]!.timestamp - stats.timeline.points[index]!.timestamp)
+              .toBe(scenario.firstSixHours * 3_600_000);
+          }
+        } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+      });
+    }
+  }
+
+  it("groups overview days and weekly totals by historical local dates", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-03-09T16:00:00Z"));
+    try {
+      __resetUsageSummaryCacheForTest();
+      const driver = entriesAt(["2026-03-02T04:30:00Z", "2026-03-09T04:30:00Z"]);
+      const summary = await getUsageSummary(driver, [], 240, undefined, "all", zone);
+      expect(summary.days.map((d) => d.date)).toEqual(["2026-03-09", "2026-03-01"]);
+      expect(summary.window!.timeline.points[0]!.key).toBe("2026-02-23");
+      expect(summary.window!.timeline.points[0]!.timestamp).toBe(Date.parse("2026-02-23T05:00:00Z"));
+      expect(summary.window!.timeline.points.reduce((sum, p) => sum + p.requests, 0)).toBe(2);
+      expect(summary.hoursToday).toHaveLength(1);
+      expect(summary.hoursToday[0]!.hour).toBe(0);
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+  });
+
+  it("counts both repeated hours in overview and the 24 elapsed-hour chart", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-01T06:45:00Z"));
+    try {
+      __resetUsageSummaryCacheForTest();
+      const driver = entriesAt(["2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z"]);
+      const summary = await getUsageSummary(driver, [], 300, undefined, "today", zone);
+      expect(summary.hoursToday[0]).toMatchObject({ hour: 1, requests: 2 });
+      expect(summary.window!.timeline.points).toHaveLength(24);
+      expect(summary.window!.timeline.points.reduce((sum, p) => sum + p.requests, 0)).toBe(2);
+      expect(summary.window!.totals.requests).toBe(2);
+      expect(summary.window!.timeline.points.at(-1)!.timestamp).toBe(Date.parse("2026-11-01T06:00:00Z"));
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+  });
+
+  it("keeps client filters on IANA chart and overview queries", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-03-09T16:00:00Z"));
+    try {
+      __resetUsageSummaryCacheForTest();
+      const driver = createMemoryUsageTrackingDriver(["selected", "other"].map((client, i) => makeEntry(client, {
+        id: client, client, timestamp: Date.parse("2026-03-03T05:00:00Z") + i,
+        modelId: "dst", totalTokens: 150,
+      })));
+      const summary = await getUsageSummary(driver, [], 240, ["selected"], "7d", zone);
+      expect(summary.window!.totals.requests).toBe(1);
+      expect(summary.window!.timeline.points.reduce((sum, p) => sum + p.requests, 0)).toBe(1);
+      expect(summary.days.reduce((sum, p) => sum + p.requests, 0)).toBe(1);
+      expect(summary.recent).toHaveLength(1);
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+  });
+
+  it("retains fixed-offset compatibility and isolates timezone cache entries", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-03-09T16:00:00Z"));
+    try {
+      __resetUsageSummaryCacheForTest();
+      const driver = entriesAt(["2026-03-03T04:30:00Z"]);
+      const fixed = await getUsageSummary(driver, [], 240, undefined, "7d");
+      const ny = await getUsageSummary(driver, [], 240, undefined, "7d", zone);
+      const utc = await getUsageSummary(driver, [], 240, undefined, "7d", "UTC");
+      expect(fixed.window!.totals.requests).toBe(1);
+      expect(ny.window!.totals.requests).toBe(0);
+      expect(utc.window!.totals.requests).toBe(1);
+      expect(ny).not.toBe(fixed);
+      expect(utc).not.toBe(ny);
+      expect(await getUsageSummary(driver, [], 240, undefined, "7d", "UTC")).toBe(utc);
+      const fixedUtc = await getUsageSummary(driver, [], 0, undefined, "7d");
+      expect(utc.window!.timeline).toEqual(fixedUtc.window!.timeline);
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
+  });
+});
+
+
+describe("explicit empty client filter", () => {
+  it("matches nothing without querying an SDK that treats [] as no filter", async () => {
+    __resetUsageSummaryCacheForTest();
+    const driver = createMemoryUsageTrackingDriver(ENTRIES);
+    const count = spyOn(driver, "count");
+    const summary = await getUsageSummary(driver, CLIENTS, TZ, [], "7d");
+    expect(summary.totals.requests).toBe(0);
+    expect(summary.window!.totals.requests).toBe(0);
+    expect(summary.recent).toEqual([]);
+    expect(count).not.toHaveBeenCalled();
+    const unfiltered = await getUsageSummary(driver, CLIENTS, TZ, undefined, "7d");
+    expect(unfiltered.totals.requests).toBe(ENTRIES.length);
+  });
+});
+
+describe("IANA summaries stay in SQL", () => {
+  it("never lists rows for timeline, days or hours (only size buckets and recent)", async () => {
+    const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-03T17:00:00Z"));
+    try {
+      for (const window of ["today", "7d", "30d", "all"] as const) {
+        __resetUsageSummaryCacheForTest();
+        const driver = createMemoryUsageTrackingDriver([
+          makeEntry("a", { id: "a", timestamp: Date.parse("2026-11-01T05:30:00Z"), modelId: "m", totalTokens: 10 }),
+          makeEntry("b", { id: "b", timestamp: Date.parse("2026-03-08T07:30:00Z"), modelId: "m", totalTokens: 10 }),
+        ]);
+        // The memory driver's count() delegates to list(); stub it out so only
+        // the summary's own list() calls are counted.
+        spyOn(driver, "count").mockResolvedValue(2);
+        const list = spyOn(driver, "list");
+        await getUsageSummary(driver, [], 300, undefined, window, "America/New_York");
+        // buildAggregates (all-time + windowed) for size buckets, plus `recent`.
+        const unbounded = list.mock.calls.filter(([options]) => options?.limit === undefined);
+        expect(unbounded.length).toBe(window === "all" ? 1 : 2);
+      }
+    } finally { clock.mockRestore(); __resetUsageSummaryCacheForTest(); }
   });
 });

@@ -2,6 +2,7 @@ import { createServer } from "http";
 import { existsSync, unlinkSync } from "fs";
 import {
   ProviderManager,
+  MintDiscovery,
   createStorageAdapterFromStore,
   createSdkStore,
 } from "@routstr/sdk";
@@ -9,7 +10,8 @@ import {
 // storage (eventStoreDbPath) gets its SQLite-backed factory. The default
 // "@routstr/sdk" export is browser-safe and throws without that factory
 // (SDK 0.3.7+ browser-safe entrypoint split).
-import { ModelManager } from "@routstr/sdk/bun";
+import { ModelManager, createBunSqliteRequestLifecycleDriver } from "@routstr/sdk/bun";
+import { initializeDaemonLifecycle } from "./request-lifecycle";
 import type { SdkLogger } from "@routstr/sdk";
 import {
   CONFIG_DIR,
@@ -19,6 +21,7 @@ import {
   REQUEST_RESPONSE_LOGS_DIR,
 } from "../utils/config";
 import { logger } from "../utils/logger";
+import { createUpdateCheckJob } from "./update-check-job";
 
 
 function makeSdkLogger(prefix?: string): SdkLogger {
@@ -49,10 +52,11 @@ import {
 } from "@routstr/sdk/storage/bun";
 import { createWalletAdapter } from "./wallet";
 import type { AutoRefillConfig } from "./wallet/auto-refill";
+import { recoverParkedTokens } from "./wallet/parked-tokens";
 import { createModelService } from "./models";
 import { createDaemonRequestHandler } from "./http";
 import { FileRequestResponseLogSink } from "./request-response-log-sink";
-import { refreshModelsAndIntegrations } from "../integrations";
+import { formatModelRefreshSummary, refreshModelsAndIntegrations } from "../integrations";
 import { RoutstrClient } from "@routstr/sdk";
 import { mkdirSync } from "fs";
 import { dirname } from "path";
@@ -67,24 +71,31 @@ import {
   legacyCocodPidPath,
   legacyCocodSocketPath,
 } from "./wallet/paths";
+import { installGlobalErrorHandlers } from "./fatal-error";
 
 // Global error handlers — the daemon is spawned detached with stdout/stderr
 // redirected to a file, so without these, uncaught async errors would kill
-// the process silently. Log to the file logger before exiting.
-process.on("uncaughtException", (error) => {
-  logger.error("UNCAUGHT EXCEPTION:", error);
-});
+// the process silently. Uncaught exceptions are fatal: the process state can
+// no longer be trusted, so the daemon logs and exits for its supervisor to
+// restart (see fatal-error.ts).
+export async function runDaemon(argv: string[] = process.argv): Promise<void> {
+  installGlobalErrorHandlers();
+  // Install signal handlers before migration and wallet startup. If a signal
+  // arrives before the full shutdown path is wired, process.exit() still runs
+  // the synchronous PID-lock exit hooks registered by claimPidFile.
+  let shutdownDaemon: () => void = () => process.exit(0);
+  const shutdownForSignal = (signal: NodeJS.Signals) => {
+    logger.log(`Received ${signal}; shutting down...`);
+    shutdownDaemon();
+  };
+  process.once("SIGINT", shutdownForSignal);
+  process.once("SIGTERM", shutdownForSignal);
 
-process.on("unhandledRejection", (reason) => {
-  logger.error("UNHANDLED REJECTION:", reason);
-});
-
-async function main(): Promise<void> {
   startupProgress("Loading configuration...");
-  const args = parseArgs(process.argv);
+  const args = parseArgs(argv);
   const config = await loadDaemonConfig();
 
-  const port = args.port;
+  const port = args.port ?? config.port ?? 8008;
   const host = args.host || config.host || "127.0.0.1";
   const provider = args.provider || config.provider;
   const requestResponseLogDir =
@@ -113,6 +124,8 @@ async function main(): Promise<void> {
     legacyStorageDriver: sqliteDriver,
   });
 
+  const requestLifecycleDriver = await createBunSqliteRequestLifecycleDriver({ dbPath: DB_PATH });
+
   const discoveryAdapter = await createShardedDiscoveryAdapter({ driver: sqliteDriver });
   const storageAdapter = createStorageAdapterFromStore(store);
   startupProgress("Routstr databases ready.");
@@ -120,12 +133,18 @@ async function main(): Promise<void> {
     logger: daemonSdkLogger,
     eventStoreDbPath: `${CONFIG_DIR}/events.db`,
     routstrPubkey: config.routstrPubkey,
+    routstrModelsPubkey: config.routstrModelsPubkey,
     nostrRelays: config.relays,
   });
   // Create shared ProviderManager for consistent failure tracking across all requests
   const providerManager = new ProviderManager(discoveryAdapter, store, daemonSdkLogger);
-  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, refreshProvidersAndModels } =
-    createModelService(modelManager, providerManager, store);
+  // Mint discovery owns the mint cache the wallet uses to refuse a mint a
+  // provider does not accept. Its own 21-minute TTL gates network refreshes.
+  const mintDiscovery = new MintDiscovery(discoveryAdapter, {
+    logger: daemonSdkLogger,
+  });
+  const { ensureProvidersBootstrapped, getRoutstr21Models, getModelProviders, getModelPaths, refreshProvidersAndModels } =
+    createModelService(modelManager, providerManager, store, mintDiscovery);
 
   // The daemon may be launched directly (or by an older/global CLI), so do
   // not rely on the parent command having stopped the external wallet first.
@@ -134,27 +153,19 @@ async function main(): Promise<void> {
     pidFilePath: legacyCocodPidPath(),
   });
 
-  let migrationLockOwner: number | undefined;
   const migration = await migrateLegacyWallet({
     assertLegacyStopped: () =>
       assertLegacyCocodNotRunning({
         socketPath: legacyCocodSocketPath(),
-        pidFilePath: legacyCocodPidPath(),
-        ignorePid: migrationLockOwner,
       }),
     acquireLegacyLock: () => {
       mkdirSync(dirname(legacyCocodPidPath()), {
         recursive: true,
         mode: 0o700,
       });
-      const release = claimLegacyCocodPidFile({
+      return claimLegacyCocodPidFile({
         pidFilePath: legacyCocodPidPath(),
       });
-      migrationLockOwner = process.pid;
-      return () => {
-        migrationLockOwner = undefined;
-        release();
-      };
     },
   });
   if (migration.status === "migrated") {
@@ -181,7 +192,6 @@ async function main(): Promise<void> {
   };
 
   const walletAdapter = await createWalletAdapter({
-    cocodPath: config.cocodPath,
     walletClient,
     getAutoRefillConfig,
     nwcConnectionString: config.nwc?.connectionString,
@@ -196,10 +206,10 @@ async function main(): Promise<void> {
     { logger: daemonSdkLogger },
   );
 
+  // Wallet startup has acquired the process PID lock. Only its owner may
+  // interrupt the previous daemon instance's unfinished rows.
+  const lifecycleOwnerInstanceId = await initializeDaemonLifecycle(requestLifecycleDriver, DB_PATH);
   const server = createServer();
-  let shutdownDaemon: () => void = () => {
-    server.close(() => process.exit(0));
-  };
   server.on(
     "request",
     createDaemonRequestHandler({
@@ -215,11 +225,16 @@ async function main(): Promise<void> {
       ensureProvidersBootstrapped,
       getRoutstr21Models,
       getModelProviders,
+      getModelPaths,
       refreshProvidersAndModels,
       mode: config.mode || "apikeys",
+      autoModelPath: config.autoModelPath === true,
       maxTokens: config.maxTokens ?? 64000,
       routstrPubkey: config.routstrPubkey,
+      routstrModelsPubkey: config.routstrModelsPubkey,
       usageTrackingDriver,
+      requestLifecycleDriver,
+      lifecycleOwnerInstanceId,
       providerManager,
       refundClient,
       requestResponseLogSink,
@@ -236,39 +251,104 @@ async function main(): Promise<void> {
     // Ignore
   }
 
-  const REFRESH_INTERVAL_MS = 21 * 60 * 1000; // 21 mins
+  const DEFAULT_REFRESH_INTERVAL_MS = 21 * 60 * 1000; // 21 mins
+  // While the job is disabled we keep a light poll running so `clients
+  // --enable-automatic-refresh` takes effect without a daemon restart.
+  const DISABLED_REFRESH_POLL_MS = 60 * 1000;
+
+  /**
+   * Read autoRefresh from disk on every tick (like the NWC auto-refill
+   * getter) so CLI/config changes apply immediately without a restart.
+   */
+  const readAutoRefreshSettings = (): {
+    enabled: boolean;
+    intervalMs: number;
+  } => {
+    const autoRefresh = loadDaemonConfigSync().autoRefresh;
+    const intervalMs =
+      typeof autoRefresh?.intervalMs === "number" && autoRefresh.intervalMs > 0
+        ? autoRefresh.intervalMs
+        : DEFAULT_REFRESH_INTERVAL_MS;
+    return { enabled: autoRefresh?.enabled !== false, intervalMs };
+  };
 
   // Recurring job to refresh routstr21 models
-  let refreshInterval: ReturnType<typeof setInterval> | null = null;
+  let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let refreshJobActive = false;
+  let disabledNoticeLogged = false;
+
+  const runScheduledRefresh = async (): Promise<void> => {
+    // One line per pass at `info` (below); the phase markers stay at `debug`
+    // because this repeats every 21 minutes and the pass is not news.
+    const startedAt = Date.now();
+    logger.debug("Running scheduled Nostr event refresh...");
+    try {
+      await modelManager.refreshNostrEvents();
+    } catch (error) {
+      logger.error("Scheduled Nostr event refresh failed:", error);
+    }
+
+    logger.debug("Running scheduled model refresh...");
+    try {
+      const result = await refreshModelsAndIntegrations(
+        getRoutstr21Models,
+        updatedConfig,
+        "Scheduled",
+      );
+      logger.log(
+        formatModelRefreshSummary("Scheduled", result, Date.now() - startedAt),
+      );
+    } catch (error) {
+      logger.error("Scheduled model refresh failed:", error);
+    }
+  };
+
+  const scheduleNextRefresh = (): void => {
+    if (!refreshJobActive) return;
+
+    const { enabled, intervalMs } = readAutoRefreshSettings();
+    if (!enabled) {
+      if (!disabledNoticeLogged) {
+        logger.log(
+          "Scheduled refresh job is disabled (autoRefresh.enabled=false). Polling for re-enable every 60s.",
+        );
+        disabledNoticeLogged = true;
+      }
+      refreshTimer = setTimeout(
+        scheduleNextRefresh,
+        Math.min(intervalMs, DISABLED_REFRESH_POLL_MS),
+      );
+      return;
+    }
+
+    if (disabledNoticeLogged) {
+      logger.log("Scheduled refresh job re-enabled.");
+      disabledNoticeLogged = false;
+    }
+
+    refreshTimer = setTimeout(() => {
+      void runScheduledRefresh()
+        .catch((error) => logger.error("Model refresh interval escaped:", error))
+        .finally(() => scheduleNextRefresh());
+    }, intervalMs);
+  };
 
   const startModelRefreshJob = () => {
+    refreshJobActive = true;
+    const { enabled, intervalMs } = readAutoRefreshSettings();
     logger.log(
-      `Starting recurring model refresh job (every ${REFRESH_INTERVAL_MS / 1000 / 60 / 60} hours)`,
+      enabled
+        ? `Starting recurring model refresh job (every ${Math.round(intervalMs / 60_000)} minutes)`
+        : "Recurring model refresh job is disabled (autoRefresh.enabled=false).",
     );
-
-    refreshInterval = setInterval(() => {
-      (async () => {
-        logger.log("Running scheduled Nostr event refresh...");
-        try {
-          await modelManager.refreshNostrEvents();
-        } catch (error) {
-          logger.error("Scheduled Nostr event refresh failed:", error);
-        }
-
-        logger.log("Running scheduled model refresh...");
-        try {
-          await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Scheduled");
-        } catch (error) {
-          logger.error("Scheduled model refresh failed:", error);
-        }
-      })().catch((error) => logger.error("Model refresh interval escaped:", error));
-    }, REFRESH_INTERVAL_MS);
+    scheduleNextRefresh();
   };
 
   const stopModelRefreshJob = () => {
-    if (refreshInterval) {
-      clearInterval(refreshInterval);
-      refreshInterval = null;
+    refreshJobActive = false;
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
       logger.log("Stopped recurring model refresh job.");
     }
   };
@@ -286,21 +366,12 @@ async function main(): Promise<void> {
       (async () => {
         logger.log("Running scheduled refund...");
         try {
-          const state = store.getState() as any;
-          const pendingDistribution = (state.cachedTokens || []).map(
-            (t: { baseUrl: string; balance?: number }) => ({
-              baseUrl: t.baseUrl,
-              amount: t.balance || 0,
-            }),
-          );
-          const apiKeysStored = (state.apiKeys || []).map(
-            (k: { baseUrl: string; balance?: number }) => ({
-              baseUrl: k.baseUrl,
-              amount: k.balance || 0,
-            }),
-          );
+          // Runs before the "nothing to refund" early return: a parked token
+          // can exist with no API key left to refund.
+          await recoverParkedTokens(refundClient);
 
-          if (pendingDistribution.length === 0 && apiKeysStored.length === 0) {
+          const state = store.getState() as any;
+          if ((state.apiKeys || []).length === 0) {
             logger.log("No pending tokens to refund.");
             return;
           }
@@ -335,6 +406,12 @@ async function main(): Promise<void> {
     }
   };
 
+  // Low-frequency background update check. It only caches the answer in
+  // update-state.json for the CLI/TUI to read; it never installs anything.
+  const updateCheckJob = createUpdateCheckJob({
+    enabled: () => loadDaemonConfigSync().updateCheck !== false,
+  });
+
   let walletDisposePromise: Promise<void> | undefined;
   const disposeWallet = (): Promise<void> => {
     walletDisposePromise ??= walletClient.dispose?.() || Promise.resolve();
@@ -344,6 +421,7 @@ async function main(): Promise<void> {
   server.on("close", () => {
     stopModelRefreshJob();
     stopRefundJob();
+    updateCheckJob.stop();
     void disposeWallet().catch((error) => {
       logger.error("Failed to dispose wallet:", error);
     });
@@ -355,13 +433,16 @@ async function main(): Promise<void> {
     });
   };
 
-  const shutdownForSignal = (signal: NodeJS.Signals) => {
-    logger.log(`Received ${signal}; shutting down...`);
-    shutdownDaemon();
-  };
-
-  process.once("SIGINT", shutdownForSignal);
-  process.once("SIGTERM", shutdownForSignal);
+  // Without this a listen failure only reaches uncaughtException, which logs and
+  // returns, leaving the daemon alive holding the wallet locks with no listener.
+  server.on("error", (error) => {
+    logger.error("Failed to start Routstr daemon:", error);
+    console.error(
+      "Failed to start Routstr daemon:",
+      error instanceof Error ? error.message : error,
+    );
+    process.exit(1);
+  });
 
   startupProgress("Starting HTTP server...");
   server.listen(port, host, async () => {
@@ -373,27 +454,47 @@ async function main(): Promise<void> {
     // Start the recurring model refresh job after initial bootstrap
     void ensureProvidersBootstrapped()
       .then(async () => {
-        // Catch up on any Nostr events published since last run
-        logger.log("Running initial Nostr event refresh...");
-        await modelManager.refreshNostrEvents();
-
+        const initialRefreshStartedAt = Date.now();
+        // Bootstrap already refreshed expired provider/review/mapping/model
+        // evidence. Reuse it here; scheduled and explicit refreshes still force
+        // network discovery. Do not immediately query every relay twice.
         startModelRefreshJob();
         startRefundJob();
-        // Run an immediate refresh to populate models right away
-        logger.log("Running initial model refresh...");
-        await refreshModelsAndIntegrations(getRoutstr21Models, updatedConfig, "Initial");
+        updateCheckJob.start();
+        // Run an immediate refresh to populate models right away. Client
+        // integrations are skipped when the scheduled job is disabled, so a
+        // restart does not overwrite hand-edited client configs.
+        const result = await refreshModelsAndIntegrations(
+          // Check provider TTLs even with a persisted warm cache; ordinary
+          // model-list readers still serve stale models without this wait.
+          (force) => getRoutstr21Models(force, true),
+          updatedConfig,
+          "Initial",
+          {
+            forceRefresh: false,
+            refreshIntegrations: readAutoRefreshSettings().enabled,
+          },
+        );
+        logger.log(
+          formatModelRefreshSummary(
+            "Initial",
+            result,
+            Date.now() - initialRefreshStartedAt,
+          ),
+        );
       })
       .catch((error) => {
         logger.error("Initial model refresh failed:", error);
         // Still start the jobs even if initial refresh fails
         startModelRefreshJob();
         startRefundJob();
+        updateCheckJob.start();
       });
   });
 }
 
 if (import.meta.main) {
-  main().catch((error) => {
+  runDaemon().catch((error) => {
     logger.error("Failed to start Routstr daemon:", error);
     // Also write to stderr so the spawning CLI can surface the real error
     // (stdout/stderr are redirected to debug.log by start-daemon.ts).

@@ -1,14 +1,13 @@
-import type { Tab } from "./types.ts";
+import type { Tab, TimeWindow } from "./types.ts";
 
 export const ALL_TABS: Tab[] = [
   { id: "overview", name: "Overview", key: "1" },
-  { id: "today", name: "Today", key: "2" },
+  { id: "history", name: "History", key: "2" },
   { id: "models", name: "Models", key: "3" },
   { id: "providers", name: "Providers", key: "4" },
-  { id: "tokens", name: "Tokens", key: "5" },
-  { id: "clients", name: "Clients", key: "6" },
-  { id: "npubs", name: "Npubs", key: "7" },
-  { id: "recent", name: "Recent", key: "8" },
+  { id: "clients", name: "Clients", key: "5" },
+  { id: "npubs", name: "Npubs", key: "6" },
+  { id: "recent", name: "Recent", key: "7" },
 ];
 
 /**
@@ -20,8 +19,43 @@ export function getVisibleTabs(hasNpubs: boolean): Tab[] {
   return tabs.map((t, i) => ({ ...t, key: String(i + 1) }));
 }
 
-/** Default tab list (no npub data yet). */
-export const TABS: Tab[] = getVisibleTabs(false);
+// ─── Time windows ─────────────────────────────────────────────────────────────
+
+/** Cycle order for the `[W]` key: all → today → 7d → 30d → all. */
+export const WINDOW_ORDER: readonly TimeWindow[] = ["all", "today", "7d", "30d"];
+
+/** Short labels shown in the window selector bar. */
+export const WINDOW_LABELS: Record<TimeWindow, string> = {
+  all: "All",
+  today: "24h",
+  "7d": "7d",
+  "30d": "30d",
+};
+
+/** Advance/rewind through {@link WINDOW_ORDER}, wrapping at either end. */
+export function cycleTimeWindow(current: TimeWindow, direction: 1 | -1): TimeWindow {
+  const idx = WINDOW_ORDER.indexOf(current);
+  const next = (idx + direction + WINDOW_ORDER.length) % WINDOW_ORDER.length;
+  return WINDOW_ORDER[next]!;
+}
+
+/**
+ * Whether the active window applies to a given tab. Only Recent is exempt:
+ * Overview honours the window but draws the selector inline, and History,
+ * Models, Providers, Clients and Npubs all follow it.
+ */
+export function tabSupportsWindow(tabId: Tab["id"]): boolean {
+  return tabId !== "recent";
+}
+
+/**
+ * Whether the window selector belongs in the top chrome. Overview honours the
+ * window but renders the selector inside its own content (right under the
+ * Balance box) instead, so it is excluded from the chrome bar.
+ */
+export function tabShowsWindowBarInChrome(tabId: Tab["id"]): boolean {
+  return tabSupportsWindow(tabId) && tabId !== "overview";
+}
 
 export const COLORS = {
   reset: "\x1b[0m",
@@ -34,6 +68,7 @@ export const COLORS = {
   magenta: "\x1b[35m",
   cyan: "\x1b[36m",
   white: "\x1b[37m",
+  orange: "\x1b[38;5;208m",
   bgBlue: "\x1b[44m",
   bgGreen: "\x1b[42m",
   bgYellow: "\x1b[43m",

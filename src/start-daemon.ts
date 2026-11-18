@@ -9,7 +9,7 @@ import { logger } from "./utils/logger";
 import { CONFIG_DIR, LOGS_DIR } from "./utils/config";
 import { withCrossProcessLock } from "./utils/process-lock";
 import { urlHosts } from "./utils/daemon-client";
-import { fileURLToPath } from "url";
+import { daemonSpawnCommand } from "./runtime";
 
 const DAEMON_STARTUP_LOCK_PATH = `${CONFIG_DIR}/routstrd-startup.lock`;
 const DEBUG_LOG_PATH = `${CONFIG_DIR}/debug.log`;
@@ -88,7 +88,8 @@ function printStartupProgress(offset: number): {
   }
 }
 
-function formatElapsed(elapsedMs: number): string {
+/** Format an elapsed duration as "45s" or "2m 5s". */
+export function formatElapsed(elapsedMs: number): string {
   const seconds = Math.floor(elapsedMs / 1000);
   if (seconds < 60) return `${seconds}s`;
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
@@ -151,17 +152,12 @@ async function startDaemonUnlocked(
     args.push("--provider", options.provider);
   }
 
-  let daemonScript = fileURLToPath(new URL("./daemon/index.js", import.meta.url));
-  if (!existsSync(daemonScript)) {
-    daemonScript = fileURLToPath(new URL("./daemon/index.ts", import.meta.url));
-  }
-
   const debugLogOffset = existsSync(DEBUG_LOG_PATH)
     ? fileSize(DEBUG_LOG_PATH)
     : 0;
   const debugLogFd = openSync(DEBUG_LOG_PATH, "a");
 
-  const proc = Bun.spawn(["bun", daemonScript, ...args], {
+  const proc = Bun.spawn(daemonSpawnCommand(args), {
     stdout: debugLogFd,
     stderr: debugLogFd,
     stdin: "ignore",
@@ -169,6 +165,22 @@ async function startDaemonUnlocked(
   });
 
   proc.unref();
+
+  // The daemon must outlive a successful start, but a start we give up on must not
+  // leave a detached process holding the wallet locks. `detached` makes it a group leader.
+  const killSpawnedDaemon = (): void => {
+    try {
+      process.kill(-proc.pid, "SIGTERM");
+    } catch {
+      // Already exited.
+    }
+  };
+  const abandonOnSignal = (): void => {
+    killSpawnedDaemon();
+    process.exit(1);
+  };
+  process.once("SIGINT", abandonOnSignal);
+  process.once("SIGTERM", abandonOnSignal);
 
   let exitCode: number | null = null;
   proc.exited.then((code) => {
@@ -212,6 +224,8 @@ async function startDaemonUnlocked(
     }
 
     if (await healthyDaemonHost(port, host)) {
+      process.off("SIGINT", abandonOnSignal);
+      process.off("SIGTERM", abandonOnSignal);
       printStartupProgress(progressLogOffset);
       console.log(
         `Routstr daemon started (PID: ${proc.pid}, ${formatElapsed(Date.now() - startedAt)}).`,
@@ -220,8 +234,10 @@ async function startDaemonUnlocked(
     }
   }
 
+  killSpawnedDaemon();
   throw new Error(
-    `Daemon failed to start within ${Math.round(startupTimeoutMs / 1000)} seconds. Check logs in ${LOGS_DIR}`,
+    `Daemon did not become healthy within ${Math.round(startupTimeoutMs / 1000)} seconds; ` +
+      `the incomplete daemon (PID ${proc.pid}) was stopped. Check logs in ${LOGS_DIR}`,
   );
 }
 
