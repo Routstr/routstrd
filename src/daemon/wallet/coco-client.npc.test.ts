@@ -1,11 +1,13 @@
 import { Manager, MintApi, SendOpsApi } from "@cashu/coco-core";
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-// The real NPCPlugin opens a websocket to npubx.cash once the wallet is ready.
-// Mock the module before importing coco-client so tests never touch the network.
+import { createCocoClient } from "./coco-client";
+
+// Substitute the plugin per client so these tests never touch npubx.cash and
+// transport tests in the same process can still exercise both real builds.
 const npcState = {
   info: { name: "alice" as string | null, pubkey: "ab".repeat(32) },
   usernameResult: { success: true } as
@@ -50,12 +52,6 @@ class MockNPCPlugin {
   }
 }
 
-mock.module("coco-cashu-plugin-npc", () => ({
-  NPCPlugin: MockNPCPlugin,
-}));
-
-const { createCocoClient } = await import("./coco-client");
-
 const TEST_MNEMONIC =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -78,6 +74,7 @@ function testClientOptions(walletDir = makeWalletDir()) {
     walletDir,
     legacySocketPath: join(walletDir, "legacy-cocod.sock"),
     legacyPidPath: join(walletDir, "legacy-cocod.pid"),
+    createNpcPlugin: (...args: ConstructorParameters<typeof MockNPCPlugin>) => new MockNPCPlugin(...args),
   };
 }
 

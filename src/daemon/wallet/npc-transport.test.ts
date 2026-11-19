@@ -1,10 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { finalizeEvent } from "nostr-tools";
 import { JWTAuthProvider, NPCClient } from "npubcash-sdk";
-// Use require so another test's mock.module of the ESM plugin cannot hide the
-// real dependency exercised here. Both shipped builds carry the same patch.
-const cjs = require("coco-cashu-plugin-npc") as typeof import("coco-cashu-plugin-npc");
-const esm = await import(require.resolve("coco-cashu-plugin-npc").replace(/index\.cjs$/, "index.js")) as typeof cjs;
+import * as esm from "coco-cashu-plugin-npc";
+// Both shipped builds carry the same patch and must exercise the real plugin.
+const cjs = require("coco-cashu-plugin-npc") as typeof esm;
 
 const signer = async (event: Parameters<typeof finalizeEvent>[0]) =>
   finalizeEvent(event, new Uint8Array(32).fill(1));

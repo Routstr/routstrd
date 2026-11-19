@@ -736,6 +736,8 @@ export interface CreateCocoClientOptions {
   enableNpc?: boolean;
   /** NPC server base URL. Default: https://npubx.cash */
   npcBaseUrl?: string;
+  /** Override plugin construction without replacing the process-wide module. */
+  createNpcPlugin?: (...args: ConstructorParameters<typeof NPCPlugin>) => CocoPlugin;
 }
 
 /**
@@ -2165,19 +2167,16 @@ export async function createCocoClient(
       const npcSecretKey = privateKeyFromSeedWords(mnemonic);
       const npcSigner = async (template: EventTemplate) =>
         finalizeEvent(template, npcSecretKey);
-      const npcPlugin = new NPCPlugin(npcBaseUrl, npcSigner, {
+      // Both coco packages implement the same plugin host contract; the
+      // default factory bridges the duplicate package types.
+      const createNpcPlugin = options.createNpcPlugin ??
+        ((...args: ConstructorParameters<typeof NPCPlugin>) => new NPCPlugin(...args) as unknown as CocoPlugin);
+      coco.use(createNpcPlugin(npcBaseUrl, npcSigner, {
         useWebsocket: true,
         // Interval fallback for missed websocket updates (see constant above).
         syncIntervalMs: NPC_QUOTE_SYNC_INTERVAL_MS,
         logger: createCocoLogger({ module: "npc" }),
-      });
-      // coco-cashu-plugin-npc implements the plugin contract from the
-      // coco-cashu-core package while routstrd runs the equivalent
-      // @cashu/coco-core build. The plugin host API is structurally identical
-      // in both (verified: mintService.addMintByUrl,
-      // mintOperationService.importQuote/getOperationByQuote), so this cast
-      // only bridges the duplicate package names, not a real API gap.
-      coco.use(npcPlugin as unknown as CocoPlugin);
+      }));
     }
 
     startupProgress("Cashu wallet ready.");
