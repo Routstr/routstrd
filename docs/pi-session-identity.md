@@ -12,18 +12,19 @@ when cache retention is `none`. This setting does not guarantee that Pi's
 Anthropic transport sends a session header.
 
 At inference ingress Routstrd consumes `x-session-id`, `session-id`, `session_id`,
-`x-client-request-id`, `x-session-affinity`, and `x-opencode-session` locally,
-in that precedence order. Header names are case-insensitive. The last alias is
-Pi's OpenCode identity header. Top-level `session_id`, `sessionId`, and
+`x-session-affinity`, and `x-opencode-session` locally, in that precedence order.
+Header names are case-insensitive. Top-level `session_id`, `sessionId`, and
 `prompt_cache_key`, plus metadata `session_id`/`sessionId`, are fallback sources.
-Only nonempty values of at most 256 characters without control characters are
-stored. These identifiers are untrusted client labels, not authentication.
+`x-client-request-id` is stripped but not used for accounting: callers may send
+one unique value per request. Only nonempty values of at most 256 characters
+without control characters are stored. These identifiers are untrusted client
+labels, not authentication.
 
 Before invoking the SDK router, all those header aliases and body fields are
 removed (including metadata `prompt_cache_key`). The request-scoped usage driver
 adds the selected ID to locally appended accounting rows, without changing the
-shared driver or unrelated requests. No session ID is inferred from an upstream
-response or injected into upstream requests. In particular, a caller's explicit
+shared driver or unrelated requests. `GET /usage` omits the stored session ID.
+No session ID is inferred from an upstream response or injected into upstream requests. In particular, a caller's explicit
 `prompt_cache_key` no longer reaches upstream; this sacrifices that explicit
 cache-affinity hint for local conversation privacy. Automatic prefix caching is
 not disabled by this policy.

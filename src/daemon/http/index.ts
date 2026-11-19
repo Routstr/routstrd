@@ -2479,12 +2479,14 @@ export function createDaemonRequestHandler(deps: {
               .map((c) => c.clientId)
           : undefined;
         // An unmatched owner is an empty selection, not an unfiltered query.
-        const output = clientFilter?.length === 0
+        const rows = clientFilter?.length === 0
           ? []
           : await deps.usageTrackingDriver.list({
               limit: parseLimit(url.searchParams.get("limit")),
               ...(clientFilter ? { clients: clientFilter } : {}),
             });
+        // Session IDs are for local accounting only; this route does not authorize access to them.
+        const output = rows.map(({ sessionId: _sessionId, ...row }) => row);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
       } catch (error) {

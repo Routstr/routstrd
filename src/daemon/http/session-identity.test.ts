@@ -14,6 +14,11 @@ describe("local session identity", () => {
     expect(headers).toEqual({ authorization: "Bearer test", "x-request-id": "request" });
     expect(body).toEqual({ model: "test", messages: [{ content: "session_id is ordinary prompt text" }] });
   });
+  it("strips a standalone per-request ID without treating it as a session", () => {
+    const headers = { "X-Client-Request-ID": "per-request-id" };
+    expect(consumeSessionIdentity(headers, {})).toBeUndefined();
+    expect(headers).toEqual({});
+  });
   it("removes invalid identity without storing it", () => {
     const headers: Record<string, string> = { "x-session-id": "x".repeat(257) };
     expect(consumeSessionIdentity(headers, {})).toBeUndefined();
