@@ -1,3 +1,4 @@
+import { readSessionIdentity, withSessionIdentity } from "./session-identity";
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
@@ -2513,12 +2514,14 @@ export function createDaemonRequestHandler(deps: {
               .map((c) => c.clientId)
           : undefined;
         // An unmatched owner is an empty selection, not an unfiltered query.
-        const output = clientFilter?.length === 0
+        const rows = clientFilter?.length === 0
           ? []
           : await deps.usageTrackingDriver.list({
               limit: parseLimit(url.searchParams.get("limit")),
               ...(clientFilter ? { clients: clientFilter } : {}),
             });
+        // Session IDs are for local accounting only; this route does not authorize access to them.
+        const output = rows.map(({ sessionId: _sessionId, ...row }) => row);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ output }));
       } catch (error) {
@@ -2684,6 +2687,8 @@ export function createDaemonRequestHandler(deps: {
       }
     }
 
+    const sessionId = readSessionIdentity(incomingHeaders, bodyObj);
+
     try {
       // Discovery is shared: cancel this waiter, not the shared bootstrap.
       await new Promise<void>((resolve, reject) => {
@@ -2725,7 +2730,7 @@ export function createDaemonRequestHandler(deps: {
         modelManager: deps.modelManager,
         debugLevel: "DEBUG",
         mode: deps.mode,
-        usageTrackingDriver: deps.usageTrackingDriver,
+        usageTrackingDriver: withSessionIdentity(deps.usageTrackingDriver, sessionId),
         sdkStore: deps.store,
         providerManager: deps.providerManager,
         logger: reqLogger,

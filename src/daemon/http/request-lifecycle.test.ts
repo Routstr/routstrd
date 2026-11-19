@@ -239,13 +239,18 @@ describe("lifecycle query endpoints", () => {
 
 /** Uses the real SDK resolver/client/transport; adapters supply local state only. */
 async function routedFixture(mode: "success" | "passthrough" | "stream") {
-  const upstream = createServer((req, res) => {
+  const usage = createMemoryUsageTrackingDriver();
+  const upstreamBodies: string[] = [];
+  const upstream = createServer(async (req, res) => {
     if (req.url === "/v1/wallet/info") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ balance: 100000, reserved: 0, api_key: "sk-node-key" }));
       return;
     }
-    req.resume();
+    req.setEncoding("utf8");
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    upstreamBodies.push(body);
     res.setHeader("x-routstr-request-id", "node-attempt-id");
     if (mode === "stream") {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -276,12 +281,13 @@ async function routedFixture(mode: "success" | "passthrough" | "stream") {
     getFailedProviders: () => new Set(),
   };
   const daemon = await fixture({
+    usageTrackingDriver: usage,
     provider: node, mode: "apikeys", ensureProvidersBootstrapped: async () => {},
     modelManager: { getBaseUrls: () => [node], getAllCachedModels: () => ({ [node]: [model] }) },
     discoveryAdapter, storageAdapter, providerManager,
     walletAdapter: { getBalances: async () => ({ "https://mint.example": 100 }), getActiveMintUrl: () => "https://mint.example" },
   });
-  return { ...daemon, closeUpstream: async () => {
+  return { ...daemon, usage, upstreamBodies, closeUpstream: async () => {
     upstream.closeAllConnections();
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
   } };
@@ -290,7 +296,7 @@ async function routedFixture(mode: "success" | "passthrough" | "stream") {
 async function awaitTerminal(driver: RequestLifecycleDriver, id: string) {
   for (let i = 0; i < 200; i++) {
     const trace = await driver.getTrace(id);
-    if (trace?.request.outcome !== "in_progress") return trace;
+    if (trace && trace.request.outcome !== "in_progress") return trace;
     await Bun.sleep(5);
   }
   return driver.getTrace(id);
@@ -319,6 +325,48 @@ describe("real SDK routed responses", () => {
     } finally { await closeUpstream(); }
   });
 
+  it("preserves the upstream cache key and omits the stored session ID from GET /usage", async () => {
+    const { call, driver, usage, upstreamBodies, closeUpstream } = await routedFixture("success");
+    try {
+      const headers = {
+        "x-opencode-session": "local-session",
+        "x-client-request-id": "per-request-id",
+        "x-api-key": "sk-test-client",
+      };
+      const response = await call("/v1/chat/completions", {
+        method: "POST", headers,
+        body: JSON.stringify({
+          model: "model", messages: [], prompt_cache_key: "caller-cache-key",
+          metadata: { sessionId: "caller-metadata-session", purpose: "test" },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.json();
+      const requestId = response.headers.get("x-routstr-sdk-request-id")!;
+      expect((await awaitTerminal(driver, requestId))?.request.outcome).toBe("succeeded");
+
+      expect(upstreamBodies).toHaveLength(1);
+      const upstreamBody = JSON.parse(upstreamBodies[0]!);
+      expect(upstreamBody.prompt_cache_key).toBe("caller-cache-key");
+      expect(upstreamBody.metadata).toEqual({ sessionId: "caller-metadata-session", purpose: "test" });
+
+      // Non-streaming lifecycle completion does not wait for SDK accounting.
+      let rows = await usage.list();
+      for (let i = 0; rows.length === 0 && i < 200; i++) {
+        await Bun.sleep(5);
+        rows = await usage.list();
+      }
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.sessionId).toBe("local-session");
+      const usageResponse = await call("/usage");
+      expect(usageResponse.status).toBe(200);
+      const { output } = await usageResponse.json() as { output: Array<Record<string, unknown>> };
+      expect(output).toHaveLength(1);
+      expect(output[0]?.requestId).toBe(requestId);
+      expect(output[0]).not.toHaveProperty("sessionId");
+    } finally { await closeUpstream(); }
+  });
+
   it("aborts the SDK lifecycle when the downstream disconnects after SSE headers", async () => {
     const { base, driver, closeUpstream } = await routedFixture("stream");
     try {
@@ -343,4 +391,26 @@ describe("real SDK routed responses", () => {
       expect(trace?.events.filter((event) => event.type === "request_finished")).toHaveLength(1);
     } finally { await closeUpstream(); }
   });
+});
+
+it.each(["/v1/chat/completions", "/v1/responses", "/v1/messages"])("reads session identity without altering router inputs on %s", async (path) => {
+  const usage = createMemoryUsageTrackingDriver();
+  const { call } = await fixture({
+    usageTrackingDriver: usage,
+    ensureProvidersBootstrapped: async () => {},
+    routeRequests: async (options: any) => {
+      for (const name of ["x-session-id", "session-id", "session_id", "x-client-request-id", "x-session-affinity", "x-opencode-session"]) {
+        expect(options.headers[name]).toBe(name === "x-session-id" ? "local-session" : "alias");
+      }
+      expect(options.headers["x-unrelated"]).toBe("preserved");
+      expect(options.requestBody.prompt_cache_key).toBe("body-cache");
+      expect(options.requestBody.session_id).toBe("body-session");
+      expect(options.requestBody.metadata).toEqual({ sessionId: "metadata-session", purpose: "test" });
+      await options.usageTrackingDriver.append({ id: path, timestamp: Date.now(), modelId: "test", baseUrl: "https://node", promptTokens: 1, completionTokens: 1, totalTokens: 2, cost: 0, satsCost: 1 });
+      return new Response(JSON.stringify({ id: "response" }), { headers: { "content-type": "application/json" } });
+    },
+  });
+  const response = await call(path, { method: "POST", headers: { "x-session-id": "local-session", "session-id": "alias", session_id: "alias", "x-client-request-id": "alias", "x-session-affinity": "alias", "x-opencode-session": "alias", "x-unrelated": "preserved" }, body: JSON.stringify({ model: "test", messages: [], session_id: "body-session", prompt_cache_key: "body-cache", metadata: { sessionId: "metadata-session", purpose: "test" } }) });
+  expect(response.status).toBe(200);
+  expect((await usage.list())[0]?.sessionId).toBe("local-session");
 });
