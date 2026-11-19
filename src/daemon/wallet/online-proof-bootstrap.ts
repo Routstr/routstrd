@@ -34,7 +34,7 @@ export function startOnlineProofBootstrap(
   const work = watchOnlineInflightProofs(coco, repo, logger, shouldStop, options).catch((error) => {
     logger.warn("Failed to bootstrap online inflight proofs", { error: errorMessage(error) });
   });
-  if (options.outstanding) trackRecovery(options.outstanding, "proof-bootstrap", work);
+  if (options.outstanding) trackRecovery(options.outstanding, `proof-bootstrap:${crypto.randomUUID()}`, work);
 }
 
 /** Preserve Coco's bootstrap check and subscriptions, excluding offline sends. */
@@ -44,8 +44,9 @@ export async function watchOnlineInflightProofs(
 ): Promise<void> {
   // A bounded wait is not cancellation. Wallet loading can persist refreshed
   // metadata, and late subscriptions need a live watcher to unsubscribe safely.
+  const passId = crypto.randomUUID();
   const bounded = <T>(key: string, work: Promise<T>) => withTimeout(
-    options.outstanding ? trackRecovery(options.outstanding, `proof-bootstrap:${key}`, work) : work,
+    options.outstanding ? trackRecovery(options.outstanding, `proof-bootstrap:${passId}:${key}`, work) : work,
     options.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS, "Timed out bootstrapping mint proofs; underlying work may still be running",
   );
   const internals = coco as unknown as Internals;

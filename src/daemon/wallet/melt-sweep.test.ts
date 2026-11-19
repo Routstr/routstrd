@@ -337,6 +337,20 @@ describe("startMeltSweep", () => {
     expect(source.refreshCalls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("defers background refreshes until mint restore releases the gate", async () => {
+    const source = makeSource({ inFlight: [melt({ id: "op" })] });
+    let restoring = true;
+    const stop = startMeltSweep(source, new Map(), { intervalMs: 5, shouldPause: () => restoring });
+    try {
+      await Bun.sleep(25);
+      expect(source.refreshCalls).toEqual([]);
+      restoring = false;
+      const deadline = Date.now() + 1000;
+      while (!source.refreshCalls.length && Date.now() < deadline) await Bun.sleep(5);
+      expect(source.refreshCalls).toContain("op");
+    } finally { await stop(); }
+  });
+
   it("is a no-op when the interval is disabled", async () => {
     const source = makeSource({ inFlight: [melt({ id: "op" })] });
     const stop = startMeltSweep(source, new Map(), { intervalMs: 0 });

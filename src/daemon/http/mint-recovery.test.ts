@@ -15,6 +15,7 @@ function responseRecorder(): {
     destroyed: boolean;
     writeHead(status: number, values: Record<string, string>): unknown;
     once(): unknown;
+    flushHeaders(): void;
     write(chunk: string): boolean;
     end(chunk?: string): unknown;
   } = {
@@ -24,6 +25,7 @@ function responseRecorder(): {
       Object.assign(headers, values);
       return this;
     },
+    flushHeaders() {},
     once() {
       return this;
     },

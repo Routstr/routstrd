@@ -21,7 +21,7 @@ const npcState = {
 
 class MockNPCPlugin {
   readonly name = "npc";
-  readonly required = [] as const;
+  readonly required = ["mintOperationService"] as const;
   private readonly api = {
     getInfo: async () => npcState.info,
     setUsername: async (username: string, attemptPayment?: boolean) => {

@@ -274,6 +274,7 @@ export async function streamMintRecovery(
   // heartbeat write into an unhandled stream error, and the restore itself
   // keeps running so recovery is never interrupted by a disconnect.
   res.once("error", () => {});
+  res.flushHeaders();
   const writeEvent = (event: string): void => {
     if (res.writableEnded || res.destroyed) return;
     res.write(event);

@@ -1,328 +1,232 @@
-import { describe, expect, it } from "bun:test";
-import type { CoreProof, Manager } from "@cashu/coco-core";
-import { describeRestoreError, recoverMintProofs } from "./coco-client";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { Database } from "bun:sqlite";
+import { Manager, type CoreProof } from "@cashu/coco-core";
+import { SqliteRepositories } from "@cashu/coco-sqlite-bun";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createCocoClient, DEFAULT_TRUSTED_MINT_URLS } from "./coco-client";
+import { recoverMintProofs } from "./mint-proof-restore";
+import { FakeMint } from "./testing/fake-mint";
 
-function proof(
-  keysetId: string,
-  secret: string,
-  amount = 1,
-  state: CoreProof["state"] = "ready",
-): CoreProof {
-  return {
-    id: keysetId,
-    amount,
-    secret,
-    C: "02" + "11".repeat(32),
-    state,
-    mintUrl: "https://mint.example.com",
-  } as CoreProof;
+const POINT = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+const cleanups: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+});
+
+async function boot() {
+  const mint = new FakeMint();
+  mint.quoteExpiry = null;
+  mint.start();
+  const database = new Database(":memory:");
+  const repo = new SqliteRepositories({ database });
+  const manager = new Manager(repo, async () => new Uint8Array(64).fill(7));
+  cleanups.push(async () => {
+    await manager.dispose();
+    manager.subscriptions.closeAll();
+    database.close();
+    mint.stop();
+  });
+  await repo.init();
+  const mintUrl = mint.url;
+  await manager.mint.addMint(mintUrl, { trusted: true });
+  const prepare = (amount: number) => manager.ops.mint.prepare({ mintUrl, method: "bolt11", amount });
+  async function issue(amount: number) {
+    const op = await prepare(amount);
+    mint.markPaid(op.quoteId);
+    await manager.ops.mint.finalize(op.id);
+    return (await repo.proofRepository.getProofsByOperationId(mintUrl, op.id))[0]!;
+  }
+  const restore = () => recoverMintProofs(manager, repo, mintUrl);
+  const counter = async () => (await repo.counterRepository.getCounter(mintUrl, mint.keysetId))?.counter;
+  const find = (secret: string) => repo.proofRepository.getProofBySecret(mintUrl, secret);
+  const fakeProof = (secret: string, fields: Partial<CoreProof> = {}): CoreProof => ({
+    mintUrl, id: mint.keysetId, amount: 1, C: POINT, secret, state: "ready", ...fields,
+  });
+  return { mint, mintUrl, database, repo, manager, prepare, issue, restore, counter, find, fakeProof };
 }
 
-type FakeOptions = {
-  /** Keysets the mint advertises. */
-  keysetIds?: string[];
-  /** What the mint returns per keyset (any state; spent ones are not saved). */
-  mintProofs?: Record<string, CoreProof[]>;
-  /** Proofs already stored locally, per keyset id, in any state. */
-  stored?: Record<string, CoreProof[]>;
-  /** Proofs left inflight, per mint. */
-  inflight?: CoreProof[];
-  restoreError?: (keysetId: string) => Error | undefined;
-};
+describe("mint proof recovery against pinned Coco, SQLite and a real fake mint", () => {
+  it("merges missing proofs and keeps both unmatched local proofs and a pending quote's higher counter", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    const pending = await w.prepare(128);
+    const floor = await w.counter();
+    expect(floor).toBe(2);
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    await w.repo.proofRepository.saveProofs(w.mintUrl, [w.fakeProof("not derived from seed")]);
 
-/**
- * Mirrors coco-core 1.0.1 / coco-sqlite-bun closely enough to reproduce the
- * failure modes this code exists to handle:
- *  - `getProofsByKeysetId()` returns READY proofs only,
- *  - `saveProofs()` rejects a secret that is already stored in ANY state,
- *  - `wipeProofsByKeysetId()` deletes every row for the keyset.
- */
-function fakeManager(options: FakeOptions = {}) {
-  const keysetIds = options.keysetIds ?? ["ks1", "ks2"];
-  const stored = new Map<string, CoreProof[]>(
-    Object.entries(options.stored ?? {}).map(([id, proofs]) => [
-      id,
-      proofs.map((p) => ({ ...p })),
-    ]),
-  );
-  const calls: string[] = [];
-  const record = (name: string) => async () => {
-    calls.push(name);
-  };
-
-  const allStored = (): CoreProof[] => [...stored.values()].flat();
-
-  const proofService = {
-    async getProofsByKeysetId(_mintUrl: string, keysetId: string) {
-      return (stored.get(keysetId) ?? []).filter(
-        (p) => p.state === "ready",
-      );
-    },
-    async wipeProofsByKeysetId(_mintUrl: string, keysetId: string) {
-      calls.push(`wipe:${keysetId}`);
-      stored.set(keysetId, []);
-    },
-    async saveProofs(_mintUrl: string, proofs: CoreProof[]) {
-      for (const incoming of proofs) {
-        const clash = allStored().find((p) => p.secret === incoming.secret);
-        if (clash) {
-          throw new Error(`Proof with secret already exists: ${incoming.secret}`);
-        }
-      }
-      for (const incoming of proofs) {
-        const keysetId = incoming.id;
-        stored.set(keysetId, [...(stored.get(keysetId) ?? []), incoming]);
-        calls.push(`save:${keysetId}:${incoming.secret}`);
-      }
-    },
-  };
-
-  const coco = {
-    mint: {
-      addMint: async (url: string, addOptions: { trusted: boolean }) => {
-        calls.push(`add:${url}:${addOptions.trusted}`);
-        return { keysets: keysetIds.map((id) => ({ id })) };
-      },
-    },
-    walletService: {
-      getWalletWithActiveKeysetId: async (url: string) => {
-        calls.push(`wallet:${url}`);
-        return { wallet: {} };
-      },
-    },
-    walletRestoreService: {
-      restoreKeyset: async (
-        _url: string,
-        _wallet: unknown,
-        keysetId: string,
-      ) => {
-        calls.push(`restore:${keysetId}`);
-        const error = options.restoreError?.(keysetId);
-        if (error) throw error;
-        const returned = options.mintProofs?.[keysetId] ?? [];
-        // coco persists only the proofs the mint reports as unspent.
-        await proofService.saveProofs(
-          "https://mint.example.com",
-          returned.filter((p) => p.state !== "spent"),
-        );
-      },
-    },
-    proofService,
-    proofRepository: {
-      async getInflightProofs(_mintUrls?: string[]) {
-        return options.inflight ?? [];
-      },
-    },
-    pauseSubscriptions: record("pause-subscriptions"),
-    disableMintOperationWatcher: record("stop-mint-watcher"),
-    disableProofStateWatcher: record("stop-proof-watcher"),
-    disableMintOperationProcessor: record("stop-mint-processor"),
-    enableMintOperationWatcher: record("start-mint-watcher"),
-    enableProofStateWatcher: record("start-proof-watcher"),
-    enableMintOperationProcessor: async () => {
-      calls.push("start-mint-processor");
-      return true;
-    },
-    resumeSubscriptions: record("resume-subscriptions"),
-  } as unknown as Manager;
-
-  return { coco, calls, stored };
-}
-
-describe("recoverMintProofs", () => {
-  it("wipes spent and inflight rows before saving the restored batch", async () => {
-    // Regression: `getProofsByKeysetId` hides spent/inflight rows, so a
-    // ready-only wipe left their secrets behind and saveProofs rejected the
-    // restored copy with "Proof with secret already exists".
-    const inflight = proof("ks1", "inflight-1", 8, "inflight");
-    const { coco, calls, stored } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: {
-        ks1: [inflight, proof("ks1", "spent-1", 4, "spent")],
-      },
-      inflight: [inflight],
-      mintProofs: {
-        ks1: [
-          proof("ks1", "fresh-1", 8),
-          proof("ks1", "spent-1", 4, "spent"),
-        ],
-      },
-    });
-    const progress: string[] = [];
-
-    const result = await recoverMintProofs(
-      coco,
-      "https://mint.example.com",
-      (message) => progress.push(message),
-    );
-
-    expect(calls).toContain("wipe:ks1");
-    expect(stored.get("ks1")?.map((p) => p.secret)).toEqual(["fresh-1"]);
-    expect(result).toContain("8 sat");
-    expect(progress.some((line) => line.includes("restoring"))).toBe(true);
+    expect(await w.restore()).toContain("8 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "ready", amount: 8 });
+    expect(await w.find("not derived from seed")).toMatchObject({ state: "ready" });
+    expect(await w.counter()).toBe(floor);
+    expect((await w.manager.ops.mint.get(pending.id))?.state).toBe("pending");
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    w.mint.markPaid(pending.quoteId);
+    await w.manager.ops.mint.finalize(pending.id);
+    expect((await w.repo.proofRepository.getAvailableProofs(w.mintUrl)).reduce((sum, p) => sum + p.amount, 0)).toBe(137);
   });
 
-  it("keeps local proofs when the restore fails partway", async () => {
-    const { coco, calls, stored } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: { ks1: [proof("ks1", "s1")] },
-      restoreError: () => new Error("mint unreachable"),
-    });
-
-    await expect(
-      recoverMintProofs(coco, "https://mint.example.com"),
-    ).rejects.toThrow("mint unreachable");
-
-    expect(stored.get("ks1")?.map((p) => p.secret)).toEqual(["s1"]);
-    expect(calls).toContain("start-mint-watcher");
-    expect(calls).toContain("resume-subscriptions");
+  it("advances a rebuilt counter when the only signature is at index zero", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    await w.repo.counterRepository.setCounter(w.mintUrl, w.mint.keysetId, 0);
+    expect(await w.restore()).toContain("8 sat newly spendable");
+    expect(await w.counter()).toBe(1);
   });
 
-  it("restores inflight proofs back on a failed restore", async () => {
-    // Inflight proofs hold value too, so the snapshot cannot be ready-only.
-    const inflight = proof("ks1", "inflight-1", 8, "inflight");
-    const { coco, stored } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: { ks1: [inflight] },
-      inflight: [inflight],
-      restoreError: () => new Error("mint unreachable"),
-    });
-
-    await expect(
-      recoverMintProofs(coco, "https://mint.example.com"),
-    ).rejects.toThrow("mint unreachable");
-
-    expect(stored.get("ks1")?.map((p) => p.secret)).toEqual(["inflight-1"]);
+  it("does not import signed outputs that belong to an unresolved mint quote", async () => {
+    const w = await boot();
+    const op = await w.prepare(8);
+    w.mint.signFor(op.quoteId, op.outputData.keep.map((output) => output.blindedMessage));
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.repo.proofRepository.getReadyProofs(w.mintUrl)).toEqual([]);
+    expect((await w.manager.ops.mint.get(op.id))?.state).toBe("pending");
   });
 
-  it("accepts a restore where the mint reports everything spent", async () => {
-    // The mint is authoritative: it returned signatures (so the restore was
-    // not truncated) but none are unspent, so dropping the local rows is the
-    // correct outcome, not a failure to roll back.
-    const { coco, stored } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: { ks1: [proof("ks1", "s1"), proof("ks1", "s2")] },
-      mintProofs: {
-        ks1: [
-          proof("ks1", "s1", 1, "spent"),
-          proof("ks1", "s2", 1, "spent"),
-        ],
-      },
-    });
+  it("does not return an exported, unredeemed outbound token to spendable balance", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    const prepared = await w.manager.ops.send.prepare({ mintUrl: w.mintUrl, amount: 8 });
+    const { operation } = await w.manager.ops.send.execute(prepared.id);
+    expect(operation.state).toBe("pending");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "inflight", usedByOperationId: operation.id });
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    await w.repo.proofRepository.saveProofs(w.mintUrl, [{ ...issued, state: "inflight", createdByOperationId: operation.id }]);
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "inflight", createdByOperationId: operation.id });
+    // An operation can still own its outgoing proof even when that row is lost.
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toBeNull();
+  }, 15_000);
 
-    const result = await recoverMintProofs(coco, "https://mint.example.com");
-
-    expect(result).toContain("0 sat");
-    expect(stored.get("ks1")).toEqual([]);
+  it("preserves a reserved ready proof and its owner", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    const op = await w.manager.ops.send.prepare({ mintUrl: w.mintUrl, amount: 8 });
+    w.mint.proofStates = ["SPENT"];
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "ready", usedByOperationId: op.id });
   });
 
-  it("skips a keyset the mint no longer serves when nothing is stored", async () => {
-    const { coco } = fakeManager({
-      keysetIds: ["retired"],
-      restoreError: () => new Error("422: keyset not known"),
-    });
-
-    const progress: string[] = [];
-    const result = await recoverMintProofs(
-      coco,
-      "https://mint.example.com",
-      (message) => progress.push(message),
-    );
-
-    expect(
-      progress.some((line) => line.includes("skipped (no local proofs")),
-    ).toBe(true);
-    expect(result).toContain("0 sat");
+  it("does not credit PENDING proofs; releases an unowned inflight proof only after UNSPENT", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    w.mint.proofStates = ["PENDING"];
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toBeNull();
+    await w.repo.proofRepository.saveProofs(w.mintUrl, [{ ...issued, createdByOperationId: undefined }]);
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "inflight" });
+    w.mint.proofStates = ["UNSPENT"];
+    expect(await w.restore()).toContain("8 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "ready" });
   });
 
-  it("reports a failed keyset without discarding a successful one", async () => {
-    const { coco, stored } = fakeManager({
-      keysetIds: ["bad", "good"],
-      stored: { bad: [proof("bad", "b1")] },
-      mintProofs: { good: [proof("good", "g1")] },
-      restoreError: (keysetId) =>
-        keysetId === "bad" ? new Error("mint unreachable") : undefined,
-    });
+  it("marks a confirmed spent proof without ever resurrecting its row", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    w.mint.proofStates = ["SPENT"];
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "spent" });
+    w.mint.proofStates = ["UNSPENT"];
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toMatchObject({ state: "spent" });
+  }, 15_000);
 
-    await expect(
-      recoverMintProofs(coco, "https://mint.example.com"),
-    ).rejects.toThrow("Failed to restore 1 of 2 keyset(s)");
-
-    expect(stored.get("bad")?.map((p) => p.secret)).toEqual(["b1"]);
-    expect(stored.get("good")?.map((p) => p.secret)).toEqual(["g1"]);
+  it("reports active-keyset transport errors on an empty wallet, instead of returning zero success", async () => {
+    const w = await boot();
+    w.mint.restoreErrorStatus = 429;
+    await expect(w.restore()).rejects.toThrow("restore temporarily unavailable");
+    expect(await w.counter()).toBeUndefined();
   });
 
-  it("refuses to wipe proofs a live operation still owns", async () => {
-    const { coco, calls } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: { ks1: [proof("ks1", "s1")] },
-      inflight: [
-        {
-          ...proof("ks1", "s9", 1, "inflight"),
-          usedByOperationId: "op_executing",
-        } as CoreProof,
-      ],
-    });
-
-    await expect(
-      recoverMintProofs(coco, "https://mint.example.com"),
-    ).rejects.toThrow(
-      "reserved by operations that are still open (op_executing)",
-    );
-
-    expect(calls.some((call) => call.startsWith("wipe:"))).toBe(false);
+  it("does not apply an incomplete or invalid proof-state response", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    await w.repo.counterRepository.setCounter(w.mintUrl, w.mint.keysetId, 0);
+    w.mint.proofStates = ["UNRECOGNIZED"];
+    await expect(w.restore()).rejects.toThrow("Unknown restored proof state");
+    expect(await w.counter()).toBe(0);
+    expect(await w.find(issued.secret)).toBeNull();
   });
 
-  it("reconciles orphaned inflight proofs instead of blocking", async () => {
-    const orphan = proof("ks1", "orphan-1", 1, "inflight");
-    const { coco, calls, stored } = fakeManager({
-      keysetIds: ["ks1"],
-      stored: { ks1: [orphan] },
-      inflight: [orphan],
-      mintProofs: { ks1: [proof("ks1", "orphan-1")] },
-    });
-    const progress: string[] = [];
-
-    const result = await recoverMintProofs(
-      coco,
-      "https://mint.example.com",
-      (message) => progress.push(message),
-    );
-
-    expect(progress.some((line) => line.includes("left inflight"))).toBe(true);
-    expect(calls).toContain("wipe:ks1");
-    expect(stored.get("ks1")?.map((p) => p.secret)).toEqual(["orphan-1"]);
-    expect(result).toContain("1 sat");
+  it("does not mutate an existing proof if the scan returns no signatures", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    w.mint.signed.clear();
+    expect(await w.restore()).toContain("0 sat newly spendable");
+    expect(await w.find(issued.secret)).toEqual(issued);
+    expect(await w.counter()).toBe(1);
   });
 
-  it("refuses to run when coco's restore internals are missing", async () => {
-    const coco = {
-      mint: { addMint: async () => ({ keysets: [] }) },
-    } as unknown as Manager;
-
-    await expect(
-      recoverMintProofs(coco, "https://mint.example.com"),
-    ).rejects.toThrow("coco mint-restore internals are unavailable");
+  it("rolls back the proof insert if SQLite rejects the counter write", async () => {
+    const w = await boot();
+    const issued = await w.issue(8);
+    await w.repo.proofRepository.deleteProofs(w.mintUrl, [issued.secret]);
+    await w.repo.counterRepository.setCounter(w.mintUrl, w.mint.keysetId, 0);
+    w.database.exec(`CREATE TRIGGER fail_counter BEFORE UPDATE ON coco_cashu_counters
+      BEGIN SELECT RAISE(ABORT, 'test counter failure'); END;`);
+    await expect(w.restore()).rejects.toThrow("test counter failure");
+    expect(await w.counter()).toBe(0);
+    expect(await w.find(issued.secret)).toBeNull();
   });
 });
 
-describe("describeRestoreError", () => {
-  it("walks the cause chain and nested aggregate errors", () => {
-    const inner = new Error("Proof with secret already exists: abcd");
-    const aggregate = new AggregateError([inner], "aggregated");
-    const outer = new Error(
-      "Failed to persist proofs for 1 keyset group(s) [ks1]",
-      { cause: aggregate },
-    );
-
-    const message = describeRestoreError(outer);
-    expect(message).toContain("Failed to persist proofs");
-    expect(message).toContain("Proof with secret already exists: abcd");
-    expect(message).toContain(" — ");
+it("holds wallet disposal for an in-flight restore and refuses another writer during the scan", async () => {
+  const mint = new FakeMint();
+  mint.start();
+  const dir = mkdtempSync(join(tmpdir(), "routstrd-proof-restore-"));
+  cleanups.push(() => { mint.stop(); rmSync(dir, { recursive: true, force: true }); });
+  const preflight = new Database(join(dir, "coco.db"));
+  try {
+    const repo = new SqliteRepositories({ database: preflight });
+    await repo.init();
+    for (const mintUrl of DEFAULT_TRUSTED_MINT_URLS) {
+      await repo.mintRepository.addNewMint({
+        mintUrl, name: "test", mintInfo: {} as never, trusted: true, createdAt: 1, updatedAt: 1,
+      });
+    }
+  } finally { preflight.close(); }
+  writeFileSync(join(dir, "config.json"), JSON.stringify({
+    version: 1, encrypted: false, defaultMintUrl: mint.url,
+    mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  }));
+  const original = Manager.prototype.enableProofStateWatcher;
+  const watcher = spyOn(Manager.prototype, "enableProofStateWatcher").mockImplementation(function (this: Manager, ...args) {
+    return original.apply(this, args);
   });
-
-  it("handles non-error values", () => {
-    expect(describeRestoreError("boom")).toBe("boom");
-    expect(describeRestoreError(undefined)).toBe("unknown error");
-  });
-});
+  cleanups.push(() => watcher.mockRestore());
+  const client = await createCocoClient({ walletDir: dir, legacySocketPath: join(dir, "legacy.sock"),
+    legacyPidPath: join(dir, "legacy.pid"), enableNpc: false });
+  cleanups.push(() => client.dispose!());
+  await client.recoverMint!(mint.url);
+  expect(watcher.mock.calls).toEqual([[{ watchExistingInflightOnStart: false }], [{ watchExistingInflightOnStart: false }]]);
+  let release!: () => void;
+  mint.restoreGate = new Promise<void>((resolve) => { release = resolve; });
+  const previous = mint.restoreRequests;
+  const restore = client.recoverMint!(mint.url);
+  const settled = restore.catch((error) => error);
+  try {
+    const deadline = Date.now() + 3000;
+    while (mint.restoreRequests === previous && Date.now() < deadline) await Bun.sleep(5);
+    expect(mint.restoreRequests).toBeGreaterThan(previous);
+    await expect(client.cleanupStuckOperations!()).rejects.toThrow("restore is in progress");
+    let disposed = false;
+    const shutdown = client.dispose!().then(() => { disposed = true; });
+    await Bun.sleep(20);
+    expect(disposed).toBe(false);
+    release();
+    expect(await settled).toBeInstanceOf(Error);
+    await shutdown;
+    expect(watcher.mock.calls).toHaveLength(2);
+  } finally {
+    release();
+    await settled;
+  }
+}, 15_000);

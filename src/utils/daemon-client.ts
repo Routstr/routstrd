@@ -165,20 +165,18 @@ export function getAuthBaseUrl(config: RoutstrdConfig): string {
  * Send an authenticated daemon request and hand back the unread `Response`.
  *
  * Shared by the buffered `callDaemonUrl` and the streaming `callDaemonRaw` so
- * both get the same NIP-98 auth, timeouts and connection-error classification.
- * The timeout signal stays armed while the body is read, so a daemon that
- * sends headers and then stalls the body cannot hang the CLI either.
+ * both get the same NIP-98 auth and connection-error classification.
+ * Buffered calls keep their deadline through the body; streaming calls
+ * clear their first-response deadline at headers and time body reads separately.
  */
 async function fetchDaemonUrl(
   baseUrl: string,
   path: string,
   options: { method?: "GET" | "POST" | "PATCH" | "DELETE"; body?: object },
   config: RoutstrdConfig,
-  // No default on purpose: an omitted argument would silently re-arm the
-  // route deadline for callers that must not have one. `null` means "no total
-  // deadline" and every caller states its intent.
-  timeoutMs: number | null,
-): Promise<{ response: Response; signal: AbortSignal | undefined }> {
+  timeoutMs: number,
+  deadline: "whole-response" | "headers-only",
+): Promise<{ response: Response; signal: AbortSignal }> {
   const { method = "GET", body } = options;
   const url = `${baseUrl}${path}`;
 
@@ -202,8 +200,11 @@ async function fetchDaemonUrl(
   if (authorization) headers.set("Authorization", authorization);
   if (bodyString || method === "POST") headers.set("Content-Type", "application/json");
 
-  const signal =
-    timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs);
+  const controller = deadline === "headers-only" ? new AbortController() : undefined;
+  const signal = controller?.signal ?? AbortSignal.timeout(timeoutMs);
+  const timer = controller
+    ? setTimeout(() => controller.abort(), timeoutMs)
+    : undefined;
 
   try {
     const response = await fetch(url, {
@@ -214,9 +215,14 @@ async function fetchDaemonUrl(
     });
     return { response, signal };
   } catch (error) {
-    if (signal?.aborted) throw timeoutError(path);
+    if (signal.aborted) {
+      if (deadline === "headers-only") throw streamStallError(timeoutMs);
+      throw timeoutError(path);
+    }
     // Only connection failures qualify for alternate-host retries.
     throw new DaemonConnectionError(error);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -240,6 +246,7 @@ export async function callDaemonUrl(
     options,
     config,
     requestTimeoutMs(path),
+    "whole-response",
   );
 
   try {
@@ -256,7 +263,7 @@ export async function callDaemonUrl(
     }
     return (await response.json()) as CommandResponse;
   } catch (error) {
-    if (signal?.aborted) throw timeoutError(path);
+    if (signal.aborted) throw timeoutError(path);
     throw error;
   }
 }
@@ -327,6 +334,13 @@ export async function callDaemon(
   return callLocalDaemon(path, options, config);
 }
 
+function streamStallError(timeoutMs: number): Error {
+  return new Error(
+    `Daemon sent no response for ${timeoutMs / 1000}s; ` +
+      "the operation may still be running — check its status before retrying",
+  );
+}
+
 /**
  * Bound silence on a streamed body, leaving total duration unbounded.
  *
@@ -349,13 +363,7 @@ export function withStallTimeout(
           reader.read(),
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Daemon sent no response for ${timeoutMs / 1000}s; ` +
-                      "the operation may still be running — check its status before retrying",
-                  ),
-                ),
+              () => reject(streamStallError(timeoutMs)),
               timeoutMs,
             );
           }),
@@ -379,8 +387,8 @@ export function withStallTimeout(
  * Perform an authenticated daemon request and return the raw fetch `Response`
  * so callers can stream the body (e.g. for live progress output).
  *
- * The response body is bounded by inactivity rather than by total duration, so
- * a long stream that keeps making progress is not cut off.
+ * The first response and subsequent body reads each have an inactivity bound,
+ * but there is no total deadline on a stream that keeps making progress.
  *
  * Unlike `callDaemon`, this never retries against another host candidate: the
  * caller streams a single response, and replaying a write to a second address
@@ -398,7 +406,8 @@ export async function callDaemonRaw(
     path,
     options,
     config,
-    null,
+    stallTimeoutMs,
+    "headers-only",
   );
   return new Response(withStallTimeout(response.body, stallTimeoutMs), {
     status: response.status,

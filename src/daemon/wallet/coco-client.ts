@@ -99,6 +99,7 @@ import {
   registerOfflineSendHandler,
 } from "./offline-send";
 import { MintRestoreGate } from "./mint-restore-gate";
+import { recoverMintProofs } from "./mint-proof-restore";
 
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
@@ -1475,7 +1476,9 @@ async function reportPendingMintRefreshError(
  * still running after that fails against the closed database and is picked
  * up by startup recovery.
  */
-function startPendingMintSweep(source: PendingMintQuoteSource, outstanding: RecoveryWork): () => Promise<void> {
+function startPendingMintSweep(
+  source: PendingMintQuoteSource, outstanding: RecoveryWork, shouldPause: () => boolean,
+): () => Promise<void> {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let inFlight: Promise<void> = Promise.resolve();
@@ -1484,7 +1487,11 @@ function startPendingMintSweep(source: PendingMintQuoteSource, outstanding: Reco
 
   const tick = async () => {
     if (stopped) return;
-    inFlight = settlePendingMintQuotes(source, Date.now(), { state, shouldStop: () => stopped }).then(
+    if (shouldPause()) {
+      timer = setTimeout(tick, PENDING_MINT_SWEEP_INTERVAL_MS);
+      return;
+    }
+    inFlight = settlePendingMintQuotes(source, Date.now(), { state, shouldStop: () => stopped || shouldPause() }).then(
       ({ unreachable }) => {
         // Report a mint becoming unreachable, or reachable again, once.
         if (unreachable > 0 && unreachableBefore === 0) {
@@ -1891,330 +1898,6 @@ export async function runWalletRecovery(
   }
 }
 
-/**
- * coco-core's `WalletRestoreService.restoreKeyset()` writes the restored
- * proofs without first removing the proofs already stored for that keyset.
- * The sqlite repository rejects duplicate secrets, so `wallet.restore()`
- * fails with "Proof with secret already exists" for any mint that already has
- * local proofs — which is always the case for the mint we are recovering.
- * See: coco-core 1.0.1 `restoreKeyset()` -> `proofService.saveProofs()`.
- *
- * We therefore drive the per-keyset restore ourselves so that:
- *   - the keyset's proofs are wiped before the restored batch is written, and
- *   - the pre-restore proofs are put back if the mint hands back fewer proofs
- *     than were already stored, so a partial NUT-09 response cannot destroy
- *     local state. NUT-09 returns the full counter range for a keyset, so a
- *     smaller response means the restore is incomplete, not that proofs were
- *     legitimately spent (spent proofs still come back from the mint).
- *
- * These services are private on coco's `Manager` type; routstrd already
- * bridges coco privates this way for send recovery and startup cleanup. The
- * availability check below fails closed if a coco bump renames them.
- */
-type MintRestoreInternals = {
-  proofService: {
-    /** Ready proofs only — the repository filters out spent/inflight rows. */
-    getProofsByKeysetId(
-      mintUrl: string,
-      keysetId: string,
-    ): Promise<CoreProof[]>;
-    wipeProofsByKeysetId(mintUrl: string, keysetId: string): Promise<void>;
-    saveProofs(mintUrl: string, proofs: CoreProof[]): Promise<void>;
-  };
-  /** `ProofService` has no inflight accessor; the repository behind it does. */
-  proofRepository: {
-    getInflightProofs(mintUrls?: string[]): Promise<CoreProof[]>;
-  };
-  walletService: {
-    getWalletWithActiveKeysetId(mintUrl: string): Promise<{ wallet: unknown }>;
-  };
-  walletRestoreService: {
-    restoreKeyset(
-      mintUrl: string,
-      wallet: unknown,
-      keysetId: string,
-    ): Promise<void>;
-  };
-};
-
-function mintRestoreInternals(coco: Manager): MintRestoreInternals {
-  const internals = coco as unknown as Partial<MintRestoreInternals>;
-  const missing = [
-    typeof internals.proofService?.getProofsByKeysetId === "function"
-      ? null
-      : "proofService.getProofsByKeysetId",
-    typeof internals.proofService?.wipeProofsByKeysetId === "function"
-      ? null
-      : "proofService.wipeProofsByKeysetId",
-    typeof internals.proofService?.saveProofs === "function"
-      ? null
-      : "proofService.saveProofs",
-    typeof internals.proofRepository?.getInflightProofs === "function"
-      ? null
-      : "proofRepository.getInflightProofs",
-    typeof internals.walletService?.getWalletWithActiveKeysetId === "function"
-      ? null
-      : "walletService.getWalletWithActiveKeysetId",
-    typeof internals.walletRestoreService?.restoreKeyset === "function"
-      ? null
-      : "walletRestoreService.restoreKeyset",
-  ].filter((name): name is string => name !== null);
-  if (missing.length > 0) {
-    throw new Error(
-      `coco mint-restore internals are unavailable (${missing.join(", ")}); refusing to run proof recovery`,
-    );
-  }
-  return internals as MintRestoreInternals;
-}
-
-type KeysetRestoreOutcome = {
-  /** Unspent proofs stored for the keyset after the restore. */
-  stored: number;
-  /** Spendable value of those proofs, in sat. */
-  storedAmount: number;
-  /** Proofs stored for the keyset before the restore. */
-  before: number;
-};
-
-/** Flatten an error's cause chain, including nested AggregateErrors. */
-export function describeRestoreError(error: unknown): string {
-  const seen = new Set<unknown>();
-  const collect = (current: unknown, out: string[]): void => {
-    if (current === undefined || current === null) return;
-    if (seen.has(current)) return;
-    seen.add(current);
-    if (current instanceof AggregateError) {
-      for (const inner of current.errors) collect(inner, out);
-      return;
-    }
-    const message = current instanceof Error ? current.message : String(current);
-    if (message && !out.includes(message)) out.push(message);
-    if (current instanceof Error) collect(current.cause, out);
-  };
-  const parts: string[] = [];
-  collect(error, parts);
-  return parts.join(" — ") || "unknown error";
-}
-
-/**
- * Proofs worth keeping if the restore does not complete: everything the wallet
- * could still spend. Spent rows are dropped by the wipe and not restored —
- * they hold no value, and a completed restore re-derives them from the mint.
- *
- * `getProofsByKeysetId()` only returns ready proofs, so inflight proofs (which
- * also hold value and whose secrets would collide on save) are collected
- * separately.
- */
-async function snapshotKeysetProofs(
-  internals: MintRestoreInternals,
-  mintUrl: string,
-  keysetId: string,
-): Promise<CoreProof[]> {
-  const ready = await internals.proofService.getProofsByKeysetId(
-    mintUrl,
-    keysetId,
-  );
-  const inflight = (
-    await internals.proofRepository.getInflightProofs([mintUrl])
-  ).filter((proof) => proof.id === keysetId);
-  return [...ready, ...inflight];
-}
-
-/** How often a long keyset restore reports that it is still alive. */
-const RESTORE_HEARTBEAT_MS = 30_000;
-
-async function restoreKeysetWithWipe(
-  internals: MintRestoreInternals,
-  mintUrl: string,
-  wallet: unknown,
-  keysetId: string,
-  snapshot: CoreProof[],
-  onProgress?: (message: string) => void,
-): Promise<KeysetRestoreOutcome> {
-  // The wipe must be unconditional. Saving a restored proof whose secret is
-  // already stored throws ("Proof with secret already exists"), and the
-  // duplicate check spans every state — so leaving spent or inflight rows
-  // behind fails the keyset exactly like leaving ready rows would.
-  await internals.proofService.wipeProofsByKeysetId(mintUrl, keysetId);
-
-  // coco restores a keyset in one opaque call: mints rate-limit the NUT-09
-  // batches, so a keyset with thousands of proofs can take many minutes
-  // without producing a single event. Emit a heartbeat so the operator (and
-  // the client's stall detector) can tell that from a wedge.
-  const startedAt = Date.now();
-  const heartbeat = onProgress
-    ? setInterval(() => {
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        onProgress(`Keyset ${keysetId}: still restoring (${elapsed}s)…`);
-      }, RESTORE_HEARTBEAT_MS)
-    : undefined;
-
-  try {
-    await internals.walletRestoreService.restoreKeyset(
-      mintUrl,
-      wallet,
-      keysetId,
-    );
-  } catch (error) {
-    // A restore that failed partway is the only case where local data can be
-    // lost: coco persists just the unspent proofs, so whatever the wipe
-    // removed is gone unless we put the snapshot back. A *successful* restore
-    // is never second-guessed — the mint is authoritative about its own
-    // proofs, and it legitimately persists zero when everything is spent.
-    await internals.proofService.wipeProofsByKeysetId(mintUrl, keysetId);
-    if (snapshot.length > 0) {
-      await internals.proofService.saveProofs(mintUrl, snapshot);
-    }
-    throw error;
-  } finally {
-    if (heartbeat !== undefined) clearInterval(heartbeat);
-  }
-
-  const after = await internals.proofService.getProofsByKeysetId(
-    mintUrl,
-    keysetId,
-  );
-  return {
-    stored: after.length,
-    storedAmount: after.reduce((sum, proof) => sum + proof.amount, 0),
-    before: snapshot.length,
-  };
-}
-
-/**
- * Re-derive a mint's proofs from its NUT-09 restore endpoint.
- *
- * Restored proofs are checked against the mint (NUT-07) by coco and only
- * unspent proofs are persisted, so this repairs a wallet that lost proof
- * metadata (wrong seed, restored backup, wiped database) without resurrecting
- * proofs the mint already sees as spent.
- */
-export async function recoverMintProofs(
-  coco: Manager,
-  mintUrl: string,
-  onProgress?: (message: string) => void,
-): Promise<string> {
-  const normalized = normalizeMintUrl(mintUrl);
-  const internals = mintRestoreInternals(coco);
-
-  onProgress?.(`Fetching mint info for ${normalized}…`);
-  const { keysets } = await coco.mint.addMint(normalized, { trusted: true });
-  if (keysets.length === 0) {
-    throw new Error(`Mint ${normalized} advertises no keysets to restore`);
-  }
-  onProgress?.(
-    `Recovery started for ${keysets.length} keyset(s) from ${normalized}; this may take several minutes…`,
-  );
-
-  // Wiping a keyset deletes every proof row for it, including proofs reserved
-  // by an operation that is still running, so refuse to break a live
-  // send/melt. A proof with no owning operation is an orphan left by an
-  // interrupted run: nothing will drive it, and reconciling it against the
-  // mint is exactly what recovery is for, so those do not block.
-  const inflight = await internals.proofRepository.getInflightProofs([
-    normalized,
-  ]);
-  const ownedInflight = inflight.filter((proof) => proof.usedByOperationId);
-  if (ownedInflight.length > 0) {
-    const operations = [
-      ...new Set(ownedInflight.map((proof) => proof.usedByOperationId)),
-    ];
-    throw new Error(
-      `${normalized} has ${ownedInflight.length} proof(s) reserved by operations that are still open (${operations.join(", ")}); settle them with 'routstrd wallet cleanup' before recovering`,
-    );
-  }
-  if (inflight.length > 0) {
-    onProgress?.(
-      `Reconciling ${inflight.length} proof(s) left inflight by an earlier run…`,
-    );
-  }
-
-  const { wallet } = await internals.walletService.getWalletWithActiveKeysetId(
-    normalized,
-  );
-
-  // Background services mutate proofs and counters independently of public
-  // client calls, so stop them while restore rewrites counters.
-  let subscriptionsPaused = false;
-  let mintWatcherStopped = false;
-  let proofWatcherStopped = false;
-  let mintProcessorStopped = false;
-  let recoveredSats = 0;
-  const failures: string[] = [];
-  try {
-    await coco.pauseSubscriptions();
-    subscriptionsPaused = true;
-    await coco.disableMintOperationWatcher();
-    mintWatcherStopped = true;
-    await coco.disableProofStateWatcher();
-    proofWatcherStopped = true;
-    await coco.disableMintOperationProcessor();
-    mintProcessorStopped = true;
-
-    for (const keyset of keysets) {
-      const snapshot = await snapshotKeysetProofs(
-        internals,
-        normalized,
-        keyset.id,
-      );
-      onProgress?.(
-        `Keyset ${keyset.id}: restoring ${keyset.id} (mints rate-limit restore batches, so this can take minutes)…`,
-      );
-      try {
-        const outcome = await restoreKeysetWithWipe(
-          internals,
-          normalized,
-          wallet,
-          keyset.id,
-          snapshot,
-          onProgress,
-        );
-        recoveredSats += outcome.storedAmount;
-        onProgress?.(
-          `Keyset ${keyset.id}: ${outcome.stored} unspent proof(s), ${outcome.storedAmount} sat` +
-            (outcome.before > 0
-              ? ` (replacing ${outcome.before} stored)`
-              : ""),
-        );
-      } catch (error) {
-        const message = describeRestoreError(error);
-        // A mint that no longer serves a retired keyset answers 4xx, and an
-        // empty keyset loses nothing by that: report it without failing the
-        // whole run, or every old keyset would mask a successful recovery.
-        if (snapshot.length === 0) {
-          onProgress?.(
-            `Keyset ${keyset.id}: skipped (no local proofs; mint said: ${message})`,
-          );
-          continue;
-        }
-        // One bad keyset must not discard the successful ones.
-        failures.push(`${keyset.id}: ${message}`);
-        onProgress?.(`Keyset ${keyset.id}: failed — ${message}`);
-      }
-    }
-  } finally {
-    const restarts: Promise<unknown>[] = [];
-    if (mintWatcherStopped) restarts.push(coco.enableMintOperationWatcher());
-    if (proofWatcherStopped) restarts.push(coco.enableProofStateWatcher());
-    if (mintProcessorStopped) restarts.push(coco.enableMintOperationProcessor());
-    if (subscriptionsPaused) restarts.push(coco.resumeSubscriptions());
-    const results = await Promise.allSettled(restarts);
-    const failedRestart = results.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failedRestart) throw failedRestart.reason;
-  }
-
-  if (failures.length > 0) {
-    throw new Error(
-      `Failed to restore ${failures.length} of ${keysets.length} keyset(s): ${failures.join("; ")}`,
-    );
-  }
-
-  onProgress?.(`Recovery complete for ${normalized}`);
-  return `Mint ${normalized} recovered: ${recoveredSats} sat in unspent proofs`;
-}
-
 export async function createCocoClient(
   options: CreateCocoClientOptions = {},
 ): Promise<WalletClient> {
@@ -2250,6 +1933,7 @@ export async function createCocoClient(
   }
 
   let database: Database | undefined;
+  let repo: SqliteRepositories;
   let historyRepository: SqliteRepositories["historyRepository"] | undefined;
   let coco: Manager | undefined;
   let findFinalizedReceiveSibling: (
@@ -2276,6 +1960,8 @@ export async function createCocoClient(
   // Serializes an explicit mint restore against public wallet mutations.
   const mintRestoreGate = new MintRestoreGate();
   let disposed = false;
+  let activeRestore: Promise<string> | undefined;
+  const shouldPauseSweeps = () => disposed || mintRestoreGate.isRestoring;
   const enqueueRecovery = createRunQueue();
   const recoveryOutstanding: RecoveryWork = new Map();
 
@@ -2287,7 +1973,7 @@ export async function createCocoClient(
     const mnemonic = walletConfig.mnemonic;
     const seed = mnemonicToSeedSync(mnemonic);
     database = new Database(dbPath);
-    const repo = new SqliteRepositories({ database });
+    repo = new SqliteRepositories({ database });
     historyRepository = repo.historyRepository;
     await repo.init();
     initReceiveDedupSchema(database);
@@ -2455,13 +2141,31 @@ export async function createCocoClient(
         syncIntervalMs: NPC_QUOTE_SYNC_INTERVAL_MS,
         logger: createCocoLogger({ module: "npc" }),
       });
-      // coco-cashu-plugin-npc implements the plugin contract from the
-      // coco-cashu-core package while routstrd runs the equivalent
-      // @cashu/coco-core build. The plugin host API is structurally identical
-      // in both (verified: mintService.addMintByUrl,
-      // mintOperationService.importQuote/getOperationByQuote), so this cast
-      // only bridges the duplicate package names, not a real API gap.
-      coco.use(npcPlugin as unknown as CocoPlugin);
+      // NPC can prepare outputs from timer and WebSocket callbacks, not only
+      // the public sync method. Admit quote imports at the plugin boundary.
+      const plugin = npcPlugin as unknown as CocoPlugin<typeof npcPlugin.required>;
+      coco.use({
+        name: plugin.name,
+        required: plugin.required,
+        onInit(ctx) {
+          const service = ctx.services.mintOperationService;
+          const guarded = new Proxy(service, {
+            get(target, name) {
+              if (name === "importQuote") {
+                return (...args: Parameters<typeof service.importQuote>) => mintRestoreGate.runMutation(async () => {
+                  if (disposed) throw new Error("Wallet is shutting down");
+                  return target.importQuote(...args);
+                });
+              }
+              const value = Reflect.get(target, name);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return plugin.onInit?.({ ...ctx, services: { ...ctx.services, mintOperationService: guarded } });
+        },
+        onReady: (ctx) => plugin.onReady?.(ctx),
+        onDispose: () => plugin.onDispose?.(),
+      } as CocoPlugin<typeof npcPlugin.required>);
     }
 
     startupProgress("Cashu wallet ready.");
@@ -2494,13 +2198,13 @@ export async function createCocoClient(
           mintOperationService: (
             coco as unknown as { mintOperationService: MintOperationServiceCleanup }
           ).mintOperationService,
-        }, recoveryOutstanding);
+        }, recoveryOutstanding, shouldPauseSweeps);
         // Coco only recovers melt operations at startup or when a melt request
         // observes its own failure in flight. A melt accepted and then left
         // pending is never re-checked, so a UNPAID flip at the mint goes
         // unnoticed and its proofs stay reserved. Sweep in-flight melts on a
         // timer so refresh() can finalize or roll them back without a restart.
-        stopMeltSweep = startMeltSweep({ ops: coco!.ops }, recoveryOutstanding);
+        stopMeltSweep = startMeltSweep({ ops: coco!.ops }, recoveryOutstanding, { shouldPause: shouldPauseSweeps });
 
         // Catch up once after recovery: quotes paid while the daemon was down
         // (or while the websocket was silently dead) would otherwise wait for
@@ -2579,6 +2283,9 @@ export async function createCocoClient(
   const disposeRecovery = createRecoveryDisposer(
     () => { disposed = true; },
     async () => {
+      // A disconnected HTTP client doesn't own the restore. Wait for the
+      // read/transaction to settle before touching the same services or DB.
+      await activeRestore?.catch(() => {});
       // Manager.dispose() only disposes plugins; it does not stop watchers.
       await coco.pauseSubscriptions();
       await recoveryPromise;
@@ -2680,7 +2387,8 @@ export async function createCocoClient(
             // duplicate. Refresh is idempotent and uses its stored output data.
             try {
               const operation = await withTimeout(
-                coco.ops.receive.refresh(reservation.existing.operationId),
+                trackRecovery(recoveryOutstanding, recoveryKey("receive-retry", crypto.randomUUID()),
+                  coco.ops.receive.refresh(reservation.existing.operationId)),
                 15_000,
               );
               if (operation.state === "finalized") {
@@ -2987,10 +2695,12 @@ export async function createCocoClient(
     },
 
     async addMint(url: string): Promise<string> {
-      await waitForRecovery();
-      const mintUrl = normalizeMintUrl(url);
-      await coco.mint.addMint(mintUrl, { trusted: true });
-      return `Mint ${mintUrl} added successfully`;
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        const mintUrl = normalizeMintUrl(url);
+        await coco.mint.addMint(mintUrl, { trusted: true });
+        return `Mint ${mintUrl} added successfully`;
+      });
     },
 
     async getMintInfo(url: string): Promise<unknown> {
@@ -3002,16 +2712,18 @@ export async function createCocoClient(
     },
 
     async setDefaultMint(url: string): Promise<string> {
-      await waitForRecovery();
-      const mintUrl = normalizeMintUrl(url);
-      const trustedMints = await coco.mint.getAllTrustedMints();
-      if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
-        await coco.mint.addMint(mintUrl, { trusted: true });
-      }
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        const mintUrl = normalizeMintUrl(url);
+        const trustedMints = await coco.mint.getAllTrustedMints();
+        if (!trustedMints.some((mint) => mint.mintUrl === mintUrl)) {
+          await coco.mint.addMint(mintUrl, { trusted: true });
+        }
 
-      walletConfig.defaultMintUrl = mintUrl;
-      saveConfig(walletConfig, configFile);
-      return `Default mint set to ${mintUrl}`;
+        walletConfig.defaultMintUrl = mintUrl;
+        saveConfig(walletConfig, configFile);
+        return `Default mint set to ${mintUrl}`;
+      });
     },
 
     async recoverMint(
@@ -3019,9 +2731,38 @@ export async function createCocoClient(
       onProgress?: (message: string) => void,
     ): Promise<string> {
       await waitForRecovery();
-      return mintRestoreGate.runRestore(() =>
-        recoverMintProofs(coco, mintUrl, onProgress),
-      );
+      return mintRestoreGate.runRestore(async () => {
+        assertOpen();
+        const work = (async () => {
+          onProgress?.("Pausing wallet writers for mint recovery…");
+          // Do not call Manager.resumeSubscriptions(): it reboots the default
+          // proof watcher and starts an unfiltered mint recovery sweep.
+          coco.subscriptions.pause();
+          try {
+            await coco.disableMintOperationWatcher();
+            await coco.disableProofStateWatcher();
+            await coco.disableMintOperationProcessor();
+            await enqueueRecovery.drain();
+            await waitForRecoveryWork(drainRecoveryWork(recoveryOutstanding), 30_000);
+            assertOpen();
+            return await recoverMintProofs(coco, repo, mintUrl, onProgress, assertOpen);
+          } finally {
+            if (!disposed) {
+              coco.subscriptions.resume();
+              await coco.enableMintOperationProcessor();
+              if (!disposed) await coco.enableMintOperationWatcher();
+              if (!disposed) {
+                await coco.enableProofStateWatcher({ watchExistingInflightOnStart: false });
+                startOnlineProofBootstrap(coco, repo, logger, () => disposed,
+                  { outstanding: recoveryOutstanding });
+              }
+            }
+          }
+        })();
+        activeRestore = work;
+        try { return await work; }
+        finally { activeRestore = undefined; }
+      });
     },
 
     async dispose(): Promise<void> {
@@ -3085,304 +2826,311 @@ export async function createCocoClient(
     async cleanupStuckOperations(
       options: WalletCleanupOptions = {},
     ): Promise<WalletCleanupResult> {
-      await waitForRecovery();
-      const minAgeMs = options.minAgeMs ?? 7 * 24 * 60 * 60 * 1000;
-      const dryRun = options.dryRun === true;
-      const force = options.force === true;
-      const nowMs = Date.now();
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        const minAgeMs = options.minAgeMs ?? 7 * 24 * 60 * 60 * 1000;
+        const dryRun = options.dryRun === true;
+        const force = options.force === true;
+        const nowMs = Date.now();
 
-      const [pendingMints, inFlightSends, preparedMelts] = await Promise.all([
-        coco.ops.mint.listPending(),
-        coco.ops.send.listInFlight(),
-        coco.ops.melt.listPrepared(),
-      ]);
+        const [pendingMints, inFlightSends, preparedMelts] = await Promise.all([
+          coco.ops.mint.listPending(),
+          coco.ops.send.listInFlight(),
+          coco.ops.melt.listPrepared(),
+        ]);
 
-      const filteredMints = options.mintUrl
-        ? pendingMints.filter((op) => op.mintUrl === options.mintUrl)
-        : pendingMints;
-      const filteredSends = options.mintUrl
-        ? inFlightSends.filter((op) => op.mintUrl === options.mintUrl)
-        : inFlightSends;
-      const filteredMelts = options.mintUrl
-        ? preparedMelts.filter((op) => op.mintUrl === options.mintUrl)
-        : preparedMelts;
+        const filteredMints = options.mintUrl
+          ? pendingMints.filter((op) => op.mintUrl === options.mintUrl)
+          : pendingMints;
+        const filteredSends = options.mintUrl
+          ? inFlightSends.filter((op) => op.mintUrl === options.mintUrl)
+          : inFlightSends;
+        const filteredMelts = options.mintUrl
+          ? preparedMelts.filter((op) => op.mintUrl === options.mintUrl)
+          : preparedMelts;
 
-      const selection = selectCleanupOperations({
-        mints: filteredMints,
-        sends: filteredSends,
-        melts: filteredMelts,
-        nowMs,
-        minAgeMs,
-      });
+        const selection = selectCleanupOperations({
+          mints: filteredMints,
+          sends: filteredSends,
+          melts: filteredMelts,
+          nowMs,
+          minAgeMs,
+        });
 
-      const errors: WalletCleanupResult["errors"] = [];
-      let failedMintQuotes = 0;
-      let leftForRecovery = 0;
+        const errors: WalletCleanupResult["errors"] = [];
+        let failedMintQuotes = 0;
+        let leftForRecovery = 0;
 
-      if (!dryRun) {
-        const mintService = (
-          coco as unknown as {
-            mintOperationService: MintOperationServiceCleanup;
-          }
-        ).mintOperationService;
+        if (!dryRun) {
+          const mintService = (
+            coco as unknown as {
+              mintOperationService: MintOperationServiceCleanup;
+            }
+          ).mintOperationService;
 
-        for (const op of selection.mintsToFail) {
-          if (force) {
-            // Legacy behaviour: fail the quote locally without asking the mint.
-            try {
-              await mintService.failPendingOperation(
-                { id: op.id },
-                {
-                  reason: "Expired mint quote cleaned up by routstrd (forced)",
-                  retryable: false,
-                  observedAt: nowMs,
-                },
-              );
+          for (const op of selection.mintsToFail) {
+            if (force) {
+              // Legacy behaviour: fail the quote locally without asking the mint.
+              try {
+                await mintService.failPendingOperation(
+                  { id: op.id },
+                  {
+                    reason: "Expired mint quote cleaned up by routstrd (forced)",
+                    retryable: false,
+                    observedAt: nowMs,
+                  },
+                );
+                failedMintQuotes++;
+              } catch (error) {
+                errors.push({
+                  operationId: op.id,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+              continue;
+            }
+            // Expiry alone does not prove the quote was never paid: the
+            // Lightning payment can land before expiry while the daemon is down.
+            // Confirm UNPAID with the mint before failing, exactly as startup
+            // recovery does; paid quotes are left for recovery to finalize.
+            const work = trackRecovery(recoveryOutstanding, recoveryKey("cleanup-mint", crypto.randomUUID()),
+              failExpiredMintQuoteIfUnpaid(mintService, op.id, Infinity));
+            const check = await withTimeout(work, EXPIRED_MINT_OBSERVATION_DEADLINE_MS)
+              .catch((error) => ({ outcome: "unobserved" as const, error }));
+            if (check.outcome === "failed") {
               failedMintQuotes++;
+            } else {
+              leftForRecovery++;
+              if (check.outcome === "unobserved") {
+                errors.push({
+                  operationId: op.id,
+                  error: `could not confirm quote state with mint: ${
+                    check.error instanceof Error
+                      ? check.error.message
+                      : String(check.error)
+                  }`,
+                });
+              }
+            }
+          }
+
+          for (const op of selection.sendsToReclaim) {
+            try {
+              await coco.ops.send.reclaim(op.id);
             } catch (error) {
               errors.push({
                 operationId: op.id,
                 error: error instanceof Error ? error.message : String(error),
               });
             }
-            continue;
           }
-          // Expiry alone does not prove the quote was never paid: the
-          // Lightning payment can land before expiry while the daemon is down.
-          // Confirm UNPAID with the mint before failing, exactly as startup
-          // recovery does; paid quotes are left for recovery to finalize.
-          const check = await failExpiredMintQuoteIfUnpaid(
-            mintService,
-            op.id,
-            EXPIRED_MINT_OBSERVATION_DEADLINE_MS,
-          );
-          if (check.outcome === "failed") {
-            failedMintQuotes++;
-          } else {
-            leftForRecovery++;
-            if (check.outcome === "unobserved") {
+
+          for (const op of selection.meltsToCancel) {
+            try {
+              await coco.ops.melt.cancel(op.id, "Cancelled by wallet cleanup");
+            } catch (error) {
               errors.push({
                 operationId: op.id,
-                error: `could not confirm quote state with mint: ${
-                  check.error instanceof Error
-                    ? check.error.message
-                    : String(check.error)
-                }`,
+                error: error instanceof Error ? error.message : String(error),
               });
             }
           }
         }
 
-        for (const op of selection.sendsToReclaim) {
-          try {
-            await coco.ops.send.reclaim(op.id);
-          } catch (error) {
-            errors.push({
-              operationId: op.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
+        const mintSummary = summarizeMintCleanup({
+          dryRun,
+          candidates: selection.mintsToFail.length,
+          failed: failedMintQuotes,
+          leftForRecovery,
+        });
+        const actedOn =
+          (dryRun ? mintSummary.mintQuoteCandidates : mintSummary.failedMintQuotes) +
+          leftForRecovery +
+          selection.sendsToReclaim.length +
+          selection.meltsToCancel.length;
+        const skipped =
+          filteredMints.length + filteredSends.length + filteredMelts.length -
+          actedOn;
 
-        for (const op of selection.meltsToCancel) {
-          try {
-            await coco.ops.melt.cancel(op.id, "Cancelled by wallet cleanup");
-          } catch (error) {
-            errors.push({
-              operationId: op.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      }
-
-      const mintSummary = summarizeMintCleanup({
-        dryRun,
-        candidates: selection.mintsToFail.length,
-        failed: failedMintQuotes,
-        leftForRecovery,
+        return {
+          dryRun,
+          ...mintSummary,
+          reclaimedSends: selection.sendsToReclaim.length,
+          cancelledMelts: selection.meltsToCancel.length,
+          skipped,
+          errors,
+        };
       });
-      const actedOn =
-        (dryRun ? mintSummary.mintQuoteCandidates : mintSummary.failedMintQuotes) +
-        leftForRecovery +
-        selection.sendsToReclaim.length +
-        selection.meltsToCancel.length;
-      const skipped =
-        filteredMints.length + filteredSends.length + filteredMelts.length -
-        actedOn;
-
-      return {
-        dryRun,
-        ...mintSummary,
-        reclaimedSends: selection.sendsToReclaim.length,
-        cancelledMelts: selection.meltsToCancel.length,
-        skipped,
-        errors,
-      };
     },
 
     async checkProofs(
       options: WalletProofCheckOptions = {},
     ): Promise<WalletProofCheckResult> {
-      await waitForRecovery();
-      assertOpen();
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        assertOpen();
 
-      const dryRun = options.dryRun === true;
-      const timeoutMs = options.timeoutMs ?? 30_000;
-      const internals = coco as unknown as ProofCheckInternals;
+        const dryRun = options.dryRun === true;
+        const timeoutMs = options.timeoutMs ?? 30_000;
+        const internals = coco as unknown as ProofCheckInternals;
 
-      // A ready proof can already be spent by a duplicate token we no longer
-      // know about, and an inflight proof may have been spent by the operation
-      // that reserved it before that operation was interrupted. The mint is
-      // the authority in both cases.
-      const [readyProofs, inflightProofs] = await Promise.all([
-        internals.proofRepository.getAllReadyProofs(),
-        internals.proofRepository.getInflightProofs(),
-      ]);
+        // A ready proof can already be spent by a duplicate token we no longer
+        // know about, and an inflight proof may have been spent by the operation
+        // that reserved it before that operation was interrupted. The mint is
+        // the authority in both cases.
+        const [readyProofs, inflightProofs] = await Promise.all([
+          internals.proofRepository.getAllReadyProofs(),
+          internals.proofRepository.getInflightProofs(),
+        ]);
 
-      // The two reads can overlap for a proof reserved mid-check; keying by
-      // mint+secret keeps us from asking the mint about one secret twice and
-      // from counting it twice in the summary.
-      const seen = new Set<string>();
-      const candidates: CoreProof[] = [];
-      for (const proof of [...readyProofs, ...inflightProofs]) {
-        if (options.mintUrl && proof.mintUrl !== options.mintUrl) continue;
-        const key = `${proof.mintUrl}\u0000${proof.secret}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        candidates.push(proof);
-      }
-
-      const mints: WalletProofCheckMintResult[] = [];
-
-      for (const group of groupProofsByMint(candidates)) {
-        const result: WalletProofCheckMintResult = {
-          mintUrl: group.mintUrl,
-          checked: group.proofs.length,
-          checkedAmount: totalAmount(group.proofs),
-          spent: 0,
-          spentAmount: 0,
-          markedSpent: 0,
-          unspent: 0,
-          unresolved: 0,
-        };
-
-        try {
-          const { wallet } =
-            await internals.walletService.getWalletWithActiveKeysetId(
-              group.mintUrl,
-            );
-
-          const checked: CheckedProof[] = [];
-          for (const batch of chunk(group.proofs)) {
-            const states = await withTimeout(
-              wallet.checkProofsStates(
-                batch.map((proof) => ({ secret: proof.secret, id: proof.id })),
-              ),
-              timeoutMs,
-            );
-            // A response we cannot align to the request would mis-attribute
-            // every later state, so refuse it rather than mark the wrong
-            // proofs spent.
-            const paired = pairProofStates(batch, states);
-            if (!paired) {
-              throw new Error(
-                `mint returned ${states.length} state(s) for ${batch.length} proof(s)`,
-              );
-            }
-            checked.push(...paired);
-          }
-
-          const { spent, unspent, unresolved } = partitionCheckedProofs(checked);
-          result.spent = spent.length;
-          result.spentAmount = totalAmount(spent.map((entry) => entry.proof));
-          result.unspent = unspent.length;
-          result.unresolved = unresolved.length;
-
-          if (!dryRun && spent.length > 0) {
-            // Mark through ProofService, not the repository: it also emits
-            // `proofs:state-changed`, which is what finalizes the send
-            // operations that reserved these inflight proofs.
-            await internals.proofService.setProofState(
-              group.mintUrl,
-              spent.map((entry) => entry.proof.secret),
-              "spent",
-            );
-            result.markedSpent = spent.length;
-          }
-        } catch (error) {
-          // One unreachable mint must not stop the others: leave its proofs
-          // untouched and report it, so a partial run is still useful.
-          result.error = error instanceof Error ? error.message : String(error);
+        // The two reads can overlap for a proof reserved mid-check; keying by
+        // mint+secret keeps us from asking the mint about one secret twice and
+        // from counting it twice in the summary.
+        const seen = new Set<string>();
+        const candidates: CoreProof[] = [];
+        for (const proof of [...readyProofs, ...inflightProofs]) {
+          if (options.mintUrl && proof.mintUrl !== options.mintUrl) continue;
+          const key = `${proof.mintUrl}\u0000${proof.secret}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          candidates.push(proof);
         }
 
-        mints.push(result);
-      }
+        const mints: WalletProofCheckMintResult[] = [];
 
-      return {
-        dryRun,
-        checked: mints.reduce((sum, mint) => sum + mint.checked, 0),
-        spent: mints.reduce((sum, mint) => sum + mint.spent, 0),
-        spentAmount: mints.reduce((sum, mint) => sum + mint.spentAmount, 0),
-        markedSpent: mints.reduce((sum, mint) => sum + mint.markedSpent, 0),
-        unspent: mints.reduce((sum, mint) => sum + mint.unspent, 0),
-        unresolved: mints.reduce((sum, mint) => sum + mint.unresolved, 0),
-        unreachableMints: mints
-          .filter((mint) => mint.error)
-          .map((mint) => mint.mintUrl),
-        mints,
-      };
+        for (const group of groupProofsByMint(candidates)) {
+          const result: WalletProofCheckMintResult = {
+            mintUrl: group.mintUrl,
+            checked: group.proofs.length,
+            checkedAmount: totalAmount(group.proofs),
+            spent: 0,
+            spentAmount: 0,
+            markedSpent: 0,
+            unspent: 0,
+            unresolved: 0,
+          };
+
+          try {
+            const { wallet } =
+              await internals.walletService.getWalletWithActiveKeysetId(
+                group.mintUrl,
+              );
+
+            const checked: CheckedProof[] = [];
+            for (const batch of chunk(group.proofs)) {
+              const states = await withTimeout(
+                wallet.checkProofsStates(
+                  batch.map((proof) => ({ secret: proof.secret, id: proof.id })),
+                ),
+                timeoutMs,
+              );
+              // A response we cannot align to the request would mis-attribute
+              // every later state, so refuse it rather than mark the wrong
+              // proofs spent.
+              const paired = pairProofStates(batch, states);
+              if (!paired) {
+                throw new Error(
+                  `mint returned ${states.length} state(s) for ${batch.length} proof(s)`,
+                );
+              }
+              checked.push(...paired);
+            }
+
+            const { spent, unspent, unresolved } = partitionCheckedProofs(checked);
+            result.spent = spent.length;
+            result.spentAmount = totalAmount(spent.map((entry) => entry.proof));
+            result.unspent = unspent.length;
+            result.unresolved = unresolved.length;
+
+            if (!dryRun && spent.length > 0) {
+              // Mark through ProofService, not the repository: it also emits
+              // `proofs:state-changed`, which is what finalizes the send
+              // operations that reserved these inflight proofs.
+              await internals.proofService.setProofState(
+                group.mintUrl,
+                spent.map((entry) => entry.proof.secret),
+                "spent",
+              );
+              result.markedSpent = spent.length;
+            }
+          } catch (error) {
+            // One unreachable mint must not stop the others: leave its proofs
+            // untouched and report it, so a partial run is still useful.
+            result.error = error instanceof Error ? error.message : String(error);
+          }
+
+          mints.push(result);
+        }
+
+        return {
+          dryRun,
+          checked: mints.reduce((sum, mint) => sum + mint.checked, 0),
+          spent: mints.reduce((sum, mint) => sum + mint.spent, 0),
+          spentAmount: mints.reduce((sum, mint) => sum + mint.spentAmount, 0),
+          markedSpent: mints.reduce((sum, mint) => sum + mint.markedSpent, 0),
+          unspent: mints.reduce((sum, mint) => sum + mint.unspent, 0),
+          unresolved: mints.reduce((sum, mint) => sum + mint.unresolved, 0),
+          unreachableMints: mints
+            .filter((mint) => mint.error)
+            .map((mint) => mint.mintUrl),
+          mints,
+        };
+      });
     },
 
     async recoverMintQuotes(options, onProgress) {
-      await waitForRecovery();
-      const service = (
-        coco as unknown as {
-          mintOperationService: MintOperationServiceCleanup;
-        }
-      ).mintOperationService;
-      // Serialize explicit recovery: two concurrent requests must not both
-      // snapshot the same failed operation, and a retry must not start
-      // underneath a finalize that outlived its timeout.
-      return enqueueRecovery(() => {
-        assertOpen();
-        return runMintQuoteRecovery(
-          {
-            ops: coco.ops as unknown as MintQuoteRecoverySource["ops"],
-            mintOperationService: service,
-            reopenFailedOperation: (operationId) =>
-              reopenFailedMintOperation(service, operationId),
-          },
-          { ...options, outstanding: recoveryOutstanding, shouldStop: () => disposed },
-          onProgress,
-        );
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        const service = (
+          coco as unknown as {
+            mintOperationService: MintOperationServiceCleanup;
+          }
+        ).mintOperationService;
+        // Serialize explicit recovery: two concurrent requests must not both
+        // snapshot the same failed operation, and a retry must not start
+        // underneath a finalize that outlived its timeout.
+        return enqueueRecovery(() => {
+          assertOpen();
+          return runMintQuoteRecovery(
+            {
+              ops: coco.ops as unknown as MintQuoteRecoverySource["ops"],
+              mintOperationService: service,
+              reopenFailedOperation: (operationId) =>
+                reopenFailedMintOperation(service, operationId),
+            },
+            { ...options, outstanding: recoveryOutstanding, shouldStop: () => disposed },
+            onProgress,
+          );
+        });
       });
     },
 
     async recoverStuckOperations() {
-      await waitForRecovery();
-      // Serialized against explicit mint-quote recovery (and itself) through
-      // the same queue and lifetime tracker, so timed-out passes cannot retry the same
-      // operation. Receive stays startup-only: recovering competing receives
-      // safely requires the startup dedup classification (receive-dedup.ts).
-      // Operations a live execute holds come back as busy via coco's
-      // fail-fast operation lock, never driven underneath it.
-      const result = await enqueueRecovery(() => {
-        assertOpen();
-        return runTargetedRecovery(coco!.ops, sendRecoveryServiceOf(coco!), {
-          kinds: ["send", "melt", "mint"],
-          outstanding: recoveryOutstanding,
-          shouldStop: () => disposed,
+      return mintRestoreGate.runMutation(async () => {
+        await waitForRecovery();
+        // Serialized against explicit mint-quote recovery (and itself) through
+        // the same queue and lifetime tracker, so timed-out passes cannot retry the same
+        // operation. Receive stays startup-only: recovering competing receives
+        // safely requires the startup dedup classification (receive-dedup.ts).
+        // Operations a live execute holds come back as busy via coco's
+        // fail-fast operation lock, never driven underneath it.
+        const result = await enqueueRecovery(() => {
+          assertOpen();
+          return runTargetedRecovery(coco!.ops, sendRecoveryServiceOf(coco!), {
+            kinds: ["send", "melt", "mint"],
+            outstanding: recoveryOutstanding,
+            shouldStop: () => disposed,
+          });
         });
+        return {
+          timedOut: result.timedOut,
+          attempted: result.attempted,
+          busy: result.busy,
+          skipped: result.skipped,
+          failed: result.failed,
+          skippedMints: Object.fromEntries(result.skippedMints),
+        };
       });
-      return {
-        timedOut: result.timedOut,
-        attempted: result.attempted,
-        busy: result.busy,
-        skipped: result.skipped,
-        failed: result.failed,
-        skippedMints: Object.fromEntries(result.skippedMints),
-      };
     },
   };
 }

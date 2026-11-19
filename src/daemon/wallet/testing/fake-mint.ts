@@ -77,6 +77,10 @@ export class FakeMint {
    * mint-quote-recovery.fake-mint.test.ts.
    */
   restoreIncludesNulls = false;
+  restoreGate: Promise<void> | null = null;
+  restoreErrorStatus: number | null = null;
+  restoreRequests = 0;
+  proofStates: string[] | null = null;
 
   private readonly quotes = new Map<string, FakeMintQuote>();
   private counter = 0;
@@ -315,6 +319,11 @@ export class FakeMint {
     if (pathname === "/v1/restore" && request.method === "POST") {
       const input = await body();
       const outputs = (input.outputs ?? []) as FakeMintRequest["outputs"];
+      this.restoreRequests++;
+      await this.restoreGate;
+      if (this.restoreErrorStatus !== null) {
+        return this.error(10000, "restore temporarily unavailable", this.restoreErrorStatus);
+      }
       if (this.restoreIncludesNulls) {
         // Spec-legal NUT-09 shape, including nulls. Kept behind a switch
         // because it is currently unusable with coco's cashu-ts version.
@@ -338,7 +347,7 @@ export class FakeMint {
       const input = await body();
       const ys = (input.Ys ?? []) as string[];
       return this.json({
-        states: ys.map((Y) => ({ Y, state: "UNSPENT", witness: null })),
+        states: ys.map((Y, index) => ({ Y, state: this.proofStates?.[index] ?? "UNSPENT", witness: null })),
       });
     }
 

@@ -218,6 +218,7 @@ export async function settleMeltOperations(
 }
 
 export interface StartMeltSweepOptions {
+  shouldPause?: () => boolean;
   intervalMs?: number;
   opTimeoutMs?: number;
   deadlineMs?: number;
@@ -250,9 +251,13 @@ export function startMeltSweep(
 
   const tick = async () => {
     if (stopped) return;
+    if (options.shouldPause?.()) {
+      timer = setTimeout(tick, intervalMs);
+      return;
+    }
     inFlight = settleMeltOperations(source, {
       state,
-      shouldStop: () => stopped,
+      shouldStop: () => stopped || options.shouldPause?.() === true,
       opTimeoutMs: options.opTimeoutMs,
       deadlineMs: options.deadlineMs,
     }).then(

@@ -1,75 +1,61 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 
-// Keep the test off the real config file: callDaemonRaw() resolves the daemon
-// base URL through loadConfig(). Everything else in the module is passed
-// through, since the import graph reads paths and defaults from it too.
 const realConfig = await import("./config");
 mock.module("./config", () => ({
   ...realConfig,
   loadConfig: async () => ({ port: 8008, host: "127.0.0.1" }),
 }));
-
 const { callDaemonRaw } = await import("./daemon-client");
-
 const originalFetch = globalThis.fetch;
-const originalAbortTimeout = AbortSignal.timeout;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  AbortSignal.timeout = originalAbortTimeout;
 });
 
 describe("callDaemonRaw", () => {
-  test("arms no total deadline, only an inactivity bound", async () => {
-    // Regression: `fetchDaemonUrl` used to default its timeout argument, so
-    // passing `undefined` re-armed the 120s route deadline and killed long
-    // streams mid-body.
-    const armed: number[] = [];
-    AbortSignal.timeout = ((ms: number) => {
-      armed.push(ms);
-      return originalAbortTimeout(ms);
-    }) as typeof AbortSignal.timeout;
+  test("aborts a request stalled before response headers", async () => {
+    globalThis.fetch = mock((_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) return reject(new Error("missing signal"));
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+    ) as unknown as typeof fetch;
 
-    let signalSeen: AbortSignal | null | undefined;
-    globalThis.fetch = (async (
-      _input: string | URL | Request,
-      init?: RequestInit,
-    ) => {
-      signalSeen = init?.signal;
-      return new Response('{"type":"result","ok":true,"message":"done"}\n');
+    await expect(callDaemonRaw("/wallet/recover/mint", { method: "POST" }, 10))
+      .rejects.toThrow("the operation may still be running");
+  });
+
+  test("clears the headers deadline while the streamed body is still active", async () => {
+    let signal: AbortSignal | null | undefined;
+    globalThis.fetch = mock((_input: unknown, init?: RequestInit) => {
+      signal = init?.signal;
+      let pulls = 0;
+      return Promise.resolve(new Response(new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await Bun.sleep(10);
+          if (signal?.aborted) throw signal.reason;
+          if (++pulls === 8) controller.close();
+          else controller.enqueue(new Uint8Array([46]));
+        },
+      })));
     }) as unknown as typeof fetch;
 
-    const response = await callDaemonRaw("/wallet/recover/mint", {
-      method: "POST",
-      body: { url: "https://mint.example.com" },
-    });
-
-    expect(armed).toEqual([]);
-    expect(signalSeen).toBeUndefined();
-    expect(await response.text()).toContain('"ok":true');
+    const response = await callDaemonRaw("/wallet/recover/mint", { method: "POST" }, 60);
+    expect(await response.text()).toBe(".......");
+    expect(signal?.aborted).toBe(false);
   });
 
   test("bounds inactivity on the streamed body", async () => {
-    globalThis.fetch = (async () =>
-      new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode("first\n"));
-            // ...then the daemon goes quiet.
-          },
-        }),
-      )) as unknown as typeof fetch;
+    globalThis.fetch = mock(async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("first\n"));
+      },
+    }))) as unknown as typeof fetch;
 
-    const response = await callDaemonRaw("/wallet/recover/mint", {
-      method: "POST",
-      body: {},
-    });
+    const response = await callDaemonRaw("/wallet/recover/mint", { method: "POST" }, 10);
     const reader = response.body!.getReader();
-    expect(new TextDecoder().decode((await reader.read()).value)).toBe(
-      "first\n",
-    );
-    // The default inactivity bound is 120s; the real one is not waited out
-    // here, only asserted through the wrapper's own unit tests.
-    await reader.cancel().catch(() => {});
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("first\n");
+    await expect(reader.read()).rejects.toThrow("Daemon sent no response");
   });
 });

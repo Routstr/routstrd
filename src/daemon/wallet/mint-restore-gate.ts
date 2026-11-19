@@ -21,6 +21,8 @@ export class MintRestoreGate {
   private activeMutations = 0;
   private restoring = false;
 
+  get isRestoring(): boolean { return this.restoring; }
+
   async runMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (this.restoring) {
       throw new WalletRestoreBusyError(
