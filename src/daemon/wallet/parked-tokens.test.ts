@@ -1,638 +1,279 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { getDecodedToken, getEncodedToken, getTokenMetadata } from "@cashu/cashu-ts";
+import { Amount, getDecodedToken, getEncodedToken, type Proof } from "@cashu/cashu-ts";
 import {
-  classifyParkedFailure,
-  groupForMerge,
-  inspectParkedToken,
-  mergeInspections,
-  PARKED_TOKEN_MAX_AGE_MS,
-  planParkedDrops,
+  inspectParkedTokens,
   recoverParkedTokens,
   type ParkedTokenEntry,
-  type ParkedTokenSource,
   type ParkedTokenSpender,
   type ParkedTokenStorage,
 } from "./parked-tokens";
 
-const MINT = "https://mint.cubabitcoin.org";
+const MINT = "https://mint.example";
+const OTHER_MINT = "https://other.example";
 const KEYSET = "00cadd580ab9ab9a";
+const V2_KEYSET = `01${"a".repeat(64)}`;
+const DAY = 86_400_000;
+const FEE = "Receive amount is not sufficient after fees";
+const SPENT = "proofs already spent";
 
-/** A real, encodable token so decoding and merging are exercised for real. */
-function token(
-  secret: string,
-  { amount = 1, mint = MINT, unit = "sat" }: { amount?: number; mint?: string; unit?: "sat" | "msat" } = {},
-): string {
-  // C must be a valid 33-byte hex point but is never verified locally for
-  // decode/merge, so a deterministic hex digest of the secret is enough to
-  // build a well-formed token with a stable, unique C per input.
-  const C = `02${createHash("sha256").update(secret).digest("hex")}`;
-  return getEncodedToken({ mint, unit, proofs: [{ amount, id: KEYSET, secret, C }] } as never);
-}
-
-function entry(secret: string, overrides: Partial<ParkedTokenEntry> = {}): ParkedTokenEntry {
-  const amount = overrides.amount ?? 1;
+function proof(secret: string, amount = 1, id = KEYSET): Proof {
   return {
-    // The encoded proof must carry the same amount as the stored entry, or a
-    // test about token value would silently exercise 1 sat instead.
-    token: token(secret, { amount }),
-    amount,
-    unit: "sat",
-    createdAt: 1_000,
-    ...overrides,
+    amount: Amount.from(amount), id, secret,
+    C: `02${createHash("sha256").update(secret).digest("hex")}`,
   };
 }
 
-/** In-memory storage adapter, recording what was written back. */
-function storageOf(entries: ParkedTokenEntry[]) {
-  let current = [...entries];
-  const writes: ParkedTokenEntry[][] = [];
-  const storage: ParkedTokenStorage = {
-    getCachedReceiveTokens: () => [...current],
-    setCachedReceiveTokens: (next) => {
-      writes.push(next);
-      current = [...next];
-    },
+function entry(
+  proofs: string | Proof[],
+  { mint = MINT, unit = "sat", createdAt = 1 }: {
+    mint?: string;
+    unit?: ParkedTokenEntry["unit"];
+    createdAt?: number;
+  } = {},
+): ParkedTokenEntry {
+  const inputs = typeof proofs === "string" ? [proof(proofs)] : proofs;
+  return {
+    token: getEncodedToken({ mint, unit, proofs: inputs }),
+    amount: inputs.reduce((total, input) => total + input.amount.toNumber(), 0),
+    unit,
+    createdAt,
   };
-  return { storage, writes, get: () => current };
 }
 
-/**
- * Spender whose verdict per token is scripted by the token's first secret-ish
- * marker, defaulting to the sub-fee failure this module exists to stop.
- */
-function spenderOf(
-  verdicts: Record<string, { success: boolean; message?: string }>,
-  fallback = { success: false, message: "Receive amount is not sufficient after fees" },
-) {
-  const calls: Array<{ token: string; cacheOnFailure?: boolean }> = [];
-  const spender: ParkedTokenSpender = {
-    async receiveToken(token, cacheOnFailure) {
-      calls.push({ token, cacheOnFailure });
-      const decoded = getDecodedToken(token, []);
-      const secrets = decoded.proofs.map((proof) => proof.secret);
-      // A merged token carries many proofs: succeed if every part succeeds.
-      const verdict = secrets
-        .map((secret) => verdicts[secret])
-        .find((candidate) => candidate !== undefined);
-      const amount = getTokenMetadata(token).amount.toNumber();
-      const settled = verdict ?? fallback;
-      return {
-        success: settled.success,
-        amount: settled.success ? amount : 0,
-        unit: "sat" as const,
-        ...(settled.message ? { message: settled.message } : {}),
-      };
-    },
-  };
-  return { client: { getCashuSpender: () => spender } as ParkedTokenSource, calls };
-}
-
-describe("classifyParkedFailure", () => {
-  it("treats a sub-fee receive as a fee problem", () => {
-    expect(
-      classifyParkedFailure("Receive amount is not sufficient after fees"),
-    ).toBe("fee-exceeds-value");
-  });
-
-  it("treats proofs the mint has consumed as already spent", () => {
-    expect(classifyParkedFailure("proofs already spent")).toBe("already-spent");
-    expect(classifyParkedFailure("Token already spent")).toBe("already-spent");
-  });
-
-  it("treats the mint's zero-output rejection as a fee problem", () => {
-    // Observed from mint.cubabitcoin.org for a 1-sat token on a 100 ppk mint:
-    // the fee consumes the whole value, so the mint is asked to mint nothing.
-    expect(classifyParkedFailure("no outputs provided.")).toBe("fee-exceeds-value");
-  });
-
-  it("treats undecodable input as undecodable", () => {
-    expect(classifyParkedFailure("Invalid token")).toBe("undecodable");
-    expect(classifyParkedFailure("malformed token")).toBe("undecodable");
-  });
-
-  it("keeps transient failures retryable", () => {
-    // A mint being unreachable must never destroy redeemable money.
-    expect(classifyParkedFailure("Failed to fetch mint")).toBeUndefined();
-    expect(classifyParkedFailure("network timeout")).toBeUndefined();
-    expect(classifyParkedFailure("")).toBeUndefined();
-    expect(classifyParkedFailure(undefined)).toBeUndefined();
-  });
-});
-
-describe("inspectParkedToken", () => {
-  it("reads the mint, unit and proofs out of a stored token", () => {
-    const inspection = inspectParkedToken(entry("s1"));
-    expect(inspection.mint).toBe(MINT);
-    expect(inspection.unit).toBe("sat");
-    expect(inspection.proofs).toHaveLength(1);
-    expect(inspection.proofs[0]?.amount).toBe(1);
-    expect(inspection.error).toBeUndefined();
-  });
-
-  it("reports an undecodable token instead of throwing", () => {
-    const inspection = inspectParkedToken({
-      token: "cashuNotARealToken",
-      amount: 5,
-      unit: "sat",
-      createdAt: 1_000,
-    });
-    expect(inspection.error).toBeDefined();
-    expect(inspection.proofs).toHaveLength(0);
-  });
-});
-
-describe("groupForMerge", () => {
-  it("groups tokens by mint and skips single-token groups", () => {
-    const inspections = [
-      inspectParkedToken(entry("a1")),
-      inspectParkedToken(entry("a2")),
-      inspectParkedToken(entry("b1", { token: token("b1", { mint: "https://other.mint" }) })),
-    ];
-    const groups = groupForMerge(inspections);
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.mint).toBe(MINT);
-    expect(groups[0]?.entries).toHaveLength(2);
-  });
-
-  it("keeps sat and msat in separate groups", () => {
-    const groups = groupForMerge([
-      inspectParkedToken(entry("a1")),
-      inspectParkedToken(entry("a2")),
-      inspectParkedToken(entry("m1", { token: token("m1", { unit: "msat" }), unit: "msat" })),
-      inspectParkedToken(entry("m2", { token: token("m2", { unit: "msat" }), unit: "msat" })),
-    ]);
-    expect(groups.map((group) => group.unit).sort()).toEqual(["msat", "sat"]);
-  });
-
-  it("ignores undecodable entries", () => {
-    const groups = groupForMerge([
-      inspectParkedToken({ token: "junk", amount: 1, unit: "sat", createdAt: 0 }),
-      inspectParkedToken(entry("a1")),
-      inspectParkedToken(entry("a2")),
-    ]);
-    expect(groups[0]?.entries).toHaveLength(2);
-  });
-});
-
-describe("mergeInspections", () => {
-  it("folds every proof into one token worth the sum", () => {
-    const entries = [inspectParkedToken(entry("a1")), inspectParkedToken(entry("a2"))];
-    const merged = mergeInspections(entries);
-
-    expect(merged.proofCount).toBe(2);
-    expect(merged.amount).toBe(2);
-    expect(getTokenMetadata(merged.token).amount.toNumber()).toBe(2);
-    expect(getDecodedToken(merged.token, []).proofs.map((proof) => proof.secret)).toEqual([
-      "a1",
-      "a2",
-    ]);
-  });
-
-  it("merges many one-sat proofs into a batch that clears the fee", () => {
-    // 59 x 1 sat at 100 ppk costs ceil(100*59/1000)=6 sat, so the batch nets 53.
-    const entries = Array.from({ length: 59 }, (_, i) => inspectParkedToken(entry(`d${i}`)));
-    const merged = mergeInspections(entries);
-    expect(merged.proofCount).toBe(59);
-    expect(merged.amount).toBe(59);
-    expect(merged.amount - Math.ceil((100 * merged.proofCount) / 1000)).toBe(53);
-  });
-});
-
-describe("planParkedDrops", () => {
-  const now = 2_000_000_000_000;
-
-  it("drops sub-fee dust only once a merged receive was tried", () => {
-    const stale = entry("a1", { createdAt: now - 1_000 });
-    const inspections = [inspectParkedToken(stale)];
-    // Terminal verdicts are keyed by the token itself, as recoverParkedTokens
-    // records them.
-    const terminal = new Map([
-      [stale.token, { reason: "fee-exceeds-value" as const, detail: "not sufficient after fees" }],
-    ]);
-
-    // Not merged yet: the batch may still rescue it, so keep it parked.
-    expect(
-      planParkedDrops(inspections, {
-        received: new Set(),
-        terminal,
-        merged: false,
-        now,
-      }),
-    ).toEqual([]);
-
-    // Merged and still sub-fee: hopeless, so discard.
-    const drops = planParkedDrops(inspections, {
-      received: new Set(),
-      terminal,
-      merged: true,
-      now,
-    });
-    expect(drops).toEqual([
-      {
-        token: stale.token,
-        reason: "fee-exceeds-value",
-        amount: 1,
-        mint: MINT,
-        detail: "not sufficient after fees",
+function setup(entries: ParkedTokenEntry[], receive: ParkedTokenSpender["receiveToken"]) {
+  let parked = [...entries];
+  const calls: Array<[string, boolean | undefined]> = [];
+  const client = {
+    getCashuSpender: () => ({
+      receiveToken: (token: string, cache?: boolean) => {
+        calls.push([token, cache]);
+        return receive(token, cache);
       },
-    ]);
-  });
+    }),
+  };
+  const storage: ParkedTokenStorage = {
+    getCachedReceiveTokens: () => [...parked],
+    setCachedReceiveTokens: (next) => { parked = [...next]; },
+  };
+  return { client, storage, calls, parked: () => parked };
+}
 
-  it("drops spent and undecodable entries regardless of merging", () => {
-    const spent = inspectParkedToken(entry("spent1", { createdAt: now - 1_000 }));
-    const junk = inspectParkedToken({ token: "junk", amount: 1, unit: "sat", createdAt: 0 });
-    const drops = planParkedDrops([spent, junk], {
-      received: new Set(),
-      terminal: new Map([[spent.entry.token, { reason: "already-spent" as const }]]),
-      merged: false,
-      now,
-    });
-    expect(drops.map((drop) => drop.reason).sort()).toEqual(["already-spent", "undecodable"]);
-  });
+function reject(message: string) {
+  return { success: false, amount: 0, unit: "sat" as const, message };
+}
 
-  it("never drops a token it just received", () => {
-    const receivedEntry = entry("a1", { createdAt: now - 1_000 });
-    const drops = planParkedDrops([inspectParkedToken(receivedEntry)], {
-      received: new Set([receivedEntry.token]),
-      terminal: new Map([[receivedEntry.token, { reason: "already-spent" as const }]]),
-      merged: true,
-      now,
-    });
-    expect(drops).toEqual([]);
-  });
+function accept() {
+  // Face value comes from token inputs independently of what the adapter returns.
+  return { success: true, amount: 0, unit: "sat" as const };
+}
 
-  it("never expires a token that could still be received", () => {
-    // A mint outage must not let age destroy redeemable money: only dust that
-    // can never be received alone is dropped on age.
-    const old = inspectParkedToken(entry("worthwhile", { amount: 500, createdAt: now - PARKED_TOKEN_MAX_AGE_MS - 1 }));
-    expect(
-      planParkedDrops([old], {
-        received: new Set(),
-        terminal: new Map(),
-        merged: false,
-        now,
-      }),
-    ).toEqual([]);
-  });
-
-  it("drops entries older than the retention window", () => {
-    const old = entry("old1", { createdAt: now - PARKED_TOKEN_MAX_AGE_MS - 1 });
-    const fresh = entry("fresh1", { createdAt: now - 1_000 });
-    const drops = planParkedDrops([inspectParkedToken(old), inspectParkedToken(fresh)], {
-      received: new Set(),
-      terminal: new Map(),
-      merged: true,
-      now,
-    });
-    expect(drops.map((drop) => drop.token)).toEqual([old.token]);
-    expect(drops[0]?.reason).toBe("expired");
-  });
-
-  it("honours a caller-supplied retention window", () => {
-    const old = entry("old1", { createdAt: now - 5_000 });
-    const drops = planParkedDrops([inspectParkedToken(old)], {
-      received: new Set(),
-      terminal: new Map(),
-      merged: true,
-      now,
-      maxAgeMs: 1_000,
-    });
-    expect(drops[0]?.reason).toBe("expired");
-  });
-
-  it("keeps transient failures parked", () => {
-    const transient = entry("a1", { createdAt: now - 1_000 });
-    expect(
-      planParkedDrops([inspectParkedToken(transient)], {
-        received: new Set(),
-        terminal: new Map(),
-        merged: true,
-        now,
-      }),
-    ).toEqual([]);
-  });
-});
+function secrets(token: string): string[] {
+  return getDecodedToken(token, []).proofs.map((input) => input.secret);
+}
 
 describe("recoverParkedTokens", () => {
-  const now = 2_000_000_000_000;
-  const fresh = { createdAt: now - 1_000 };
-
-  it("reports nothing when the parked list is empty", async () => {
-    const { client, calls } = spenderOf({});
-    const { storage, writes } = storageOf([]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-    expect(recovery).toEqual({
-      attempted: 0,
-      succeeded: 0,
-      parked: 0,
-      recoveredAmount: 0,
-      dropped: [],
-      batches: 0,
-      batchesRecovered: 0,
+  it("makes no wallet or storage writes for an empty list", async () => {
+    const { client, storage, calls } = setup([], async () => accept());
+    expect(await recoverParkedTokens(client, storage)).toEqual({
+      attempted: 0, succeeded: 0, parked: 0, remaining: 0, dropped: [],
+      batches: 0, batchesRecovered: 0, recoveredFaceValue: { sat: 0, msat: 0 },
     });
     expect(calls).toHaveLength(0);
-    expect(writes).toHaveLength(0);
   });
 
-  it("receives a token that only needed a reachable mint, and prunes it", async () => {
-    const { client } = spenderOf({ a1: { success: true } });
-    const { storage, get } = storageOf([entry("a1", fresh)]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.succeeded).toBe(1);
-    expect(recovery.recoveredAmount).toBe(1);
-    expect(recovery.dropped).toEqual([]);
-    expect(get()).toEqual([]);
+  it("redeems same-mint dust in a batch and accounts for denominations separately", async () => {
+    const { client, storage, calls, parked } = setup([
+      entry("a"), entry("b"), entry([proof("c", 1500)], { unit: "msat" }),
+    ], async () => accept());
+    const result = await recoverParkedTokens(client, storage);
+    expect(calls.map(([token]) => secrets(token))).toEqual([["a", "b"], ["c"]]);
+    expect(calls.every(([, cache]) => cache === false)).toBe(true);
+    expect(result).toMatchObject({
+      attempted: 1, succeeded: 3, parked: 3, remaining: 0,
+      recoveredFaceValue: { sat: 2, msat: 1500 }, batches: 1, batchesRecovered: 1,
+    });
+    expect(parked()).toEqual([]);
   });
 
-  it("rescues sub-fee dust by merging it and rewrites the list once", async () => {
-    // Individually every token dies on the 1-sat fee; merged they succeed.
-    const { client, calls } = spenderOf(
-      {},
-      { success: false, message: "Receive amount is not sufficient after fees" },
+  it("preserves DLEQ, P2BK key and witness fields when merging", async () => {
+    const special: Proof = {
+      ...proof("a"),
+      dleq: { e: "11".repeat(32), s: "22".repeat(32), r: "33".repeat(32) },
+      p2pk_e: `02${"44".repeat(32)}`,
+      witness: { signatures: ["55".repeat(64)] },
+    };
+    const original = entry([special]);
+    const { client, storage, calls } = setup([original, entry("b")], async () => accept());
+    await recoverParkedTokens(client, storage);
+    expect(calls).toHaveLength(1);
+    const merged = getDecodedToken(calls[0]![0], []).proofs[0];
+    const decodedOriginal = getDecodedToken(original.token, []).proofs[0];
+    expect(merged).toMatchObject({
+      id: special.id, secret: special.secret, C: special.C,
+      dleq: special.dleq, p2pk_e: special.p2pk_e, witness: decodedOriginal?.witness,
+    });
+  });
+
+  it("passes a valid v4 token requiring full keyset IDs to the wallet unchanged", async () => {
+    const short = entry([proof("short-keyset", 2, V2_KEYSET)]);
+    expect(() => getDecodedToken(short.token, [])).toThrow();
+    expect(getDecodedToken(short.token, [V2_KEYSET]).proofs[0]?.id).toBe(V2_KEYSET);
+    const { client, storage, calls, parked } = setup([short], async () => accept());
+    expect(inspectParkedTokens(storage)).toEqual([expect.objectContaining({
+      mint: MINT, amount: 2, proofCount: 1,
+    })]);
+    const result = await recoverParkedTokens(client, storage);
+    expect(calls).toEqual([[short.token, false]]);
+    expect(result.succeeded).toBe(1);
+    expect(result.dropped).toEqual([]);
+    expect(parked()).toEqual([]);
+  });
+
+  it("keeps all spent-looking dust when no proof states can be confirmed", async () => {
+    const entries = [entry("a"), entry("b"), entry("c")];
+    for (const checkSpent of [undefined, async () => { throw new Error("checkstate timeout"); }]) {
+      const { client, storage, calls, parked } = setup(entries, async () => reject(SPENT));
+      const result = await recoverParkedTokens(client, storage, { checkSpent });
+      expect(calls).toHaveLength(1);
+      expect(result.dropped).toEqual([]);
+      expect(parked()).toEqual(entries);
+    }
+  });
+
+  it("prunes a fully spent batch only after checking every proof", async () => {
+    const entries = Array.from({ length: 59 }, (_, i) => entry(`dust-${i}`));
+    const { client, storage, calls, parked } = setup(entries, async () => reject(SPENT));
+    const result = await recoverParkedTokens(client, storage, {
+      checkSpent: async (mint, proofs) => {
+        expect(mint).toBe(MINT);
+        expect(proofs).toHaveLength(59);
+        expect(proofs[0]).toEqual({ id: KEYSET, secret: "dust-0" });
+        return new Set(proofs.map(({ secret }) => secret));
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(result).toMatchObject({ attempted: 0, batches: 1, remaining: 0 });
+    expect(result.dropped).toEqual(entries.map(() => ({
+      reason: "already-spent", amount: 1, unit: "sat", mint: MINT,
+    })));
+    expect(parked()).toEqual([]);
+  });
+
+  it("re-batches interleaved unspent proofs instead of inheriting the batch verdict", async () => {
+    const { client, storage, calls, parked } = setup([
+      entry("spentA"), entry("goodA"), entry("spentB"), entry("goodB"),
+    ], async (token) => secrets(token).some((secret) => secret.startsWith("spent")) ? reject(SPENT) : accept());
+    const result = await recoverParkedTokens(client, storage, {
+      checkSpent: async () => new Set(["spentA", "spentB"]),
+    });
+    expect(calls.map(([token]) => secrets(token))).toEqual([
+      ["spentA", "goodA", "spentB", "goodB"], ["goodA", "goodB"],
+    ]);
+    expect(result).toMatchObject({ succeeded: 2, batches: 2, batchesRecovered: 1 });
+    expect(result.dropped).toHaveLength(2);
+    expect(parked()).toEqual([]);
+  });
+
+  it("retains the original token of a partially spent multi-proof entry", async () => {
+    const partiallySpent = entry([proof("spent"), proof("good")]);
+    const { client, storage, parked } = setup([partiallySpent], async () => reject(SPENT));
+    const result = await recoverParkedTokens(client, storage, {
+      checkSpent: async () => new Set(["spent"]),
+    });
+    expect(result.dropped).toEqual([]);
+    expect(parked()).toEqual([partiallySpent]);
+  });
+
+  it("discards an original single proof directly reported spent, but not an unknown keyset", async () => {
+    const unknown = entry([proof("unknown", 2)], { mint: OTHER_MINT });
+    const { client, storage, parked } = setup([entry("spent"), unknown], async (token) =>
+      token === unknown.token ? reject("keyset was not found") : reject(SPENT),
     );
-    const mergingClient: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken(token, cacheOnFailure) {
-          const proofs = getDecodedToken(token, []).proofs;
-          // The merged receive is the only one carrying more than one proof.
-          if (proofs.length > 1) {
-            return { success: true, amount: proofs.length, unit: "sat" as const };
-          }
-          return await client.getCashuSpender().receiveToken(token, cacheOnFailure);
-        },
-      }),
-    };
-    const entries = [entry("d1", fresh), entry("d2", fresh), entry("d3", fresh)];
-    const { storage, get, writes } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(mergingClient, storage, { now });
-
-    expect(recovery.batches).toBe(1);
-    expect(recovery.batchesRecovered).toBe(1);
-    expect(recovery.recoveredAmount).toBe(3);
-    expect(recovery.dropped).toEqual([]);
-    // Everything was recovered, so nothing is left parked and the list is
-    // rewritten exactly once rather than per token.
-    expect(get()).toEqual([]);
-    expect(writes).toHaveLength(1);
-    // Batching runs first and settles all three, so no token-sized retry is
-    // needed afterwards: sub-fee dust is never retried one at a time.
-    expect(calls).toHaveLength(0);
+    const result = await recoverParkedTokens(client, storage);
+    expect(result.dropped).toEqual([{ reason: "already-spent", amount: 1, unit: "sat", mint: MINT }]);
+    expect(parked()).toEqual([unknown]);
   });
 
-  it("reports the mint's verdict, not coco's local fee guard", async () => {
-    // In the field, single 1-sat tokens never reach the mint: coco rejects
-    // them locally as "not sufficient after fees" even when the mint would
-    // have said the proofs are spent. Batching first means the reason we
-    // report and record is the mint's.
-    const client: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken(token) {
-          const proofs = getDecodedToken(token, []).proofs;
-          if (proofs.length === 1) {
-            return {
-              success: false,
-              amount: 0,
-              unit: "sat" as const,
-              message: "Receive amount is not sufficient after fees",
-            };
-          }
-          return {
-            success: false,
-            amount: 0,
-            unit: "sat" as const,
-            message: "proofs already spent",
-          };
-        },
-      }),
-    };
-    const entries = [entry("d1", fresh), entry("d2", fresh)];
-    const { storage } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    // "already spent", not "fee exceeds value": the mint answered.
-    expect(recovery.dropped.map((drop) => drop.reason)).toEqual([
-      "already-spent",
-      "already-spent",
-    ]);
-    expect(recovery.dropped[0]?.detail).toBe("proofs already spent");
+  it("retains fee-limited old tokens even when another mint attempted a batch", async () => {
+    const old = entry("old", { mint: OTHER_MINT, createdAt: Date.now() - 60 * DAY });
+    const { client, storage, parked } = setup([entry("a"), entry("b"), old], async (token) =>
+      token === old.token ? reject(FEE) : accept(),
+    );
+    const result = await recoverParkedTokens(client, storage);
+    expect(result).toMatchObject({ batches: 1, dropped: [], remaining: 1 });
+    expect(parked()).toEqual([old]);
   });
 
-  it("does not condemn good dust in a batch rejected for one spent proof", async () => {
-    // A merged swap is all-or-nothing: a batch containing one spent proof is
-    // rejected as a whole. The good proofs beside it are still redeemable and
-    // must be recovered by bisection, never discarded.
-    const { client } = spenderOf({}, { success: false, message: "Failed to fetch mint" });
-    const bisectingClient: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken(token) {
-          const proofs = getDecodedToken(token, []).proofs;
-          const secrets = proofs.map((proof) => proof.secret);
-          // "bad" is spent at the mint; every batch that contains it fails.
-          if (secrets.includes("bad")) {
-            return { success: false, amount: 0, unit: "sat" as const, message: "proofs already spent" };
-          }
-          if (proofs.length === 1) {
-            // Individual retries still hit the sub-fee guard.
-            return {
-              success: false,
-              amount: 0,
-              unit: "sat" as const,
-              message: "Receive amount is not sufficient after fees",
-            };
-          }
-          return { success: true, amount: proofs.length, unit: "sat" as const };
-        },
-      }),
-    };
-
-    const entries = ["d1", "d2", "bad", "d4"].map((secret) => entry(secret, fresh));
-    const { storage, get } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(bisectingClient, storage, { now });
-
-    // d1 and d2 merged into one receivable batch, so 2 sat were genuinely
-    // recovered instead of being thrown away with the bad proof.
-    expect(recovery.recoveredAmount).toBe(2);
-    expect(get()).toEqual([]);
-    // The remaining two sit in the rejected half. Bisection cannot isolate
-    // further: a lone 1-sat proof is refused by coco before the mint sees it,
-    // so a singleton can never prove itself either way. They therefore inherit
-    // the batch verdict rather than being retried forever.
-    expect(recovery.dropped.map((drop) => drop.reason)).toEqual([
-      "already-spent",
-      "already-spent",
-    ]);
-    expect(recovery.dropped[0]?.detail).toBe("proofs already spent");
-    // Crucially, no redeemable value was destroyed: the two recovered sats are
-    // reported as recovered, and only the un-isolatable remainder was dropped.
-    expect(recovery.recoveredAmount + recovery.dropped.reduce((sum, d) => sum + d.amount, 0)).toBe(4);
-    void client;
+  it("does not fan out for an unreachable mint but still processes other mints", async () => {
+    const down = Array.from({ length: 128 }, (_, i) => entry(`dust-${i}`, { createdAt: Date.now() - 60 * DAY }));
+    const sameMint = entry([proof("same-mint", 5)]);
+    const otherMint = entry([proof("other-mint", 7)], { mint: OTHER_MINT });
+    const { client, storage, calls, parked } = setup([...down, sameMint, otherMint], async (token) =>
+      token === otherMint.token ? accept() : reject("Failed to fetch mint"),
+    );
+    const result = await recoverParkedTokens(client, storage);
+    expect(calls).toHaveLength(2);
+    expect(result).toMatchObject({ attempted: 1, succeeded: 1, batches: 1, dropped: [] });
+    expect(parked()).toEqual([...down, sameMint]);
   });
 
-  it("keeps unreachable dust parked instead of discarding the batch", async () => {
-    const client: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken() {
-          return {
-            success: false,
-            amount: 0,
-            unit: "sat" as const,
-            message: "Failed to fetch mint",
-          };
-        },
-      }),
-    };
-    const entries = [entry("d1", fresh), entry("d2", fresh)];
-    const { storage, get } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped).toEqual([]);
-    expect(get()).toHaveLength(2);
+  it("does not split or individually retry a batch after an unknown failure", async () => {
+    const entries = [entry("a"), entry("b")];
+    const { client, storage, calls, parked } = setup(entries, async () => reject("unknown failure"));
+    const result = await recoverParkedTokens(client, storage, {
+      checkSpent: async () => { throw new Error("unexpected proof check"); },
+    });
+    expect(calls).toHaveLength(1);
+    expect(result.attempted).toBe(0);
+    expect(parked()).toEqual(entries);
   });
 
-  it("discards fully spent dust but keeps good dust beside it", async () => {
-    // Every token is spent, so bisection ends at single tokens each reporting
-    // it; all of them are then discarded rather than retried forever.
-    const client: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken() {
-          return {
-            success: false,
-            amount: 0,
-            unit: "sat" as const,
-            message: "proofs already spent",
-          };
-        },
-      }),
-    };
-    const entries = [entry("a1", fresh), entry("a2", fresh), entry("a3", fresh)];
-    const { storage, get } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped.every((drop) => drop.reason === "already-spent")).toBe(true);
-    expect(get()).toEqual([]);
+  it("does not publish token strings in discard metadata or storage errors", async () => {
+    const invalid = { ...entry("bad"), token: "private bearer data" };
+    const { client, storage } = setup([invalid], async () => accept());
+    expect(inspectParkedTokens(storage)[0]).toMatchObject({
+      amount: 1, unit: "sat", proofCount: 0, problem: "Token metadata could not be decoded",
+    });
+    expect(JSON.stringify(inspectParkedTokens(storage))).not.toContain(invalid.token);
+    const result = await recoverParkedTokens(client, storage);
+    expect(result.dropped).toEqual([{ reason: "undecodable", amount: 1, unit: "sat" }]);
+    const failed = await recoverParkedTokens(client, {
+      ...storage, getCachedReceiveTokens() { throw new Error(invalid.token); },
+    });
+    expect(failed.error).toBeDefined();
+    expect(JSON.stringify(failed)).not.toContain(invalid.token);
   });
 
-  it("discards dead dust once instead of retrying it forever", async () => {
-    // The exact shape of the field incident: 59 one-sat proofs on a 100 ppk
-    // mint that the mint has already spent.
-    const secrets = Array.from({ length: 5 }, (_, i) => `d${i}`);
-    const { client } = spenderOf({}, { success: false, message: "proofs already spent" });
-    const entries = secrets.map((secret) => entry(secret, fresh));
-    const { storage, get } = storageOf(entries);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.parked).toBe(5);
-    expect(recovery.succeeded).toBe(0);
-    expect(recovery.batches).toBe(1);
-    expect(recovery.dropped).toHaveLength(5);
-    expect(recovery.dropped.every((drop) => drop.reason === "already-spent")).toBe(true);
-    // The whole point: the list is empty, so the next sweep is silent.
-    expect(get()).toEqual([]);
+  it("keeps swap counts but does not claim durable removals on flush failure", async () => {
+    const valid = entry([proof("valid", 5)]);
+    const invalid = { ...entry("bad"), token: "private bearer data" };
+    const { client, storage } = setup([valid, invalid], async () => accept());
+    let flushCalls = 0;
+    const result = await recoverParkedTokens(client, storage, {
+      flush: async () => { flushCalls++; throw new Error(invalid.token); },
+    });
+    expect(flushCalls).toBe(1);
+    expect(result).toMatchObject({
+      remaining: 2, succeeded: 1, dropped: [], recoveredFaceValue: { sat: 5, msat: 0 },
+      pruneError: "Could not persist parked refund token removals",
+    });
+    expect(JSON.stringify(result)).not.toContain(invalid.token);
   });
 
-  it("keeps unreachable-mint tokens parked for a later run", async () => {
-    const { client } = spenderOf({}, { success: false, message: "Failed to fetch mint" });
-    const { storage, get } = storageOf([entry("a1", fresh), entry("a2", fresh)]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped).toEqual([]);
-    expect(recovery.succeeded).toBe(0);
-    expect(get()).toHaveLength(2);
-  });
-
-  it("drops an undecodable entry without asking the mint about it", async () => {
-    const { client, calls } = spenderOf({});
-    const junk: ParkedTokenEntry = {
-      token: "cashuGarbage",
-      amount: 7,
-      unit: "sat",
-      createdAt: now - 1_000,
-    };
-    const { storage, get } = storageOf([junk]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped).toEqual([
-      { token: "cashuGarbage", reason: "undecodable", amount: 7, detail: expect.any(String) },
-    ]);
-    expect(calls).toHaveLength(0);
-    expect(get()).toEqual([]);
-  });
-
-  it("expires entries past the retention window", async () => {
-    const { client } = spenderOf({}, { success: false, message: "Failed to fetch mint" });
-    const stale = entry("old1", { createdAt: now - PARKED_TOKEN_MAX_AGE_MS - 1 });
-    const { storage, get } = storageOf([stale]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped.map((drop) => drop.reason)).toEqual(["expired"]);
-    expect(get()).toEqual([]);
-  });
-
-  it("swallows storage errors so the refund that follows still runs", async () => {
-    const { client } = spenderOf({});
-    const storage: ParkedTokenStorage = {
-      getCachedReceiveTokens() {
-        throw new Error("database is locked");
-      },
-      setCachedReceiveTokens() {},
-    };
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-    expect(recovery.error).toBe("database is locked");
-    expect(recovery.parked).toBe(0);
-  });
-
-  it("swallows spender throws per token and keeps the rest going", async () => {
-    const calls: string[] = [];
-    const client: ParkedTokenSource = {
-      getCashuSpender: () => ({
-        async receiveToken(token) {
-          const secret = getDecodedToken(token, []).proofs[0]?.secret ?? "";
-          calls.push(secret);
-          if (secret === "boom") throw new Error("unexpected wallet explosion");
-          return { success: false, amount: 0, unit: "sat" as const, message: "Failed to fetch mint" };
-        },
-      }),
-    };
-    const { storage, get } = storageOf([entry("boom", fresh), entry("ok", fresh)]);
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    // The transient failure on the second token is retried, not fatal.
-    expect(recovery.error).toBeUndefined();
-    expect(get()).toHaveLength(2);
-    expect(calls).toContain("ok");
-  });
-
-  it("still prunes when the storage write itself fails", async () => {
-    const { client } = spenderOf({}, { success: false, message: "proofs already spent" });
-    let reads = 0;
-    const storage: ParkedTokenStorage = {
-      getCachedReceiveTokens() {
-        reads += 1;
-        return [entry("a1", fresh)];
-      },
-      setCachedReceiveTokens() {
-        throw new Error("disk full");
-      },
-    };
-
-    const recovery = await recoverParkedTokens(client, storage, { now });
-
-    expect(recovery.dropped).toHaveLength(1);
-    expect(reads).toBeGreaterThan(0);
+  it("shares one sweep across concurrent callers and waits for the prune to flush", async () => {
+    const { client, storage, calls } = setup([entry("a"), entry("b")], async () => accept());
+    const flushing = Promise.withResolvers<void>();
+    const durable = Promise.withResolvers<void>();
+    const first = recoverParkedTokens(client, storage, {
+      flush: () => { flushing.resolve(); return durable.promise; },
+    });
+    await flushing.promise;
+    const second = recoverParkedTokens(client, storage);
+    expect(second).toBe(first);
+    expect(calls).toHaveLength(1);
+    durable.resolve();
+    expect(await second).toMatchObject({ succeeded: 2, remaining: 0 });
+    expect((await recoverParkedTokens(client, storage)).succeeded).toBe(0);
   });
 });

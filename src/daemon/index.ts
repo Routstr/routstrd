@@ -368,7 +368,10 @@ export async function runDaemon(argv: string[] = process.argv): Promise<void> {
         try {
           // Runs before the "nothing to refund" early return: a parked token
           // can exist with no API key left to refund.
-          await recoverParkedTokens(refundClient, storageAdapter);
+          await recoverParkedTokens(refundClient, storageAdapter, {
+            flush: () => store.getState().flush(),
+            checkSpent: walletClient.checkParkedProofsSpent,
+          });
 
           const state = store.getState() as any;
           if ((state.apiKeys || []).length === 0) {

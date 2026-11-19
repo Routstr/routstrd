@@ -1,5 +1,6 @@
 import { IncrementalRequestLogs } from "./utils/incremental-request-logs";
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
+import type { ParkedTokenRecovery, ParkedTokenReport } from "./daemon/wallet/parked-tokens";
 import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
@@ -800,62 +801,53 @@ program
     }
   });
 
-/**
- * Tokens the daemon had parked after a failed receive and retried as part of
- * this refund. Reported separately because they never appear in the store's
- * pending token/API key counts — without this line a refund that recovered
- * them looks identical to one that had nothing to do.
- *
- * Discards are reported too, and loudly: an entry is only dropped when it can
- * never be received (already spent, sub-fee dust, undecodable, expired), so the
- * lost value has to be visible rather than silently disappearing from the list.
- */
-interface RefundRecovery {
-  attempted: number;
-  succeeded: number;
-  parked?: number;
-  recoveredAmount?: number;
-  batches?: number;
-  batchesRecovered?: number;
-  dropped?: Array<{ reason: string; amount: number; mint?: string }>;
-  error?: string;
+type RefundRecovery = Partial<ParkedTokenRecovery> & { attempted: number; succeeded: number };
+type CashuAmounts = { sat: number; msat: number };
+
+function formatCashuAmounts({ sat, msat }: CashuAmounts): string {
+  if (sat && msat) return `${sat} sat + ${msat} msat`;
+  return msat ? `${msat} msat` : `${sat} sat`;
 }
 
 function printRecoveredTokens(recovered?: RefundRecovery): void {
-  if (!recovered || (recovered.attempted === 0 && !recovered.error)) return;
+  if (!recovered) return;
   if (recovered.error) {
     console.log(`\nParked tokens: recovery failed: ${recovered.error}`);
     return;
   }
   const batches = recovered.batches ?? 0;
-  const stillParked = recovered.parked ?? recovered.attempted - recovered.succeeded;
+  const dropped = recovered.dropped ?? [];
+  const parked = recovered.parked ?? recovered.attempted;
+  if (!(parked || recovered.succeeded || batches || dropped.length || recovered.pruneError)) return;
+
+  const faceValue = recovered.recoveredFaceValue;
+  const remaining = recovered.remaining ?? Math.max(0, parked - recovered.succeeded - dropped.length);
   console.log(
-    `\nParked tokens: ${recovered.succeeded}/${recovered.attempted} received` +
-      (recovered.recoveredAmount ? ` (${recovered.recoveredAmount} sat)` : "") +
+    `\nParked tokens: ${recovered.succeeded}/${parked} received` +
+      (faceValue && recovered.succeeded
+        ? ` (${formatCashuAmounts(faceValue)} face value before fees)`
+        : "") +
       (batches > 0
         ? `, ${recovered.batchesRecovered ?? 0}/${batches} merged batch(es) recovered`
         : "") +
-      (stillParked > 0
-        ? `, ${stillParked} still parked (the daemon retries them every 42 minutes)`
-        : ""),
+      (recovered.pruneError ? "" : `, ${remaining} still parked`),
   );
 
-  const dropped = recovered.dropped ?? [];
+  if (recovered.pruneError) {
+    console.error(`Parked tokens: could not confirm cleanup was saved: ${recovered.pruneError}`);
+  }
   if (dropped.length > 0) {
-    const amount = dropped.reduce((sum, drop) => sum + drop.amount, 0);
+    const amounts = { sat: 0, msat: 0 };
     const byReason = new Map<string, number>();
-    for (const drop of dropped) {
-      byReason.set(drop.reason, (byReason.get(drop.reason) ?? 0) + 1);
+    for (const { reason, amount, unit } of dropped) {
+      amounts[unit ?? "sat"] += amount;
+      byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
     }
     const summary = [...byReason]
       .map(([reason, count]) => `${count} ${reason.replace(/-/g, " ")}`)
       .join(", ");
     console.log(
-      `Discarded ${dropped.length} unrecoverable parked token(s) worth ${amount} sat (${summary}).`,
-    );
-    console.log(
-      "These can never be received: the mint has already spent them, their value is" +
-        " consumed by mint input fees, or they no longer decode.",
+      `Discarded ${dropped.length} parked token(s) (${formatCashuAmounts(amounts)} face value; ${summary}).`,
     );
   }
 }
@@ -3278,19 +3270,7 @@ walletCmd
       }
 
       const output = result.output as
-        | {
-            count?: number;
-            amount?: number;
-            tokens?: Array<{
-              token: string;
-              amount: number;
-              unit: string;
-              mint?: string;
-              ageDays: number;
-              proofCount: number;
-              problem?: string;
-            }>;
-          }
+        | { count: number; amounts: CashuAmounts; tokens: ParkedTokenReport[] }
         | undefined;
 
       if (options.json) {
@@ -3298,34 +3278,27 @@ walletCmd
         return;
       }
 
-      const tokens = output?.tokens ?? [];
-      if (tokens.length === 0) {
+      if (!output?.tokens.length) {
         console.log("No parked refund tokens.");
         return;
       }
 
       console.log(
-        `Parked refund tokens: ${output?.count ?? tokens.length} (${output?.amount ?? 0} sat)`,
+        `Parked refund tokens: ${output.count} (${formatCashuAmounts(output.amounts)} face value)`,
       );
-      const byMint = new Map<string, { count: number; amount: number }>();
-      for (const token of tokens) {
-        const key = token.mint ?? "(undecodable)";
-        const bucket = byMint.get(key) ?? { count: 0, amount: 0 };
+      const byMint = new Map<string, { count: number; amounts: CashuAmounts; oldest: number }>();
+      for (const token of output.tokens) {
+        const key = token.mint ?? "(unknown mint)";
+        const bucket = byMint.get(key) ?? { count: 0, amounts: { sat: 0, msat: 0 }, oldest: 0 };
         bucket.count += 1;
-        bucket.amount += token.amount;
+        bucket.amounts[token.unit] += token.amount;
+        bucket.oldest = Math.max(bucket.oldest, token.ageDays);
         byMint.set(key, bucket);
       }
       for (const [mint, bucket] of byMint) {
-        console.log(`  ${mint}: ${bucket.count} token(s), ${bucket.amount} sat`);
+        console.log(`  ${mint}: ${bucket.count} token(s), ${formatCashuAmounts(bucket.amounts)}; oldest ${bucket.oldest} day(s)`);
       }
-
-      const problems = tokens.filter((token) => token.problem);
-      if (problems.length > 0) {
-        console.log(`\n  ${problems.length} entr(ies) do not decode and will be discarded on the next refund.`);
-      }
-      console.log(
-        "\n`rout refund` retries these, merges same-mint dust, and discards the ones that can never be received.",
-      );
+      console.log("\nRun `rout refund` to retry parked tokens and merge same-mint dust.");
     } catch (error) {
       const message = (error as Error).message;
       if (

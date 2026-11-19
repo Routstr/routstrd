@@ -2640,6 +2640,30 @@ export async function createCocoClient(
       return "Payment sent successfully";
     },
 
+    async checkParkedProofsSpent(url, proofs) {
+      const mintUrl = normalizeMintUrl(url);
+      if (!(await coco.mint.isTrustedMint(mintUrl))) return new Set<string>();
+
+      const { walletService } = coco as unknown as ProofCheckInternals;
+      return withTimeout((async () => {
+        const { wallet } =
+          await walletService.getWalletWithActiveKeysetId(mintUrl);
+        const spent = new Set<string>();
+        for (const batch of chunk(proofs)) {
+          // cashu-ts matches the response Ys to the requested proofs before
+          // returning the states in input order (and rejects missing Ys).
+          const states = await wallet.checkProofsStates(batch);
+          if (states.length !== batch.length) {
+            throw new Error("Incomplete proof state response");
+          }
+          for (const [index, proof] of batch.entries()) {
+            if (states[index]?.state === "SPENT") spent.add(proof.secret);
+          }
+        }
+        return spent;
+      })(), 15_000);
+    },
+
     async listMints(): Promise<string[]> {
       const mints = await coco.mint.getAllTrustedMints();
       return mints.map((m) => m.mintUrl);
