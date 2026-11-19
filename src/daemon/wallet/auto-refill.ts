@@ -38,6 +38,14 @@ const FATAL_ERROR_PATTERNS = [
 /**
  * How long to stop retrying after a fatal error or an underfunded NWC wallet.
  * The loop keeps running so a funded wallet recovers without a daemon restart.
+ *
+ * This is the whole cool-down, not an addition: it is enforced by its own
+ * deadline (`cooldownUntil` below), and the fatal branch returns before the
+ * scheduled cooldown can stack on top of it. Before that split, the long
+ * cool-down was written as a *future* value into the same field the short
+ * cooldown measured from, which made the effective window
+ * `FATAL_COOLDOWN_MS + config.cooldownMs` (15 minutes by default) while the log
+ * line still promised the 10 minutes below.
  */
 const FATAL_COOLDOWN_MS = 10 * 60 * 1000;
 
@@ -74,15 +82,34 @@ export function startAutoRefillLoop(
    */
   getNwcBalance?: () => Promise<number | undefined>,
 ): () => void {
-  let lastRefillAt = 0;
-  let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
+  // ── Loop lifecycle ───────────────────────────────────────────────
+  // One `let` per *concept* instead of per flag. Previously `running` and
+  // `checkInProgress` could be false/true in the "stopped mid-check" window,
+  // and `lastRefillAt` doubled as both "when we last succeeded" and "the
+  // earliest time we may try again" — set into the future for cooldowns, so a
+  // reader could not tell the two apart. They are separate fields now.
   let running = true;
   let timeout: ReturnType<typeof setInterval> | null = null;
   let checkInProgress = false;
+
+  /** When a refill last succeeded; the configured cooldown is measured from here. */
+  let lastSuccessAt = 0;
+  /**
+   * Explicit "do not try before" deadline, or 0 when none is set. Used for the
+   * fatal-error cooldown, whose duration is unrelated to `config.cooldownMs`.
+   * A plain success leaves it at 0 and relies on `lastSuccessAt`.
+   */
+  let cooldownUntil = 0;
+  let lastAttemptAt = 0; // tracks last attempt (success or failure) for backoff
   let consecutiveFailures = 0;
   // Mint operation of a refill whose NWC payment timed out. Its invoice may
   // still be paid, so no fresh invoice until the wallet settles it either way.
   let unsettledRefill: string | undefined;
+
+  /** Push every time-gate into the future, without pretending it was a success. */
+  const startCooldown = (now: number, durationMs: number): void => {
+    cooldownUntil = now + durationMs;
+  };
 
   async function checkAndRefill(): Promise<void> {
     if (!running) return;
@@ -101,9 +128,14 @@ export function startAutoRefillLoop(
     }
 
     const now = Date.now();
-    if (now - lastRefillAt < config.cooldownMs) {
-      return;
-    }
+    // Two independent gates, one per concept:
+    //  - `cooldownUntil` is an explicit deadline (the fatal-error cool-down);
+    //  - `lastSuccessAt` drives the configured cool-down after a refill.
+    // They are checked separately so a long deadline does NOT stack with
+    // `config.cooldownMs`. When both lived in one future-dated field, a fatal
+    // error blocked for the sum of the two while logging only the deadline.
+    if (now < cooldownUntil) return;
+    if (now - lastSuccessAt < config.cooldownMs) return;
 
     // If we've been failing too much, back off rather than retrying at full speed.
     // This prevents tight loops on transient errors.
@@ -126,7 +158,7 @@ export function startAutoRefillLoop(
         unsettledRefill = undefined;
         if (quote.state === "finalized") {
           logger.log("[auto-refill] Timed-out payment landed; counting it as the refill.");
-          lastRefillAt = now;
+          lastSuccessAt = now;
           return;
         }
       }
@@ -169,9 +201,10 @@ export function startAutoRefillLoop(
                 `(${config.amount} + ${NWC_FEE_BUFFER_SATS} fee buffer); skipping refill ` +
                 `(no invoice created). Fund the NWC wallet and auto-refill will retry automatically.`,
             );
-            // Push the cooldown into the future so every time-gate blocks until
-            // the funding wallet is topped up.
-            lastRefillAt = now + FATAL_COOLDOWN_MS;
+            // Hold refills for the fatal cool-down: no invoice is created
+            // until the funding wallet is topped up, and auto-refill recovers
+            // on its own once it is.
+            startCooldown(now, FATAL_COOLDOWN_MS);
             return;
           }
         }
@@ -219,7 +252,7 @@ export function startAutoRefillLoop(
       if (payment.fees_paid !== undefined) {
         logger.log(`[auto-refill] Fees paid: ${payment.fees_paid} msats`);
       }
-      lastRefillAt = now;
+      lastSuccessAt = now;
       lastAttemptAt = now;
       consecutiveFailures = 0; // reset on success
     } catch (error) {
@@ -240,15 +273,17 @@ export function startAutoRefillLoop(
       if (isFatalError(message)) {
         // Cooldown for 10 minutes — the user likely needs to fund their NWC wallet.
         // We don't stop permanently so it auto-recovers without a restart.
-        // Set lastRefillAt into the future so all time-gate checks block.
+        // The logged duration is the one enforced: this deadline is checked on
+        // its own, not stacked with the configured cooldown.
         logger.error(
           `[auto-refill] FATAL: ${message}. The funding wallet (NWC) cannot pay. ` +
             `Cooling down for ${FATAL_COOLDOWN_MS / 60000} minutes. ` +
             `Fund your NWC wallet and auto-refill will retry automatically.`,
         );
-        lastRefillAt = now + FATAL_COOLDOWN_MS;
+        startCooldown(now, FATAL_COOLDOWN_MS);
         consecutiveFailures = 0; // reset — no point counting these as transient backoffs
-        checkInProgress = false;
+        // No manual `checkInProgress = false` here: `finally` owns that, so the
+        // guard cannot be released while this call is still unwinding.
         return;
       }
 
