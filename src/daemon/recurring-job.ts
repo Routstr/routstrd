@@ -7,16 +7,19 @@
  *
  *  - `active = true` with `timer = null` meant "between runs";
  *  - calling `start()` twice armed a second timer and leaked the first, so two
- *    independent loops ran and the effective interval halved;
- *  - `stop()` during a run cleared the timer that run had already consumed, so
- *    "re-arm unless stopped" had to consult the same boolean the stopper had
- *    just cleared — correct only if the two were ordered exactly right.
+ *    independent loops ran and the effective interval halved.
  *
  * Here the job is `idle`, `waiting` (a timer is armed), or `running` (the body
  * is executing), and one `keepRunning` flag records *intent*. A pass re-arms
- * only if `keepRunning` is still true when it settles, so `stop()` mid-pass is
- * honoured without any ordering subtlety, and a manual `runNow()` on an idle
- * job cannot start a cadence nobody asked for.
+ * only if `keepRunning` is still true when it settles, so a stop that arrives
+ * mid-pass is honoured without any ordering subtlety.
+ *
+ * The one invariant that needs care is that `running` belongs to the pass, not
+ * to `start()`/`stop()`: `stop()` during a pass clears intent and the timer but
+ * leaves the status alone, and `start()` during a pass only sets intent. Were
+ * `stop()` to report `idle` while the body was still awaiting, a restart in
+ * that window would pass the `start()` guard and arm a second timer, and the
+ * surviving pass would re-arm its own chain on settle — two permanent loops.
  *
  * The delay is recomputed per pass by the caller's `delayMs`, so a job can read
  * live config on every tick — change cadence, or drop to a slow "poll for
@@ -52,8 +55,6 @@ export interface RecurringJob {
   stop(): void;
   /** Current state, for diagnostics and tests. */
   status(): RecurringJobStatus;
-  /** Run one pass immediately, honouring the no-overlap rule. */
-  runNow(): Promise<void>;
 }
 
 export function createRecurringJob(options: RecurringJobOptions): RecurringJob {
@@ -120,25 +121,25 @@ export function createRecurringJob(options: RecurringJobOptions): RecurringJob {
 
   return {
     start(): void {
-      // Starting an already-live job must not arm a second timer.
+      // Restarting during a pass must not arm a competing timer; the running
+      // pass re-arms from its own `finally`, since `keepRunning` is true again.
+      if (status === "running") {
+        keepRunning = true;
+        return;
+      }
       if (status !== "idle") return;
       keepRunning = true;
       schedule();
     },
     stop(): void {
-      goIdle();
+      keepRunning = false;
+      clearArmedTimer();
+      // `running` is owned by the pass: it clears itself in `finally`. Reporting
+      // `idle` here would let a `start()` in this window arm a second timer.
+      if (status !== "running") status = "idle";
     },
     status(): RecurringJobStatus {
       return status;
-    },
-    async runNow(): Promise<void> {
-      // Never overlap: a scheduled pass already owns the body.
-      if (status === "running") return;
-      clearArmedTimer();
-      status = "idle";
-      // `pass` reads `keepRunning`, so a manual run of an idle job settles with
-      // no timer armed, while a manual run of a waiting job resumes the cadence.
-      await pass();
     },
   };
 }

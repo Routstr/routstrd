@@ -106,9 +106,41 @@ describe("recurring job lifecycle", () => {
     await firing;
 
     expect(h.job.status()).toBe("idle");
-    // The critical assertion: a stop that arrived mid-pass wins. The old job
-    // re-armed from its `finally` and resurrected itself.
+    // A stop that arrived mid-pass wins: nothing is armed. (Main's refresh loop
+    // already honoured this through its `refreshJobActive` check, and the refund
+    // loop was a `setInterval`; this pins the behaviour for the shared primitive
+    // so a future caller cannot lose it.)
     expect(h.armed()).toBe(0);
+  });
+
+  it("keeps one loop when restarted during a pass", async () => {
+    // Regression: `stop()` used to report `idle` while the pass was still
+    // awaiting `run()`, so a `start()` before that pass settled armed a second
+    // timer; the surviving pass then re-armed its own chain on settle and the
+    // two loops ran forever out of step. The daemon never restarts a job today
+    // (stop is shutdown-only), but the primitive promises this.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = harness({ delays: [1_000, 1_000], run: () => gate });
+
+    h.job.start();
+    const firing = h.fire();
+    expect(h.job.status()).toBe("running");
+
+    h.job.stop();
+    // The pass is still live, so this must not arm a competing timer.
+    h.job.start();
+    expect(h.armed()).toBe(0);
+
+    release();
+    await firing;
+
+    // Exactly one chain resumes: the surviving pass re-armed once.
+    expect(h.job.status()).toBe("waiting");
+    expect(h.armed()).toBe(1);
+    expect(h.passes()).toBe(1);
   });
 
   it("keeps its cadence when a pass throws", async () => {
@@ -131,34 +163,6 @@ describe("recurring job lifecycle", () => {
     h.job.start();
     expect(h.job.status()).toBe("idle");
     expect(h.armed()).toBe(0);
-  });
-
-  it("runs once on demand without starting a cadence", async () => {
-    const h = harness({ delays: [1_000] });
-    await h.job.runNow();
-    expect(h.passes()).toBe(1);
-    // A manual run of an idle job must not silently begin recurring work.
-    expect(h.job.status()).toBe("idle");
-    expect(h.armed()).toBe(0);
-  });
-
-  it("refuses to overlap an on-demand run with a scheduled pass", async () => {
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const h = harness({ delays: [1_000], run: () => gate });
-
-    h.job.start();
-    const firing = h.fire();
-    expect(h.job.status()).toBe("running");
-
-    // Must return without starting a second concurrent pass.
-    await h.job.runNow();
-    expect(h.passes()).toBe(1);
-
-    release();
-    await firing;
   });
 
   it("reports only the three defined statuses", () => {
