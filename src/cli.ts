@@ -1482,21 +1482,28 @@ const modelsCmd = program
       typeof result.output === "object" &&
       "models" in result.output
     ) {
-      const models = (result.output as { models: RoutstrModel[] }).models;
-      // The label has to say which catalog this is: a model missing from the
-      // routstr21 list is still listed here under --all, and the count is no
-      // longer the curated count.
-      const catalog = options.all ? "available" : "routstr21";
+      const { models, catalog: returnedCatalog } = result.output as {
+        models: RoutstrModel[];
+        catalog?: string;
+      };
+      const catalog = returnedCatalog === "available" ? "available" : "routstr21";
+      if (options.all && catalog !== "available") {
+        console.warn(
+          "Warning: This daemon does not support the full model catalog; showing the curated routstr21 list.",
+        );
+      }
       if (models.length === 0) {
         console.log(`No ${catalog} models found`);
       } else {
         console.log(`\nFound ${models.length} ${catalog} models:`);
         console.log(
-          options.all
+          catalog === "available"
             ? "(Every model the enabled providers advertise; the routstr21 list is the curated," +
                 " routable subset. Use 'routstrd models -m <model_id>' to see providers and pricing.)\n"
             : "(Use 'routstrd models -m <model_id>' to see providers and pricing; add --paths for the" +
-                " model-path inventory. Pass --all to list every model the providers serve.)\n",
+                " model-path inventory." +
+                (options.all ? "" : " Pass --all to list every model the providers serve.") +
+                ")\n",
         );
         models.forEach((model, i) => {
           const details = [

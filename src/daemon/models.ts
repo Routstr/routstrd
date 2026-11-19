@@ -291,14 +291,16 @@ export function createModelService(
         // Its curated-list prefetch also avoids a duplicate cold relay query.
         await ensureProvidersBootstrapped();
         const ids = await modelManager.fetchRoutstr21Models(forceRefresh);
-        const models = await modelManager.fetchModels(
+        // The SDK populates the cache, but its return value ranks by
+        // completion price rather than the warm cost used by both catalogs.
+        await modelManager.fetchModels(
           modelManager.getBaseUrls(),
           forceRefresh,
         );
         logger.debug(
           `Model population complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
         );
-        return exposeModels(ids, models);
+        return exposeModels(ids, getCachedModels());
       })().finally(() => {
         modelPopulationPromise = null;
         modelPopulationStartedCold = false;
@@ -334,10 +336,15 @@ export function createModelService(
     forceRefresh = false,
     refreshExpired = false,
   ): Promise<ExposedModel[]> => {
-    if (forceRefresh || refreshExpired || cheapestModelPerId().size === 0) {
+    let bestById = cheapestModelPerId();
+    // A cold pass can publish some provider results before it finishes.
+    if (
+      modelPopulationStartedCold || forceRefresh || refreshExpired || bestById.size === 0
+    ) {
       await getRoutstr21Models(forceRefresh, refreshExpired);
+      bestById = cheapestModelPerId();
     }
-    return [...cheapestModelPerId()]
+    return [...bestById]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([canonicalId, model]) => ({ ...model, id: canonicalId }));
   };

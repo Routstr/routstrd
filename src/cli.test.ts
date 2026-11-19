@@ -755,7 +755,11 @@ describe("models --all", () => {
 
   function respond(request: ProxyRequest): Response {
     const all = new URLSearchParams(request.search).get("all");
-    return Response.json({ output: { models: all === "true" ? catalog : curated } });
+    return Response.json({
+      output: all === "true"
+        ? { models: catalog, catalog: "available" }
+        : { models: curated, catalog: "routstr21" },
+    });
   }
 
   test("lists only the routstr21 models without the flag", async () => {
@@ -775,10 +779,22 @@ describe("models --all", () => {
     expect(result.exitCode).toBe(0);
     expect(result.requests).toHaveLength(1);
     expect(result.requests[0]!.path).toBe("/models");
-    expect(result.stdout).toContain("Found 2 available models");    expect(result.stdout).toContain("unlisted-model");
+    expect(result.stdout).toContain("Found 2 available models");
+    expect(result.stdout).toContain("unlisted-model");
+    expect(result.stderr).not.toContain("does not support the full model catalog");
     // The curated list is the routable subset; the output must not imply the
     // extra models are routable just because they were published.
     expect(result.stdout).toContain("routstr21 list is the curated");
+  });
+
+  test("warns when an older daemon ignores --all and labels the fallback as curated", async () => {
+    const result = await runAgainstProxy(["models", "--all"], () =>
+      Response.json({ output: { models: curated } }),
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toContain("does not support the full model catalog");
+    expect(result.stdout).toContain("Found 1 routstr21 models");
+    expect(result.stdout).not.toContain("available models");
   });
 
   test("combines --all with --refresh in one request", async () => {

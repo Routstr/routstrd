@@ -760,13 +760,14 @@ List available models (OpenAI-compatible).
 ### `GET /models`
 
 The model catalog, as rendered by `routstrd models`. Returns
-`{ output: { models } }`.
+`{ output: { models, catalog } }`.
 
 `?all=true` (the CLI's `--all`) returns every model the enabled providers
-advertise instead of only the curated routstr21 ids. Both catalogs are derived
-from the same cached, cheapest-per-model aggregation, so a model present in
-both is described identically in each. `?refresh=true` forces a live refresh
-first and combines with `all`.
+advertise instead of only the curated routstr21 ids.
+The `catalog` field identifies the returned list (`routstr21` or `available`).
+Both catalogs use the same cached, cheapest-per-model aggregation, so a model
+present in both is described identically in each. `?refresh=true` forces a
+live refresh first and combines with `all`.
 
 ### `GET /models/:id/providers`
 

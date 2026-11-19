@@ -1325,12 +1325,13 @@ export function createDaemonRequestHandler(deps: {
         // guaranteed routable; the rest are what the nodes advertise, which is
         // exactly what a caller looking for an unlisted model wants to see.
         const all = url.searchParams.get("all")?.toLowerCase() === "true";
-        const models = all
-          ? await (deps.getAvailableModels ?? deps.getRoutstr21Models)(
-              forceRefresh,
-            )
+        const available = all ? deps.getAvailableModels : undefined;
+        const models = available
+          ? await available(forceRefresh)
           : await deps.getRoutstr21Models(forceRefresh);
-        sendJson(res, 200, { output: { models } });
+        sendJson(res, 200, {
+          output: { models, catalog: available ? "available" : "routstr21" },
+        });
       } catch (error) {
         sendJson(res, 500, { error: toErrorMessage(error) });
       }

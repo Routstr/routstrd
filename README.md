@@ -363,9 +363,10 @@ every 210 minutes only when the daemon does not support this endpoint.
 GET /models
 ```
 
-The model catalog, as rendered by `routstrd models`: `{ output: { models } }`.
+The model catalog, as rendered by `routstrd models`: `{ output: { models, catalog } }`.
 By default this is the curated routstr21 list from Nostr. `?all=true` (the
 CLI's `--all`) returns every model the enabled providers advertise instead.
+The `catalog` field identifies the returned list (`routstr21` or `available`).
 Both catalogs come from the same cached cheapest-per-model aggregation, so a
 model listed in both has the same id, name and context length either way;
 `?refresh=true` forces a live refresh first and combines with `all`.

@@ -425,6 +425,40 @@ describe("createModelService.getAvailableModels", () => {
     expect(calls.bootstrap).toBe(1);
   });
 
+  it("uses the same warm-cost winner for both refreshed catalogs", async () => {
+    const cheapCompletion = {
+      ...curated[0]!,
+      name: "Low completion rate",
+      sats_pricing: { prompt: 100, completion: 1 },
+    };
+    const cheapWarmRequest = {
+      ...curated[0]!,
+      name: "Low warm cost",
+      sats_pricing: { prompt: 1, completion: 2 },
+    };
+    const { manager, calls } = makeModelManager(["glm-5.3"], {
+      "https://a.example/": [cheapCompletion],
+      "https://b.example/": [cheapWarmRequest],
+    });
+    // The SDK returns its completion-price winner, not the warm-cost winner.
+    const modelManager = {
+      ...(manager as object),
+      fetchModels: async () => {
+        calls.fetchModels++;
+        return [cheapCompletion];
+      },
+    };
+    const service = createModelService(modelManager as never, {} as never, makeStore());
+    const [curatedModels, availableModels] = await Promise.all([
+      service.getRoutstr21Models(true),
+      service.getAvailableModels(true),
+    ]);
+
+    expect(curatedModels).toEqual([cheapWarmRequest]);
+    expect(availableModels).toEqual(curatedModels);
+    expect(calls.fetchModels).toBe(1);
+  });
+
   it("exposes a mapped variant under its canonical id, like the curated view", async () => {
     // Both commands must spell a model the same way: a variant id would be a
     // second name for a row the curated list already lists canonically.
@@ -580,7 +614,11 @@ describe("model population single-flight", () => {
     return {
       service: createModelService(manager as never, {} as never, { getState: () => state } as unknown as SdkStore),
       calls, idCalls,
-      release: (models = [model]) => release(models), reject: () => reject(new Error("failed pass")),
+      release: (models = [model]) => {
+        cached = { [provider]: models };
+        release(models);
+      },
+      reject: () => reject(new Error("failed pass")),
       warm: (models = [model]) => { cached = { [provider]: models }; },
       next: () => { gate = new Promise((resolve, fail) => { release = resolve; reject = fail; }); },
     };
@@ -624,16 +662,20 @@ describe("model population single-flight", () => {
     const first = f.service.getRoutstr21Models();
     await flush();
     f.warm(); // SDK publishes provider A before provider B has answered.
-    let settled = false;
-    const second = f.service.getRoutstr21Models().then(models => { settled = true; return models; });
+    let curatedSettled = false;
+    let availableSettled = false;
+    const second = f.service.getRoutstr21Models().then(models => { curatedSettled = true; return models; });
+    const catalog = f.service.getAvailableModels().then(models => { availableSettled = true; return models; });
     await flush();
-    expect(settled).toBe(false);
+    expect(curatedSettled).toBe(false);
+    expect(availableSettled).toBe(false);
     expect(f.calls).toEqual([false]);
     const pending = { ...model, id: "pending", name: "Pending provider metadata" };
     f.release([model, pending]);
     for (const result of await Promise.all([first, second])) {
       expect(result[1]!.name).toBe("Pending provider metadata");
     }
+    expect(await catalog).toEqual([model, pending]);
   });
 
   for (const freshness of ["fresh", "expired"]) {

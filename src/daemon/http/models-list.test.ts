@@ -71,7 +71,7 @@ describe("GET /models", () => {
     const res = await call(handler, "GET", "/models");
 
     expect(res.status).toBe(200);
-    expect(res.json().output.models).toEqual(curated);
+    expect(res.json().output).toEqual({ models: curated, catalog: "routstr21" });
     expect(calls).toEqual([{ catalog: "curated", forceRefresh: false }]);
   });
 
@@ -81,7 +81,7 @@ describe("GET /models", () => {
     const res = await call(handler, "GET", "/models?all=true");
 
     expect(res.status).toBe(200);
-    expect(res.json().output.models).toEqual(catalog);
+    expect(res.json().output).toEqual({ models: catalog, catalog: "available" });
     expect(calls).toEqual([{ catalog: "all", forceRefresh: false }]);
   });
 
@@ -89,7 +89,7 @@ describe("GET /models", () => {
     for (const query of ["?all=false", "?all=1", "?all=", "?al=true"]) {
       const { handler, calls } = makeDeps();
       const res = await call(handler, "GET", `/models${query}`);
-      expect(res.json().output.models).toEqual(curated);
+      expect(res.json().output).toEqual({ models: curated, catalog: "routstr21" });
       expect(calls).toEqual([{ catalog: "curated", forceRefresh: false }]);
     }
   });
@@ -110,7 +110,7 @@ describe("GET /models", () => {
     const res = await call(handler, "GET", "/models?all=true");
 
     expect(res.status).toBe(200);
-    expect(res.json().output.models).toEqual(curated);
+    expect(res.json().output).toEqual({ models: curated, catalog: "routstr21" });
     expect(calls).toEqual([{ catalog: "curated", forceRefresh: false }]);
   });
 });
