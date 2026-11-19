@@ -1,10 +1,12 @@
 import { IncrementalRequestLogs } from "./utils/incremental-request-logs";
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
+import type { ParkedTokenRecovery, ParkedTokenReport } from "./daemon/wallet/parked-tokens";
 import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
 import {
+  checkRemoteUrl,
   handleDaemonCommand,
   callDaemon,
   callAuth,
@@ -800,31 +802,55 @@ program
     }
   });
 
-/**
- * Tokens the daemon had parked after a failed receive and retried as part of
- * this refund. Reported separately because they never appear in the store's
- * pending token/API key counts — without this line a refund that recovered
- * them looks identical to one that had nothing to do.
- */
-interface RefundRecovery {
-  attempted: number;
-  succeeded: number;
-  error?: string;
+type RefundRecovery = Partial<ParkedTokenRecovery> & { attempted: number; succeeded: number };
+type CashuAmounts = { sat: number; msat: number };
+
+function formatCashuAmounts({ sat, msat }: CashuAmounts): string {
+  if (sat && msat) return `${sat} sat + ${msat} msat`;
+  return msat ? `${msat} msat` : `${sat} sat`;
 }
 
 function printRecoveredTokens(recovered?: RefundRecovery): void {
-  if (!recovered || (recovered.attempted === 0 && !recovered.error)) return;
+  if (!recovered) return;
   if (recovered.error) {
     console.log(`\nParked tokens: recovery failed: ${recovered.error}`);
     return;
   }
-  const stillParked = recovered.attempted - recovered.succeeded;
+  const batches = recovered.batches ?? 0;
+  const dropped = recovered.dropped ?? [];
+  const parked = recovered.parked ?? recovered.attempted;
+  if (!(parked || recovered.succeeded || batches || dropped.length || recovered.pruneError)) return;
+
+  const faceValue = recovered.recoveredFaceValue;
+  const remaining = recovered.remaining ?? Math.max(0, parked - recovered.succeeded - dropped.length);
   console.log(
-    `\nParked tokens: ${recovered.succeeded}/${recovered.attempted} received` +
-      (stillParked > 0
-        ? `, ${stillParked} still parked (the daemon retries them every 42 minutes)`
-        : ""),
+    `\nParked tokens: ${recovered.succeeded}/${parked} received` +
+      (faceValue && recovered.succeeded
+        ? ` (${formatCashuAmounts(faceValue)} face value before fees)`
+        : "") +
+      (batches > 0
+        ? `, ${recovered.batchesRecovered ?? 0}/${batches} merged batch(es) recovered`
+        : "") +
+      (recovered.pruneError ? "" : `, ${remaining} still parked`),
   );
+
+  if (recovered.pruneError) {
+    console.error(`Parked tokens: could not confirm cleanup was saved: ${recovered.pruneError}`);
+  }
+  if (dropped.length > 0) {
+    const amounts = { sat: 0, msat: 0 };
+    const byReason = new Map<string, number>();
+    for (const { reason, amount, unit } of dropped) {
+      amounts[unit ?? "sat"] += amount;
+      byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+    }
+    const summary = [...byReason]
+      .map(([reason, count]) => `${count} ${reason.replace(/-/g, " ")}`)
+      .join(", ");
+    console.log(
+      `Discarded ${dropped.length} parked token(s) (${formatCashuAmounts(amounts)} face value; ${summary}).`,
+    );
+  }
 }
 
 program
@@ -946,7 +972,11 @@ program
     "Show the configured remote daemon, or configure one. With no URL, prints the current remote node; pass a URL to set one up.",
   )
   .option("--auth-url <authUrl>", "URL of the auth proxy for management commands (npubs, clients, usage)")
-  .action(async (url: string | undefined, options: { authUrl?: string }) => {
+  .option(
+    "--force",
+    "Save the URL even if it does not answer like a routstrd daemon",
+  )
+  .action(async (url: string | undefined, options: { authUrl?: string; force?: boolean }) => {
     const config = await loadConfig();
 
     // No URL provided -> show the current remote node, or tell the user to set one up.
@@ -996,6 +1026,30 @@ program
     if (options.authUrl) {
       updates.authUrl = normalizeBaseUrl(options.authUrl);
     }
+
+    // Probe before saving. `new URL()` only proves the string is a URL; a
+    // dashboard or an SPA at that origin would then be configured as the
+    // daemon and fail every later command with a JSON parse error from deep
+    // inside an integration. Refusing here keeps the diagnosis at the command
+    // that caused it.
+    //
+    // `--force` skips the probe entirely rather than running it and ignoring
+    // the result: the flag exists for a host that cannot be reached from here
+    // (behind a VPN, not yet deployed), where the probe could only burn its
+    // full timeout before saving anyway.
+    if (!options.force) {
+      const check = await checkRemoteUrl({ ...config, ...updates });
+      if (!check.ok) {
+        console.error(`Refusing to set the remote daemon: ${check.reason}`);
+        console.error("");
+        console.error("  Pass --force to save it anyway (e.g. behind a proxy that");
+        console.error("  is not reachable from this machine yet).");
+        process.exit(1);
+      }
+    } else {
+      console.error("Skipping the reachability probe because --force was passed.");
+    }
+
     let generatedNpub: string | undefined;
 
     if (!config.nsec) {
@@ -3229,6 +3283,66 @@ walletCmd
   );
 
 walletCmd
+  .command("parked")
+  .description(
+    "List refund tokens the daemon parked after a failed receive (read-only)",
+  )
+  .option("--json", "Print the raw JSON from the daemon", false)
+  .action(async (options: { json: boolean }) => {
+    try {
+      await ensureDaemonRunning();
+
+      const result = await callDaemon("/wallet/parked", { method: "GET" });
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const output = result.output as
+        | { count: number; amounts: CashuAmounts; tokens: ParkedTokenReport[] }
+        | undefined;
+
+      if (options.json) {
+        console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+
+      if (!output?.tokens.length) {
+        console.log("No parked refund tokens.");
+        return;
+      }
+
+      console.log(
+        `Parked refund tokens: ${output.count} (${formatCashuAmounts(output.amounts)} face value)`,
+      );
+      const byMint = new Map<string, { count: number; amounts: CashuAmounts; oldest: number }>();
+      for (const token of output.tokens) {
+        const key = token.mint ?? "(unknown mint)";
+        const bucket = byMint.get(key) ?? { count: 0, amounts: { sat: 0, msat: 0 }, oldest: 0 };
+        bucket.count += 1;
+        bucket.amounts[token.unit] += token.amount;
+        bucket.oldest = Math.max(bucket.oldest, token.ageDays);
+        byMint.set(key, bucket);
+      }
+      for (const [mint, bucket] of byMint) {
+        console.log(`  ${mint}: ${bucket.count} token(s), ${formatCashuAmounts(bucket.amounts)}; oldest ${bucket.oldest} day(s)`);
+      }
+      console.log("\nRun `rout refund` to retry parked tokens and merge same-mint dust.");
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
+
+walletCmd
   .command("recover")
   .description(
     "Retry mint quotes using their stored outputs (does not replace rejected outputs)",
@@ -4089,7 +4203,9 @@ program
         const diagnostics = options.verbose && options.follow ? new IncrementalRequestLogs(LOGS_DIR) : undefined;
         let first = true;
         do {
-          const traces = await loadRequestTraces(options, callDaemon);
+          // Requests still in flight from an earlier poll are read by id, since
+          // newer ones may have pushed them out of the newest-`-n` window.
+          const traces = await loadRequestTraces(options, callDaemon, follower.awaiting());
           const ids = traces.map(trace => trace.request.requestId);
           const poll = diagnostics?.poll(ids);
           for (const warning of poll?.warnings ?? []) console.error(warning);

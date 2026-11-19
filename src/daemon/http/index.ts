@@ -17,6 +17,7 @@ import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { VERSION } from "../../version";
+import type { ClientMode } from "../../utils/config";
 import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
 import { loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "../config-store";
 import {
@@ -26,7 +27,7 @@ import {
   type WalletRecoveryProgress,
 } from "../wallet/wallet-client";
 import { receiveCashuToken } from "../wallet";
-import { recoverParkedTokens } from "../wallet/parked-tokens";
+import { inspectParkedTokens, recoverParkedTokens } from "../wallet/parked-tokens";
 import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
@@ -60,8 +61,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-
-type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
   daemon: "running";
@@ -300,9 +299,17 @@ function optionalStringArrayField(
   return value.map((item: string) => item.trim());
 }
 
+/**
+ * The mode this process was started with.
+ *
+ * `mode` is startup-only: `routstrd mode` restarts the daemon to apply it, so
+ * there is exactly one source of truth (the value handed to the handler at
+ * construction). This helper used to consult `store.getState()?.mode` first,
+ * a field nothing ever writes — so the branch was dead and its precedence over
+ * `deps.mode` implied a second, phantom source of truth.
+ */
 function getCurrentMode(deps: DaemonDeps): ClientMode {
-  const stateMode = deps.store.getState()?.mode;
-  return stateMode || deps.mode || "apikeys";
+  return deps.mode ?? "apikeys";
 }
 
 /** One provider as `/providers` renders it, numbered from 1. */
@@ -600,6 +607,12 @@ export function createDaemonRequestHandler(deps: {
   // request — unlike `mode`, which stays startup-only in `deps`.
   const settings = { autoModelPath: deps.autoModelPath === true };
 
+  const recoverRefundTokens = () =>
+    recoverParkedTokens(deps.refundClient, deps.storageAdapter, {
+      flush: deps.storageAdapter.flush?.bind(deps.storageAdapter),
+      checkSpent: deps.walletClient?.checkParkedProofsSpent?.bind(deps.walletClient),
+    });
+
   return async function handler(req: IncomingMessage, res: ServerResponse) {
     const host = req.headers.host || "localhost";
     const url = new URL(req.url || "/", `http://${host}`);
@@ -677,6 +690,28 @@ export function createDaemonRequestHandler(deps: {
           hasUpdate: enabled && !!state && isUpdateStateApplicable(state, VERSION),
           checkedAt: state?.checkedAt ?? null,
         },
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/wallet/parked") {
+      await respond(res, async () => {
+        // Read-only: this must never touch a mint or the parked list itself,
+        // so an operator can inspect stuck tokens before deciding to refund.
+        const tokens = inspectParkedTokens(deps.storageAdapter);
+        return {
+          output: {
+            count: tokens.length,
+            amounts: tokens.reduce(
+              (totals, { amount, unit }) => {
+                totals[unit] += amount;
+                return totals;
+              },
+              { sat: 0, msat: 0 },
+            ),
+            tokens,
+          },
+        };
       });
       return;
     }
@@ -1413,7 +1448,7 @@ export function createDaemonRequestHandler(deps: {
         // Parked refund tokens are not in the store's pending buckets, so
         // retry them before deciding there is nothing to refund — otherwise a
         // forced refund reports "nothing pending" while funds stay unredeemed.
-        const recovered = await recoverParkedTokens(deps.refundClient);
+        const recovered = await recoverRefundTokens();
 
         const apiKeys = (deps.store.getState().apiKeys || []).length;
 
@@ -1459,7 +1494,7 @@ export function createDaemonRequestHandler(deps: {
 
         // Same reasoning as POST /refund: parked refund tokens are not xcashu
         // tokens, so this route must recover them too.
-        const recovered = await recoverParkedTokens(deps.refundClient);
+        const recovered = await recoverRefundTokens();
 
         const spender = deps.refundClient.getCashuSpender();
         const results = await spender.refundXcashuTokens(mintUrl);
