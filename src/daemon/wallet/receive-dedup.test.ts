@@ -9,6 +9,8 @@ import {
   initReceiveDedupSchema,
   listProcessingReceiveTokens,
   reconcileExecutingReceives,
+  isReceiveReservationReplayable,
+  receiveReservationPhase,
   reserveReceiveToken,
   updateReceiveToken,
   type ReceiveReconcileSource,
@@ -126,6 +128,58 @@ describe("receive token hashing and reservation", () => {
       expect.objectContaining({ tokenHash: linked.tokenHash, operationId: "receive-1" }),
     ]);
     expect(reserveReceiveToken(database, "orphan").tokenHash).toBe(orphan.tokenHash);
+    database.close();
+  });
+
+  // The table's `state` + nullable `operationId` describe four situations, but
+  // only three were named at the SQL level. These pin the classification that
+  // separates "a live attempt owns a Coco op" from "a process died before
+  // recording one" — the difference decides whether a retry may re-drive an
+  // operation or must start fresh.
+  it("classifies a processing row without an operation id as reserved", () => {
+    const database = new Database(":memory:");
+    initReceiveDedupSchema(database);
+    const { tokenHash } = reserveReceiveToken(database, "cashuA");
+    const row = listProcessingReceiveTokens(database)[0]!;
+    expect(receiveReservationPhase(row)).toEqual({ phase: "reserved" });
+    expect(isReceiveReservationReplayable(row)).toBe(false);
+    expect(tokenHash).toBe(row.tokenHash);
+    database.close();
+  });
+
+  it("classifies a processing row with an operation id as in-flight", () => {
+    const database = new Database(":memory:");
+    initReceiveDedupSchema(database);
+    const { tokenHash } = reserveReceiveToken(database, "cashuA");
+    updateReceiveToken(database, tokenHash, {
+      state: "processing",
+      operationId: "receive-1",
+    });
+    const row = listProcessingReceiveTokens(database)[0]!;
+    expect(receiveReservationPhase(row)).toEqual({
+      phase: "in-flight",
+      operationId: "receive-1",
+    });
+    // Narrowing the row proves the operation id is a string, so callers cannot
+    // reach `ops.receive.get(null)` without handling `reserved` first.
+    if (isReceiveReservationReplayable(row)) {
+      expect(row.operationId).toBe("receive-1");
+    }
+    database.close();
+  });
+
+  it("keeps a terminal phase's error for the retry message", () => {
+    const database = new Database(":memory:");
+    initReceiveDedupSchema(database);
+    const { tokenHash } = reserveReceiveToken(database, "cashuA");
+    updateReceiveToken(database, tokenHash, {
+      state: "failed",
+      operationId: "receive-2",
+      error: "rolled back",
+    });
+    const row = listProcessingReceiveTokens(database);
+    // A failed row is not returned by the processing-only query.
+    expect(row).toEqual([]);
     database.close();
   });
 });

@@ -1,17 +1,48 @@
 import type { UsageTrackingEntry } from "../../daemon/types.ts";
-import type { VimState } from "./types.ts";
+import {
+  MOTION_PREFIX_TIMEOUT_MS,
+  type VimMode,
+  type VimState,
+} from "./types.ts";
 
+/**
+ * The TUI's key state.
+ *
+ * `mode` is the single source of truth for input handling: `search` swallows
+ * printable keys into the query, `normal` dispatches them as motions and tab
+ * switches. Earlier versions also carried an `isSearching` boolean that had to
+ * be flipped by hand alongside `mode`, so a missed assignment left the search
+ * bar rendering over a normal-mode keymap (or the reverse). Everything that
+ * needs to know the mode now asks {@link isSearching} or reads `mode` directly.
+ */
 export const vimState: VimState = {
   scrollPos: 0,
   searchQuery: "",
   searchResults: [],
   currentSearchIdx: 0,
-  isSearching: false,
-  searchReverse: false,
   mode: "normal",
-  lastKey: "",
-  lastKeyTime: 0,
+  searchReverse: false,
+  pendingMotion: null,
 };
+
+/** Whether the search prompt currently owns keyboard input. */
+export function isSearching(): boolean {
+  return vimState.mode === "search";
+}
+
+/**
+ * Enter `mode`, clearing state that only belongs to the mode being left.
+ *
+ * `searchReverse` is deliberately preserved: it selects the prompt (`/` vs `?`)
+ * *and* the direction `n`/`N` continue in after the prompt closes, so resetting
+ * it here would flip a reverse search to forward on Enter.
+ */
+export function setMode(mode: VimMode): void {
+  vimState.mode = mode;
+  // A pending motion belongs to normal mode; leaving it set would let a `g`
+  // pressed before `/` complete an `gg` after the search was dismissed.
+  vimState.pendingMotion = null;
+}
 
 let maxScrollLines = 0;
 
@@ -57,10 +88,9 @@ export function pageDown(): void {
 }
 
 export function startSearch(reverse = false): void {
-  vimState.isSearching = true;
   vimState.searchReverse = reverse;
   vimState.searchQuery = "";
-  vimState.mode = "search";
+  setMode("search");
 }
 
 export function performSearch(query: string, entries: UsageTrackingEntry[]): void {
@@ -95,6 +125,28 @@ export function prevSearchResult(totalEntries: number): void {
 }
 
 export function exitSearchMode(): void {
-  vimState.isSearching = false;
-  vimState.mode = "normal";
+  setMode("normal");
+}
+
+/**
+ * Record a motion prefix and report whether it just completed a doubled motion.
+ *
+ * `gg` is two `g` presses inside {@link MOTION_PREFIX_TIMEOUT_MS}. The pending
+ * prefix is a single nullable record, so "waiting for the second g" and "no
+ * prefix" are the only representable states — the previous `lastKey`/`lastKeyTime`
+ * pair also allowed "prefix waiting since the epoch", which silently expired.
+ */
+export function consumeMotionPrefix(key: string, now = Date.now()): boolean {
+  const pending = vimState.pendingMotion;
+  if (pending && pending.key === key && now - pending.at < MOTION_PREFIX_TIMEOUT_MS) {
+    vimState.pendingMotion = null;
+    return true;
+  }
+  vimState.pendingMotion = { key, at: now };
+  return false;
+}
+
+/** Drop any pending motion prefix (used when another key interrupts it). */
+export function clearPendingMotion(): void {
+  vimState.pendingMotion = null;
 }
