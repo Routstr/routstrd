@@ -1442,7 +1442,7 @@ const modelsCmd = program
   )
   .option(
     "-a, --all",
-    "Include disabled providers; with --paths show full advertised route inventory",
+    "List every model the providers serve, not just the routstr21 list; with --model, include disabled providers; with --paths, show the full advertised route inventory",
     false,
   )
   .action(async (options: {
@@ -1518,10 +1518,14 @@ const modelsCmd = program
       return;
     }
 
-    // List all models with interactive selection
-    const result = await callDaemon(
-      options.refresh ? "/models?refresh=true" : "/models",
-    );
+    // List models. `--all` asks the daemon for its whole catalog instead of
+    // the curated routstr21 list; both share one population pass, so the flag
+    // costs no extra network I/O.
+    const params = new URLSearchParams();
+    if (options.refresh) params.set("refresh", "true");
+    if (options.all) params.set("all", "true");
+    const query = params.toString();
+    const result = await callDaemon(`/models${query ? `?${query}` : ""}`);
     if (result.error) {
       console.log(result.error);
       process.exit(1);
@@ -1532,14 +1536,28 @@ const modelsCmd = program
       typeof result.output === "object" &&
       "models" in result.output
     ) {
-      const models = (result.output as { models: RoutstrModel[] }).models;
+      const { models, catalog: returnedCatalog } = result.output as {
+        models: RoutstrModel[];
+        catalog?: string;
+      };
+      const catalog = returnedCatalog === "available" ? "available" : "routstr21";
+      if (options.all && catalog !== "available") {
+        console.warn(
+          "Warning: This daemon does not support the full model catalog; showing the curated routstr21 list.",
+        );
+      }
       if (models.length === 0) {
-        console.log("No routstr21 models found");
+        console.log(`No ${catalog} models found`);
       } else {
-        console.log(`\nFound ${models.length} routstr21 models:`);
+        console.log(`\nFound ${models.length} ${catalog} models:`);
         console.log(
-          "(Use 'routstrd models -m <model_id>' to see providers and pricing; add --paths for the" +
-            " model-path inventory)\n",
+          catalog === "available"
+            ? "(Every model the enabled providers advertise; the routstr21 list is the curated," +
+                " routable subset. Use 'routstrd models -m <model_id>' to see providers and pricing.)\n"
+            : "(Use 'routstrd models -m <model_id>' to see providers and pricing; add --paths for the" +
+                " model-path inventory." +
+                (options.all ? "" : " Pass --all to list every model the providers serve.") +
+                ")\n",
         );
         models.forEach((model, i) => {
           const details = [

@@ -108,7 +108,8 @@ export function createModelService(
     url.endsWith("/") ? url : `${url}/`;
 
   /**
-   * Build the same cheapest-per-model view as ModelManager.fetchModels, but
+   * The cheapest priced entry per canonical id across the cached providers:
+   * the same cheapest-per-model view as ModelManager.fetchModels, but built
    * exclusively from the persisted cache. Model-list reads must not wait for
    * unavailable providers; explicit and scheduled refreshes own network I/O.
    *
@@ -116,8 +117,12 @@ export function createModelService(
    * the catalog entry that describes a model is the one whose node routes
    * would pick — not the node with the lowest completion rate, which a warm
    * session never pays in full.
+   *
+   * One aggregation feeds both views (`getRoutstr21Models` and
+   * `getAvailableModels`), so "the entry describing a model" cannot mean two
+   * different things depending on which command asked.
    */
-  const getCachedModels = (): ExposedModel[] => {
+  const cheapestModelPerId = (): Map<string, ExposedModel & { sats_pricing?: ModelSatsPricing }> => {
     type PricedModel = ExposedModel & {
       sats_pricing?: ModelSatsPricing;
     };
@@ -165,8 +170,16 @@ export function createModelService(
       }
     }
 
-    return [...bestById.values()];
+    return bestById;
   };
+
+  /**
+   * Cached exposure, as `getRoutstr21Models` reads it: the curated list only,
+   * resolved against the aggregated provider models (never the network).
+   */
+  const getCachedModels = (): ExposedModel[] => [
+    ...cheapestModelPerId().values(),
+  ];
 
   const ensureProvidersBootstrapped = (): Promise<void> => {
     if (!providerBootstrapPromise) {
@@ -278,20 +291,62 @@ export function createModelService(
         // Its curated-list prefetch also avoids a duplicate cold relay query.
         await ensureProvidersBootstrapped();
         const ids = await modelManager.fetchRoutstr21Models(forceRefresh);
-        const models = await modelManager.fetchModels(
+        // The SDK populates the cache, but its return value ranks by
+        // completion price rather than the warm cost used by both catalogs.
+        await modelManager.fetchModels(
           modelManager.getBaseUrls(),
           forceRefresh,
         );
         logger.debug(
           `Model population complete in ${((Date.now() - startedAt) / 1000).toFixed(1)}s.`,
         );
-        return exposeModels(ids, models);
+        return exposeModels(ids, getCachedModels());
       })().finally(() => {
         modelPopulationPromise = null;
         modelPopulationStartedCold = false;
       });
     }
     return modelPopulationPromise;
+  };
+
+  /**
+   * Every model the enabled providers currently serve, not just the curated
+   * routstr21 list (`routstrd models --all`).
+   *
+   * Same aggregation as the curated view — the cheapest cached entry per
+   * canonical id — so both commands describe a model with the same metadata
+   * and spell its id the same way. Rows are exposed under the canonical id
+   * for the same reason `exposeModels` does it: clients request canonical ids
+   * and the SDK canonicalizes mapped variants on the way in, so a variant
+   * spelling here would be a second name for the same row.
+   *
+   * A cold cache or an explicit refresh reuses the population pass
+   * `getRoutstr21Models` runs (bootstrap + provider fetch) instead of adding a
+   * second network pass: that pass fills exactly the cache this view reads.
+   * Warm reads stay cache-only, like every other model-list read.
+   *
+   * Sorted by id. The curated list has a published order worth keeping, but a
+   * catalog aggregated out of every provider's catalog does not: without a
+   * sort, rows would be numbered in whatever order the provider cache
+   * happens to be iterated, so the same node set could list differently after
+   * a restart. Models without pricing are absent, exactly as in the curated
+   * view: a request cannot be billed for them.
+   */
+  const getAvailableModels = async (
+    forceRefresh = false,
+    refreshExpired = false,
+  ): Promise<ExposedModel[]> => {
+    let bestById = cheapestModelPerId();
+    // A cold pass can publish some provider results before it finishes.
+    if (
+      modelPopulationStartedCold || forceRefresh || refreshExpired || bestById.size === 0
+    ) {
+      await getRoutstr21Models(forceRefresh, refreshExpired);
+      bestById = cheapestModelPerId();
+    }
+    return [...bestById]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([canonicalId, model]) => ({ ...model, id: canonicalId }));
   };
 
   /**
@@ -777,6 +832,7 @@ export function createModelService(
   return {
     ensureProvidersBootstrapped,
     getRoutstr21Models,
+    getAvailableModels,
     getModelProviders,
     getModelPaths,
     refreshProvidersAndModels,
