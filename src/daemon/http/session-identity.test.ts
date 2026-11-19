@@ -15,7 +15,7 @@ describe("local session identity", () => {
     expect(body).toEqual({ model: "test", messages: [{ content: "session_id is ordinary prompt text" }] });
   });
   it("strips a standalone per-request ID without treating it as a session", () => {
-    const headers = { "X-Client-Request-ID": "per-request-id" };
+    const headers: Record<string, string> = { "X-Client-Request-ID": "per-request-id" };
     expect(consumeSessionIdentity(headers, {})).toBeUndefined();
     expect(headers).toEqual({});
   });
