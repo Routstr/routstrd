@@ -11,26 +11,22 @@ Transport caveats: Pi's completions transport does not send affinity headers
 when cache retention is `none`. This setting does not guarantee that Pi's
 Anthropic transport sends a session header.
 
-At inference ingress Routstrd consumes `x-session-id`, `session-id`, `session_id`,
-`x-session-affinity`, and `x-opencode-session` locally, in that precedence order.
-Header names are case-insensitive. Top-level `session_id`, `sessionId`, and
-`prompt_cache_key`, plus metadata `session_id`/`sessionId`, are fallback sources.
-`x-client-request-id` is stripped but not used for accounting: callers may send
-one unique value per request. Only nonempty values of at most 256 characters
-without control characters are stored. These identifiers are untrusted client
-labels, not authentication.
+At inference ingress Routstrd reads `x-session-id`, `session-id`, `session_id`,
+`x-session-affinity`, and `x-opencode-session` for usage accounting, in that
+precedence order. Header names are case-insensitive. Top-level `session_id`,
+`sessionId`, and `prompt_cache_key`, plus metadata `session_id`/`sessionId`,
+are fallback sources. `x-client-request-id` is not used for accounting:
+callers may send a unique value per request. Only nonempty values of at most
+256 characters without control characters are stored. These headers and
+fields are untrusted client labels, not authentication.
 
-Before invoking the SDK router, all those header aliases and body fields are
-removed (including metadata `prompt_cache_key`). The request-scoped usage driver
-adds the selected ID to locally appended accounting rows, without changing the
-shared driver or unrelated requests. `GET /usage` omits the stored session ID.
-No session ID is inferred from an upstream response or injected into upstream requests. In particular, a caller's explicit
-`prompt_cache_key` no longer reaches upstream; this sacrifices that explicit
-cache-affinity hint for local conversation privacy. Automatic prefix caching is
-not disabled by this policy.
+Reading session identity does not change the request passed to the SDK router.
+The pinned SDK (0.5.1) does not forward these session headers, but it does
+forward body fields such as `prompt_cache_key`. A client that puts its session
+ID in that field allows the upstream provider to see it. Caller-provided
+cache affinity is preserved; this feature does not anonymize requests.
 
-This is not payload anonymization: prompt text, arbitrary user-defined metadata,
-and unrelated identifiers are not recursively searched or rewritten. Request
-logs, when explicitly enabled, may still contain the original local request.
-Historical accounting rows are not backfilled. No new schema is needed: the SDK
-usage entry and SQLite driver already support `sessionId` / `session_id`.
+The request-scoped usage driver adds the selected ID to local accounting rows
+without changing the shared driver. `GET /usage` omits the stored session ID.
+Request logs, when enabled, may contain session metadata. Historical rows are
+not backfilled, and no new schema is needed.

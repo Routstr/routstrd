@@ -1,4 +1,4 @@
-import { consumeSessionIdentity, withSessionIdentity } from "./session-identity";
+import { readSessionIdentity, withSessionIdentity } from "./session-identity";
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
 import { randomBytes } from "crypto";
@@ -2652,7 +2652,7 @@ export function createDaemonRequestHandler(deps: {
       }
     }
 
-    const sessionId = consumeSessionIdentity(incomingHeaders, bodyObj);
+    const sessionId = readSessionIdentity(incomingHeaders, bodyObj);
 
     try {
       // Discovery is shared: cancel this waiter, not the shared bootstrap.

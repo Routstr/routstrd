@@ -4,25 +4,22 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryUsageTrackingDriver } from "@routstr/sdk/storage";
-import { consumeSessionIdentity, withSessionIdentity } from "./session-identity";
+import { readSessionIdentity, withSessionIdentity } from "./session-identity";
 
 describe("local session identity", () => {
-  it("consumes aliases case-insensitively without changing unrelated data", () => {
-    const headers: Record<string, string> = { "X-Session-ID": "local-session", "session-id": "other", session_id: "other", "x-client-request-id": "other", "x-session-affinity": "other", "x-opencode-session": "other", authorization: "Bearer test", "x-request-id": "request" };
-    const body: Record<string, unknown> = { session_id: "body", sessionId: "body", prompt_cache_key: "body", model: "test", messages: [{ content: "session_id is ordinary prompt text" }] };
-    expect(consumeSessionIdentity(headers, body)).toBe("local-session");
-    expect(headers).toEqual({ authorization: "Bearer test", "x-request-id": "request" });
-    expect(body).toEqual({ model: "test", messages: [{ content: "session_id is ordinary prompt text" }] });
+  it("reads aliases case-insensitively without modifying the request", () => {
+    const headers = Object.freeze({ "X-Session-ID": "local-session", "session-id": "other", "x-client-request-id": "request" });
+    const metadata = Object.freeze({ sessionId: "metadata", prompt_cache_key: "nested-cache" });
+    const body = Object.freeze({ session_id: "body", prompt_cache_key: "cache", metadata });
+    expect(readSessionIdentity(headers, body)).toBe("local-session");
   });
-  it("strips a standalone per-request ID without treating it as a session", () => {
-    const headers: Record<string, string> = { "X-Client-Request-ID": "per-request-id" };
-    expect(consumeSessionIdentity(headers, {})).toBeUndefined();
-    expect(headers).toEqual({});
+  it("does not treat a per-request ID as a session", () => {
+    expect(readSessionIdentity({ "X-Client-Request-ID": "per-request-id" }, {})).toBeUndefined();
   });
-  it("removes invalid identity without storing it", () => {
-    const headers: Record<string, string> = { "x-session-id": "x".repeat(257) };
-    expect(consumeSessionIdentity(headers, {})).toBeUndefined();
-    expect(headers).toEqual({});
+  it("skips invalid session values when choosing a label to store", () => {
+    const headers = Object.freeze({ "x-session-id": "x".repeat(257) });
+    expect(readSessionIdentity(headers, {})).toBeUndefined();
+    expect(readSessionIdentity(headers, { prompt_cache_key: "cache" })).toBe("cache");
   });
   it("keeps accounting identity local for single and bulk appends", async () => {
     const driver = createMemoryUsageTrackingDriver();

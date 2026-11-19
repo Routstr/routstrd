@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { createServer, request as httpRequest, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -240,7 +240,7 @@ describe("lifecycle query endpoints", () => {
 /** Uses the real SDK resolver/client/transport; adapters supply local state only. */
 async function routedFixture(mode: "success" | "passthrough" | "stream") {
   const usage = createMemoryUsageTrackingDriver();
-  const upstreamRequests: Array<{ headers: IncomingHttpHeaders; body: string }> = [];
+  const upstreamBodies: string[] = [];
   const upstream = createServer(async (req, res) => {
     if (req.url === "/v1/wallet/info") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -250,7 +250,7 @@ async function routedFixture(mode: "success" | "passthrough" | "stream") {
     req.setEncoding("utf8");
     let body = "";
     for await (const chunk of req) body += chunk;
-    upstreamRequests.push({ headers: req.headers, body });
+    upstreamBodies.push(body);
     res.setHeader("x-routstr-request-id", "node-attempt-id");
     if (mode === "stream") {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -287,7 +287,7 @@ async function routedFixture(mode: "success" | "passthrough" | "stream") {
     discoveryAdapter, storageAdapter, providerManager,
     walletAdapter: { getBalances: async () => ({ "https://mint.example": 100 }), getActiveMintUrl: () => "https://mint.example" },
   });
-  return { ...daemon, usage, upstreamRequests, closeUpstream: async () => {
+  return { ...daemon, usage, upstreamBodies, closeUpstream: async () => {
     upstream.closeAllConnections();
     await new Promise<void>((resolve) => upstream.close(() => resolve()));
   } };
@@ -325,8 +325,8 @@ describe("real SDK routed responses", () => {
     } finally { await closeUpstream(); }
   });
 
-  it("keeps session identity in local accounting but out of upstream requests and GET /usage", async () => {
-    const { call, driver, usage, upstreamRequests, closeUpstream } = await routedFixture("success");
+  it("preserves the upstream cache key and omits the stored session ID from GET /usage", async () => {
+    const { call, driver, usage, upstreamBodies, closeUpstream } = await routedFixture("success");
     try {
       const headers = {
         "x-opencode-session": "local-session",
@@ -336,8 +336,8 @@ describe("real SDK routed responses", () => {
       const response = await call("/v1/chat/completions", {
         method: "POST", headers,
         body: JSON.stringify({
-          model: "model", messages: [], prompt_cache_key: "private-cache-key",
-          metadata: { sessionId: "private-metadata-session", purpose: "test" },
+          model: "model", messages: [], prompt_cache_key: "caller-cache-key",
+          metadata: { sessionId: "caller-metadata-session", purpose: "test" },
         }),
       });
       expect(response.status).toBe(200);
@@ -345,13 +345,10 @@ describe("real SDK routed responses", () => {
       const requestId = response.headers.get("x-routstr-sdk-request-id")!;
       expect((await awaitTerminal(driver, requestId))?.request.outcome).toBe("succeeded");
 
-      expect(upstreamRequests).toHaveLength(1);
-      const upstream = upstreamRequests[0]!;
-      expect(upstream.headers["x-opencode-session"]).toBeUndefined();
-      expect(upstream.headers["x-client-request-id"]).toBeUndefined();
-      const upstreamBody = JSON.parse(upstream.body);
-      expect(upstreamBody).not.toHaveProperty("prompt_cache_key");
-      expect(upstreamBody.metadata).toEqual({ purpose: "test" });
+      expect(upstreamBodies).toHaveLength(1);
+      const upstreamBody = JSON.parse(upstreamBodies[0]!);
+      expect(upstreamBody.prompt_cache_key).toBe("caller-cache-key");
+      expect(upstreamBody.metadata).toEqual({ sessionId: "caller-metadata-session", purpose: "test" });
 
       // Non-streaming lifecycle completion does not wait for SDK accounting.
       let rows = await usage.list();
@@ -396,19 +393,19 @@ describe("real SDK routed responses", () => {
   });
 });
 
-it.each(["/v1/chat/completions", "/v1/responses", "/v1/messages"])("keeps session identity local on %s", async (path) => {
+it.each(["/v1/chat/completions", "/v1/responses", "/v1/messages"])("reads session identity without altering router inputs on %s", async (path) => {
   const usage = createMemoryUsageTrackingDriver();
   const { call } = await fixture({
     usageTrackingDriver: usage,
     ensureProvidersBootstrapped: async () => {},
     routeRequests: async (options: any) => {
       for (const name of ["x-session-id", "session-id", "session_id", "x-client-request-id", "x-session-affinity", "x-opencode-session"]) {
-        expect(options.headers[name]).toBeUndefined();
+        expect(options.headers[name]).toBe(name === "x-session-id" ? "local-session" : "alias");
       }
       expect(options.headers["x-unrelated"]).toBe("preserved");
-      expect(options.requestBody.prompt_cache_key).toBeUndefined();
-      expect(options.requestBody.session_id).toBeUndefined();
-      expect(options.requestBody.metadata).toEqual({ purpose: "test" });
+      expect(options.requestBody.prompt_cache_key).toBe("body-cache");
+      expect(options.requestBody.session_id).toBe("body-session");
+      expect(options.requestBody.metadata).toEqual({ sessionId: "metadata-session", purpose: "test" });
       await options.usageTrackingDriver.append({ id: path, timestamp: Date.now(), modelId: "test", baseUrl: "https://node", promptTokens: 1, completionTokens: 1, totalTokens: 2, cost: 0, satsCost: 1 });
       return new Response(JSON.stringify({ id: "response" }), { headers: { "content-type": "application/json" } });
     },
