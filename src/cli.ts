@@ -5,6 +5,7 @@ import { program } from "commander";
 import { startDaemon } from "./start-daemon";
 import { ensureDirsSync, saveDaemonConfig } from "./daemon/config-store";
 import {
+  checkRemoteUrl,
   handleDaemonCommand,
   callDaemon,
   callAuth,
@@ -946,7 +947,11 @@ program
     "Show the configured remote daemon, or configure one. With no URL, prints the current remote node; pass a URL to set one up.",
   )
   .option("--auth-url <authUrl>", "URL of the auth proxy for management commands (npubs, clients, usage)")
-  .action(async (url: string | undefined, options: { authUrl?: string }) => {
+  .option(
+    "--force",
+    "Save the URL even if it does not answer like a routstrd daemon",
+  )
+  .action(async (url: string | undefined, options: { authUrl?: string; force?: boolean }) => {
     const config = await loadConfig();
 
     // No URL provided -> show the current remote node, or tell the user to set one up.
@@ -996,6 +1001,30 @@ program
     if (options.authUrl) {
       updates.authUrl = normalizeBaseUrl(options.authUrl);
     }
+
+    // Probe before saving. `new URL()` only proves the string is a URL; a
+    // dashboard or an SPA at that origin would then be configured as the
+    // daemon and fail every later command with a JSON parse error from deep
+    // inside an integration. Refusing here keeps the diagnosis at the command
+    // that caused it.
+    //
+    // `--force` skips the probe entirely rather than running it and ignoring
+    // the result: the flag exists for a host that cannot be reached from here
+    // (behind a VPN, not yet deployed), where the probe could only burn its
+    // full timeout before saving anyway.
+    if (!options.force) {
+      const check = await checkRemoteUrl({ ...config, ...updates });
+      if (!check.ok) {
+        console.error(`Refusing to set the remote daemon: ${check.reason}`);
+        console.error("");
+        console.error("  Pass --force to save it anyway (e.g. behind a proxy that");
+        console.error("  is not reachable from this machine yet).");
+        process.exit(1);
+      }
+    } else {
+      console.error("Skipping the reachability probe because --force was passed.");
+    }
+
     let generatedNpub: string | undefined;
 
     if (!config.nsec) {
