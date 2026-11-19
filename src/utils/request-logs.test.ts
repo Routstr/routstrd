@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  formatRequestSummary, formatRequestVerbose, loadRequestTraces,
+  formatRequestSummary, formatRequestVerbose, loadRequestTraces, MAX_TRACKED_IN_FLIGHT,
   RequestLogFollower, requestLogsQuery, safeCorrelatedLog, utcTime,
   type LifecycleTrace,
 } from "./request-logs";
@@ -160,6 +160,28 @@ describe("lifecycle logs querying and follow", () => {
     expect(paths).toEqual(["/requests?limit=2", "/requests/older", `/requests/${id}`]);
     expect(traces.map(t => t.request.requestId)).toEqual([id, "older"]);
   });
+  test("in-flight requests are carried past the newest-N window and read by id", async () => {
+    const older = trace(); older.request.requestId = "older"; older.request.startedAt = 0;
+    older.request.outcome = "in_progress";
+    const paths: string[] = [];
+    const results: unknown[] = [{ requests: [trace().request] }, trace(), older];
+    const traces = await loadRequestTraces({ lines: "1" }, async path => {
+      paths.push(path);
+      const next = results.shift()!;
+      return "request" in (next as LifecycleTrace) ? next : { output: next };
+    }, ["older"]);
+    // The window only returned the newest request; `older` was fetched explicitly.
+    expect(paths).toEqual(["/requests?limit=1", `/requests/${id}`, "/requests/older"]);
+    expect(traces.map(t => t.request.requestId)).toEqual([id, "older"]);
+  });
+  test("an id already covered by the list window is not fetched twice", async () => {
+    const paths: string[] = [];
+    await loadRequestTraces({ lines: "7" }, async path => {
+      paths.push(path);
+      return path.startsWith("/requests?") ? { output: [trace().request] } : trace();
+    }, [id]);
+    expect(paths).toEqual(["/requests?limit=7", `/requests/${id}`]);
+  });
   test("request-id lookup fetches a single complete trace", async () => {
     const paths: string[] = [];
     const result = await loadRequestTraces({ lines: "50", requestId: "id/with space" }, async path => { paths.push(path); return { output: trace() }; });
@@ -182,5 +204,46 @@ describe("lifecycle logs querying and follow", () => {
     expect(follower.changed([t], true)).toHaveLength(1);
     expect(follower.changed([t], true)).toEqual([]);
     expect(follower.changed([t], true, [`[1970-01-01T00:00:04.000Z] [INFO] [req:${id}] Stream completed`])).toHaveLength(1);
+  });
+  test("follow tracks only in-flight ids so a completed request is released", () => {
+    const follower = new RequestLogFollower();
+    const t = trace(); t.request.outcome = "in_progress";
+    follower.changed([t], false);
+    expect(follower.awaiting()).toEqual([id]);
+    t.request.outcome = "succeeded";
+    follower.changed([t], false);
+    // Terminal: no longer worth a detail request on every poll.
+    expect(follower.awaiting()).toEqual([]);
+  });
+  test("follow bounds the carried set so a stuck row cannot grow the load", () => {
+    const follower = new RequestLogFollower();
+    const stuck = Array.from({ length: MAX_TRACKED_IN_FLIGHT + 5 }, (_, i) => {
+      const t = trace();
+      t.request.requestId = `stuck-${i}`;
+      t.request.startedAt = i;
+      t.request.outcome = "in_progress";
+      return t;
+    });
+    follower.changed(stuck, false);
+    expect(follower.awaiting()).toHaveLength(MAX_TRACKED_IN_FLIGHT);
+  });
+  test("a re-rendered request is marked so an appended update is not read as a duplicate", () => {
+    const follower = new RequestLogFollower(); const t = trace(); t.request.outcome = "in_progress";
+    // First sighting is unmarked: nothing precedes it to disambiguate against.
+    expect(follower.changed([t], false)[0]).not.toContain("(updated)");
+    t.attempts.forEach(a => { a.httpStatus = 200; a.outcome = "succeeded"; });
+    t.request.outcome = "succeeded"; t.request.httpStatus = 200;
+    const [updated] = follower.changed([t], false);
+    expect(updated).toMatch(/^00:00:01 {2}alice - deepseek-v4\.1-flash - 200 - 200 - 200 - .*\(updated\)$/);
+  });
+  test("verbose re-renders mark the summary line only, keeping the timeline intact", () => {
+    const follower = new RequestLogFollower(); const t = trace();
+    follower.changed([t], true);
+    t.events.push({ sequence: 3, timestamp: 2000, type: "request_finished" });
+    const [updated] = follower.changed([t], true);
+    const lines = updated!.split("\n");
+    expect(lines[0]).toEndWith("  (updated)");
+    // Timeline entries keep their own timestamps and are not decorated.
+    expect(lines.slice(1).some(line => line.includes("(updated)"))).toBe(false);
   });
 });
