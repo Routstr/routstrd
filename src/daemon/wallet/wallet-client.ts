@@ -298,6 +298,11 @@ export interface WalletClient {
   unlock(passphrase: string): Promise<string>;
   getBalances(): Promise<Record<string, number>>;
   receiveCashu(token: string): Promise<string>;
+  /** Read-only NUT-07 lookup for parked refund proofs at a trusted mint. */
+  checkParkedProofsSpent?(
+    mintUrl: string,
+    proofs: Array<{ id: string; secret: string }>,
+  ): Promise<ReadonlySet<string>>;
   receiveBolt11(
     amount: number,
     mintUrl?: string,

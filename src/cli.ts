@@ -1,5 +1,6 @@
 import { IncrementalRequestLogs } from "./utils/incremental-request-logs";
 import { normalizeOfflineSweepMintUrl } from "./daemon/wallet/offline-sweep";
+import type { ParkedTokenRecovery, ParkedTokenReport } from "./daemon/wallet/parked-tokens";
 import { loadRequestTraces, RequestLogFollower, utcTime, type RequestLogFilters } from "./utils/request-logs";
 import { program } from "commander";
 import { startDaemon } from "./start-daemon";
@@ -801,31 +802,55 @@ program
     }
   });
 
-/**
- * Tokens the daemon had parked after a failed receive and retried as part of
- * this refund. Reported separately because they never appear in the store's
- * pending token/API key counts — without this line a refund that recovered
- * them looks identical to one that had nothing to do.
- */
-interface RefundRecovery {
-  attempted: number;
-  succeeded: number;
-  error?: string;
+type RefundRecovery = Partial<ParkedTokenRecovery> & { attempted: number; succeeded: number };
+type CashuAmounts = { sat: number; msat: number };
+
+function formatCashuAmounts({ sat, msat }: CashuAmounts): string {
+  if (sat && msat) return `${sat} sat + ${msat} msat`;
+  return msat ? `${msat} msat` : `${sat} sat`;
 }
 
 function printRecoveredTokens(recovered?: RefundRecovery): void {
-  if (!recovered || (recovered.attempted === 0 && !recovered.error)) return;
+  if (!recovered) return;
   if (recovered.error) {
     console.log(`\nParked tokens: recovery failed: ${recovered.error}`);
     return;
   }
-  const stillParked = recovered.attempted - recovered.succeeded;
+  const batches = recovered.batches ?? 0;
+  const dropped = recovered.dropped ?? [];
+  const parked = recovered.parked ?? recovered.attempted;
+  if (!(parked || recovered.succeeded || batches || dropped.length || recovered.pruneError)) return;
+
+  const faceValue = recovered.recoveredFaceValue;
+  const remaining = recovered.remaining ?? Math.max(0, parked - recovered.succeeded - dropped.length);
   console.log(
-    `\nParked tokens: ${recovered.succeeded}/${recovered.attempted} received` +
-      (stillParked > 0
-        ? `, ${stillParked} still parked (the daemon retries them every 42 minutes)`
-        : ""),
+    `\nParked tokens: ${recovered.succeeded}/${parked} received` +
+      (faceValue && recovered.succeeded
+        ? ` (${formatCashuAmounts(faceValue)} face value before fees)`
+        : "") +
+      (batches > 0
+        ? `, ${recovered.batchesRecovered ?? 0}/${batches} merged batch(es) recovered`
+        : "") +
+      (recovered.pruneError ? "" : `, ${remaining} still parked`),
   );
+
+  if (recovered.pruneError) {
+    console.error(`Parked tokens: could not confirm cleanup was saved: ${recovered.pruneError}`);
+  }
+  if (dropped.length > 0) {
+    const amounts = { sat: 0, msat: 0 };
+    const byReason = new Map<string, number>();
+    for (const { reason, amount, unit } of dropped) {
+      amounts[unit ?? "sat"] += amount;
+      byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+    }
+    const summary = [...byReason]
+      .map(([reason, count]) => `${count} ${reason.replace(/-/g, " ")}`)
+      .join(", ");
+    console.log(
+      `Discarded ${dropped.length} parked token(s) (${formatCashuAmounts(amounts)} face value; ${summary}).`,
+    );
+  }
 }
 
 program
@@ -3256,6 +3281,66 @@ walletCmd
       }
     },
   );
+
+walletCmd
+  .command("parked")
+  .description(
+    "List refund tokens the daemon parked after a failed receive (read-only)",
+  )
+  .option("--json", "Print the raw JSON from the daemon", false)
+  .action(async (options: { json: boolean }) => {
+    try {
+      await ensureDaemonRunning();
+
+      const result = await callDaemon("/wallet/parked", { method: "GET" });
+      if (result.error) {
+        console.log(result.error);
+        process.exit(1);
+      }
+
+      const output = result.output as
+        | { count: number; amounts: CashuAmounts; tokens: ParkedTokenReport[] }
+        | undefined;
+
+      if (options.json) {
+        console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+
+      if (!output?.tokens.length) {
+        console.log("No parked refund tokens.");
+        return;
+      }
+
+      console.log(
+        `Parked refund tokens: ${output.count} (${formatCashuAmounts(output.amounts)} face value)`,
+      );
+      const byMint = new Map<string, { count: number; amounts: CashuAmounts; oldest: number }>();
+      for (const token of output.tokens) {
+        const key = token.mint ?? "(unknown mint)";
+        const bucket = byMint.get(key) ?? { count: 0, amounts: { sat: 0, msat: 0 }, oldest: 0 };
+        bucket.count += 1;
+        bucket.amounts[token.unit] += token.amount;
+        bucket.oldest = Math.max(bucket.oldest, token.ageDays);
+        byMint.set(key, bucket);
+      }
+      for (const [mint, bucket] of byMint) {
+        console.log(`  ${mint}: ${bucket.count} token(s), ${formatCashuAmounts(bucket.amounts)}; oldest ${bucket.oldest} day(s)`);
+      }
+      console.log("\nRun `rout refund` to retry parked tokens and merge same-mint dust.");
+    } catch (error) {
+      const message = (error as Error).message;
+      if (
+        message?.includes("fetch failed") ||
+        message?.includes("Connection refused")
+      ) {
+        console.error("Daemon is not running");
+        process.exit(1);
+      }
+      console.error(message);
+      process.exit(1);
+    }
+  });
 
 walletCmd
   .command("recover")
