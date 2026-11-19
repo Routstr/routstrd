@@ -795,6 +795,20 @@ export function tokenSegments(entry: {
   return { cacheRead, notCached, input, output, total: input + output };
 }
 
+/**
+ * The OUT cell of a Recent row. Image endpoints bill per image and report no
+ * tokens, so a row with images and no output tokens shows the image count
+ * (`outputImages`, from the node's `X-Routstr-Image-Count`) instead of `0`.
+ */
+export function formatOutput(
+  segments: Pick<TokenSegments, "output">,
+  outputImages: number | undefined,
+): string {
+  const images = outputImages ?? 0;
+  if (segments.output === 0 && images > 0) return `${formatNumber(images)} img`;
+  return formatNumber(segments.output);
+}
+
 /** One coloured slice of a {@link renderStackedBar}. */
 export interface BarSegment {
   /** Segment magnitude; negatives are treated as zero. */
@@ -881,7 +895,11 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
   // column and OUT to the right, so both halves need the widest value on show.
   const tokenRows = recentEntries.map((entry) => tokenSegments(entry));
   const inputTexts = tokenRows.map((row) => formatNumber(row.input));
-  const outputTexts = tokenRows.map((row) => formatNumber(row.output));
+  // `outputImages` arrives with SDK versions that persist the node's
+  // X-Routstr-Image-Count; older entries simply lack it.
+  const outputTexts = tokenRows.map((row, i) =>
+    formatOutput(row, (recentEntries[i] as { outputImages?: number }).outputImages)
+  );
   const inputCol = Math.max(...inputTexts.map((text) => text.length));
   const outputCol = Math.max(...outputTexts.map((text) => text.length));
   const inOutCol = inputCol + outputCol + " - ".length;
