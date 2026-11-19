@@ -1,3 +1,4 @@
+import { initializeWallet } from "./daemon/wallet/wallet-config";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -8,7 +9,6 @@ import {
   collectRecentRequestsFromLines,
   formatAutoModelPathStatus,
   getLivePidFileOwner,
-  initializeWallet,
   parseAutoModelPathArg,
   parseMonthlyLimitSats,
   parseStructuredLogLine,
