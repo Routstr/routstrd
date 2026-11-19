@@ -16,6 +16,7 @@ import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
 import { logger } from "../../utils/logger";
 import { VERSION } from "../../version";
+import type { ClientMode } from "../../utils/config";
 import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
 import { loadDaemonConfig, loadDaemonConfigSync, saveDaemonConfig } from "../config-store";
 import {
@@ -59,8 +60,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-
-type ClientMode = "xcashu" | "lazyrefund" | "apikeys";
 
 type WalletStatusOutput = {
   daemon: "running";
@@ -299,9 +298,17 @@ function optionalStringArrayField(
   return value.map((item: string) => item.trim());
 }
 
+/**
+ * The mode this process was started with.
+ *
+ * `mode` is startup-only: `routstrd mode` restarts the daemon to apply it, so
+ * there is exactly one source of truth (the value handed to the handler at
+ * construction). This helper used to consult `store.getState()?.mode` first,
+ * a field nothing ever writes — so the branch was dead and its precedence over
+ * `deps.mode` implied a second, phantom source of truth.
+ */
 function getCurrentMode(deps: DaemonDeps): ClientMode {
-  const stateMode = deps.store.getState()?.mode;
-  return stateMode || deps.mode || "apikeys";
+  return deps.mode ?? "apikeys";
 }
 
 /** One provider as `/providers` renders it, numbered from 1. */

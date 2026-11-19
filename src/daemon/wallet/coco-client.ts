@@ -46,10 +46,13 @@ import type {
   WalletProofCheckMintResult,
   WalletProofCheckOptions,
   WalletProofCheckResult,
+  WalletRecoveryPhase,
   WalletRecoveryProgress,
+  WalletRecoveryState,
   OfflineCashuSendResult,
   MarkSendSpentResult,
 } from "./wallet-client";
+import { describeRecoveryState } from "./wallet-client";
 import { selectCleanupOperations, summarizeMintCleanup } from "./cleanup";
 import {
   chunk,
@@ -77,7 +80,9 @@ import {
   getReceiveReconcileBackup,
   initReceiveDedupSchema,
   listProcessingReceiveTokens,
+  isReceiveReservationReplayable,
   receiveInputFingerprint,
+  receiveReservationPhase,
   reconcileExecutingReceives,
   releaseReceiveToken,
   hashReceiveToken,
@@ -1628,7 +1633,7 @@ interface ProofCheckInternals {
 }
 
 interface RecoveryPhaseProgress {
-  phase: string;
+  phase: WalletRecoveryPhase;
   failedMintQuotes: number;
 }
 
@@ -1700,18 +1705,50 @@ export interface RecoveryGate {
   fail(error: string): void;
 }
 
+/**
+ * The gate's lifecycle, as one value.
+ *
+ * Previously this was `stuckMints: Set | undefined` + `done: boolean` +
+ * `error: string | undefined`, where "finished" and "failed" were the same
+ * `done = true` distinguished by a second field, and `stuckMints === undefined`
+ * meant "still enumerating" only by convention. The combinations
+ * `done: false, error: set` and `done: true, stuckMints: undefined` were
+ * representable but unreachable-by-design, which put the burden of knowing the
+ * invariant on every reader.
+ *
+ *  - `enumerating`: stuck mints are not known yet; every caller waits.
+ *  - `recovering`:  the stuck set is known; healthy-mint callers proceed.
+ *  - `recovered`:   sweeps finished; every caller proceeds.
+ *  - `failed`:      sweeps failed; every caller is poisoned.
+ */
+type RecoveryGateState =
+  | { status: "enumerating" }
+  | { status: "recovering"; stuckMints: Set<string> }
+  | { status: "recovered" }
+  | { status: "failed"; error: string };
+
 export function createRecoveryGate(): RecoveryGate {
-  let stuckMints: Set<string> | undefined;
-  let done = false;
-  let error: string | undefined;
-  let mintsResolve: (() => void) | undefined;
-  const mintsPromise = new Promise<void>((resolve) => {
-    mintsResolve = resolve;
+  let state: RecoveryGateState = { status: "enumerating" };
+
+  // Two distinct waits, so two distinct promises:
+  //  - enumeration settles when stuck mints are known (or the gate finished);
+  //  - outcome settles only when recovery succeeded or failed.
+  let enumerationResolve: (() => void) | undefined;
+  const enumerationSettled = new Promise<void>((resolve) => {
+    enumerationResolve = resolve;
   });
-  let doneResolve: (() => void) | undefined;
-  const donePromise = new Promise<void>((resolve) => {
-    doneResolve = resolve;
+  let outcomeResolve: (() => void) | undefined;
+  const outcomeSettled = new Promise<void>((resolve) => {
+    outcomeResolve = resolve;
   });
+
+  const settle = (next: RecoveryGateState): void => {
+    state = next;
+    enumerationResolve?.();
+    if (next.status === "recovered" || next.status === "failed") {
+      outcomeResolve?.();
+    }
+  };
 
   return {
     async waitForRecovery(mintUrl?: string): Promise<void> {
@@ -1724,31 +1761,35 @@ export function createRecoveryGate(): RecoveryGate {
           normalized = undefined;
         }
         if (normalized) {
-          await mintsPromise;
-          if (!stuckMints?.has(normalized)) {
-            if (error) throw new Error(`Wallet is not ready: ${error}`);
-            return;
+          await enumerationSettled;
+          // A driver for this mint is only admitted once the stuck set is
+          // known and does not contain it. `recovered` admits everyone; a
+          // `failed` gate admits no one.
+          if (state.status === "recovered") return;
+          if (state.status === "recovering" && !state.stuckMints.has(normalized)) return;
+          if (state.status === "failed") {
+            throw new Error(`Wallet is not ready: ${state.error}`);
           }
         }
       }
-      if (!done) await donePromise;
-      if (error) throw new Error(`Wallet is not ready: ${error}`);
+      await outcomeSettled;
+      if (state.status === "failed") {
+        throw new Error(`Wallet is not ready: ${state.error}`);
+      }
     },
     publishStuckMints(mints: Set<string>): void {
-      if (stuckMints) return;
-      stuckMints = mints;
-      mintsResolve?.();
+      // First publication wins, and only while enumeration is still open: a
+      // late publisher must not reopen a finished gate.
+      if (state.status !== "enumerating") return;
+      settle({ status: "recovering", stuckMints: mints });
     },
     complete(): void {
-      done = true;
-      mintsResolve?.();
-      doneResolve?.();
+      if (state.status === "recovered" || state.status === "failed") return;
+      settle({ status: "recovered" });
     },
     fail(message: string): void {
-      done = true;
-      error = message;
-      mintsResolve?.();
-      doneResolve?.();
+      if (state.status === "failed") return;
+      settle({ status: "failed", error: message });
     },
   };
 }
@@ -1934,10 +1975,8 @@ export async function createCocoClient(
   ) => Promise<string | null> = async () => null;
   let walletConfig = loadConfig(configFile);
 
-  let recoveryPhase = "queued";
+  let recoveryState: WalletRecoveryState = { status: "queued" };
   let recoveryFailedMintQuotes = 0;
-  let recoveryDone = false;
-  let recoveryError: string | undefined;
   const recoveryCounts = {
     pendingSends: 0,
     inflightProofs: 0,
@@ -2042,7 +2081,9 @@ export async function createCocoClient(
 
     const syncReceiveReservations = async (): Promise<void> => {
       for (const reservation of listProcessingReceiveTokens(openDatabase)) {
-        if (!reservation.operationId) continue;
+        // Only rows that already own a Coco operation can be reconciled; a
+        // `reserved` row belongs to no operation and is cleared separately.
+        if (!isReceiveReservationReplayable(reservation)) continue;
         try {
           const operation = await coco!.ops.receive.get(reservation.operationId);
           if (operation?.state === "finalized") {
@@ -2146,7 +2187,7 @@ export async function createCocoClient(
     runWalletRecovery(
       coco,
       (progress) => {
-        recoveryPhase = progress.phase;
+        recoveryState = { status: "running", phase: progress.phase };
         recoveryFailedMintQuotes = progress.failedMintQuotes;
         if (progress.phase !== "done") {
           startupProgress(`Wallet recovery: ${progress.phase}...`);
@@ -2158,8 +2199,7 @@ export async function createCocoClient(
     )
       .then(async () => {
         await syncReceiveReservations();
-        recoveryDone = true;
-        recoveryPhase = "done";
+        recoveryState = { status: "recovered", phase: "done" };
         recoveryGate.complete();
         recoveryResolve?.();
         startupProgress("Wallet recovery complete.");
@@ -2193,12 +2233,11 @@ export async function createCocoClient(
         }
       })
       .catch((error) => {
-        recoveryDone = true;
-        recoveryPhase = "error";
-        recoveryError = error instanceof Error ? error.message : String(error);
-        recoveryGate.fail(recoveryError);
+        const message = error instanceof Error ? error.message : String(error);
+        recoveryState = { status: "failed", error: message };
+        recoveryGate.fail(message);
         recoveryResolve?.();
-        startupProgress(`Wallet recovery failed: ${recoveryError}`);
+        startupProgress(`Wallet recovery failed: ${message}`);
         logger.warn("Periodic mint and melt sweeps were not started because wallet recovery failed");
       });
   } catch (error) {
@@ -2301,8 +2340,8 @@ export async function createCocoClient(
     },
 
     async getStatus(): Promise<WalletRuntimeState> {
-      if (recoveryError) return "ERROR";
-      if (!recoveryDone) return "RECOVERING";
+      if (recoveryState.status === "failed") return "ERROR";
+      if (recoveryState.status !== "recovered") return "RECOVERING";
       try {
         await coco.wallet.balances.total();
         return "UNLOCKED";
@@ -2312,14 +2351,18 @@ export async function createCocoClient(
     },
 
     async getRecoveryProgress(): Promise<WalletRecoveryProgress> {
+      // Project the lifecycle onto the wire shape the CLI/TUI consume. The two
+      // rulers are derived from one state value, so `state` and `phase` cannot
+      // contradict each other.
+      const { state, phase } = describeRecoveryState(recoveryState);
       return {
-        state: recoveryError ? "ERROR" : recoveryDone ? "UNLOCKED" : "RECOVERING",
-        phase: recoveryPhase,
+        state,
+        phase,
         pendingSends: recoveryCounts.pendingSends,
         inflightProofs: recoveryCounts.inflightProofs,
         pendingMints: recoveryCounts.pendingMints,
         failedMintQuotes: recoveryFailedMintQuotes,
-        ...(recoveryError ? { error: recoveryError } : {}),
+        ...(recoveryState.status === "failed" ? { error: recoveryState.error } : {}),
       };
     },
 
@@ -2345,61 +2388,69 @@ export async function createCocoClient(
       return waitForReceive(recoveryOutstanding, hashReceiveToken(token), async () => {
       const reservation = reserveReceiveToken(database, token);
       if (!reservation.acquired) {
-        if (reservation.existing?.state === "succeeded") {
-          return "Token already received successfully";
+        // `existing` is always present when the reservation was not acquired.
+        const existing = reservation.existing;
+        if (!existing) {
+          // Defensive: the row vanished between INSERT OR IGNORE and SELECT.
+          throw new Error("Token receive reservation is in an unknown state");
         }
-        if (
-          reservation.existing?.state === "processing" &&
-          reservation.existing.operationId
-        ) {
-          // A prior request may have stopped after the mint call became
-          // uncertain. Re-drive that one Coco operation instead of creating a
-          // duplicate. Refresh is idempotent and uses its stored output data.
-          try {
-            const operation = await withTimeout(
-              coco.ops.receive.refresh(reservation.existing.operationId),
-              15_000,
-            );
-            if (operation.state === "finalized") {
-              updateReceiveToken(database, reservation.tokenHash, {
-                state: "succeeded",
-                operationId: operation.id,
-              });
-              return "Token received successfully";
-            }
-            if (operation.state === "rolled_back") {
-              const finalizedSibling = await findFinalizedReceiveSibling(operation);
-              if (finalizedSibling) {
+        const phase = receiveReservationPhase(existing);
+        switch (phase.phase) {
+          case "succeeded":
+            return "Token already received successfully";
+          case "in-flight": {
+            // A prior request may have stopped after the mint call became
+            // uncertain. Re-drive that one Coco operation instead of creating a
+            // duplicate. Refresh is idempotent and uses its stored output data.
+            const operationId = phase.operationId;
+            try {
+              const operation = await withTimeout(
+                coco.ops.receive.refresh(operationId),
+                15_000,
+              );
+              if (operation.state === "finalized") {
                 updateReceiveToken(database, reservation.tokenHash, {
                   state: "succeeded",
-                  operationId: finalizedSibling,
+                  operationId: operation.id,
                 });
-                return "Token already received successfully";
+                return "Token received successfully";
               }
-              updateReceiveToken(database, reservation.tokenHash, {
-                state: "failed",
-                operationId: operation.id,
-                error: operation.error || "Token receive was rolled back",
-              });
-              throw new Error(operation.error || "Token receive was rolled back");
+              if (operation.state === "rolled_back") {
+                const finalizedSibling = await findFinalizedReceiveSibling(operation);
+                if (finalizedSibling) {
+                  updateReceiveToken(database, reservation.tokenHash, {
+                    state: "succeeded",
+                    operationId: finalizedSibling,
+                  });
+                  return "Token already received successfully";
+                }
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "failed",
+                  operationId: operation.id,
+                  error: operation.error || "Token receive was rolled back",
+                });
+                throw new Error(operation.error || "Token receive was rolled back");
+              }
+            } catch (error) {
+              const latest = await coco.ops.receive.get(operationId);
+              if (latest?.state === "finalized") {
+                updateReceiveToken(database, reservation.tokenHash, {
+                  state: "succeeded",
+                  operationId: latest.id,
+                });
+                return "Token received successfully";
+              }
+              throw error;
             }
-          } catch (error) {
-            const latest = await coco.ops.receive.get(reservation.existing.operationId);
-            if (latest?.state === "finalized") {
-              updateReceiveToken(database, reservation.tokenHash, {
-                state: "succeeded",
-                operationId: latest.id,
-              });
-              return "Token received successfully";
-            }
-            throw error;
+            throw new Error("Token receive is still unresolved");
           }
-          throw new Error("Token receive is still unresolved");
+          case "reserved":
+            // A claim exists but no Coco operation was ever prepared: another
+            // request is mid-prepare right now.
+            throw new Error("Token receive is already in progress");
+          case "failed":
+            throw new Error(phase.error || "Token receive previously failed");
         }
-        if (reservation.existing?.state === "processing") {
-          throw new Error("Token receive is already in progress");
-        }
-        throw new Error(reservation.existing?.error || "Token receive previously failed");
       }
 
       let preparedOperationId: string | undefined;

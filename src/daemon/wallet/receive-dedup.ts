@@ -21,6 +21,59 @@ export interface ReceiveTokenReservation {
   existing?: StoredReceiveTokenRow;
 }
 
+/**
+ * A receive reservation, classified.
+ *
+ * The table stores `state` and a nullable `operationId`, which together describe
+ * four distinct situations. Only three were named: `processing` covered both
+ * "a live attempt is driving a Coco operation" and "a previous process died
+ * before recording one", and the difference was carried by a bare
+ * `if (!reservation.operationId) continue` inside the reconciler.
+ *
+ * The classification carries the data each phase guarantees, so a caller that
+ * needs the operation id cannot read it without having proved it exists:
+ *
+ *  - `reserved`   — claimed, no Coco operation handed to a mint yet.
+ *  - `in-flight`  — a Coco operation exists and can be re-driven idempotently.
+ *  - `succeeded`  — credited; duplicate submissions must answer success.
+ *  - `failed`     — not credited; `error` says why.
+ */
+export type ReceiveReservationPhase =
+  | { phase: "reserved" }
+  | { phase: "in-flight"; operationId: string }
+  | { phase: "succeeded"; operationId: string | null }
+  | { phase: "failed"; operationId: string | null; error: string | null };
+
+/**
+ * Classify a stored row.
+ *
+ * `reserved` is the only phase with no operation id, and the only one safe to
+ * retry from scratch: nothing was handed to a mint under that claim.
+ */
+export function receiveReservationPhase(
+  row: StoredReceiveTokenRow,
+): ReceiveReservationPhase {
+  switch (row.state) {
+    case "succeeded":
+      return { phase: "succeeded", operationId: row.operationId };
+    case "failed":
+      return { phase: "failed", operationId: row.operationId, error: row.error };
+    case "processing":
+      // `processing` without an operation id means the claim was written but
+      // the process died before (or while) preparing the Coco operation.
+      return row.operationId
+        ? { phase: "in-flight", operationId: row.operationId }
+        : { phase: "reserved" };
+  }
+}
+
+/** Whether the row's state-changing work is already owned by a Coco operation. */
+export function isReceiveReservationReplayable(
+  row: StoredReceiveTokenRow,
+): row is StoredReceiveTokenRow & { operationId: string } {
+  return receiveReservationPhase(row).phase === "in-flight";
+}
+
 export interface ReceiveReconcileResult {
   executing: number;
   uniqueGroups: number;
