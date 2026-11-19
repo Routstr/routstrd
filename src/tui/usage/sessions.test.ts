@@ -393,3 +393,17 @@ test("Bunkhouse state root discovers fixed bot/group layouts and new groups on r
   expect(warnings.join()).toContain("results incomplete");
  } finally { SOURCE_DISCOVERY_LIMITS.directories=old; }
 });
+
+test("a key consumed by the Sessions view still cancels a half-typed gg", async () => {
+  // Regression for the merge of main's explicit motion-prefix state into the
+  // Sessions key handler: `clearPendingMotion()` has to run BEFORE the view
+  // claims the key, otherwise `g`, <sessions key>, `g` reads as a completed
+  // `gg` instead of two separate `g` presses. Assert on the handler order in
+  // source, since the dispatch loop itself lives inside a stdin callback.
+  const source = await Bun.file(join(import.meta.dir, "app.ts")).text();
+  const clearAt = source.indexOf("if (key !== \"g\") clearPendingMotion();");
+  const sessionsAt = source.indexOf("if (sessionsKey(sessionsView, key))");
+  expect(clearAt).toBeGreaterThan(-1);
+  expect(sessionsAt).toBeGreaterThan(-1);
+  expect(clearAt).toBeLessThan(sessionsAt);
+});

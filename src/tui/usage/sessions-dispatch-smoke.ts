@@ -1,6 +1,6 @@
 /** Isolated full-app dispatch regression harness, run by sessions.test.ts. */
 import { mock } from "bun:test";
-import { vimState } from "./state.ts";
+import { isSearching, vimState } from "./state.ts";
 const data = await import("./data.ts");
 mock.module("./data.ts", () => ({ ...data, isDaemonRunning: async () => true,
  fetchUsageSummary: async () => null, fetchBalance: async () => null,
@@ -34,7 +34,7 @@ for (const key of ["/", "?"]) {
  receive("\x1b[H");
  if (vimState.scrollPos !== 0) throw Error("request scroll-to-top failed");
  receive(key); receive("\x1b");
- if (vimState.isSearching) throw Error("Sessions leaked global search");
+ if (isSearching()) throw Error("Sessions leaked global search");
  receive("7");
  if (!output.includes("Could not fetch usage data")) throw Error("tab switch failed");
  receive("6");

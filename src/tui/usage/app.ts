@@ -9,7 +9,10 @@ import type { Tab } from "./types.ts";
 import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchMonthlyQuota, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type MonthlyQuota, type NpubEntry, type StatusInfo } from "./data.ts";
 import {
   applyScrollToContent,
+  clearPendingMotion,
+  consumeMotionPrefix,
   exitSearchMode,
+  isSearching,
   nextSearchResult,
   pageDown,
   pageUp,
@@ -260,13 +263,19 @@ export async function runUsageTui(): Promise<void> {
   }
 
   const handleKey = (key: string) => {
+    // Any key that is not `g` cancels a half-typed `gg`, so a prefix cannot
+    // linger and complete against an unrelated later press. This runs before
+    // the Sessions handler so keys the Sessions tab consumes also cancel a
+    // pending prefix, rather than letting `g`, <sessions key>, `g` still read
+    // as `gg`.
+    if (key !== "g") clearPendingMotion();
     if (currentTab === "sessions" && key !== "\x03") {
       if (sessionsKey(sessionsView, key)) { vimState.scrollPos = sessionsView.detail ? vimState.scrollPos : 0; render(); return; }
       if (key === "m" || key === "M") { sessionsView.limit = Math.min(200, sessionsView.limit + 20); loadSessions(true); render(); return; }
     }
     // Sessions owns its filter; request search must never capture its keys.
     if (currentTab === "sessions" && (key === "/" || key === "?")) return;
-    if (vimState.isSearching) {
+    if (isSearching()) {
       if (key === "\x1b" || key === "\x1b[3~") {
         exitSearchMode();
         render();
@@ -354,14 +363,11 @@ export async function runUsageTui(): Promise<void> {
     if (currentTab === "sessions") loadSessions();
 
     if (key === "g") {
-      if (vimState.lastKey === "g" && Date.now() - vimState.lastKeyTime < 300) {
+      if (consumeMotionPrefix("g")) {
         scrollToBottom();
-        vimState.lastKey = "";
         render();
         return;
       }
-      vimState.lastKey = "g";
-      vimState.lastKeyTime = Date.now();
       scrollToTop();
       render();
       return;
