@@ -84,6 +84,9 @@ export async function createNIP98Authorization(
   const tags = [
     ["u", url],
     ["method", method.toUpperCase()],
+    // Event ids exclude the signature. Give identical same-second requests
+    // distinct signed ids so single-use NIP-98 replay guards can distinguish them.
+    ["nonce", crypto.randomUUID()],
   ];
 
   if (body && body.byteLength > 0) {

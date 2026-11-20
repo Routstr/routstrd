@@ -701,3 +701,10 @@ The hidden-input example uses Bash. Alternatively, pass `--bootstrap-token <toke
 registration POST and is not saved by the CLI. It is consumed by the proxy after
 successful first registration. Later users must be added by an existing admin
 with `routstrd npubs add`; NIP-98 alone cannot claim the first admin.
+
+Remote NIP-98 requests include a fresh random `nonce` tag before signing, so
+identical requests within the same second have distinct event IDs. Treat each
+signed Authorization header as single-use; a replay-protected proxy may reject
+reuse. The extra tag is compatible with validators that ignore unknown tags.
+This is not operation-level idempotency: freshly signing a retry of a wallet
+operation can execute it again if the original response was lost.
