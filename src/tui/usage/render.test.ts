@@ -379,9 +379,9 @@ describe("renderRecent token bars", () => {
     const out = renderRecent(stats, 120, buildClientNaming([], []));
 
     // 9000 cache read / 1000 not cached out of 10K input on a 20-cell track.
-    expect(out).toContain(COLORS.green + "█".repeat(18) + COLORS.red + "█".repeat(2) + COLORS.reset);
-    // No blue (output) segment: output is reported as the second number.
-    expect(out).not.toContain(COLORS.blue + "█");
+    expect(out).toContain(COLORS.cyan + "█".repeat(18) + COLORS.blue + "█".repeat(2) + COLORS.reset);
+    // No estimated-miss segment without session context; output stays numeric.
+    expect(out).not.toContain(COLORS.red + "█");
     // IN and OUT are pinned to opposite ends of the column.
     expect(stripAnsi(out)).toContain("10.0K - 2.5K");
     expect(stripAnsi(out)).toContain("IN    -  OUT");
