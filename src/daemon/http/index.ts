@@ -1,6 +1,7 @@
 import { readSessionIdentity, withSessionIdentity } from "./session-identity";
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
+import { executeLightningOperation, LightningRequestError } from "./lightning-payments";
 import { randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
@@ -10,6 +11,7 @@ import {
   shouldTrackRequestLifecycle,
   InsufficientBalanceError,
   ProviderManager,
+  LightningPaymentError,
 } from "@routstr/sdk";
 import type { RequestLifecycleDriver, UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
@@ -231,7 +233,14 @@ function respondWithError(
     sendJson(res, error.status, { error: error.message });
     return;
   }
-
+  if (error instanceof LightningRequestError) {
+    sendJson(res, error.status, { error: error.message });
+    return;
+  }
+  if (error instanceof LightningPaymentError) {
+    sendJson(res, error.status, { error: error.message, detail: error.detail });
+    return;
+  }
   sendJson(res, fallbackStatus, { error: toErrorMessage(error) });
 }
 
@@ -668,6 +677,17 @@ export function createDaemonRequestHandler(deps: {
       (req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() !== "application/json"
     ) {
       sendJson(res, 415, { error: "Content-Type must be application/json." });
+      return;
+    }
+
+    const lightningAction = /^\/payments\/lightning\/(create|topup|status|recover|refund|invoices)$/.exec(url.pathname)?.[1];
+    if (req.method === "POST" && lightningAction) {
+      try {
+        const output = await executeLightningOperation(lightningAction, await readJsonBody(req), deps.storageAdapter);
+        sendJson(res, 200, { output });
+      } catch (error) {
+        respondWithError(res, error);
+      }
       return;
     }
 
@@ -1630,13 +1650,19 @@ export function createDaemonRequestHandler(deps: {
       try {
         let baseUrl: string | undefined;
         let mintUrl: string | undefined;
+        // `force` removes the key even when the refund fails (e.g. the provider
+        // is gone for good). Without it a failed refund keeps the credential.
+        let force = false;
         if (req.method === "DELETE") {
           baseUrl = url.searchParams.get("baseUrl") || undefined;
           mintUrl = url.searchParams.get("mintUrl") || undefined;
+          const forceParam = url.searchParams.get("force");
+          force = forceParam === "1" || forceParam === "true";
         } else {
           const body = await readJsonBody(req);
           baseUrl = getRequiredStringField(body, "baseUrl");
           mintUrl = body.mintUrl as string | undefined;
+          force = body.force === true;
         }
         if (!baseUrl) {
           sendJson(res, 400, {
@@ -1697,7 +1723,16 @@ export function createDaemonRequestHandler(deps: {
           refundMessage = "No mint available to refund to";
         }
 
-        // refundApiKey removes the key on success; remove manually on failure.
+        // A failed/ambiguous refund retains the credential for recovery unless
+        // the caller explicitly forces removal. refundApiKey removes the key on
+        // success.
+        if (!refunded && !force) {
+          sendJson(res, 409, {
+            output: { baseUrl: existing.baseUrl, removed: false, refunded: false, refundMessage },
+            error: `${refundMessage || "Refund failed"}; API key retained (use force to remove anyway)`,
+          });
+          return;
+        }
         if (!refunded) {
           deps.storageAdapter.removeApiKey(existing.baseUrl);
         }

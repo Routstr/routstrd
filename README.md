@@ -682,3 +682,46 @@ MIT
 ## Request lifecycle logs
 
 `routstrd logs` shows one persistent summary per inference request, including retries and failures. Use `logs -v` for safe chronological diagnostics, or `logs --raw` for legacy flat logs. See [lifecycle logs and APIs](docs/request-lifecycle-logs.md) for filters, compatibility and SDK prerequisites.
+
+### Provider Lightning payments
+
+Explicit Lightning funding is separate from the default Cashu automatic top-up flow:
+
+```sh
+routstrd payments-lightning create https://provider.example/ 100
+# Pay the returned BOLT11 with an external Lightning wallet, then:
+routstrd payments-lightning status https://provider.example/ <invoice-id>
+routstrd payments-lightning topup https://provider.example/ 100
+routstrd payments-lightning status https://provider.example/ <topup-invoice-id>
+routstrd payments-lightning refund https://provider.example/ alice@example.com
+```
+
+`status` imports a paid key or refreshes the existing key's balance. It refuses to
+replace a different stored key. `recover <provider> <bolt11>` recovers settlement
+from an invoice; `invoices` lists the recovery credentials saved under
+`~/.routstrd/lightning-invoices/` (directory 0700, files 0600). Treat the invoice
+IDs and BOLT11s as secrets: provider status/recovery can return spend-capable keys.
+Save the output yourself if the journal write reports a warning.
+
+No automatic Lightning/NWC spending occurs. Invoice creation needs a provider
+supporting `/v2/lightning`; a provider 404 is surfaced without retry/fallback.
+A timeout is not proof that an invoice or refund failed remotely. Recheck invoice
+status or recover by BOLT11 rather than paying another invoice blindly.
+
+Lightning refunds pay the available balance to the explicit address, minus a
+Lightning fee reserve the provider keeps on the key; they do not deposit Cashu
+into the local wallet. The output reports `sats` paid, `fee_msats`, and, when a
+reserve was kept, `remaining_sats` with a note. Repeating the refund replays the
+same claim (same `refund_id`) instead of paying the reserve, so sweep it with a
+Cashu refund: `routstrd balance --delete-api-keys <provider>`. The key is
+retained after a Lightning refund so provider claim results can be recovered.
+An unresolved refund stays recoverable; it must not trigger key deletion.
+
+`status`/`recover` store the provider key and only echo a masked form of it.
+
+`balance --delete-api-keys` keeps the key when its Cashu refund fails, so the
+balance stays recoverable. Add `--force` to remove it anyway (for a provider
+that is gone for good); this forfeits the remaining balance.
+
+Do not run refunds while requests/top-ups are active; the provider rejects active
+reservations and owns refund reconciliation.
