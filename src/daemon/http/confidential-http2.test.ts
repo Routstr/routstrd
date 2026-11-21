@@ -62,12 +62,14 @@ describe("confidentialUpstream.http2 → SDK http2 options", () => {
     expect(o.maxRequestsPerConnection).toBeUndefined();
   });
 
-  test("logs through the sink it is given, so the lines carry the request id", () => {
+  test("onRequest logs through the request's sink; the pool's log does not", () => {
     const lines: string[] = [];
     const o = confidentialHttp2Options({}, (m) => lines.push(m));
     o.log("connection opened");
     o.onRequest({ status: 200, reused: true });
-    expect(lines).toEqual(["connection opened", `[confidential] request ${"{\"status\":200,\"reused\":true}"}`]);
+    // The SDK keeps one pool per process and each request's options replace the
+    // last ones, so the pool's lines must not carry one request's id.
+    expect(lines).toEqual([`[confidential] request ${"{\"status\":200,\"reused\":true}"}`]);
   });
 });
 

@@ -2789,10 +2789,14 @@ export function createDaemonRequestHandler(deps: {
               : {}),
             http: confidentialFraming(confidentialConfig.http),
             maxConnectionDepositMsat: confidentialMaxDeposit(confidentialConfig),
-            // The callbacks below run inside this request's session, so their
-            // lines carry its `[req:<id>]` prefix like every other line of it
-            // (a bare `logger.log` would leave them out of `logs -i <id>`).
-            prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm, (m) => reqLogger.log(m)),
+            // `onRequest` runs for this request only, so its line carries the
+            // request's `[req:<id>]` prefix (a bare `logger.log` would leave it
+            // out of `logs -i <id>`). The pool's own `log` stays on the daemon
+            // logger: the SDK keeps one pool per process, and each request's
+            // options replace the last ones, so a request's logger there would
+            // label later background lines (idle closes, pre-warming for other
+            // keys) with whichever request came last.
+            prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
             http2: confidentialHttp2Options(confidentialConfig.http2, (m) => reqLogger.log(m)),
             // Which requests may share a connection to the provider (per request).
             reuseScope: confidentialReuseScope(confidentialConfig.http2?.reuse, req),
@@ -3162,7 +3166,7 @@ export function noteOutdatedNode(baseUrl: string, nodeVersion: number, now = Dat
  */
 export function confidentialHttp2Options(
   cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["http2"],
-  log: (message: string) => void = (message) => logger.log(message)
+  requestLog: (message: string) => void = (message) => logger.log(message)
 ): {
   reuse: "shared" | "none";
   maxConnectionsPerKey?: number;
@@ -3185,9 +3189,9 @@ export function confidentialHttp2Options(
     maxConnections: count(cfg?.maxTotal),
     maxIdleMs: seconds !== undefined ? Math.max(seconds, 1) * 1000 : undefined,
     maxRequestsPerConnection: count(cfg?.maxRequestsPerConnection),
-    log,
+    log: (message: string) => logger.log(message),
     // Where each request ran and what it cost on the wire (no content, no credentials).
-    onRequest: (stats: object) => log(`[confidential] request ${JSON.stringify(stats)}`),
+    onRequest: (stats: object) => requestLog(`[confidential] request ${JSON.stringify(stats)}`),
   };
 }
 
@@ -3196,8 +3200,7 @@ export function confidentialHttp2Options(
  * options (undefined = pre-warming off). On by default.
  */
 export function confidentialPrewarmOptions(
-  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["prewarm"],
-  log: (message: string) => void = (message) => logger.log(message)
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["prewarm"]
 ):
   | {
       enabled: boolean;
@@ -3221,6 +3224,6 @@ export function confidentialPrewarmOptions(
     // deposits) every tick.
     maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
     maxDepositMsat: num(cfg?.maxDepositMsat),
-    log,
+    log: (message: string) => logger.log(message),
   };
 }
