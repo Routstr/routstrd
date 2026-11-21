@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { logger } from "../../utils/logger";
 import {
   confidentialErrorStatus,
   confidentialFraming,
@@ -188,6 +189,24 @@ describe("confidentialUpstream.padBucket and the warning sink", () => {
     expect(confidentialPadBucket({ padBucket: "pow2" } as never)).toBe("pow2");
     for (const bad of [0, 15, -1, 1.5, "4096", null, true]) {
       expect(confidentialPadBucket({ padBucket: bad as never })).toBeUndefined();
+    }
+  });
+
+  test("an invalid padBucket is said once per value, a valid one never", () => {
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      confidentialPadBucket({ padBucket: "4096" as never });
+      confidentialPadBucket({ padBucket: "4096" as never });
+      confidentialPadBucket({ padBucket: 8 });
+      confidentialPadBucket({ padBucket: 4096 });
+      confidentialPadBucket({ padBucket: "pow2" } as never);
+      confidentialPadBucket({});
+      expect(warn.mock.calls.map((c) => c[0])).toEqual([
+        '[confidential] padBucket "4096" is not an integer of at least 16 or "pow2": bodies are not padded',
+        '[confidential] padBucket 8 is not an integer of at least 16 or "pow2": bodies are not padded',
+      ]);
+    } finally {
+      warn.mockRestore();
     }
   });
 

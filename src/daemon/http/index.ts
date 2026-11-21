@@ -2802,7 +2802,10 @@ export function createDaemonRequestHandler(deps: {
             reuseScope: confidentialReuseScope(confidentialConfig.http2?.reuse, req),
             padBucket: confidentialPadBucket(confidentialConfig),
             onNodeProtocolOutdated: noteOutdatedNode,
-            onWarning: confidentialWarningSink((...args) => reqLogger.warn(...args)),
+            // A connection keeps the sink it was opened with and warns when it
+            // ends (its deposit outcome), after later requests on it or as a
+            // spare another request claimed: the daemon logger, like the pool's log.
+            onWarning: confidentialWarningSink(),
           }
         : undefined;
 
@@ -3089,15 +3092,23 @@ export function confidentialMaxDeposit(
 /**
  * `confidentialUpstream.padBucket` → the SDK's body-size bucket: an integer of
  * at least 16 bytes, or `"pow2"`. Off when unset; any other value also leaves
- * it off (the SDK would refuse every request with it).
+ * it off (the SDK would refuse every request with it), with one warning.
  */
 export function confidentialPadBucket(
   cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
 ): number | "pow2" | undefined {
   const v = cfg.padBucket as unknown;
-  if (v === "pow2") return v;
-  return typeof v === "number" && Number.isSafeInteger(v) && v >= 16 ? v : undefined;
+  if (v === undefined || v === "pow2") return v;
+  if (typeof v === "number" && Number.isSafeInteger(v) && v >= 16) return v;
+  // Said once per value: a user who meant to pad would otherwise not know.
+  const shown = JSON.stringify(v) ?? String(v);
+  if (shown !== badPadBucketLogged) {
+    badPadBucketLogged = shown;
+    logger.warn(`[confidential] padBucket ${shown} is not an integer of at least 16 or "pow2": bodies are not padded`);
+  }
+  return undefined;
 }
+let badPadBucketLogged: string | undefined;
 
 /** Where the SDK's connection warnings go: one line at warn level. */
 export function confidentialWarningSink(
