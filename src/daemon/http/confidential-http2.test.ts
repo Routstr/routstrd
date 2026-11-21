@@ -61,6 +61,14 @@ describe("confidentialUpstream.http2 → SDK http2 options", () => {
     expect(o.maxIdleMs).toBeUndefined();
     expect(o.maxRequestsPerConnection).toBeUndefined();
   });
+
+  test("logs through the sink it is given, so the lines carry the request id", () => {
+    const lines: string[] = [];
+    const o = confidentialHttp2Options({}, (m) => lines.push(m));
+    o.log("connection opened");
+    o.onRequest({ status: 200, reused: true });
+    expect(lines).toEqual(["connection opened", `[confidential] request ${"{\"status\":200,\"reused\":true}"}`]);
+  });
 });
 
 describe("the connection deposit maximum", () => {
