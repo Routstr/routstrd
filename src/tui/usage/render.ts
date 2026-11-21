@@ -753,7 +753,7 @@ function truncateNpub(npub: string): string {
 
 /**
  * Token breakdown of a single request, split the way the TUI colours it:
- * input read from the prompt cache (green) vs input that was not (red,
+ * input read from the prompt cache (cyan) vs input that was not (blue,
  * i.e. cache writes plus uncached input), plus output tokens.
  */
 export interface TokenSegments {
@@ -853,13 +853,31 @@ export function renderStackedBar(segments: BarSegment[], trackWidth: number): st
 
 /** Colour coding for the Recent tab's cache-hit bars. */
 const TOKEN_BAR_COLORS = {
-  cacheRead: COLORS.green,
-  notCached: COLORS.red,
+  cacheRead: COLORS.cyan,
+  notCached: COLORS.blue,
 };
 
 export function renderRecent(stats: UsageStats, width: number, naming: ClientNaming): string {
-  const recentEntries = stats.entries.slice(0, 50);
-  if (recentEntries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
+  if (stats.entries.length === 0) return renderBox(["No recent entries"], width, "Recent Requests");
+  const entries = stats.entries.slice(0, 50) as RequestTableEntry[];
+  const coverage = entries.filter(e => e.estimatedMissedTokens !== undefined).length;
+  return renderRequestTable(entries, width, naming, `Recent Requests (${stats.entries.length} shown)`) +
+    "\n" + renderBox([
+      `Pi miss estimates: ${coverage}/${entries.length} eligible exact matches (local bounded transcripts).`,
+      "Blue = uncached, no identified miss; not proven zero.",
+    ], width);
+}
+
+/** Shared request UI for Recent and session-scoped history; unknown cells stay explicit. */
+export type RequestTableEntry = Omit<UsageStats["entries"][number], "satsCost" | "promptTokens" | "completionTokens"> & {
+  /** Session-sequence estimate; absent when no predecessor context is available. */
+  estimatedMissedTokens?: number;
+  satsCost: number | null;
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+export function renderRequestTable(recentEntries: RequestTableEntry[], width: number, naming: ClientNaming, title = "Recent Requests"): string {
+  if (recentEntries.length === 0) return renderBox(["No recent entries"], width, title);
 
   const timeCol = 8;
   const costCol = 12;
@@ -893,12 +911,14 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
 
   // Token counts are drawn as `IN - OUT` with IN pinned to the left edge of the
   // column and OUT to the right, so both halves need the widest value on show.
-  const tokenRows = recentEntries.map((entry) => tokenSegments(entry));
-  const inputTexts = tokenRows.map((row) => formatNumber(row.input));
+  const tokenRows = recentEntries.map((entry) => tokenSegments({ ...entry, promptTokens: entry.promptTokens ?? undefined, completionTokens: entry.completionTokens ?? undefined }));
+  const inputTexts = tokenRows.map((row, i) => recentEntries[i]!.promptTokens === null ? "—" : formatNumber(row.input));
   // `outputImages` arrives with SDK versions that persist the node's
   // X-Routstr-Image-Count; older entries simply lack it.
   const outputTexts = tokenRows.map((row, i) =>
-    formatOutput(row, (recentEntries[i] as { outputImages?: number }).outputImages)
+    recentEntries[i]!.completionTokens === null
+      ? "—"
+      : formatOutput(row, (recentEntries[i] as { outputImages?: number }).outputImages)
   );
   const inputCol = Math.max(...inputTexts.map((text) => text.length));
   const outputCol = Math.max(...outputTexts.map((text) => text.length));
@@ -955,14 +975,17 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     const time = formatTime(entry.timestamp).slice(0, 8);
     const model = entry.modelId.slice(0, modelCol).padEnd(modelCol);
     const segments = tokenRows[i]!;
+    const missed = Math.min(segments.notCached, Math.max(0, entry.estimatedMissedTokens ?? 0));
     const bar = renderStackedBar([
       { value: segments.cacheRead, color: TOKEN_BAR_COLORS.cacheRead },
-      { value: segments.notCached, color: TOKEN_BAR_COLORS.notCached },
-    ], barWidth);
-    const tokens = `${bar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;
+      { value: segments.notCached - missed, color: TOKEN_BAR_COLORS.notCached },
+      { value: missed, color: COLORS.reset + COLORS.red },
+    ], entry.promptTokens === null ? 0 : barWidth);
+    const cacheBar = entry.promptTokens === null ? "—".padEnd(barWidth) : bar;
+    const tokens = `${cacheBar} ${inputTexts[i]!.padEnd(inputCol)} - ${outputTexts[i]!.padStart(outputCol)}`;
     const totalSats = typeof entry.totalMsats === "number" ? entry.totalMsats / 1000 : entry.satsCost;
     // Right-aligned so the `sats` unit ends at the same column on every row.
-    const cost = `${formatCost(totalSats)} sats`.padStart(costCol);
+    const cost = (totalSats === null ? "— sats" : `${formatCost(totalSats)} sats`).padStart(costCol);
     // `base:provider` keeps its informative halves — the URL's tail from its
     // first dot on (`.fips:28080/`, a tunnel host) and the `:provider` the
     // request actually went to — and elides only the opaque label in front of
@@ -985,7 +1008,7 @@ export function renderRecent(stats: UsageStats, width: number, naming: ClientNam
     ].join(" "));
   }
 
-  return renderBox(lines, width, `Recent Requests (${stats.entries.length} shown)`);
+  return renderBox(lines, width, title);
 }
 
 export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: BalanceInfo | null, status: StatusInfo | null, width: number, naming: ClientNaming, activeWindow: TimeWindow, height?: number, quota: MonthlyQuota | null = null): string {
@@ -996,6 +1019,7 @@ export function renderTabContent(activeTab: TabId, stats: UsageStats, balance: B
     case "providers": return renderProviders(stats, width);
     case "clients": return renderClients(stats, width);
     case "npubs": return renderNpubs(stats, naming, width);
+    case "sessions": return "Sessions loading…";
     case "recent": return renderRecent(stats, width, naming);
     default: return "Unknown tab";
   }

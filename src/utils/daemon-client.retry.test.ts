@@ -14,7 +14,7 @@ async function runCase(config: object, action: string, responses: number[]) {
       const responses = ${JSON.stringify(responses)};
       const requests = [];
       globalThis.fetch = async (url, init) => {
-        requests.push({ url: String(url), method: init?.method ?? "GET" });
+        requests.push({ url: String(url), method: init?.method ?? "GET", token: new Headers(init?.headers).get("x-routstr-bootstrap-token") });
         const status = responses.shift();
         if (status === 0) throw new TypeError("Connection reset");
         if (status === undefined) throw new Error("Unexpected request");
@@ -31,7 +31,7 @@ async function runCase(config: object, action: string, responses: number[]) {
     const stderr = await new Response(proc.stderr).text();
     expect(await proc.exited, stderr).toBe(0);
     return JSON.parse(output) as {
-      requests: { url: string; method: string }[];
+      requests: { url: string; method: string; token: string | null }[];
       result?: unknown;
       error?: string;
     };
@@ -69,9 +69,9 @@ describe("daemon loopback retries", () => {
     const r = await runCase(remote, 'callDaemon("/wallet/send/cashu", {method: "POST"})', [0, 200, 200]);
     expect(r.result).toEqual({ output: "ok" });
     expect(r.requests).toEqual([
-      { url: "http://localhost:18008/health", method: "GET" },
-      { url: "http://127.0.0.1:18008/health", method: "GET" },
-      { url: "http://127.0.0.1:18008/wallet/send/cashu", method: "POST" },
+      { url: "http://localhost:18008/health", method: "GET", token: null },
+      { url: "http://127.0.0.1:18008/health", method: "GET", token: null },
+      { url: "http://127.0.0.1:18008/wallet/send/cashu", method: "POST", token: null },
     ]);
   });
 
@@ -100,4 +100,14 @@ describe("daemon loopback retries", () => {
     expect(r.result).toBe(true);
     expect(r.requests).toHaveLength(2);
   });
+});
+
+
+test("bootstrap header is excluded from address-selection health probes", async () => {
+  const r = await runCase(remote,
+    'callAuth("/npubs", {method: "POST", body: {name: "Alice"}, headers: {"x-routstr-bootstrap-token": "test-secret"}})',
+    [0, 200, 200]);
+  expect(r.error).toBeUndefined();
+  expect(r.requests.map(r => r.token)).toEqual([null, null, "test-secret"]);
+  expect(r.requests.map(r => r.method)).toEqual(["GET", "GET", "POST"]);
 });

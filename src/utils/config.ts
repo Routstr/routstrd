@@ -56,7 +56,16 @@ export interface NwcConfig {
   autoRefill?: NwcAutoRefillConfig;
 }
 
+export interface SessionSourceConfig {
+  /** Flat transcript directory, or Bunkhouse state root for bunkhouse-state. */
+  path: string;
+  kind: "pi" | "bunkhouse" | "bunkhouse-state";
+  /** Optional source/group label, distinct from the recorded cwd. */
+  label?: string;
+}
+
 export interface RoutstrdConfig {
+  sessionSources?: SessionSourceConfig[];
   port: number;
   host: string;
   provider: string | null;

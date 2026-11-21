@@ -1,6 +1,6 @@
 {
   "name": "routstrd",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "repository": {
     "type": "git",
     "url": "https://github.com/Routstr/routstrd.git"
@@ -17,6 +17,7 @@
   },
   "files": [
     "dist/index.js",
+    "dist/sessions-worker.ts",
     "dist/daemon/index.js",
     "patches",
     "src",
@@ -33,8 +34,8 @@
     "lint": "tsc --noEmit",
     "test": "bun test",
     "smoke": "scripts/smoke/chat-completions.sh",
-    "build": "bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
-    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts --outfile=dist/routstrd",
+    "build": "bun build src/tui/usage/sessions-worker.ts --target=bun --outfile=dist/sessions-worker.ts && bun build src/index.ts --target=bun --outfile=dist/index.js --external better-sqlite3 && bun build src/daemon/index.ts --target=bun --outfile=dist/daemon/index.js --external better-sqlite3",
+    "build:binary": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/index.ts src/tui/usage/sessions-worker.ts --outfile=dist/routstrd",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
@@ -48,7 +49,7 @@
     "@cashu/cashu-ts": "^4.3.0",
     "@cashu/coco-core": "1.0.1",
     "@cashu/coco-sqlite-bun": "^1.0.1",
-    "@routstr/sdk": "0.5.1",
+    "@routstr/sdk": "0.5.2",
     "@scure/bip39": "^2.2.0",
     "applesauce-core": "^5.1.0",
     "applesauce-relay": "^5.1.0",

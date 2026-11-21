@@ -90,7 +90,7 @@ unfiltered scan but silently omit the online bootstrap after resume.
 
 ## SDK request-funding cancellation
 
-`@routstr/sdk` is pinned to 0.5.1 and is **not patched**. SDK 0.5.1 ships the
+`@routstr/sdk` is pinned to 0.5.2 and is **not patched**. SDK 0.5.1 shipped the
 request-funding cancellation fix from [SDK PR #137](https://github.com/Routstr/routstr-sdk/pull/137)
 natively, so the 0.5.0 dist-only backport (`patches/@routstr%2Fsdk@0.5.0.patch`)
 was removed with this upgrade rather than re-based onto the new dist. Do not

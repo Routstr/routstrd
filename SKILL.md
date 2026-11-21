@@ -388,10 +388,21 @@ from the legacy admin table can appear as `(unnamed)`.
 |---------|-------------|
 | `routstrd npubs whoami` | Print your own npub from the local config; works with no remote node and needs no auth proxy |
 | `routstrd npubs list` | List registered npubs with role, display name, monthly cap and current-month spend |
-| `routstrd npubs register --name <name>` | Register yourself as the first admin (bootstrap only); `--name` is required |
+| `routstrd npubs register --name <name> [--bootstrap-token <token>]` | Register yourself as the first admin (bootstrap only); `--name` is required |
 | `routstrd npubs add <npub> --name <name> [--role <role>] [--limit-sats <sats>]` | Add an npub (accepts hex or npub1...); defaults to the `user` role |
 | `routstrd npubs update <npub> [--role <role>] [--name <name>] [--limit-sats <sats>] [--clear-limit]` | Update role, name and/or monthly spend cap (admin only); a name cannot be cleared |
 | `routstrd npubs delete <npub>` | Delete an npub |
+
+First-admin registration on a hardened auth proxy requires its one-time bootstrap
+token (printed in the proxy startup log, or configured by the operator). Pass
+`--bootstrap-token <token>` or set `ROUTSTRD_AUTH_BOOTSTRAP_TOKEN` in the CLI's
+environment; the flag takes precedence. Prefer the environment variable to avoid
+putting the token in shell history/process arguments. The CLI does not save or
+print it and sends it only with the registration POST, not health probes or other
+management requests. Registration does not list npubs first: the proxy denies
+listing to an unregistered identity, and POST enforces the bootstrap gate.
+After bootstrap, ask an existing admin to use `npubs add` instead. A NIP-98
+signature alone does not replace the bootstrap token.
 
 Every other `npubs` subcommand needs a remote node, because the npub list lives
 on the auth proxy. Without one they exit 1 and print your own npub so you can

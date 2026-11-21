@@ -1,3 +1,9 @@
+import { loadConfig } from "../../utils/daemon-client.ts";
+import { annotateRecent, recentEstimateIndex } from "./recent-estimates.ts";
+import { sessionsWorkerPath } from "./sessions-worker-path.ts";
+import { createSessionsView, renderSessions, sessionsKey, filteredSessions } from "./sessions-view.ts";
+import type { SessionsResult } from "./sessions-data.ts";
+import { truncateAnsi } from "./terminal.ts";
 import { getVisibleTabs } from "./constants.ts";
 import type { Tab } from "./types.ts";
 import { buildClientNaming, emptyClientNaming, fetchBalance, fetchClients, fetchMonthlyQuota, fetchNpubs, fetchStatus, fetchUsageSummary, hasAnyNpubs, isDaemonRunning, type BalanceInfo, type ClientInfo, type ClientNaming, type MonthlyQuota, type NpubEntry, type StatusInfo } from "./data.ts";
@@ -47,6 +53,43 @@ export async function runUsageTui(): Promise<void> {
   const stdout = process.stdout;
   const isInteractive = Boolean(stdout.isTTY && stdin.isTTY);
 
+  const sessionsView = createSessionsView();
+  let sessionsWorker: Worker | undefined;
+  let sessionsLastLoad = 0;
+  let recentEstimates = new Map<string, number>();
+  let estimatesLocal = false;
+  let sessionsReloadQueued = false;
+  function loadSessions(force = false) {
+    if (sessionsView.loading) { if (force) sessionsReloadQueued = true; return; }
+    if (!force && Date.now() - sessionsLastLoad < 10000) return;
+    sessionsView.loading = true;
+    try {
+      if (!sessionsWorker) {
+        sessionsWorker = new Worker(sessionsWorkerPath());
+        sessionsWorker.onmessage = (event: MessageEvent<SessionsResult>) => {
+          const selectedPath = filteredSessions(sessionsView)[sessionsView.selected]?.path;
+          sessionsView.result = event.data;
+          recentEstimates = recentEstimateIndex(event.data.sessions.slice(0, 20));
+          const selected = filteredSessions(sessionsView).findIndex(s => s.path === selectedPath);
+          sessionsView.selected = Math.max(0, selected);
+          sessionsView.loading = false;
+          sessionsLastLoad = Date.now();
+          if (sessionsReloadQueued) { sessionsReloadQueued = false; loadSessions(true); }
+          render();
+        };
+        sessionsWorker.onerror = () => {
+          sessionsView.loading = false;
+          recentEstimates.clear();
+          sessionsView.result = { sessions: [], more: false, error: "Session worker failed; press R to retry" };
+          sessionsWorker?.terminate(); sessionsWorker = undefined; render();
+        };
+      }
+      sessionsWorker.postMessage(sessionsView.limit);
+    } catch (error) {
+      sessionsView.loading = false;
+      sessionsView.result = { sessions: [], more: false, error: String(error) };
+    }
+  }
   let currentTab: TabId = "overview";
   let stats: UsageStats | null = null;
   let balance: BalanceInfo | null = null;
@@ -87,6 +130,7 @@ export async function runUsageTui(): Promise<void> {
     if (cleanedUp) return;
     cleanedUp = true;
     if (refreshInterval) clearInterval(refreshInterval);
+    sessionsWorker?.terminate();
 
     if (isInteractive) {
       stdin.setRawMode?.(false);
@@ -116,6 +160,10 @@ export async function runUsageTui(): Promise<void> {
     }
     fetching = true;
     try {
+      try { const config = await loadConfig(); estimatesLocal = !config.daemonUrl && !config.authUrl; }
+      catch { estimatesLocal = false; }
+      // Independent of visiting Sessions; parsing stays in the bounded worker.
+      if (estimatesLocal || currentTab === "sessions") loadSessions();
       const requestedWindow = windowSelection.currentWindow;
       const running = await isDaemonRunning();
       if (!running) {
@@ -182,7 +230,7 @@ export async function runUsageTui(): Promise<void> {
     const width = getWidth();
     const height = getHeight();
 
-    if (!stats) {
+    if (!stats && currentTab !== "sessions") {
       stdout.write(
         moveCursor(1, 1) +
         eraseDown() +
@@ -194,27 +242,39 @@ export async function runUsageTui(): Promise<void> {
     }
 
     const windowHelp = windowSelection.supportsWindows ? "[W] window" : windowSelection.notice;
-    const footer = `${COLORS.dim}Press [Q] to quit, [R] to refresh, ${windowHelp}, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
-    const chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(windowSelection.currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
+    const footer = currentTab === "sessions" ? `${COLORS.dim}Q quit · R refresh · ←→ tabs · Enter details · Esc back · / filter · M more${COLORS.reset}` : `${COLORS.dim}Press [Q] to quit, [R] to refresh, ${windowHelp}, [A] to toggle auto-refresh${autoRefresh ? " (on)" : " (off)"}  scroll:${vimState.scrollPos}${COLORS.reset}${vimState.mode === "normal" ? `  ${COLORS.yellow}vim: hjkl/arrows, / search, g top, gg bottom${COLORS.reset}` : ""}`;
+    let chrome = renderHeader(currentTab, width, visibleTabs, updateInfo ?? undefined) + renderTabs(currentTab, visibleTabs) + renderWindowBar(windowSelection.currentWindow, currentTab) + renderSeparator(width) + renderSearchBar();
+    if (currentTab === "sessions") chrome = chrome.split("\n").map(line => truncateAnsi(line, width)).join("\n");
     const chromeLines = chrome.split("\n").length - 1;
     const footerSeparator = renderSeparator(width);
     const footerLines = footerSeparator.split("\n").length - 1;
     const contentViewportHeight = Math.max(1, height - chromeLines - footerLines - 1);
 
-    const content = renderTabContent(currentTab, stats, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
-    const visibleContent = applyScrollToContent(content, contentViewportHeight);
+    const content = currentTab === "sessions" ? renderSessions(sessionsView, width, contentViewportHeight, naming).map(line => truncateAnsi(line, width)).join("\n") : renderTabContent(currentTab, stats ? { ...stats, entries: annotateRecent(stats.entries, recentEstimates, estimatesLocal && !sessionsView.loading) as typeof stats.entries } : stats!, balance, status, width, naming, windowSelection.currentWindow, contentViewportHeight, quota);
+    const visibleContent = currentTab === "sessions" && !sessionsView.detail
+      ? content.split("\n").slice(0, contentViewportHeight).join("\n")
+      : applyScrollToContent(content, contentViewportHeight);
     const visibleLines = visibleContent === "" ? 0 : visibleContent.split("\n").length;
     // Pin the footer to the bottom even when a tab's content is short.
     const padLines = Math.max(0, contentViewportHeight - visibleLines);
-    const footerBlock = (visibleContent ? "\n" : "") + "\n".repeat(padLines) + footerSeparator + footer;
+    const footerBlock = (visibleContent ? "\n" : "") + "\n".repeat(padLines) + footerSeparator + (currentTab === "sessions" ? truncateAnsi(footer, width) : footer);
 
     stdout.write(moveCursor(1, 1) + eraseDown() + chrome + visibleContent + footerBlock);
   }
 
   const handleKey = (key: string) => {
     // Any key that is not `g` cancels a half-typed `gg`, so a prefix cannot
-    // linger and complete against an unrelated later press.
+    // linger and complete against an unrelated later press. This runs before
+    // the Sessions handler so keys the Sessions tab consumes also cancel a
+    // pending prefix, rather than letting `g`, <sessions key>, `g` still read
+    // as `gg`.
     if (key !== "g") clearPendingMotion();
+    if (currentTab === "sessions" && key !== "\x03") {
+      if (sessionsKey(sessionsView, key)) { vimState.scrollPos = sessionsView.detail ? vimState.scrollPos : 0; render(); return; }
+      if (key === "m" || key === "M") { sessionsView.limit = Math.min(200, sessionsView.limit + 20); loadSessions(true); render(); return; }
+    }
+    // Sessions owns its filter; request search must never capture its keys.
+    if (currentTab === "sessions" && (key === "/" || key === "?")) return;
     if (isSearching()) {
       if (key === "\x1b" || key === "\x1b[3~") {
         exitSearchMode();
@@ -248,6 +308,7 @@ export async function runUsageTui(): Promise<void> {
 
     if (key === "q" || key === "Q" || key === "\u0003") return cleanup(0);
     if (key === "r" || key === "R") {
+      if (estimatesLocal || currentTab === "sessions") loadSessions(true);
       void fetchData();
       return;
     }
@@ -286,16 +347,20 @@ export async function runUsageTui(): Promise<void> {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
       currentTab = visibleTabs[(currentIdx + 1) % visibleTabs.length]!.id;
       vimState.scrollPos = 0;
+      if (currentTab === "sessions") loadSessions();
       render();
       return;
     }
     if (key === "h" || key === "\x1b[D" || key === "\x1bOD") {
       const currentIdx = visibleTabs.findIndex((t) => t.id === currentTab);
       currentTab = visibleTabs[(currentIdx - 1 + visibleTabs.length) % visibleTabs.length]!.id;
+      if (currentTab === "sessions") loadSessions();
       vimState.scrollPos = 0;
       render();
       return;
     }
+
+    if (currentTab === "sessions") loadSessions();
 
     if (key === "g") {
       if (consumeMotionPrefix("g")) {
@@ -333,6 +398,7 @@ export async function runUsageTui(): Promise<void> {
     const tab = visibleTabs.find((t) => t.key === key);
     if (tab) {
       currentTab = tab.id;
+      if (currentTab === "sessions") loadSessions();
       vimState.scrollPos = 0;
       render();
     }

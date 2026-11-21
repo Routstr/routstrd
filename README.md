@@ -690,3 +690,29 @@ MIT
 ## Request lifecycle logs
 
 `routstrd logs` shows one persistent summary per inference request, including retries and failures. Use `logs -v` for safe chronological diagnostics, or `logs --raw` for legacy flat logs. See [lifecycle logs and APIs](docs/request-lifecycle-logs.md) for filters, compatibility and SDK prerequisites.
+
+### Registering the first remote admin
+
+After configuring a remote with `routstrd remote <url>`, obtain the one-time
+bootstrap token from the auth proxy's startup log (or its operator-configured
+`ROUTSTRD_AUTH_BOOTSTRAP_TOKEN`). Then run:
+
+```sh
+read -rs -p "Bootstrap token: " ROUTSTRD_AUTH_BOOTSTRAP_TOKEN; echo
+export ROUTSTRD_AUTH_BOOTSTRAP_TOKEN
+routstrd npubs register --name "Alice"
+unset ROUTSTRD_AUTH_BOOTSTRAP_TOKEN
+```
+
+The hidden-input example uses Bash. Alternatively, pass `--bootstrap-token <token>`
+(beware shell history and process listings). The token is sent only on the
+registration POST and is not saved by the CLI. It is consumed by the proxy after
+successful first registration. Later users must be added by an existing admin
+with `routstrd npubs add`; NIP-98 alone cannot claim the first admin.
+
+Remote NIP-98 requests include a fresh random `nonce` tag before signing, so
+identical requests within the same second have distinct event IDs. Treat each
+signed Authorization header as single-use; a replay-protected proxy may reject
+reuse. The extra tag is compatible with validators that ignore unknown tags.
+This is not operation-level idempotency: freshly signing a retry of a wallet
+operation can execute it again if the original response was lost.

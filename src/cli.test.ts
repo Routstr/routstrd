@@ -26,7 +26,7 @@ function permissions(path: string): number {
   return statSync(path).mode & 0o777;
 }
 
-type ProxyRequest = { method: string; path: string; search: string; body?: unknown };
+type ProxyRequest = { method: string; path: string; search: string; body?: unknown; headers: Headers };
 
 /** A 64-char hex pubkey; the CLI normalizes it to an npub1... value. */
 const TEST_NPUB = "ab".repeat(32);
@@ -39,6 +39,7 @@ const TEST_NPUB = "ab".repeat(32);
 async function runAgainstProxy(
   args: string[],
   respond: (request: ProxyRequest) => Response,
+  options: { config?: object; env?: Record<string, string> } = {},
 ) {
   const requests: ProxyRequest[] = [];
   const server = Bun.serve({
@@ -54,6 +55,7 @@ async function runAgainstProxy(
         path,
         search: url.search,
         body: raw ? JSON.parse(raw) : undefined,
+        headers: req.headers,
       };
       requests.push(request);
       return respond(request);
@@ -62,11 +64,11 @@ async function runAgainstProxy(
   const dir = makeTempDir();
   writeFileSync(
     join(dir, "config.json"),
-    JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false }),
+    JSON.stringify({ daemonUrl: server.url.origin, updateCheck: false, ...options.config }),
   );
   try {
     const proc = Bun.spawn([process.execPath, join(import.meta.dir, "index.ts"), ...args], {
-      env: { ...process.env, ROUTSTRD_DIR: dir },
+      env: { ...process.env, ROUTSTRD_AUTH_BOOTSTRAP_TOKEN: undefined, ...options.env, ROUTSTRD_DIR: dir },
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -926,5 +928,67 @@ describe("models --all", () => {
     const params = new URLSearchParams(result.requests[0]!.search);
     expect(params.get("all")).toBe("true");
     expect(params.get("refresh")).toBe("true");
+  });
+});
+
+describe("npubs register bootstrap token", () => {
+  const identity = { nsec: nip19.nsecEncode(generateSecretKey()) };
+
+  for (const source of ["flag", "env", "both", "none"] as const) {
+    test(`registers directly with token from ${source}`, async () => {
+      const token = source === "none" ? null : "one-time-test-token";
+      const args = ["npubs", "register", "--name", "Alice"];
+      if (source === "flag" || source === "both") args.push("--bootstrap-token", token!);
+      const result = await runAgainstProxy(args, (req) => {
+        // A hardened proxy denies GET even while its npub table is empty.
+        if (req.method === "GET") return Response.json({ error: "not registered" }, { status: 403 });
+        expect(req.path).toBe("/npubs");
+        expect(req.headers.get("x-routstr-bootstrap-token")).toBe(token);
+        expect(req.headers.get("authorization")).toStartWith("Nostr ");
+        const body = req.body as { npub: string; name: string };
+        expect(body.name).toBe("Alice");
+        expect(body.npub).toStartWith("npub1");
+        return Response.json({ npub: body.npub, name: body.name, added: true });
+      }, {
+        config: identity,
+        env: source === "env" ? { ROUTSTRD_AUTH_BOOTSTRAP_TOKEN: token! }
+          : source === "both" ? { ROUTSTRD_AUTH_BOOTSTRAP_TOKEN: "ignored-env-token" } : {},
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("Successfully registered");
+      expect(result.requests.map(r => r.method)).toEqual(["POST"]);
+      if (token) expect(result.stdout + result.stderr).not.toContain(token);
+    });
+  }
+
+  test("reports a rejected token without claiming success", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "register", "--name", "Alice", "--bootstrap-token", "wrong-token"],
+      () => Response.json({ error: "Bootstrap token required", code: "bootstrap_token_required" }, { status: 403 }),
+      { config: identity },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout + result.stderr).toContain("Bootstrap token required");
+    expect(result.stdout + result.stderr).not.toContain("Successfully registered");
+    expect(result.stdout + result.stderr).not.toContain("wrong-token");
+    expect(result.requests).toHaveLength(1);
+  });
+
+  test("rejects an empty token before making requests", async () => {
+    const result = await runAgainstProxy(
+      ["npubs", "register", "--name", "Alice", "--bootstrap-token", "   "],
+      () => Response.json({}), { config: identity },
+    );
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Bootstrap token must not be empty");
+    expect(result.requests).toHaveLength(0);
+  });
+
+  test("does not attach the environment token to npubs list", async () => {
+    const result = await runAgainstProxy(["npubs", "list"], (req) => {
+      expect(req.headers.has("x-routstr-bootstrap-token")).toBe(false);
+      return Response.json({ npubs: [] });
+    }, { config: identity, env: { ROUTSTRD_AUTH_BOOTSTRAP_TOKEN: "secret-test-token" } });
+    expect(result.exitCode).toBe(0);
   });
 });

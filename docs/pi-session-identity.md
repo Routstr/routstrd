@@ -21,10 +21,14 @@ callers may send a unique value per request. Only nonempty values of at most
 fields are untrusted client labels, not authentication.
 
 Reading session identity does not change the request passed to the SDK router.
-The pinned SDK (0.5.1) does not forward these session headers, but it does
-forward body fields such as `prompt_cache_key`. A client that puts its session
-ID in that field allows the upstream provider to see it. Caller-provided
-cache affinity is preserved; this feature does not anonymize requests.
+The pinned SDK (0.5.2) forwards these session headers to the selected provider,
+and it also forwards body fields such as `prompt_cache_key`. A client that puts
+its session ID in that field allows the upstream provider to see it.
+Caller-provided cache affinity is preserved; this feature does not anonymize
+requests. The forwarded headers are a fixed allowlist (`x-session-id`,
+`session-id`, `session_id`, `x-session-affinity`, `x-opencode-session`,
+`x-client-request-id`); credentials, cookies and any other header are never
+forwarded.
 
 The request-scoped usage driver adds the selected ID to local accounting rows
 without changing the shared driver. `GET /usage` omits the stored session ID.
