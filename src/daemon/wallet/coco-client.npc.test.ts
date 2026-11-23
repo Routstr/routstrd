@@ -6,7 +6,7 @@ import { join } from "path";
 
 import { createCocoClient } from "./coco-client";
 
-// Substitute the plugin per client so these tests never touch npubx.cash and
+// Substitute the plugin per client so these tests never touch npub.cash and
 // transport tests in the same process can still exercise both real builds.
 const npcState = {
   info: { name: "alice" as string | null, pubkey: "ab".repeat(32) },
@@ -16,6 +16,7 @@ const npcState = {
   setUsernameCalls: [] as Array<{ username: string; attemptPayment?: boolean }>,
   syncCalls: 0,
   pluginOptions: [] as Array<{
+    baseUrl: string;
     useWebsocket?: boolean;
     syncIntervalMs?: number;
   }>,
@@ -36,11 +37,12 @@ class MockNPCPlugin {
   };
 
   constructor(
-    _baseUrl: string,
+    baseUrl: string,
     _signer: unknown,
     options?: { useWebsocket?: boolean; syncIntervalMs?: number },
   ) {
     npcState.pluginOptions.push({
+      baseUrl,
       useWebsocket: options?.useWebsocket,
       syncIntervalMs: options?.syncIntervalMs,
     });
@@ -216,11 +218,11 @@ describe("in-process coco client NPC integration", () => {
     const client = await createCocoClient(testClientOptions());
     try {
       expect(npcState.pluginOptions).toEqual([
-        { useWebsocket: true, syncIntervalMs: 5 * 60_000 },
+        { baseUrl: "https://npub.cash", useWebsocket: true, syncIntervalMs: 5 * 60_000 },
       ]);
       const info = await client.getNpcAddress();
       expect(info).toEqual({
-        address: "alice@npubx.cash",
+        address: "alice@npub.cash",
         name: "alice",
         pubkey: "ab".repeat(32),
       });
@@ -235,7 +237,7 @@ describe("in-process coco client NPC integration", () => {
     try {
       const info = await client.getNpcAddress();
       expect(info.address).toStartWith("npub1");
-      expect(info.address).toEndWith("@npubx.cash");
+      expect(info.address).toEndWith("@npub.cash");
       expect(info.name).toBeUndefined();
       expect(info.pubkey).toBe("ab".repeat(32));
     } finally {

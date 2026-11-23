@@ -1094,7 +1094,7 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
-    // ── NPC (npubx.cash) Lightning address endpoints ──────────────
+    // ── NPC Lightning address endpoints ──────────────
 
     if (req.method === "GET" && url.pathname === "/wallet/npc/address") {
       await respond(res, async () => {

@@ -662,6 +662,7 @@ Receive funds via a Cashu token.
 ### `routstrd wallet receive bolt11 <amount>`
 
 Create a Lightning invoice to receive funds. Displays a QR code.
+You can also use `routstrd wallet invoice <amount>`. Enter an amount greater than zero in sats.
 
 | Option | Description |
 |--------|-------------|
@@ -718,7 +719,7 @@ Get info about a specific mint.
 
 ### `routstrd wallet npc`
 
-NPC (npubx.cash) Lightning address operations.
+Manage this wallet's npub.cash Lightning address.
 
 | Command | Description |
 |---------|-------------|

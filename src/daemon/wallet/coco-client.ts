@@ -108,7 +108,7 @@ import {
 
 export { DEFAULT_MINT_URL, DEFAULT_TRUSTED_MINT_URLS } from "./trusted-mints";
 
-const NPC_DEFAULT_BASE_URL = "https://npubx.cash";
+const NPC_DEFAULT_BASE_URL = "https://npub.cash";
 // NPC's websocket push is best-effort: the connection can drop without the
 // plugin noticing, and there is no reconnect-triggered or startup catch-up. Poll
 // the quote list on an interval so paid quotes are never stranded until a manual
@@ -732,9 +732,9 @@ export interface CreateCocoClientOptions {
   /** Override legacy external-cocod coordination paths. */
   legacySocketPath?: string;
   legacyPidPath?: string;
-  /** Set to false to skip NPC (npubx.cash) plugin registration. Default: true. */
+  /** Set to false to skip NPC (npub.cash) plugin registration. Default: true. */
   enableNpc?: boolean;
-  /** NPC server base URL. Default: https://npubx.cash */
+  /** NPC server base URL. Default: https://npub.cash */
   npcBaseUrl?: string;
   /** Override plugin construction without replacing the process-wide module. */
   createNpcPlugin?: (...args: ConstructorParameters<typeof NPCPlugin>) => CocoPlugin;
@@ -2160,7 +2160,7 @@ export async function createCocoClient(
     }
 
     if (options.enableNpc !== false) {
-      startupProgress("Registering NPC (npubx.cash) plugin...");
+      startupProgress(`Registering NPC (${npcAddressDomain}) plugin...`);
       // NPC authenticates with a Nostr key derived from the same wallet seed
       // (NIP-06). The signer only produces JWT auth events for the NPC
       // server; it never signs anything that moves funds by itself.

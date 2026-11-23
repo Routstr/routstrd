@@ -362,6 +362,46 @@ describe("initializeWallet", () => {
   });
 });
 
+describe("wallet invoice shortcut", () => {
+  test("lists invoice creation in wallet help", async () => {
+    const result = await runAgainstProxy(["wallet", "--help"], () => new Response(null, { status: 404 }));
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/invoice \[options\] <amount>\s+Create a Lightning invoice/);
+  });
+
+  test("requires an invoice amount", async () => {
+    const result = await runAgainstProxy(["wallet", "invoice"], () => new Response(null, { status: 404 }));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("missing required argument 'amount'");
+    expect(result.requests).toEqual([]);
+  });
+
+  test("rejects a zero amount before contacting the daemon", async () => {
+    const result = await runAgainstProxy(["wallet", "invoice", "0"], () => new Response(null, { status: 404 }));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("Invalid amount: 0");
+    expect(result.requests).toEqual([]);
+  });
+
+  test("creates and prints the invoice with either receive command", async () => {
+    const invoice = "lnbc1testinvoice";
+    const mintUrl = "https://mint.example";
+    for (const command of [["wallet", "invoice"], ["wallet", "receive", "bolt11"]]) {
+      const result = await runAgainstProxy([...command, "1000", "--mint-url", mintUrl], (request) =>
+        request.path === "/wallet/status"
+          ? Response.json({ output: { state: "UNLOCKED" } })
+          : Response.json({ output: { invoice } }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain(`Invoice:\n${invoice}`);
+      expect(result.requests.filter((request) => request.method === "POST")).toEqual([
+        expect.objectContaining({ path: "/wallet/receive/bolt11", body: { amount: 1000, mintUrl } }),
+      ]);
+    }
+  });
+});
+
 describe("offline settlement confirmation", () => {
   test("refuses non-interactive mark-spent without --yes before contacting the daemon", async () => {
     const proc = Bun.spawn([
