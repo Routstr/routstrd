@@ -96,9 +96,9 @@ export function describeRecoveryState(state: WalletRecoveryState): {
   }
 }
 
-/** NPC (npubx.cash) Lightning address details for this wallet. */
+/** NPC Lightning address details for this wallet. */
 export interface NpcAddress {
-  /** Full Lightning address, e.g. "alice@npubx.cash" (npub fallback when no username is set). */
+  /** Full Lightning address, e.g. "alice@npub.cash" (npub fallback when no username is set). */
   address: string;
   /** NPC username, when one has been claimed. */
   name?: string;
@@ -334,7 +334,7 @@ export interface WalletClient {
   getHistory(offset?: number, limit?: number): Promise<HistoryEntry[]>;
   /** Look up a single transaction by its history entry ID. */
   getHistoryEntryById(id: string): Promise<HistoryEntry | null>;
-  /** NPC (npubx.cash) Lightning address for this wallet. */
+  /** NPC Lightning address for this wallet. */
   getNpcAddress(): Promise<NpcAddress>;
   /** Claim an NPC username; pass confirm=true to pay the claim fee from the wallet. */
   setNpcUsername(username: string, confirm?: boolean): Promise<NpcUsernameResult>;

@@ -719,7 +719,7 @@ Get info about a specific mint.
 
 ### `routstrd wallet npc`
 
-NPC (npubx.cash) Lightning address operations.
+Manage this wallet's npub.cash Lightning address.
 
 | Command | Description |
 |---------|-------------|

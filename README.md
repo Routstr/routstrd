@@ -318,13 +318,13 @@ tokens. Keep the default loopback binding or protect access outside routstrd.
 
 ### NPC (Lightning Address)
 
-The in-process wallet registers the NPC (npubx.cash) plugin, which gives the
+The in-process wallet registers the npub.cash plugin, which gives the
 daemon a persistent Lightning address backed by the wallet's Cashu mints.
 Payments to the address are imported into the wallet automatically (websocket
 push, plus manual sync on demand).
 
 ```sh
-# Show your NPC Lightning address (username@npubx.cash, or npub fallback)
+# Show your Lightning address (username@npub.cash, or npub fallback)
 routstrd wallet npc address
 
 # Claim a username (quote first, then confirm to pay the claim fee from the wallet)

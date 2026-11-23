@@ -225,7 +225,7 @@ describe("legacy cocod wallet migration", () => {
     writeFileSync(join(walletDir, "coco.db"), gunzipSync(fixture));
 
     // NPC is disabled here: this test verifies database migration, and the
-    // real plugin would otherwise open a websocket to npubx.cash.
+    // real plugin would otherwise open a websocket to npub.cash.
     const client = await createCocoClient({
       walletDir,
       legacySocketPath: join(walletDir, "legacy-cocod.sock"),

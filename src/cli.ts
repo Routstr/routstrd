@@ -3665,7 +3665,7 @@ walletMintsCmd
 
 const walletNpcCmd = walletCmd
   .command("npc")
-  .description("NPC (npubx.cash) Lightning address operations");
+  .description("Manage this wallet's npub.cash Lightning address");
 
 walletNpcCmd
   .command("address")
