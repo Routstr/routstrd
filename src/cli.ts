@@ -3491,40 +3491,44 @@ walletReceiveCmd
     });
   });
 
-walletReceiveCmd
-  .command("bolt11 <amount>")
-  .description("Create a Lightning invoice")
-  .option("--mint-url <url>", "Mint URL to use")
-  .action(async (amount: string, options: { mintUrl?: string }) => {
-    await warnIfWalletRecovering();
-    try {
-      await ensureDaemonRunning();
+for (const [parent, name] of [[walletReceiveCmd, "bolt11"], [walletCmd, "invoice"]] as const) {
+  parent
+    .command(name)
+    .argument("<amount>", "Amount in sats (greater than zero)")
+    .description("Create a Lightning invoice")
+    .option("--mint-url <url>", "Mint URL to use")
+    .action(async (amount: string, options: { mintUrl?: string }) => {
+      const sats = parsePositiveIntOrExit(amount, "amount");
+      await warnIfWalletRecovering();
+      try {
+        await ensureDaemonRunning();
 
-      const result = await callDaemon("/wallet/receive/bolt11", {
-        method: "POST",
-        body: {
-          amount: parsePositiveIntOrExit(amount, "amount"),
-          mintUrl: options.mintUrl,
-        },
-      });
+        const result = await callDaemon("/wallet/receive/bolt11", {
+          method: "POST",
+          body: {
+            amount: sats,
+            mintUrl: options.mintUrl,
+          },
+        });
 
-      const output = result.output as
-        | { invoice?: string; amount?: number; mintUrl?: string }
-        | undefined;
+        const output = result.output as
+          | { invoice?: string; amount?: number; mintUrl?: string }
+          | undefined;
 
-      if (typeof output?.invoice === "string" && output.invoice) {
-        await printLightningInvoice(output.invoice);
-        return;
+        if (typeof output?.invoice === "string" && output.invoice) {
+          await printLightningInvoice(output.invoice);
+          return;
+        }
+
+        if (result.output !== undefined) {
+          console.log(JSON.stringify(result.output, null, 2));
+        }
+      } catch (error) {
+        console.error((error as Error).message);
+        process.exit(1);
       }
-
-      if (result.output !== undefined) {
-        console.log(JSON.stringify(result.output, null, 2));
-      }
-    } catch (error) {
-      console.error((error as Error).message);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 const walletSendCmd = walletCmd
   .command("send")
