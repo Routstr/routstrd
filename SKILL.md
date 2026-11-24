@@ -23,10 +23,10 @@ OpenAI-compatible API.
 Initialize routstrd for the first time:
 - Creates `~/.routstrd/` (mode 0700) and `~/.routstrd/config.json` (mode 0600)
   with defaults (port 8008, host 127.0.0.1, apikeys mode)
-- Generates a Nostr identity (`nsec`) for NIP-98 authentication
 - Migrates a legacy `~/.cocod` wallet to `~/.routstrd/wallet` if one is present,
   stopping any running external `cocod` first
 - Initializes the in-process Cashu wallet
+- Keeps the configured NIP-98 identity, or derives one from the wallet mnemonic when available
 - Starts the daemon and configures a client integration
 
 | Option | Description |
@@ -452,8 +452,10 @@ when the proxy reports a cap for your npub.
 
 ### `routstrd remote [url]`
 
-With no URL, print the configured remote daemon. Pass a URL to configure one — a
-Nostr identity (nsec/npub) is generated automatically for NIP-98 authentication.
+With no URL, print the configured remote daemon. Pass a URL to configure one — an
+existing NIP-98 identity is kept. If none exists, the CLI migrates or creates a local
+wallet and derives the identity from its mnemonic (NIP-06 account 0, matching NPC).
+It generates a random identity only if the mnemonic is unavailable.
 
 Before saving, the URL is probed for a routstrd-shaped answer. A URL that only
 serves a web page — a reverse proxy's dashboard, an SPA that returns
