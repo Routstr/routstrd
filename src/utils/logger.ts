@@ -61,6 +61,17 @@ export function resolveLogLevel(
     : fallback;
 }
 
+/**
+ * Text from elsewhere (a node's error message) for one log line: CR, LF and
+ * the other control and line-separator characters are escaped, so the text
+ * cannot end the line and forge another one.
+ */
+export function oneLine(text: unknown): string {
+  return String(text).replace(/[\u0000-\u0008\u000a-\u001f\u007f\u0085\u2028\u2029]/g, (c) =>
+    c === "\n" ? "\\n" : c === "\r" ? "\\r" : `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 export function isLevelEnabled(level: LogLevel, minLevel: LogLevel): boolean {
   return LEVEL_RANK[level] >= LEVEL_RANK[minLevel];
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { createLogger, isLevelEnabled, resolveLogLevel } from "./logger";
+import { createLogger, isLevelEnabled, oneLine, resolveLogLevel } from "./logger";
 
 type Written = { level: string; args: unknown[] };
 
@@ -101,5 +101,17 @@ describe("logger level filter", () => {
     expect(isLevelEnabled("debug", "info")).toBe(false);
     expect(isLevelEnabled("info", "warn")).toBe(false);
     expect(isLevelEnabled("warn", "warn")).toBe(true);
+  });
+});
+
+describe("oneLine", () => {
+  it("escapes CR, LF and other line breaks so a node's text cannot forge a log line", () => {
+    const forged = "bad gateway\r\n[2026-01-01T00:00:00.000Z] [INFO] payment ok";
+    const out = oneLine(forged);
+    expect(out).not.toMatch(/[\r\n]/);
+    expect(out).toBe("bad gateway\\r\\n[2026-01-01T00:00:00.000Z] [INFO] payment ok");
+    expect(oneLine("a\u2028b\u2029c\u0085d\u0000e\u001bf\u007f")).toBe("a\\u2028b\\u2029c\\u0085d\\u0000e\\u001bf\\u007f");
+    expect(oneLine("tab\tstays, plain text too: é")).toBe("tab\tstays, plain text too: é");
+    expect(oneLine(42)).toBe("42");
   });
 });

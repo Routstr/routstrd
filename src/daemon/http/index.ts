@@ -16,7 +16,7 @@ import type { RoutstrdConfig } from "../../utils/config";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
-import { logger } from "../../utils/logger";
+import { logger, oneLine } from "../../utils/logger";
 import { VERSION } from "../../version";
 import type { ClientMode } from "../../utils/config";
 import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
@@ -2903,7 +2903,7 @@ export function createDaemonRequestHandler(deps: {
           try {
             await finalize();
           } catch (err) {
-            reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
+            reqLogger.error(`finalize error: ${oneLine(toErrorMessage(err))}`);
           }
         }
         return;
@@ -2941,7 +2941,7 @@ export function createDaemonRequestHandler(deps: {
         try {
           await finalize();
         } catch (err) {
-          reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
+          reqLogger.error(`finalize error: ${oneLine(toErrorMessage(err))}`);
         }
       }
       return;
@@ -2949,7 +2949,8 @@ export function createDaemonRequestHandler(deps: {
       const message = error instanceof Error ? error.message : String(error);
       const nodeRequestId = (error as { nodeRequestId?: unknown })?.nodeRequestId;
       if (!res.headersSent && typeof nodeRequestId === "string") res.setHeader("x-routstr-request-id", nodeRequestId);
-      reqLogger.error(`Error: ${message}`);
+      // The message may be a node's own text: it must not end the log line.
+      reqLogger.error(`Error: ${oneLine(message)}`);
       if (!handedToSdk) await finishLocal(error instanceof InsufficientBalanceError ? 402 : 500, "Local inference preparation failed.");
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
 
