@@ -1,7 +1,7 @@
 import { readSessionIdentity, withSessionIdentity } from "./session-identity";
 import { CORS_ROUTES, corsHeadersFor } from "./cors";
 import { normalizeOfflineSweepMintUrl } from "../wallet/offline-sweep";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { type IncomingMessage, type ServerResponse } from "http";
 import { Readable } from "stream";
 import {
@@ -12,10 +12,11 @@ import {
   ProviderManager,
 } from "@routstr/sdk";
 import type { RequestLifecycleDriver, UsageTrackingDriver, SdkLogger } from "@routstr/sdk";
+import type { RoutstrdConfig } from "../../utils/config";
 import type { RequestResponseLogSink } from "../request-response-log-sink";
 import { getEncodedToken } from "@cashu/coco-core";
 import type { HistoryEntry } from "@cashu/coco-core";
-import { logger } from "../../utils/logger";
+import { logger, oneLine } from "../../utils/logger";
 import { VERSION } from "../../version";
 import type { ClientMode } from "../../utils/config";
 import { isUpdateStateApplicable, readUpdateState, type UpdateState } from "../../utils/update-state";
@@ -32,6 +33,12 @@ import { getClientsFromStore } from "../../utils/clients";
 import { getUsageSummary, parseTimeWindow } from "./usage-summary";
 import { applyDefaultOutputTokenLimit } from "./request-body";
 import { collapseDuplicatedV1, ensureV1Prefix } from "./request-path";
+import {
+  CONFIDENTIAL_OPT_IN_HEADER,
+  isConfidentialPath,
+  parseConfidentialOptIn,
+  parseConfidentialReuseScope,
+} from "./confidential-opt-in";
 import {
   buildCooldownsOutput,
   type StoredCooldownEntry,
@@ -183,6 +190,31 @@ function normalizeProviderBaseUrl(url: string): string {
     url = `https://${url}`;
   }
   return url.endsWith("/") ? url : `${url}/`;
+}
+
+/** The keys of the provider announcements (kind 38421) for `baseUrl` that
+ *  carry a positive review, from the SDK's provider index (same evidence and
+ *  trust gates as discovery). Anyone can announce any URL, so an announcement
+ *  alone does not make its key a pin: only a key whose latest review label
+ *  is one the daemon enables. */
+export async function announcedNodePubkeys(
+  deps: {
+    modelManager: {
+      getProviderReviewIndex(): Promise<{
+        providerNodes: Map<string, Set<string>>;
+        latestLabelByNode: Map<string, string>;
+      }>;
+      getEnabledReviewLabels(): string[];
+    };
+  },
+  baseUrl: string,
+): Promise<string[]> {
+  const { providerNodes, latestLabelByNode } = await deps.modelManager.getProviderReviewIndex();
+  const enabled = new Set(deps.modelManager.getEnabledReviewLabels());
+  return [...(providerNodes.get(normalizeProviderBaseUrl(baseUrl)) ?? [])].filter((pubkey) => {
+    const label = latestLabelByNode.get(pubkey);
+    return label !== undefined && enabled.has(label);
+  });
 }
 
 /** Read a tag value by name from a Nostr event's tag array. */
@@ -599,6 +631,8 @@ export function createDaemonRequestHandler(deps: {
    * SDK module.
    */
   routeRequests?: typeof routeRequests;
+  /** Confidential-upstream settings (see RoutstrdConfig.confidentialUpstream). */
+  confidentialUpstream?: RoutstrdConfig["confidentialUpstream"];
   /** Nostr hex pubkey for routstr review/audit events (kind 38425). */
   routstrPubkey?: string;
   /** Nostr hex pubkey for the routstr-21 model list only (kind 38423). Falls back to routstrPubkey. */
@@ -2628,6 +2662,40 @@ export function createDaemonRequestHandler(deps: {
       return;
     }
 
+    // Confidential upstream is opt-in per request; the node never sees the
+    // prompt or response. Fail closed: a request that asks for it is refused
+    // here, never sent on the plain path, when it cannot run confidentially,
+    // and so is one whose opt-in header carries any other value.
+    const optIn = parseConfidentialOptIn(req.headers[CONFIDENTIAL_OPT_IN_HEADER]);
+    if (optIn.kind === "invalid") {
+      sendJson(res, 400, { error: optIn.error });
+      return;
+    }
+    const wantsConfidential = optIn.kind === "confidential";
+    if (wantsConfidential) {
+      if (deps.confidentialUpstream?.enabled !== true) {
+        sendJson(res, 400, {
+          error:
+            "x-routstr-verify: confidential requested, but confidentialUpstream is not enabled in the routstrd config.",
+        });
+        return;
+      }
+      if (!isConfidentialPath(url.pathname)) {
+        sendJson(res, 400, {
+          error:
+            "Confidential requests support only POST /v1/chat/completions, /v1/images/generations and /v1/image/generate.",
+        });
+        return;
+      }
+      // A reuse scope that cannot be used as given is refused, never
+      // dropped: dropping it would widen the scope the caller asked for.
+      const scope = parseConfidentialReuseScope(req);
+      if (scope.kind === "invalid") {
+        sendJson(res, 400, { error: scope.error });
+        return;
+      }
+    }
+
     // Only the final provider-proxy POST branch is eligible. Metadata/admin
     // routes above never allocate a lifecycle (including their validation errors).
     const abortController = new AbortController();
@@ -2699,6 +2767,48 @@ export function createDaemonRequestHandler(deps: {
       deps.provider ||
       undefined;
 
+    const confidentialConfig = deps.confidentialUpstream;
+    const confidential =
+      wantsConfidential && confidentialConfig
+        ? {
+            trustedHosts: confidentialConfig.trusted_hosts ?? [],
+            nodePubkeys: confidentialConfig.node_pubkeys,
+            // Without configured pins, the keys that announced the node's URL
+            // on Nostr: the offer must then be signed by the key that
+            // announced the URL it is served from.
+            // Only an absent or literal `true` setting pins from the
+            // announcement; anything else (`false`, `"false"`, …) requires
+            // the configured `node_pubkeys`.
+            ...(confidentialConfig.pin_from_announcement !== undefined &&
+            confidentialConfig.pin_from_announcement !== true
+              ? {}
+              : { nodePubkeysFor: (baseUrl: string) => announcedNodePubkeys(deps, baseUrl) }),
+            proverPath: confidentialConfig.prover_path,
+            ...(confidentialConfig.allow_insecure_transport === true
+              ? { allowInsecureTransport: true }
+              : {}),
+            http: confidentialFraming(confidentialConfig.http),
+            maxConnectionDepositMsat: confidentialMaxDeposit(confidentialConfig),
+            // `onRequest` runs for this request only, so its line carries the
+            // request's `[req:<id>]` prefix (a bare `logger.log` would leave it
+            // out of `logs -i <id>`). The pool's own `log` stays on the daemon
+            // logger: the SDK keeps one pool per process, and each request's
+            // options replace the last ones, so a request's logger there would
+            // label later background lines (idle closes, pre-warming for other
+            // keys) with whichever request came last.
+            prewarm: confidentialPrewarmOptions(confidentialConfig.prewarm),
+            http2: confidentialHttp2Options(confidentialConfig.http2, (m) => reqLogger.log(m)),
+            // Which requests may share a connection to the provider (per request).
+            reuseScope: confidentialReuseScope(confidentialConfig.http2?.reuse, req),
+            padBucket: confidentialPadBucket(confidentialConfig),
+            onNodeProtocolOutdated: noteOutdatedNode,
+            // A connection keeps the sink it was opened with and warns when it
+            // ends (its deposit outcome), after later requests on it or as a
+            // spare another request claimed: the daemon logger, like the pool's log.
+            onWarning: confidentialWarningSink(),
+          }
+        : undefined;
+
     // Convert req.headers to Record<string, string>
     const incomingHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(req.headers)) {
@@ -2745,6 +2855,7 @@ export function createDaemonRequestHandler(deps: {
         path: forwardedPath,
         forcedProvider,
         autoModelPath: settings.autoModelPath,
+        ...(confidential ? { confidential } : {}),
         headers: incomingHeaders,
         walletAdapter: deps.walletAdapter,
         storageAdapter: deps.storageAdapter,
@@ -2792,7 +2903,7 @@ export function createDaemonRequestHandler(deps: {
           try {
             await finalize();
           } catch (err) {
-            reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
+            reqLogger.error(`finalize error: ${oneLine(toErrorMessage(err))}`);
           }
         }
         return;
@@ -2816,6 +2927,11 @@ export function createDaemonRequestHandler(deps: {
         res.once("finish", finish);
         res.once("close", () => { nodeReadable.destroy(); finish(); });
         res.once("error", fail);
+        // A body error rejects; the catch below answers with an error status
+        // when nothing was written yet, and otherwise destroys the response,
+        // so a stream the SDK aborts after its first byte (a confidential
+        // settlement check that failed: proof, receipt, usage or cost) never
+        // ends cleanly.
         nodeReadable.once("error", fail);
         nodeReadable.pipe(res);
       });
@@ -2825,7 +2941,7 @@ export function createDaemonRequestHandler(deps: {
         try {
           await finalize();
         } catch (err) {
-          reqLogger.error(`finalize error: ${toErrorMessage(err)}`);
+          reqLogger.error(`finalize error: ${oneLine(toErrorMessage(err))}`);
         }
       }
       return;
@@ -2833,7 +2949,8 @@ export function createDaemonRequestHandler(deps: {
       const message = error instanceof Error ? error.message : String(error);
       const nodeRequestId = (error as { nodeRequestId?: unknown })?.nodeRequestId;
       if (!res.headersSent && typeof nodeRequestId === "string") res.setHeader("x-routstr-request-id", nodeRequestId);
-      reqLogger.error(`Error: ${message}`);
+      // The message may be a node's own text: it must not end the log line.
+      reqLogger.error(`Error: ${oneLine(message)}`);
       if (!handedToSdk) await finishLocal(error instanceof InsufficientBalanceError ? 402 : 500, "Local inference preparation failed.");
       if (res.headersSent || res.destroyed) { res.destroy(); return; }
 
@@ -2854,6 +2971,15 @@ export function createDaemonRequestHandler(deps: {
             maxMintBalance: balanceError.maxMintBalance,
             maxMintUrl: balanceError.maxMintUrl,
           }),
+        );
+        return;
+      }
+
+      const confidential = confidentialErrorStatus(error);
+      if (confidential) {
+        res.writeHead(confidential.status, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({ error: message, error_type: confidential.code, request_id: lifecycle.requestId }),
         );
         return;
       }
@@ -2887,5 +3013,229 @@ export function createDaemonRequestHandler(deps: {
         }),
       );
     }
+  };
+}
+
+/**
+ * The SDK's typed confidential errors as HTTP statuses: a request the
+ * confidential path cannot take is the caller's (400); a failed proof,
+ * receipt or session is the node's or provider's (502). Matched by shape,
+ * since the error may cross bundle boundaries.
+ */
+export function confidentialErrorStatus(error: unknown): { status: number; code: string } | undefined {
+  // Every SDK subclass sets its own `name`, so match the stable `code`.
+  const e = error as { code?: unknown } | null;
+  if (!e || !(error instanceof Error) || typeof e.code !== "string") return undefined;
+  if (CONFIDENTIAL_CALLER_CODES.has(e.code)) return { status: 400, code: e.code };
+  // A node refusal for the credential's balance, authorization or rate
+  // keeps the node's status, so a caller can tell it from a failed node.
+  if (e.code === "request_refused") {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number" && REFUSAL_STATUSES_KEPT.has(status)) return { status, code: e.code };
+  }
+  if (CONFIDENTIAL_UPSTREAM_CODES.has(e.code)) return { status: 502, code: e.code };
+  return undefined;
+}
+
+/** Node statuses of a `request_refused` answered as they are (the rest: 502). */
+const REFUSAL_STATUSES_KEPT = new Set([401, 402, 403, 429]);
+/** A request the confidential path cannot take. */
+const CONFIDENTIAL_CALLER_CODES = new Set([
+  "unsupported_endpoint",
+  "offer_no_images",
+  "not_configured",
+  "pinned_parameter",
+  // No node offers the model confidentially (or the pinned one does not).
+  "no_confidential_provider",
+]);
+/** The node's offer, connection, proofs or receipt failed (the SDK's other codes). */
+const CONFIDENTIAL_UPSTREAM_CODES = new Set([
+  "offer_unavailable",
+  "offer_malformed",
+  "offer_bad_signature",
+  "offer_unpinned",
+  "offer_pin_mismatch",
+  "offer_unsupported_version",
+  // No node can serve the request: the ones that offer the model still run
+  // an older protocol (routstr-confidential §11). The message names it.
+  "node_protocol_outdated",
+  // The node runs a newer protocol than this daemon: update routstrd.
+  "upgrade_required",
+  // cu-2pc and the node's sidecar are of different releases.
+  "twopc_version_mismatch",
+  "request_refused",
+  // The node announced a larger reservation than the signed offer and the
+  // model's listing allow; nothing was sent to the provider.
+  "reservation_above_ceiling",
+  "trusted_host_rejected",
+  "session_protocol",
+  "session_rejected",
+  "prover_failed",
+  "prover_missing",
+  "receipt_verification",
+  "response_verification",
+  "timeout",
+]);
+
+/** `confidentialUpstream.http` → the SDK's framing choice (anything else: `auto`). */
+export function confidentialFraming(value: unknown): "auto" | "2" | "1.1" {
+  return value === "2" || value === "1.1" ? value : "auto";
+}
+
+/** The largest connection deposit accepted (msat); 0 is a value. */
+export function confidentialMaxDeposit(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
+): number | undefined {
+  const v = cfg.maxConnectionDepositMsat;
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : undefined;
+}
+
+/**
+ * `confidentialUpstream.padBucket` → the SDK's body-size bucket: an integer of
+ * at least 16 bytes, or `"pow2"`. Off when unset; any other value also leaves
+ * it off (the SDK would refuse every request with it), with one warning.
+ */
+export function confidentialPadBucket(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>
+): number | "pow2" | undefined {
+  const v = cfg.padBucket as unknown;
+  if (v === undefined || v === "pow2") return v;
+  if (typeof v === "number" && Number.isSafeInteger(v) && v >= 16) return v;
+  // Said once per value: a user who meant to pad would otherwise not know.
+  const shown = JSON.stringify(v) ?? String(v);
+  if (shown !== badPadBucketLogged) {
+    badPadBucketLogged = shown;
+    logger.warn(`[confidential] padBucket ${shown} is not an integer of at least 16 or "pow2": bodies are not padded`);
+  }
+  return undefined;
+}
+let badPadBucketLogged: string | undefined;
+
+/** Where the SDK's connection warnings go: one line at warn level. */
+export function confidentialWarningSink(
+  warn: (...args: unknown[]) => void = (...args) => logger.warn(...args)
+): (message: string) => void {
+  return (message) => warn(`[confidential] ${String(message).replace(/\s*[\r\n]+\s*/g, " ").trim()}`);
+}
+
+/**
+ * The reuse scope of a request (`confidentialUpstream.http2.reuse`):
+ * `per-client` (default, and for any unknown value: the narrower scope)
+ * derives it from the local caller, its API key or without one its address,
+ * so two local clients never share a connection to the provider; `shared`
+ * and `none` name no scope. Only a hash leaves this function.
+ */
+export function confidentialReuseScope(
+  reuse: unknown,
+  req: { headers: Record<string, string | string[] | undefined>; socket?: { remoteAddress?: string } }
+): string | undefined {
+  if (reuse === "none") return undefined;
+  // A caller may narrow the scope further (one conversation, one task):
+  // `x-routstr-reuse-scope` partitions within the client's (or, under
+  // `shared`, the daemon's) connections. It can never widen one.
+  const raw = req.headers["x-routstr-reuse-scope"];
+  const own = typeof raw === "string" && raw.length > 0 && raw.length <= 256 ? raw : undefined;
+  const narrow = own === undefined ? "" : `\0scope\0${own}`;
+  if (reuse === "shared") {
+    return own === undefined
+      ? undefined
+      : `scope-${createHash("sha256").update(`routstrd-reuse-scope${narrow}`).digest("hex").slice(0, 32)}`;
+  }
+  const auth = req.headers.authorization;
+  const bearer = typeof auth === "string" ? auth.match(/^Bearer\s+(.+)$/i)?.[1] : undefined;
+  const apiKey = bearer ?? req.headers["x-api-key"];
+  const who =
+    typeof apiKey === "string" && apiKey.length > 0
+      ? `key\0${apiKey}`
+      : `addr\0${req.socket?.remoteAddress ?? "unknown"}`;
+  return `client-${createHash("sha256").update(`routstrd-reuse-scope\0${who}${narrow}`).digest("hex").slice(0, 32)}`;
+}
+
+/** When each node's outdated protocol was last logged. */
+const outdatedNodeLogged = new Map<string, number>();
+const OUTDATED_LOG_EVERY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A node offered an older confidential protocol than this daemon speaks: it
+ * is not used for confidential requests. Logged once per node per day.
+ * Returns whether this call logged.
+ */
+export function noteOutdatedNode(baseUrl: string, nodeVersion: number, now = Date.now()): boolean {
+  const node = baseUrl.replace(/\/$/, "");
+  const last = outdatedNodeLogged.get(node);
+  if (last !== undefined && now - last < OUTDATED_LOG_EVERY_MS) return false;
+  outdatedNodeLogged.set(node, now);
+  logger.log(
+    `[confidential] node_protocol_outdated: ${node} offers routstr-confidential v${nodeVersion}, this daemon speaks v3; ` +
+      "the node is not used for confidential requests until it is updated (logged once per day)",
+  );
+  return true;
+}
+
+/**
+ * routstrd's `confidentialUpstream.http2` block → the SDK's `http2` options
+ * (the pool of framing-"2" connections).
+ */
+export function confidentialHttp2Options(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["http2"],
+  requestLog: (message: string) => void = (message) => logger.log(message)
+): {
+  reuse: "shared" | "none";
+  maxConnectionsPerKey?: number;
+  maxConnections?: number;
+  maxIdleMs?: number;
+  maxRequestsPerConnection?: number;
+  log: (message: string) => void;
+  onRequest: (stats: object) => void;
+} {
+  const count = (v: unknown) =>
+    typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : undefined;
+  const seconds =
+    typeof cfg?.maxIdleSeconds === "number" && Number.isFinite(cfg.maxIdleSeconds) && cfg.maxIdleSeconds > 0
+      ? cfg.maxIdleSeconds
+      : undefined;
+  return {
+    // `per-client` is `shared` within a client's scope (`confidentialReuseScope`).
+    reuse: cfg?.reuse === "none" ? "none" : "shared",
+    maxConnectionsPerKey: count(cfg?.maxConnections),
+    maxConnections: count(cfg?.maxTotal),
+    maxIdleMs: seconds !== undefined ? Math.max(seconds, 1) * 1000 : undefined,
+    maxRequestsPerConnection: count(cfg?.maxRequestsPerConnection),
+    log: (message: string) => logger.log(message),
+    // Where each request ran and what it cost on the wire (no content, no credentials).
+    onRequest: (stats: object) => requestLog(`[confidential] request ${JSON.stringify(stats)}`),
+  };
+}
+
+/**
+ * routstrd's `confidentialUpstream.prewarm` block → the SDK's pre-warm
+ * options (undefined = pre-warming off). On by default.
+ */
+export function confidentialPrewarmOptions(
+  cfg: NonNullable<RoutstrdConfig["confidentialUpstream"]>["prewarm"]
+):
+  | {
+      enabled: boolean;
+      activityWindowMs?: number;
+      maxTotal?: number;
+      maxAgeMs?: number;
+      maxDepositMsat?: number;
+      log: (message: string) => void;
+    }
+  | undefined {
+  if (cfg?.enabled === false) return undefined;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const minutes = num(cfg?.activityWindowMinutes);
+  const seconds = num(cfg?.maxAgeSeconds);
+  return {
+    enabled: true,
+    activityWindowMs: minutes !== undefined ? minutes * 60_000 : undefined,
+    maxTotal: num(cfg?.maxTotal),
+    // The node and the sidecar end an armed connection 600 s after its
+    // setup; below 60 s connections would be armed and retired (traffic,
+    // deposits) every tick.
+    maxAgeMs: seconds !== undefined ? Math.min(Math.max(seconds, 60), 570) * 1000 : undefined,
+    maxDepositMsat: num(cfg?.maxDepositMsat),
+    log: (message: string) => logger.log(message),
   };
 }
